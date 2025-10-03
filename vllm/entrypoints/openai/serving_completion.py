@@ -9,7 +9,6 @@ from typing import Optional, Union, cast
 
 import jinja2
 from fastapi import Request
-from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -32,8 +31,7 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import get_max_tokens
-from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
-                              is_tokens_prompt)
+from vllm.inputs.data import EmbedsPrompt, TokensPrompt, is_embeds_prompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -157,23 +155,16 @@ class OpenAIServingCompletion(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                sampling_params: Union[SamplingParams, BeamSearchParams]
-                # Mypy does not infer that engine_prompt will have only one of
-                # "prompt_token_ids" or "prompt_embeds" defined, and both of
-                # these as Union[object, the expected type], where it infers
-                # object if engine_prompt is a subclass of one of the
-                # typeddicts that defines both keys. Worse, because of
-                # https://github.com/python/mypy/issues/8586, mypy does not
-                # infer the type of engine_prompt correctly because of the
-                # enumerate. So we need an unnecessary cast here.
-                engine_prompt = cast(Union[EmbedsPrompt, TokensPrompt],
-                                     engine_prompt)
-                if is_embeds_prompt(engine_prompt):
-                    input_length = len(engine_prompt["prompt_embeds"])
-                elif is_tokens_prompt(engine_prompt):
-                    input_length = len(engine_prompt["prompt_token_ids"])
+                prompt_text, prompt_token_ids, prompt_embeds = (
+                    self._get_prompt_components(engine_prompt))
+
+                input_length = None
+                if prompt_token_ids is not None:
+                    input_length = len(prompt_token_ids)
+                elif prompt_embeds is not None:
+                    input_length = len(prompt_embeds)
                 else:
-                    assert_never(engine_prompt)
+                    raise NotImplementedError
 
                 if self.default_sampling_params is None:
                     self.default_sampling_params = {}
@@ -185,6 +176,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     default_sampling_params=self.default_sampling_params,
                 )
 
+                sampling_params: Union[SamplingParams, BeamSearchParams]
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
                         max_tokens, self.default_sampling_params)
@@ -220,13 +212,25 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
+                    engine_request, tokenization_kwargs = (
+                        await self._process_inputs(
+                            request_id_item,
+                            engine_prompt,
+                            sampling_params,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            priority=request.priority,
+                        ))
+
                     generator = self.engine_client.generate(
-                        engine_prompt,
+                        engine_request,
                         sampling_params,
                         request_id_item,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        prompt_text=prompt_text,
+                        tokenization_kwargs=tokenization_kwargs,
                     )
 
                 generators.append(generator)
