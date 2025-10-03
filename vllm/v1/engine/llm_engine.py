@@ -27,6 +27,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -213,13 +214,14 @@ class LLMEngine:
     def add_request(
         self,
         request_id: str,
-        prompt: PromptType,
+        prompt: Union[EngineCoreRequest, PromptType],
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        prompt_text: Optional[str] = None,
     ) -> None:
         # Validate the request_id type.
         if not isinstance(request_id, str):
@@ -227,12 +229,18 @@ class LLMEngine:
                 f"request_id must be a string, got {type(request_id)}")
 
         # Process raw inputs into the request.
-        request = self.processor.process_inputs(request_id, prompt, params,
-                                                arrival_time, lora_request,
-                                                tokenization_kwargs,
-                                                trace_headers, priority)
-        prompt_text = prompt if isinstance(prompt,
-                                           str) else prompt.get("prompt")
+        if isinstance(prompt, EngineCoreRequest):
+            request = prompt
+        else:
+            assert prompt_text is None
+            logger.warning_once("Processor has been moved under LLM and will "
+                                "be removed from LLMEngine in v0.13.")
+            request = self.processor.process_inputs(request_id, prompt, params,
+                                                    arrival_time, lora_request,
+                                                    tokenization_kwargs,
+                                                    trace_headers, priority)
+            prompt_text = (prompt if isinstance(prompt, str) else
+                           prompt.get("prompt"))
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
