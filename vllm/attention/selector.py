@@ -144,6 +144,7 @@ def get_attn_backend(
     block_size: int,
     use_mla: bool = False,
     has_sink: bool = False,
+    use_sparse: bool = False,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
     # Accessing envs.* behind an @lru_cache decorator can cause the wrong
@@ -158,6 +159,7 @@ def get_attn_backend(
         use_v1=envs.VLLM_USE_V1,
         use_mla=use_mla,
         has_sink=has_sink,
+        use_sparse=use_sparse,
     )
 
 
@@ -170,6 +172,7 @@ def _cached_get_attn_backend(
     use_v1: bool = False,
     use_mla: bool = False,
     has_sink: bool = False,
+    use_sparse: bool = False,
 ) -> type[AttentionBackend]:
 
     # Check whether a particular choice of backend was
@@ -186,6 +189,14 @@ def _cached_get_attn_backend(
         # Check the environment variable and override if specified
         backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
         if backend_by_env_var is not None:
+            if backend_by_env_var.endswith("_VLLM_V1"):
+                logger.warning(
+                    "The suffix '_VLLM_V1' in the environment variable "
+                    "%s is no longer necessary as V0 backends have been "
+                    "deprecated. Please remove this suffix from your "
+                    "environment variable setting.", STR_BACKEND_ENV_VAR)
+                backend_by_env_var = backend_by_env_var.removesuffix(
+                    "_VLLM_V1")
             selected_backend = backend_name_to_enum(backend_by_env_var)
             if selected_backend is None:
                 raise ValueError(
@@ -195,7 +206,7 @@ def _cached_get_attn_backend(
     # get device-specific attn_backend
     attention_cls = current_platform.get_attn_backend_cls(
         selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1,
-        use_mla, has_sink)
+        use_mla, has_sink, use_sparse)
     if not attention_cls:
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}")

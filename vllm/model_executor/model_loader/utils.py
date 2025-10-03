@@ -95,6 +95,13 @@ def initialize_model(
 
 def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
                                   target_device: torch.device) -> None:
+
+    # to avoid circular dependency
+    from vllm.model_executor.model_loader.online_quantization import (
+        maybe_save_metadata_and_attributes_for_weight_reloading)
+    maybe_save_metadata_and_attributes_for_weight_reloading(
+        model, model_config)
+
     for _, module in model.named_modules():
         if isinstance(module, QKVCrossParallelLinear):
             # NOTE(Isotr0py): special case for cross QKV layer because
@@ -165,7 +172,7 @@ def device_loading_context(module: torch.nn.Module,
         # New parameters or parameters already on target device are untouched
 
 
-_MODEL_ARCH_BY_HASH = dict[str, tuple[type[nn.Module], str]]()
+_MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()
 """Caches the outputs of `_get_model_architecture`."""
 
 
@@ -215,7 +222,14 @@ def _get_model_architecture(
 
 def get_model_architecture(
         model_config: ModelConfig) -> tuple[type[nn.Module], str]:
-    key = model_config.compute_hash()
+    key = hash((
+        model_config.model,
+        model_config.convert_type,
+        model_config.runner_type,
+        model_config.trust_remote_code,
+        model_config.model_impl,
+        tuple(getattr(model_config.hf_config, "architectures", [])),
+    ))
     if key in _MODEL_ARCH_BY_HASH:
         return _MODEL_ARCH_BY_HASH[key]
 
@@ -236,7 +250,7 @@ def get_architecture_class_name(model_config: ModelConfig) -> str:
 class ParamMapping:
     """
     A class to handle parameter mapping for model weight loading.
-    It creates a bidirectional mapping between packed parameters and their 
+    It creates a bidirectional mapping between packed parameters and their
     constituent parts.
     """
     packed_mapping: dict[str, list[str]]
