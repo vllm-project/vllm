@@ -122,6 +122,44 @@ llm = LLM(model="google/gemma-3-27b-it",
           limit_mm_per_prompt={"image": 0})
 ```
 
+### Configurable options
+
+`limit_mm_per_prompt` also accepts configurable options per modality. In the configurable form, you still specify `count`, and you may optionally provide size hints that control how vLLM profiles and reserves memory for your multi‑modal inputs. This helps you tune memory for the actual media you expect, instead of the model’s absolute maxima.
+
+Configurable options by modality:
+
+- `image`: `{"count": int, "width": int, "height": int}`
+- `video`: `{"count": int, "num_frames": int, "width": int, "height": int}`
+- `audio`: `{"count": int, "length": int}`
+
+Examples:
+
+```python
+from vllm import LLM
+
+# Up to 5 images per prompt, profile with 512x512.
+# Up to 1 video per prompt, profile with 32 frames at 640x640.
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-3B-Instruct",
+    limit_mm_per_prompt={
+        "image": {"count": 5, "width": 512, "height": 512},
+        "video": {"count": 1, "num_frames": 32, "width": 640, "height": 640},
+    },
+)
+```
+
+Notes:
+
+- Backward compatible and mixed format: passing an integer works as before and is interpreted as `{"count": <int>}`.
+  e.g., `limit_mm_per_prompt={"image": 5}` is equivalent to `limit_mm_per_prompt={"image": {"count": 5}}`.
+  e.g. `limit_mm_per_prompt={"image": 5, "video": {"count": 1, "num_frames": 32, "width": 640, "height": 640}}` is equivalent to `limit_mm_per_prompt={"image": {"count": 5}, "video": {"count": 1, "num_frames": 32, "width": 640, "height": 640}}`.
+- The size hints affect memory profiling only. They shape the dummy inputs
+  used to compute reserved activation sizes. They do not change how
+  inputs are actually processed at inference time.
+- If a hint exceeds what the model can accept, vLLM clamps it to the model’s
+  effective maximum and may log a warning.
+- TODO: Encoder cache size and actual input processing are not affected by these size hints, which should be addressed later.
+
 ## Multi-modal processor arguments
 
 For certain models, you can adjust the multi-modal processor arguments to
