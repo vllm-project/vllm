@@ -4,14 +4,21 @@
 end-to-end tests for context length corner cases of vLLM v1 model runner
 versus HuggingFace's transformers.
 
-This test verifies the following behavior: allow a prefill that fills the
-model's maximum context length and then request a single new token.
+This test verifies the following behavior: allow prefill and decodes on the
+model's maximum context length ``max_model_len`` and get one more token.
 
 Test strategy
 - Build a textual prompt that tokenizes to exactly ``max_model_len`` tokens.
-- Run vLLM generation requesting a single new token (max_tokens=1).
-- Run HF generation on the same prompt requesting a single token too.
+- Run vLLM generation requesting ``max_tokens`` new tokens.
+- Run HF generation on the same prompt requesting the same number of tokens.
 - Assert both return the same number of generated tokens and the same ids.
+
+Test cases
+- Prefill a prompt of ``max_model_len`` (2048) and request a single token which
+will be sampled after the prefill (context length ``max_model_len``).
+- Prefill a prompt of ``max_model_len`` - 1 (2047) and request two tokens where
+the 1st will be sampled after the prefill and the 2nd after the first decode
+(context length ``max_model_len``).
 
 """
 
@@ -27,9 +34,14 @@ from vllm.inputs import TokensPrompt
 
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("model", ["JackFram/llama-160m"])
-@pytest.mark.parametrize("max_model_len", [2048])
-@pytest.mark.parametrize("max_tokens", [1])
-def test_prefill_max_context_length(
+@pytest.mark.parametrize(
+    "max_model_len, max_tokens",
+    [
+        (2048, 1),
+        (2047, 2),
+    ],
+)
+def test_max_context_length(
     model: str,
     max_model_len: int,
     max_tokens: int,
