@@ -30,7 +30,6 @@ from typing import Any, Callable, Optional, Union, cast
 
 import numpy as np
 from PIL import Image
-from transformers import PreTrainedTokenizerBase
 from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
@@ -155,7 +154,7 @@ class BenchmarkDataset(ABC):
 
     def get_random_lora_request(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         max_loras: Optional[int] = None,
         lora_path: Optional[str] = None,
     ) -> tuple[Optional[LoRARequest], AnyTokenizer]:
@@ -168,7 +167,7 @@ class BenchmarkDataset(ABC):
         that LoRA if available. Otherwise, it returns the base tokenizer.
 
         Args:
-            tokenizer (PreTrainedTokenizerBase): The base tokenizer to use if no
+            tokenizer (AnyTokenizer): The base tokenizer to use if no
                 LoRA is selected.
             max_loras (Optional[int]): The maximum number of LoRAs available.
                 If `None`, LoRA is not used.
@@ -198,7 +197,7 @@ class BenchmarkDataset(ABC):
         return lora_request, lora_tokenizer_cache[lora_id] or tokenizer
 
     @abstractmethod
-    def sample(self, tokenizer: PreTrainedTokenizerBase,
+    def sample(self, tokenizer: AnyTokenizer,
                num_requests: int,
                request_id_prefix: str = "",
                no_oversample: bool = False) -> list[SampleRequest]:
@@ -209,7 +208,7 @@ class BenchmarkDataset(ABC):
         for generating a list of SampleRequest objects.
 
         Args:
-            tokenizer (PreTrainedTokenizerBase): The tokenizer to be used
+            tokenizer (AnyTokenizer): The tokenizer to be used
                 for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
             request_id_prefix (str) The prefix of request_id.
@@ -410,7 +409,7 @@ class RandomDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -467,7 +466,7 @@ class RandomDataset(BenchmarkDataset):
         return requests
 
     def get_prefix(
-        self, tokenizer: PreTrainedTokenizerBase, prefix_len: int
+        self, tokenizer: AnyTokenizer, prefix_len: int
     ) -> list[int]:
         """
         Get the prefix for the dataset.
@@ -485,7 +484,7 @@ class RandomDataset(BenchmarkDataset):
         range_ratio: float,
         input_len: int,
         output_len: int,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Get the sampling parameters for the dataset.
@@ -493,7 +492,7 @@ class RandomDataset(BenchmarkDataset):
         # Enforce range_ratio < 1
         if not (0.0 <= range_ratio < 1.0):
             raise ValueError("range_ratio must be in [0, 1).")
-        num_special_tokens = int(tokenizer.num_special_tokens_to_add())
+        num_special_tokens = len(tokenizer.all_special_tokens_extended)
         real_input_len = max(0, int(input_len) - num_special_tokens)
         # Bounds use floor for low and ceil for high
         input_low = math.floor(real_input_len * (1 - range_ratio))
@@ -534,7 +533,7 @@ class RandomDataset(BenchmarkDataset):
     def generate_token_sequence(
         self,
         *,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         prefix_token_ids: list[int],
         prefix_len: int,
         vocab_size: int,
@@ -838,7 +837,7 @@ class RandomMultiModalDataset(RandomDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -962,7 +961,7 @@ class ShareGPTDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         lora_path: Optional[str] = None,
         max_loras: Optional[int] = None,
@@ -1635,7 +1634,7 @@ class CustomDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         lora_path: Optional[str] = None,
         max_loras: Optional[int] = None,
@@ -1862,7 +1861,7 @@ class BurstGPTDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         max_loras: Optional[int] = None,
         lora_path: Optional[str] = None,
@@ -1942,7 +1941,7 @@ class ConversationDataset(HuggingFaceDataset):
     IS_MULTIMODAL = True
 
     def sample(self,
-               tokenizer: PreTrainedTokenizerBase,
+               tokenizer: AnyTokenizer,
                num_requests: int,
                output_len: Optional[int] = None,
                enable_multimodal_chat: bool = False,
@@ -2014,7 +2013,7 @@ class VisionArenaDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
@@ -2074,7 +2073,7 @@ class InstructCoderDataset(HuggingFaceDataset):
     }
 
     def sample(self,
-               tokenizer: PreTrainedTokenizerBase,
+               tokenizer: AnyTokenizer,
                num_requests: int,
                output_len: Optional[int] = None,
                enable_multimodal_chat: bool = False,
@@ -2137,7 +2136,7 @@ class MTBenchDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
@@ -2203,7 +2202,7 @@ class BlazeditDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: Optional[int] = None,
         request_id_prefix: str = "",
@@ -2281,7 +2280,7 @@ class AIMODataset(HuggingFaceDataset):
     }
 
     def sample(self,
-               tokenizer: PreTrainedTokenizerBase,
+               tokenizer: AnyTokenizer,
                num_requests: int,
                output_len: Optional[int] = None,
                request_id_prefix: str = "",
@@ -2388,7 +2387,7 @@ class NextEditPredictionDataset(HuggingFaceDataset):
         "zed-industries/zeta": _format_zeta_prompt,
     }
 
-    def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int,
+    def sample(self, tokenizer: AnyTokenizer, num_requests: int,
                request_id_prefix: str = "",
                no_oversample: bool = False,
                **kwargs):
@@ -2458,7 +2457,7 @@ class ASRDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: Optional[int] = None,
         request_id_prefix: str = "",
@@ -2535,7 +2534,7 @@ class MLPerfDataset(HuggingFaceDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         output_len: Optional[int] = None,
         request_id_prefix: str = "",
@@ -2613,7 +2612,7 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
 
     def sample(
         self,
-        tokenizer: PreTrainedTokenizerBase,
+        tokenizer: AnyTokenizer,
         num_requests: int,
         prefix_len: int = DEFAULT_PREFIX_LEN,
         suffix_len: int = DEFAULT_SUFFIX_LEN,
