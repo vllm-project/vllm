@@ -618,7 +618,6 @@ class MambaManager(SingleTypeKVCacheManager):
         if self.kv_cache_spec.num_speculative_blocks > 0:
             num_tokens += (self.kv_cache_spec.block_size *
                            self.kv_cache_spec.num_speculative_blocks)
-
         return super().allocate_new_blocks(request_id, num_tokens)
 
 
