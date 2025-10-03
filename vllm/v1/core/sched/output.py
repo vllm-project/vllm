@@ -6,11 +6,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-from vllm import bc_linter_include
+from vllm._bc_linter import bc_linter_include
 
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
+    import torch
 
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorMetadata)
@@ -26,13 +27,14 @@ if TYPE_CHECKING:
 class NewRequestData:
 
     req_id: str
-    prompt_token_ids: list[int]
+    prompt_token_ids: Optional[list[int]]
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
+    prompt_embeds: Optional[torch.Tensor] = None
 
     @classmethod
     def from_request(
@@ -49,9 +51,12 @@ class NewRequestData:
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
+            prompt_embeds=request.prompt_embeds,
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
+        prompt_embeds_shape = (self.prompt_embeds.shape
+                               if self.prompt_embeds else None)
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids={self.prompt_token_ids},"
@@ -59,19 +64,26 @@ class NewRequestData:
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
-                f"lora_request={self.lora_request}"
+                f"lora_request={self.lora_request},"
+                f"prompt_embeds_shape={prompt_embeds_shape}"
                 ")")
 
     # Version of __repr__ with the prompt data obfuscated
-    def anon_repr(self):
+    def anon_repr(self) -> str:
+        prompt_token_ids_len = len(
+            self.prompt_token_ids
+        ) if self.prompt_token_ids is not None else None
+        prompt_embeds_shape = (self.prompt_embeds.shape
+                               if self.prompt_embeds else None)
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
-                f"prompt_token_ids_len={len(self.prompt_token_ids)},"
+                f"prompt_token_ids_len={prompt_token_ids_len},"
                 f"mm_features={self.mm_features},"
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
-                f"lora_request={self.lora_request}"
+                f"lora_request={self.lora_request},"
+                f"prompt_embeds_shape={prompt_embeds_shape}"
                 ")")
 
 
@@ -89,6 +101,7 @@ class CachedRequestData:
     new_token_ids: list[list[int]]
     new_block_ids: list[Optional[tuple[list[int], ...]]]
     num_computed_tokens: list[int]
+    num_output_tokens: list[int]
 
     @property
     def num_reqs(self) -> int:
@@ -102,6 +115,7 @@ class CachedRequestData:
             new_token_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
+            num_output_tokens=[],
         )
 
 

@@ -19,7 +19,7 @@ vLLM will take all the available factors into consideration, and decide a direct
 
 The factors considered include:
 
-- All the related configs (see the `compute_hash` functions in the [compilation.py](gh-file:vllm/config/compilation.py))
+- All the related configs (see the `compute_hash` functions in their respective configs in the [config folder](gh-file:vllm/config))
 - PyTorch configs (see the `compute_hash` functions in the [compiler_interface.py](gh-file:vllm/compilation/compiler_interface.py))
 - The model's forward function and the relevant functions called by the forward function (see below)
 

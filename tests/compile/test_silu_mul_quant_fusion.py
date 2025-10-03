@@ -15,6 +15,7 @@ from vllm.compilation.activation_quant_fusion import (
 # yapf: enable
 from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.noop_elimination import NoOpEliminationPass
+from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import CompilationConfig, PassConfig, VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -69,6 +70,10 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
 
     def __init__(self, hidden_size: int, x: torch.Tensor, **kwargs):
         super().__init__()
+        from vllm.compilation.activation_quant_fusion import (
+            silu_and_mul_nvfp4_quant_supported)
+        assert silu_and_mul_nvfp4_quant_supported
+
         self.silu_and_mul = SiluAndMul()
 
         # create nvfp4 weight
@@ -98,8 +103,9 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
         return [FUSED_OPS[kNvfp4Quant]]
 
 
-@pytest.mark.parametrize("num_tokens", [64])
-@pytest.mark.parametrize("hidden_size", [128])
+@pytest.mark.parametrize("num_tokens", [32, 64])
+@pytest.mark.parametrize("hidden_size", [128, 256])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
     "model_class",
     cast(list[type], [TestSiluMulFp8QuantModel, TestSiluMulNvfp4QuantModel]
@@ -110,13 +116,13 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
                          [True, False] if cutlass_fp8_supported() else [True])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"],
                     reason="Only test on CUDA and ROCm")
-def test_fusion_silu_and_mul_quant(num_tokens, hidden_size, model_class,
+def test_fusion_silu_and_mul_quant(num_tokens, hidden_size, dtype, model_class,
                                    cuda_force_torch):
     if model_class == TestSiluMulNvfp4QuantModel and cuda_force_torch:
         pytest.skip("Duplicate tests for NVFP4")
 
     torch.set_default_device("cuda")
-    torch.set_default_dtype(torch.float16)
+    torch.set_default_dtype(dtype)
 
     x = torch.rand(num_tokens, hidden_size * 2)
 
@@ -126,7 +132,11 @@ def test_fusion_silu_and_mul_quant(num_tokens, hidden_size, model_class,
         pass_config=PassConfig(enable_fusion=True, enable_noop=True))
     fusion_pass = ActivationQuantFusionPass(config)
 
-    backend = TestBackend(NoOpEliminationPass(config), fusion_pass)
+    passes = [
+        NoOpEliminationPass(config), fusion_pass,
+        PostCleanupPass(config)
+    ]
+    backend = TestBackend(*passes)
     model = model_class(hidden_size=hidden_size,
                         cuda_force_torch=cuda_force_torch,
                         x=x)
@@ -145,10 +155,12 @@ def test_fusion_silu_and_mul_quant(num_tokens, hidden_size, model_class,
     elif model_class == TestSiluMulNvfp4QuantModel:
         atol, rtol = 1e-1, 1e-1
 
-    torch.testing.assert_close(result[0].to(dtype=torch.float16),
-                               result2[0].to(dtype=torch.float16),
+    torch.testing.assert_close(result[0].to(dtype=dtype),
+                               result2[0].to(dtype=dtype),
                                atol=atol,
                                rtol=rtol)
+
+    assert fusion_pass.matched_count == 1
 
     # In pre-nodes, quant op should be present and fused kernels should not
     backend.check_before_ops(model.ops_in_model_before())

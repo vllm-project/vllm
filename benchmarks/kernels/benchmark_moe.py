@@ -14,6 +14,10 @@ import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
 
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+    _get_config_dtype_str,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import *
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
@@ -134,43 +138,36 @@ def benchmark_config(
     def run():
         from vllm.model_executor.layers.fused_moe import override_config
 
+        if use_fp8_w8a8:
+            quant_dtype = torch.float8_e4m3fn
+        elif use_int8_w8a16:
+            quant_dtype = torch.int8
+        else:
+            quant_dtype = None
+
+        quant_config = FusedMoEQuantConfig.make(
+            quant_dtype=quant_dtype,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=block_quant_shape,
+        )
+
         with override_config(config):
-            if use_deep_gemm:
-                topk_weights, topk_ids, token_expert_indices = fused_topk(
-                    x, input_gating, topk, False
-                )
-                return fused_experts(
-                    x,
-                    w1,
-                    w2,
-                    topk_weights,
-                    topk_ids,
-                    inplace=True,
-                    use_fp8_w8a8=use_fp8_w8a8,
-                    w1_scale=w1_scale,
-                    w2_scale=w2_scale,
-                    a1_scale=a1_scale,
-                    a2_scale=a2_scale,
-                    block_shape=block_quant_shape,
-                    allow_deep_gemm=True,
-                )
-            else:
-                fused_moe(
-                    x,
-                    w1,
-                    w2,
-                    input_gating,
-                    topk,
-                    renormalize=True,
-                    inplace=True,
-                    use_fp8_w8a8=use_fp8_w8a8,
-                    use_int8_w8a16=use_int8_w8a16,
-                    w1_scale=w1_scale,
-                    w2_scale=w2_scale,
-                    a1_scale=a1_scale,
-                    a2_scale=a2_scale,
-                    block_shape=block_quant_shape,
-                )
+            topk_weights, topk_ids, token_expert_indices = fused_topk(
+                x, input_gating, topk, renormalize=not use_deep_gemm
+            )
+            return fused_experts(
+                x,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                inplace=True,
+                quant_config=quant_config,
+                allow_deep_gemm=use_deep_gemm,
+            )
 
     # JIT compilation & warmup
     run()
@@ -414,7 +411,7 @@ class BenchmarkWorker:
         use_deep_gemm: bool = False,
     ) -> tuple[dict[str, int], float]:
         current_platform.seed_everything(self.seed)
-        dtype_str = get_config_dtype_str(
+        dtype_str = _get_config_dtype_str(
             dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
         )
         # NOTE(woosuk): The current naming convention uses w2.shape[2], which
@@ -547,7 +544,7 @@ def save_configs(
     block_quant_shape: list[int],
     save_dir: str,
 ) -> None:
-    dtype_str = get_config_dtype_str(
+    dtype_str = _get_config_dtype_str(
         dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
     )
 
@@ -587,8 +584,9 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
     elif config.architectures[0] in (
-        "DeepseekV3ForCausalLM",
         "DeepseekV2ForCausalLM",
+        "DeepseekV3ForCausalLM",
+        "DeepseekV32ForCausalLM",
         "Glm4MoeForCausalLM",
     ):
         E = config.n_routed_experts

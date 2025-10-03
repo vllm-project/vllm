@@ -28,7 +28,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, row_parallel_weight_loader)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -43,9 +42,9 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
                          SupportsQuant)
-from .utils import (flatten_bn, is_pp_missing_parameter,
+from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix, merge_multimodal_embeddings)
+                    maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -936,6 +935,8 @@ class ChameleonModel(nn.Module):
     dummy_inputs=ChameleonDummyInputsBuilder)
 class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP, SupportsQuant):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
@@ -960,6 +961,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
             config.hidden_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
@@ -981,8 +983,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         expected_h = expected_w = vq_config.resolution
 
         return ChameleonImagePixelInputs(type="pixel_values",
-                                         data=flatten_bn(pixel_values,
-                                                         concat=True),
+                                         data=pixel_values,
                                          resolve_bindings={
                                              "h": expected_h,
                                              "w": expected_w
@@ -1002,20 +1003,6 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         vision_embeddings = self.model.get_input_embeddings(image_tokens)
         return vision_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-
-        inputs_embeds = self.model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.model.vocabulary_mapping.image_token_id)
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1028,14 +1015,6 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
-            input_ids = None
-
         hidden_states = self.model(input_ids,
                                    positions,
                                    intermediate_tensors,
@@ -1045,10 +1024,8 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
 
         # Disallow image tokens which does not include special
         # begin-image and end-image tokens

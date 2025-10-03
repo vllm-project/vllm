@@ -8,6 +8,7 @@ import functools
 import importlib
 import json
 import os
+import random
 import signal
 import subprocess
 import sys
@@ -90,8 +91,10 @@ class RemoteOpenAIServer:
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
         if env_dict is not None:
             env.update(env_dict)
+        serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
+        print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(
-            ["vllm", "serve", model, *vllm_serve_args],
+            serve_cmd,
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,
@@ -1130,16 +1133,18 @@ def has_module_attribute(module_name, attribute_name):
 
 def get_attn_backend_list_based_on_platform() -> list[str]:
     if current_platform.is_cuda():
-        return ["FLASH_ATTN_VLLM_V1", "TRITON_ATTN_VLLM_V1", "TREE_ATTN"]
+        return ["FLASH_ATTN", "TRITON_ATTN", "TREE_ATTN"]
     elif current_platform.is_rocm():
-        attn_backend_list = ["TRITON_ATTN_VLLM_V1"]
+        attn_backend_list = ["TRITON_ATTN"]
         try:
             import aiter  # noqa: F401
-            attn_backend_list.append("FLASH_ATTN_VLLM_V1")
+            attn_backend_list.append("FLASH_ATTN")
         except Exception:
-            print("Skip FLASH_ATTN_VLLM_V1 on ROCm as aiter is not installed")
+            print("Skip FLASH_ATTN on ROCm as aiter is not installed")
 
         return attn_backend_list
+    elif current_platform.is_xpu():
+        return ["FLASH_ATTN", "TRITON_ATTN"]
     else:
         raise ValueError("Unsupported platform")
 
@@ -1150,3 +1155,49 @@ def override_cutlass_fp8_supported(value: bool):
             "vllm.model_executor.layers.quantization.utils.w8a8_utils.cutlass_fp8_supported",
             return_value=value):
         yield
+
+
+def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):
+    """
+    Generate prompts which a bunch of assignments,
+    then asking for the value of one of them.
+    The prompt is just under 10k tokens; sliding window is 4k
+    so the answer is outside sliding window, but should still be correct.
+    Args:
+        batch_size: number of prompts to generate
+        ln_range: an argument to control the length of the prompt
+    """
+    prompts: list[str] = []
+    answer: list[int] = []
+    indices: list[int] = []
+    random.seed(1)
+    for _ in range(batch_size):
+        idx = random.randint(30, 90)
+        indices.append(idx)
+        prompt = "```python\n# We set a number of variables, " + \
+                 f"x{idx} will be important later\n"
+        ln = random.randint(*ln_range)
+        for k in range(30, ln):
+            v = random.randint(10, 99)
+            if k == idx:
+                answer.append(v)
+            prompt += f"x{k} = {v}\n"
+        prompt += f"# Now, we check the value of x{idx}:\n"
+        prompt += f"assert x{idx} == "
+        prompts.append(prompt)
+    return prompts, answer, indices
+
+
+def check_answers(indices: list[int],
+                  answer: list[int],
+                  outputs: list[str],
+                  accept_rate: float = 0.7):
+    answer2 = [int(text[0:2].strip()) for text in outputs]
+    print(list(zip(indices, zip(answer, answer2))))
+    numok = 0
+    for a1, a2 in zip(answer, answer2):
+        if a1 == a2:
+            numok += 1
+    frac_ok = numok / len(answer)
+    print(f"Num OK: {numok}/{len(answer)} {frac_ok}")
+    assert frac_ok >= accept_rate
