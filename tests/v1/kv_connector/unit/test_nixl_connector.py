@@ -57,6 +57,26 @@ def clear_kv_transfer():
         ensure_kv_transfer_shutdown()
 
 
+def get_default_xfer_telemetry(xferDurationS: float = 1,
+                               postDurationS: float = 1,
+                               totalBytes: int = 1,
+                               descCount: int = 1) -> dict:
+
+    class AttributeDict(dict):
+        __slots__ = ()
+        __getattr__ = dict.__getitem__
+        __setattr__ = dict.__setitem__  # type: ignore[assignment]
+
+    # We can't instantiate nixlXferTelemetry because it's read only and
+    # ray env does not have NIXL, so we must fake it
+    return AttributeDict(
+        xferDuration=xferDurationS * 1e6,  # in us
+        postDuration=postDurationS * 1e6,  # in us
+        totalBytes=totalBytes,
+        descCount=descCount,
+    )
+
+
 class FakeNixlWrapper:
     """Mock implementation of NixlWrapper for testing.
 
@@ -132,6 +152,9 @@ class FakeNixlWrapper:
     def transfer(self, handle: int) -> str:
         return "PROC"
 
+    def get_xfer_telemetry(self, handle: int) -> dict:
+        return get_default_xfer_telemetry()
+
     ############################################################
     # Follow are for changing the behavior during testing.
     ############################################################
@@ -169,6 +192,11 @@ nixl_agent = FakeNixlWrapper
         with open(os.path.join(pkg_root, "__init__.py"), "w") as f:
             f.write(stub)
 
+        # Mock nixlXferTelemetry class
+        pkg_root2 = os.path.join(td, "nixl", "_bindings")
+        os.makedirs(pkg_root2, exist_ok=True)
+        with open(os.path.join(pkg_root2, "__init__.py"), "w") as f:
+            f.write("class nixlXferTelemetry: pass")
         # touch parent package
         open(os.path.join(td, "nixl", "__init__.py"), "w").close()
         yield td
@@ -575,7 +603,7 @@ def test_kv_connector_stats(dist_init):
 
     # Verify stats values are recorded
     assert not stats_after_transfer.is_empty()
-    assert stats_after_transfer.data["num_successful_transfers"] == 1
+    assert stats_after_transfer.num_successful_transfers == 1
 
     # Verify stats are reset after retrieval
     stats_after_reset = connector.get_kv_connector_stats()
@@ -599,16 +627,21 @@ def test_kv_connector_stats_aggregation():
 
     # Record different transfers on each worker
     # Worker 1: 2 transfers
-    worker1_stats.record_transfer()
-    worker1_stats.record_transfer()
+    stats = get_default_xfer_telemetry()
+    worker1_stats.record_transfer(stats)
+    worker1_stats.record_transfer(stats)
 
     # Worker 2: 1 transfer
-    worker2_stats.record_transfer()
+    worker2_stats.record_transfer(stats)
 
     # Worker 3: 3 transfers
-    worker3_stats.record_transfer()
-    worker3_stats.record_transfer()
-    worker3_stats.record_transfer()
+    stats = get_default_xfer_telemetry(xferDurationS=2,
+                                       postDurationS=2,
+                                       totalBytes=2,
+                                       descCount=2)
+    worker3_stats.record_transfer(stats)
+    worker3_stats.record_transfer(stats)
+    worker3_stats.record_transfer(stats)
 
     # Create ModelRunnerOutput instances for each worker
     worker_outputs = []
@@ -636,7 +669,12 @@ def test_kv_connector_stats_aggregation():
         aggregated_output.kv_connector_output.kv_connector_stats
     assert isinstance(kv_connector_stats, NixlKVConnectorStats)
     # Number of total transfers across all workers.
-    assert kv_connector_stats.data["num_successful_transfers"] == 6
+    assert kv_connector_stats.num_successful_transfers == 6
+    # Logging proc, call reduce() to get CLI-friendly stats.
+    cli_stats = kv_connector_stats.reduce()
+    assert cli_stats["Avg xfer time (ms)"] == 1500.0
+    assert cli_stats["Avg post time (ms)"] == 1500.0
+    assert cli_stats["Avg number of descriptors"] == 1.5
 
 
 def test_multi_kv_connector_stats_aggregation():
@@ -649,6 +687,7 @@ def test_multi_kv_connector_stats_aggregation():
 
     from dataclasses import dataclass
 
+    # Mock a KVConnectorStats class for testing aggregation over connectors.
     @dataclass
     class FooKVConnectorStats(KVConnectorStats):
 
@@ -676,7 +715,7 @@ def test_multi_kv_connector_stats_aggregation():
         if nixl_count > 0:
             nixl_stats = NixlKVConnectorStats()
             for _ in range(nixl_count):
-                nixl_stats.record_transfer()
+                nixl_stats.record_transfer(get_default_xfer_telemetry())
             data["NixlConnector"] = nixl_stats
         if foo_count > 0:
             foo_stats = FooKVConnectorStats()
@@ -712,8 +751,10 @@ def test_multi_kv_connector_stats_aggregation():
     assert isinstance(kv_connector_stats, MultiKVConnectorStats)
 
     # Validate per-connector totals across workers
-    assert kv_connector_stats["NixlConnector"].data[
-        "num_successful_transfers"] == 5
+    assert isinstance(kv_connector_stats["NixlConnector"],
+                      NixlKVConnectorStats)
+    assert kv_connector_stats["NixlConnector"].num_successful_transfers == 5
+    assert isinstance(kv_connector_stats["FooConnector"], FooKVConnectorStats)
     assert kv_connector_stats["FooConnector"].data["num_foo_transfers"] == 6
 
 
@@ -755,6 +796,8 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
                 "working_dir": working_dir,  # ship fake nixl package
                 "env_vars": {
                     "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": str(timeout),
+                    # TODO: for ray to carry over, remove once we set
+                    "NIXL_TELEMETRY_ENABLE": "1",
                 },
             }
             ray.init(runtime_env=runtime_env)
