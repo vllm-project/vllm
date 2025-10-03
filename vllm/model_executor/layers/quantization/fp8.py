@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     register_moe_scaling_factors, rotate_flashinfer_fp8_moe_weights,
     select_cutlass_fp8_gemm_impl, swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    apply_fp8_block_linear, check_aiter_fp8_linear_support,
+    W8A8BlockFp8LinearOp, check_aiter_fp8_linear_support,
     create_fp8_input_scale, create_fp8_scale_parameter,
     create_fp8_weight_parameter, expert_weight_is_col_major,
     maybe_post_process_fp8_weight_block, process_fp8_weight_block_strategy,
@@ -242,15 +242,28 @@ class Fp8LinearMethod(LinearMethodBase):
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None
         self.act_q_static = self.quant_config.activation_scheme == "static"
-        # Use per-token quantization for better perf if dynamic and cutlass
-        if not self.act_q_static and cutlass_fp8_supported():
-            self.act_q_group_shape = GroupShape.PER_TOKEN
+        if self.weight_block_size:
+            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
         else:
-            self.act_q_group_shape = GroupShape.PER_TENSOR
+            # Use per-token quantization for better perf if dynamic and cutlass
+            if not self.act_q_static and cutlass_fp8_supported():
+                self.act_q_group_shape = GroupShape.PER_TOKEN
+            else:
+                self.act_q_group_shape = GroupShape.PER_TENSOR
 
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=self.act_q_static,
-            act_quant_group_shape=self.act_q_group_shape)
+        if self.block_quant:
+            assert not self.act_q_static
+            assert self.weight_block_size is not None
+            self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
+                weight_group_shape=GroupShape(*self.weight_block_size),
+                act_quant_group_shape=self.act_q_group_shape,
+                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
+                use_aiter_and_is_supported=self.use_aiter_and_is_supported,
+            )
+        else:
+            self.fp8_linear = Fp8LinearOp(
+                act_quant_static=self.act_q_static,
+                act_quant_group_shape=self.act_q_group_shape)
 
     def create_weights(
         self,
@@ -399,12 +412,15 @@ class Fp8LinearMethod(LinearMethodBase):
                 bias=bias)
 
         if self.block_quant:
-            return apply_fp8_block_linear(
-                layer,
+            assert self.weight_block_size is not None
+
+            return self.w8a8_block_fp8_linear.apply(
                 input=x,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
+                input_scale=layer.input_scale,
                 bias=bias,
-                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
-                use_aiter_and_is_supported=self.use_aiter_and_is_supported)
+            )
 
         return self.fp8_linear.apply(input=x,
                                      weight=layer.weight,
@@ -467,7 +483,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 logger.info_once("DeepGemm disabled: FlashInfer MOE is"
                                  " enabled.")
             elif (is_deep_gemm_supported()):
-                logger.info_once("Using DeepGemm kernels for Fp8MoEMethod.")
+                logger.debug_once(
+                    "DeepGemm kernels available for Fp8MoEMethod.")
                 self.allow_deep_gemm = True
             else:
                 logger.warning_once(
@@ -481,9 +498,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         elif (current_platform.is_cuda()
               and current_platform.is_device_capability(100)
               and not self.flashinfer_moe_backend):
-            logger.info_once(
-                "Using CutlassBlockScaledGroupedGemm kernels for Fp8 MOE "
-                "on SM100.")
+            logger.debug_once(
+                "CutlassBlockScaledGroupedGemm available for Fp8MoEMethod.")
             self.allow_cutlass_block_scaled_grouped_gemm = True
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,

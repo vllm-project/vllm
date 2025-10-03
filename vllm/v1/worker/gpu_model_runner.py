@@ -634,8 +634,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_data.resumed_from_preemption[i]
+            num_output_tokens = req_data.num_output_tokens[i]
 
             # Update the cached states.
+
             req_state.num_computed_tokens = num_computed_tokens
 
             if not is_last_rank:
@@ -653,6 +655,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 elif num_new_tokens > 0:
                     req_state.output_token_ids.extend(
                         new_token_ids[-num_new_tokens:])
+            elif num_output_tokens < len(req_state.output_token_ids):
+                # Some output tokens were discarded due to a sync-KV-load
+                # failure. Align the cached state.
+                del req_state.output_token_ids[num_output_tokens:]
+
+                req_index = self.input_batch.req_id_to_index.get(req_id)
+                if req_index is not None:
+                    old_end_idx = self.input_batch.num_tokens_no_spec[
+                        req_index]
+                    end_idx = self.input_batch.num_prompt_tokens[
+                        req_index] + num_output_tokens
+                    self.input_batch.num_tokens[req_index] = end_idx
+                    self.input_batch.num_tokens_no_spec[req_index] = end_idx
+                    self.input_batch.is_token_ids[req_index,
+                                                  end_idx:old_end_idx] = False
 
             # Update the block IDs.
             if not resumed_from_preemption:
@@ -2230,14 +2247,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
             end_idx = start_idx + len(sampled_ids)
-            assert end_idx <= self.max_model_len, (
-                "Sampled token IDs exceed the max model length. "
-                f"Total number of tokens: {end_idx} > max_model_len: "
-                f"{self.max_model_len}")
+            assert end_idx <= self.max_model_len + 1, (
+                "Sampled token IDs exceed the max model length + 1. "
+                f"Total number of tokens: {end_idx} > max_model_len + 1: "
+                f"{self.max_model_len + 1}")
 
-            self.input_batch.token_ids_cpu[req_idx,
-                                           start_idx:end_idx] = sampled_ids
-            self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
+            n_tokens_cache = len(sampled_ids)
+
+            # Sampled token IDs exceed the max model length by 1. This is
+            # legitimate as we can still sample 1 last token when the context
+            # length equals the max model length. Note that we do not need to
+            # cache this token ID as the sequence finishes after this step.
+            # Additionally, the buffers token_ids_cpu and is_token_ids are of
+            # size max model length only.
+            if end_idx == self.max_model_len + 1:
+                n_tokens_cache -= 1
+
+            self.input_batch.token_ids_cpu[req_idx, start_idx:(
+                start_idx + n_tokens_cache)] = sampled_ids[:n_tokens_cache]
+            self.input_batch.is_token_ids[req_idx,
+                                          start_idx:(start_idx +
+                                                     n_tokens_cache)] = True
+
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
 
@@ -3043,7 +3074,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert not uniform_decode
             # Create mixed batch:
             # first half decode tokens, second half one prefill
-            num_decode_tokens = num_tokens // 2
+            num_decode_tokens = min(max_num_reqs - 1, num_tokens // 2)
             num_prefill_tokens = num_tokens - num_decode_tokens
             num_reqs = num_decode_tokens + 1
 
@@ -3055,7 +3086,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             max_query_len = num_prefill_tokens
         elif uniform_decode:
             assert not create_mixed_batch
-            num_reqs = cdiv(num_tokens, max_query_len)
+            num_reqs = min(max_num_reqs, cdiv(num_tokens, max_query_len))
             num_scheduled_tokens_list = [max_query_len] * num_reqs
             if num_tokens % max_query_len != 0:
                 num_scheduled_tokens_list[-1] = num_tokens % max_query_len
@@ -3500,7 +3531,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
         start_time = time.perf_counter()
-        start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         @contextmanager
         def freeze_gc():
@@ -3523,6 +3553,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
         with freeze_gc(), graph_capture(device=self.device):
+            start_free_gpu_memory = torch.cuda.mem_get_info()[0]
             cudagraph_mode = self.compilation_config.cudagraph_mode
             assert cudagraph_mode is not None
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
@@ -3551,6 +3582,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
                     uniform_decode=True)
 
+            torch.cuda.synchronize()
+            end_free_gpu_memory = torch.cuda.mem_get_info()[0]
+
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.
         # Note: We don't put it into graph_capture context manager because
@@ -3559,7 +3593,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         set_cudagraph_capturing_enabled(False)
 
         end_time = time.perf_counter()
-        end_free_gpu_memory = torch.cuda.mem_get_info()[0]
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes 5~20 seconds.
