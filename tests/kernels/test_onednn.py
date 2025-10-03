@@ -165,7 +165,7 @@ def onednn_gemm_test_helper(primitive_cache_size: int,
 def test_onednn_int8_scaled_gemm(
     n: int,
     k: int,
-    m_list: tuple[int],
+    m_list: tuple[int, ...],
     per_tensor_a_scale: bool,
     per_tensor_b_scale: bool,
     use_bias: bool,
@@ -196,7 +196,7 @@ def test_onednn_int8_scaled_gemm(
 def test_onednn_gemm(
     n: int,
     k: int,
-    m_list: tuple[int],
+    m_list: tuple[int, ...],
     use_bias: bool,
     use_stride: bool,
     dtype: torch.dtype,

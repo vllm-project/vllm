@@ -30,7 +30,7 @@ eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 def _create_proposer(
     method: str,
     num_speculative_tokens: int,
-    speculative_token_tree: Optional[list[tuple[int]]] = None,
+    speculative_token_tree: Optional[list[tuple[int, ...]]] = None,
 ) -> EagleProposer:
     model_config = ModelConfig(model=model_dir,
                                runner="generate",
@@ -314,12 +314,11 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
 
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
-    if (attn_backend == "TRITON_ATTN_VLLM_V1"
-            and not current_platform.is_rocm()):
-        pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
+    if (attn_backend == "TRITON_ATTN" and not current_platform.is_rocm()):
+        pytest.skip("TRITON_ATTN does not support "
                     "multi-token eagle spec decode on current platform")
 
-    if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
+    if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     # Setup draft model mock
@@ -338,13 +337,19 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
         "target_attn_1": mock.MagicMock(),
         "target_attn_2": mock.MagicMock()
     }
+    target_indx_layers: dict[str, mock.MagicMock] = {}
     # Draft model has one extra attention layer compared to target model
     all_attn_layers = {
         **target_attn_layers, "draft_extra_attn": mock.MagicMock()
     }
 
+    all_indx_layers: dict[str, mock.MagicMock] = {}
+
     # Make mock_get_layers return different values for each call
-    mock_get_layers.side_effect = [target_attn_layers, all_attn_layers]
+    mock_get_layers.side_effect = [
+        target_attn_layers, target_indx_layers, all_attn_layers,
+        all_indx_layers
+    ]
 
     # Setup mock for pp group to return the appropriate value for world size
     mock_pp_group = mock.MagicMock()
@@ -400,16 +405,15 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
-    if (attn_backend == "TRITON_ATTN_VLLM_V1"
-            and not current_platform.is_rocm()):
-        pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
+    if (attn_backend == "TRITON_ATTN" and not current_platform.is_rocm()):
+        pytest.skip("TRITON_ATTN does not support "
                     "multi-token eagle spec decode on current platform")
 
     if (attn_backend == "TREE_ATTN"):
         pytest.skip("TREE_ATTN is tested separately in test_propose_tree"
                     "because it requires special input mocking.")
 
-    if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
+    if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     # Use GPU device
@@ -510,12 +514,12 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
                                    device=device)
     sampling_metadata = mock.MagicMock()
 
-    if attn_backend == "FLASH_ATTN_VLLM_V1":
+    if attn_backend == "FLASH_ATTN":
         attn_metadata_builder_cls, _ = get_attention_backend(
-            _Backend.FLASH_ATTN_VLLM_V1)
-    elif attn_backend == "TRITON_ATTN_VLLM_V1":
+            _Backend.FLASH_ATTN)
+    elif attn_backend == "TRITON_ATTN":
         attn_metadata_builder_cls, _ = get_attention_backend(
-            _Backend.TRITON_ATTN_VLLM_V1)
+            _Backend.TRITON_ATTN)
     elif attn_backend == "TREE_ATTN":
         attn_metadata_builder_cls, _ = get_attention_backend(
             _Backend.TREE_ATTN)
@@ -532,9 +536,10 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     # Mock runner for attention metadata building
     proposer.runner = mock.MagicMock()
     proposer.runner.attn_groups.append([mock.MagicMock()])
-    proposer.runner.attn_groups[0][0].metadata_builders = [
+    proposer.runner.attn_groups[0][0].get_metadata_builder.return_value = \
         attn_metadata_builder
-    ]
+    proposer._get_attention_metadata_builder = mock.MagicMock(
+        return_value=attn_metadata_builder)
 
     result = proposer.propose(target_token_ids=target_token_ids,
                               target_positions=target_positions,
@@ -662,6 +667,10 @@ def test_propose_tree(spec_token_tree):
     proposer.runner.attn_groups[0][0].metadata_builders = [
         attn_metadata_builder
     ]
+    proposer.runner.attn_groups[0][0].get_metadata_builder.return_value = \
+        attn_metadata_builder
+    proposer._get_attention_metadata_builder = mock.MagicMock(
+        return_value=attn_metadata_builder)
 
     # Setup inputs for the proposer.
     target_token_ids = torch.randint(0,
