@@ -1318,6 +1318,8 @@ class Scheduler(SchedulerInterface):
             logger.debug("Finished recving KV transfer for request %s", req_id)
             self.finished_recving_kv_req_ids.add(req_id)
         for req_id in (kv_connector_output.finished_sending or ()):
+            if req_id not in self.requests:
+                continue
             logger.debug("Finished sending KV transfer for request %s", req_id)
             if req_id not in self.requests:
                 logger.warning(
