@@ -545,7 +545,7 @@ class MambaManager(SingleTypeKVCacheManager):
         assert dcp_world_size == 1, "DCP not support mamba now."
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids)))
-        if kv_cache_spec.enable_prefix_caching == False:
+        if not kv_cache_spec.enable_prefix_caching:
             return computed_blocks  #return empty list if cache is disabled
 
         max_num_blocks = max_length // kv_cache_spec.block_size
@@ -621,7 +621,7 @@ class MambaManager(SingleTypeKVCacheManager):
             num_tokens += (self.kv_cache_spec.block_size *
                            self.kv_cache_spec.num_speculative_blocks)
 
-        if self.kv_cache_spec.enable_prefix_caching == False:
+        if not self.kv_cache_spec.enable_prefix_caching:
             new_blocks = super().allocate_new_blocks(request_id, num_tokens)
             assert len(self.req_to_blocks[request_id]) == 1, (
                 "MambaManager should only allocate 1 block for each request.")
