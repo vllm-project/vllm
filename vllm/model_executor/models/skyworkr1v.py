@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
-from transformers import BatchEncoding, PretrainedConfig, TensorType
+from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -25,7 +25,7 @@ from vllm.model_executor.models.intern_vit import (InternVisionModel,
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargsItems, NestedTensors)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -37,8 +37,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix)
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -399,7 +398,7 @@ class SkyworkR1VProcessor:
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
-    ) -> Mapping[str, NestedTensors]:
+    ) -> BatchFeature:
         if text is None:
             text = []
         if not isinstance(text, list):
@@ -418,7 +417,7 @@ class SkyworkR1VProcessor:
                 max_dynamic_patch=max_dynamic_patch,
                 dynamic_image_size=dynamic_image_size,
             )
-            image_inputs: dict[str, NestedTensors] = {
+            image_inputs = {
                 "pixel_values_flat":
                 torch.cat(pixel_values_lst),
                 "image_num_patches":
@@ -435,10 +434,9 @@ class SkyworkR1VProcessor:
 
         text_inputs = self.tokenizer(text)
 
-        return {
-            **BatchEncoding(text_inputs, tensor_type=return_tensors),
-            **image_inputs,
-        }
+        combined_outputs = {**text_inputs, **image_inputs}
+
+        return BatchFeature(combined_outputs, tensor_type=return_tensors)
 
 
 class SkyworkR1VProcessingInfo(BaseProcessingInfo):
@@ -529,7 +527,7 @@ class SkyworkR1VMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
-    ) -> Mapping[str, NestedTensors]:
+    ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
@@ -549,7 +547,7 @@ class SkyworkR1VMultiModalProcessor(
 
     def _get_mm_fields_config(
         self,
-        hf_inputs: Mapping[str, NestedTensors],
+        hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
@@ -617,6 +615,7 @@ class SkyworkR1VMultiModalProcessor(
     info=SkyworkR1VProcessingInfo,
     dummy_inputs=SkyworkR1VDummyInputsBuilder)
 class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
+    merge_by_field_config = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -703,7 +702,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         else:
             return InternVisionPatchModel(config.vision_config)
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:
+    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.text_config.hidden_size
 
@@ -756,13 +755,9 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             return None
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image embeddings. "
-                                 f"Got type: {type(image_embeds)}")
-
             return SkyworkR1VImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds),
+                data=image_embeds,
             )
 
         image_token_id = kwargs["image_token_id"]
@@ -770,17 +765,6 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.img_context_token_id = image_token_id.flatten().unique().item()
 
         if pixel_values_flat is not None:
-            if not isinstance(pixel_values_flat, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values_flat)}")
-
-            if not isinstance(image_num_patches, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image_num_patches. "
-                                 f"Got type: {type(image_num_patches)}")
-
-            pixel_values_flat = flatten_bn(pixel_values_flat, concat=True)
-            image_num_patches = flatten_bn(image_num_patches, concat=True)
-
             return SkyworkR1VImagePixelInputs(
                 type="pixel_values",
                 pixel_values_flat=pixel_values_flat,
