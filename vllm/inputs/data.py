@@ -52,6 +52,9 @@ class TokensPrompt(TypedDict):
     prompt_token_ids: list[int]
     """A list of token IDs to pass to the model."""
 
+    prompt: NotRequired[str]
+    """The prompt text corresponding to the token IDs, if available."""
+
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
