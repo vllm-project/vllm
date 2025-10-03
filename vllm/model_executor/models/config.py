@@ -393,6 +393,9 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # End result:
             #  attn_block_size = 512
             #  mamba_block_size = 512 (aligned to a multiple of chunk_size)
+            # TODO(tdoublep): this constraint can be relaxed fairly
+            # easily by changing the way we layout chunks in the
+            # mamba2 kernels.
             chunk_size = model_config.get_mamba_chunk_size()
             attn_tokens_per_mamba_state = \
                 cdiv(mamba_page_size, attn_page_size_1_token)
