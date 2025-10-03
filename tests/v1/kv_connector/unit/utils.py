@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import tempfile
 from collections import defaultdict
+from itertools import count
 from typing import Any, Callable, Optional
 
 import torch
@@ -61,12 +62,15 @@ def create_vllm_config(
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 64,
     block_size: int = 16,
+    max_model_len: int = 10000,
+    enable_chunked_prefill: bool = True,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
-        max_model_len=max_num_batched_tokens,
+        max_model_len=max_model_len,
+        enable_chunked_prefill=enable_chunked_prefill,
     )
     model_config = ModelConfig(
         model=model,
@@ -117,19 +121,27 @@ def create_scheduler(
     )
 
 
+_request_count = count(1)
 _none_hash_initialized = False
 
 
-def create_request(request_id: int,
-                   num_tokens: int = 10,
-                   max_tokens: int = 16,
-                   do_remote_decode: bool = False,
-                   do_remote_prefill: bool = False,
-                   use_all_1s_for_prompt_tokens: bool = False,
-                   num_remote_blocks: int = 3,
-                   block_size: int = 16,
-                   hash_fn: Callable = sha256) -> Request:
+def create_request(
+    request_id: Optional[int] = None,
+    num_tokens: int = 10,
+    common_prefix_len=0,
+    max_tokens: int = 16,
+    do_remote_decode: bool = False,
+    do_remote_prefill: bool = False,
+    num_remote_blocks: int = 3,
+    block_size: int = 16,
+    hash_fn: Callable = sha256,
+) -> Request:
     """Make dummy request for testing."""
+    assert num_tokens >= common_prefix_len >= 0
+
+    if request_id is None:
+        request_id = next(_request_count)
+
     global _none_hash_initialized
     if not _none_hash_initialized:
         init_none_hash(hash_fn)
@@ -153,10 +165,9 @@ def create_request(request_id: int,
     max_tokens = 1 if do_remote_decode else max_tokens
     sampling_params = SamplingParams(max_tokens=max_tokens)
 
-    if use_all_1s_for_prompt_tokens:
-        prompt_token_ids = [1] * num_tokens
-    else:
-        prompt_token_ids = [i * request_id for i in range(num_tokens)]
+    common_prefix = [1] * common_prefix_len if common_prefix_len > 0 else []
+    suffix = [i * request_id for i in range(num_tokens - common_prefix_len)]
+    prompt_token_ids = common_prefix + suffix
 
     req = Request(
         request_id=f"id-{request_id}",
@@ -173,8 +184,9 @@ def create_request(request_id: int,
 
 def create_model_runner_output(
     reqs: list[Request],
-    finished_sending: Optional[list[str]] = None,
-    finished_recving: Optional[list[str]] = None,
+    finished_sending: Optional[set[str]] = None,
+    finished_recving: Optional[set[str]] = None,
+    invalid_block_ids: Optional[set[int]] = None,
     use_eos: bool = False,
     token_id: int = 0,
 ) -> ModelRunnerOutput:
@@ -189,10 +201,11 @@ def create_model_runner_output(
     sampled_token_ids = [[sampled_token] for _ in req_ids]
 
     kv_connector_output = None if (
-        finished_sending is None
-        and finished_recving is None) else KVConnectorOutput(
+        finished_sending is None and finished_recving is None
+        and invalid_block_ids is None) else KVConnectorOutput(
             finished_sending=finished_sending,
             finished_recving=finished_recving,
+            invalid_block_ids=invalid_block_ids or set(),
         )
 
     # Make output data structure.

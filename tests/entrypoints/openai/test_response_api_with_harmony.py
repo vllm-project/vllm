@@ -379,6 +379,14 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             if event.type == "response.created":
                 resp_id = event.response.id
 
+            # test vllm custom types are in the response
+            if event.type in [
+                    "response.completed", "response.in_progress",
+                    "response.created"
+            ]:
+                assert 'input_messages' in event.response.model_extra
+                assert 'output_messages' in event.response.model_extra
+
             if current_event_mode != event.type:
                 current_event_mode = event.type
                 print(f"\n[{event.type}] ", end="", flush=True)
@@ -688,6 +696,22 @@ async def test_function_calling_required(client: OpenAI, model_name: str):
             tools=tools,
             tool_choice="required",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_system_message_with_tools(client: OpenAI, model_name: str):
+    from vllm.entrypoints.harmony_utils import get_system_message
+
+    # Test with custom tools enabled - commentary channel should be available
+    sys_msg = get_system_message(with_custom_tools=True)
+    valid_channels = sys_msg.content[0].channel_config.valid_channels
+    assert "commentary" in valid_channels
+
+    # Test with custom tools disabled - commentary channel should be removed
+    sys_msg = get_system_message(with_custom_tools=False)
+    valid_channels = sys_msg.content[0].channel_config.valid_channels
+    assert "commentary" not in valid_channels
 
 
 @pytest.mark.asyncio
