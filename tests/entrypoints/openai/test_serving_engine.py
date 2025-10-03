@@ -45,14 +45,10 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop(
     mock_tokenizer = Mock(spec=MistralTokenizer)
     mock_tokenizer.apply_chat_template.side_effect = mocked_apply_chat_template
 
-    task = asyncio.create_task(
-        serving._apply_chat_template(tokenizer=mock_tokenizer,
-                                     messages=[],
-                                     conversation=[],
-                                     chat_template_kwargs={
-                                         "chat_template": None,
-                                         "tools": []
-                                     }))
+    task = serving._apply_mistral_chat_template_async(tokenizer=mock_tokenizer,
+                                                      messages=[],
+                                                      chat_template=None,
+                                                      tools=[])
 
     # Ensure the event loop is not blocked
     blocked_count = 0

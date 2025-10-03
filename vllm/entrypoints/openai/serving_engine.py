@@ -240,6 +240,8 @@ class OpenAIServing:
         self.enable_force_include_usage = enable_force_include_usage
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
+        self._apply_mistral_chat_template_async = make_async(
+            apply_mistral_chat_template, executor=self._tokenizer_executor)
 
         self._async_tokenizer_pool: dict[AnyTokenizer,
                                          AsyncMicrobatchTokenizer] = {}
@@ -749,32 +751,6 @@ class OpenAIServing:
                     tokenizer=tokenizer,
                 )
 
-    async def _apply_chat_template(
-            self, tokenizer: AnyTokenizer,
-            messages: list[ChatCompletionMessageParam],
-            conversation: list[ConversationMessage],
-            chat_template_kwargs: dict[str, Any]) -> Union[str, list[int]]:
-        request_prompt: Union[str, list[int]]
-
-        if tokenizer is None:
-            request_prompt = "placeholder"
-        elif isinstance(tokenizer, MistralTokenizer):
-            apply_mistral_async = make_async(apply_mistral_chat_template,
-                                             executor=self._tokenizer_executor)
-            request_prompt = await apply_mistral_async(
-                tokenizer,
-                messages=messages,
-                **chat_template_kwargs,
-            )
-        else:
-            request_prompt = apply_hf_chat_template(
-                tokenizer=tokenizer,
-                conversation=conversation,
-                model_config=self.model_config,
-                **chat_template_kwargs,
-            )
-        return request_prompt
-
     async def _preprocess_chat(
         self,
         request: Union[ChatLikeRequest, ResponsesRequest],
@@ -819,12 +795,23 @@ class OpenAIServing:
         )
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
-        request_prompt = await self._apply_chat_template(
-            tokenizer,
-            messages,
-            conversation,
-            _chat_template_kwargs,
-        )
+        request_prompt: Union[str, list[int]]
+
+        if tokenizer is None:
+            request_prompt = "placeholder"
+        elif isinstance(tokenizer, MistralTokenizer):
+            request_prompt = await self._apply_mistral_chat_template_async(
+                tokenizer,
+                messages=messages,
+                **_chat_template_kwargs,
+            )
+        else:
+            request_prompt = apply_hf_chat_template(
+                tokenizer=tokenizer,
+                conversation=conversation,
+                model_config=model_config,
+                **_chat_template_kwargs,
+            )
 
         mm_data = await mm_data_future
 
