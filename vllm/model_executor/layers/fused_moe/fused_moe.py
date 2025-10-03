@@ -1148,6 +1148,7 @@ def eplb_map_to_physical_and_record(
         -1, replica_indices).squeeze(-1)
 
     topk_ids = physical_ids
+
     if eplb_record_metrics:
         # 2. Record expert load metrics.
 
