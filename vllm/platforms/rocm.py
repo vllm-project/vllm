@@ -189,8 +189,6 @@ class RocmPlatform(Platform):
         from vllm.attention.backends.registry import _Backend
         if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
                 and on_gfx9()):
-            # Note: AITER FA is only supported for Qwen-VL models.
-            # TODO: Add support for other VL models in their model class.
             return _Backend.ROCM_AITER_FA
         if on_gfx9():
             return _Backend.FLASH_ATTN
