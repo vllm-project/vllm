@@ -72,8 +72,6 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
     reorder_batch_to_split_decodes_and_prefills, split_attn_metadata)
-from vllm.v1.attention.backends.cp_utils import (
-    cp_shard_positions_for_prefill, cp_get_computed_positions)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -410,7 +408,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                        self.max_num_tokens),
                                    dtype=np.int64)
 
-        # Pre-allocated array for computed token positions for context parallelism
+        # Pre-allocated array for computed token positions for CP
         if get_context_parallel_world_size() > 1:
             self.computed_positions_np = np.zeros(self.max_num_tokens,
                                                   dtype=np.int64)
