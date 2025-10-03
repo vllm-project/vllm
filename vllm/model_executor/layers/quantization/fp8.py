@@ -68,6 +68,54 @@ ACTIVATION_SCHEMES = ["static", "dynamic"]
 logger = init_logger(__name__)
 
 
+<<<<<<< HEAD
+def _is_col_major(x: torch.Tensor) -> bool:
+    assert x.dim() == 3
+    b, m, n = x.shape
+    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
+
+class PureFp8Config(QuantizationConfig):
+    """Custom FP8 config for pure FP8 weights without scales."""
+    
+    def __init__(self) -> None:
+        super().__init__()
+        self.is_checkpoint_fp8_serialized = True
+        self.activation_scheme = "none"  # No activation quantization
+        self.ignored_layers = []
+        self.weight_block_size = None
+        self.use_tma_kernel = True  # Flag to use TMA kernel
+    
+    @classmethod
+    def get_name(cls) -> QuantizationMethods:
+        return "pure_fp8"
+    
+    @classmethod
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
+        return [torch.bfloat16, torch.half]
+    
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 80
+    
+    @classmethod
+    def get_config_filenames(cls) -> list[str]:
+        return []
+    
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "PureFp8Config":
+        """Create PureFp8Config from config dict - no additional config needed."""
+        return cls()
+    
+    def get_quant_method(self, layer: torch.nn.Module,
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention
+        
+        if isinstance(layer, LinearBase):
+            return PureFp8LinearMethod(self)
+        return None
+
+=======
+>>>>>>> 143844fa43d4851831e89200c9a6069c929f8882
 class Fp8Config(QuantizationConfig):
     """Config class for FP8."""
 
@@ -1111,6 +1159,61 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         else:
             return result
 
+
+class PureFp8LinearMethod(LinearMethodBase):
+    """Pure FP8 linear method for weights already quantized to FP8E4M3FN without scales.
+    
+    This method assumes:
+    1. Weights are already pure FP8E4M3FN format
+    2. No scaling factors needed 
+    3. Uses custom TMA kernel for optimal performance
+    """
+    
+    def __init__(self, quant_config: PureFp8Config):
+        self.quant_config = quant_config
+        
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
+        
+        # Create FP8 weight parameter - weights should already be FP8E4M3FN
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=torch.float8_e4m3fn
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader
+        )
+        layer.register_parameter("weight", weight)
+        
+    def process_weights_after_loading(self, layer: Module) -> None:
+        # No processing needed for pure FP8 weights
+        # Just ensure weight is in correct format and transposed for TMA kernel
+        layer.weight = Parameter(layer.weight.t(), requires_grad=False)
+        
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        
+        # Use the custom TMA kernel from utils.py
+        from vllm.model_executor.utils import fp8_tma_linear
+        return fp8_tma_linear(x, layer.weight, layer.weight_scale, layer.input_scale, layer.bias, layer=layer)
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
     """

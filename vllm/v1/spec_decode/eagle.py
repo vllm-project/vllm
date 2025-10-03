@@ -956,6 +956,82 @@ class EagleProposer:
         # share lm_head with the target model if needed
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
+<<<<<<< HEAD
+        import os
+        lm_head_path = os.environ.get("LM_HEAD_PATH", "")
+        if lm_head_path:
+            logger.info(f"Loading separate LM head weights from: {lm_head_path}")
+            lm_head_state_dict = torch.load(lm_head_path, map_location="cpu")
+
+            # Get config from target model (different models store config differently)
+            if hasattr(target_model, 'config'):
+                model_config = target_model.config
+            elif hasattr(target_model, 'model_config'):
+                model_config = target_model.model_config
+            elif hasattr(target_model, 'hf_config'):
+                model_config = target_model.hf_config
+            else:
+                # Fallback to vllm_config
+                model_config = self.vllm_config.model_config.hf_config
+                logger.warning("Could not find model config, using vllm_config.model_config.hf_config")
+            
+            # EAGLE model doesn't have lm_head - create one with custom FP8 config
+            from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+            from vllm.model_executor.layers.quantization.fp8 import PureFp8Config
+            
+            # Create custom FP8 config for pure FP8 weights without scales
+            pure_fp8_config = PureFp8Config()
+            
+            self.model.lm_head = ParallelLMHead(
+                    model_config.vocab_size,
+                    model_config.hidden_size,
+                    params_dtype=torch.float8_e4m3fn,
+                    org_num_embeddings=model_config.vocab_size,
+                    quant_config=fp8_config,  # Use custom FP8 config
+                )
+            
+            # Initialize CUDA graph buffers for TMA kernel capture
+            self.model.lm_head._tma_graphs = {}
+            self.model.lm_head._tma_inputs = {}
+            self.model.lm_head._tma_outputs = {}
+            self.model.lm_head._tma_weights = {}
+            self.model.lm_head._tma_weight_scales = {}
+            self.model.lm_head.cudagraph_batch_sizes = [1, 2, 4, 8, 16]
+
+            ## loading weight data
+            with torch.no_grad():
+                self.model.lm_head.weight.data = self.model.lm_head.weight.data.to(torch.float8_e4m3fn)
+            self.model.lm_head.weight_loader(self.model.lm_head.weight, lm_head_state_dict['lm_head.weight'])
+            logger.info(f"LM head weight dtype after loading: {self.model.lm_head.weight.dtype}")
+
+            ## loading weight_scale data
+            # Create a weight_scale parameter for per-channel quantization
+            self.model.lm_head.weight_scale = nn.Parameter(
+                torch.zeros(model_config.vocab_size, dtype=torch.bfloat16),
+                requires_grad=False
+            )
+            self.model.lm_head.weight_loader(self.model.lm_head.weight_scale, lm_head_state_dict['lm_head.weight_scale'].squeeze())
+            logger.info(f"LM head weight_scale dtype after loading: {self.model.lm_head.weight_scale.dtype}")
+
+            # Move lm_head to the same device as the target model
+            device = next(target_model.parameters()).device
+            self.model.lm_head = self.model.lm_head.to(device)
+            logger.info(f"Successfully loaded separate LM head weights for EAGLE on device {device}.")
+
+            # Check the data type of loaded weights
+            logger.info(f"LM head weight dtype: {self.model.lm_head.weight.dtype}")
+            logger.info(f"LM head weight shape: {self.model.lm_head.weight.shape}")
+            logger.info(f"LM head weight_scale dtype: {self.model.lm_head.weight_scale.dtype}")
+            logger.info(f"LM head weight_scale shape: {self.model.lm_head.weight_scale.shape}")
+            if hasattr(self.model.lm_head, 'bias') and self.model.lm_head.bias is not None:
+                logger.info(f"LM head bias dtype: {self.model.lm_head.bias.dtype}")
+
+
+        elif self.vllm_config.speculative_config.method != "eagle3" and \
+                hasattr(target_language_model, "lm_head"):
+            logger.info("Loading EAGLE LM head weights from the target model.")
+            self.model.lm_head = target_language_model.lm_head
+=======
         if self.vllm_config.speculative_config.method != "eagle3":
             if hasattr(target_language_model, "lm_head"):
                 logger.info(
@@ -974,6 +1050,7 @@ class EagleProposer:
                 logger.info(
                     "The EAGLE head's lm_head will be loaded separately"
                     " from the target model.")
+>>>>>>> 143844fa43d4851831e89200c9a6069c929f8882
 
     @torch.inference_mode()
     def dummy_run(
