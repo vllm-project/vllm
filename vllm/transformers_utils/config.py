@@ -609,7 +609,7 @@ def get_config(
 
     if quantization_config is not None:
         config.quantization_config = quantization_config
-        # auto-enable DeepGEMM UE8M0 on Hopper if model config requests it
+        # auto-enable DeepGEMM UE8M0 if model config requests it
         scale_fmt = quantization_config.get("scale_fmt", None)
         if scale_fmt in ("ue8m0", ):
             if not envs.is_set("VLLM_USE_DEEP_GEMM_E8M0"):
