@@ -41,6 +41,7 @@ class Request:
         cache_salt: Optional[str] = None,
         priority: int = 0,
         trace_headers: Optional[Mapping[str, str]] = None,
+        cache_hit_threshold: Optional[float] = None,
         block_hasher: Optional[Callable[["Request"],
                                         list["BlockHash"]]] = None,
     ) -> None:
@@ -63,6 +64,8 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: Optional[dict[str, Any]] = None
+
+        self.cache_hit_threshold: Optional[float] = cache_hit_threshold
 
         if pooling_params is not None:
             # Pooling models.
@@ -148,6 +151,7 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
+            cache_hit_threshold=request.cache_hit_threshold
         )
 
     def append_output_token_ids(
@@ -218,6 +222,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_LENGTH_CAPPED = enum.auto()
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
+    FINISHED_CACHE_HIT_BELOW_THRESHOLD = enum.auto()
 
     def __str__(self):
         return self.name
@@ -241,4 +246,6 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_LENGTH_CAPPED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
+    RequestStatus.FINISHED_CACHE_HIT_BELOW_THRESHOLD:
+    FinishReason.CACHE_THRESHOLD,
 }
