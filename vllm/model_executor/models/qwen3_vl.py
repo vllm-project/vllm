@@ -799,7 +799,6 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
                 height=height,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
-                overrides=video_overrides,
             ),
         }
 
@@ -810,7 +809,6 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         height: int,
         num_frames: int,
         num_videos: int,
-        overrides: Optional[BaseDummyOptions] = None,
     ) -> list[VideoItem]:
         num_frames = max(num_frames, 2)
         video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
