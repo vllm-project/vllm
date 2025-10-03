@@ -129,14 +129,11 @@ class ServingScores(OpenAIServing):
         emb_texts_1: list[PoolingRequestOutput] = []
         emb_texts_2: list[PoolingRequestOutput] = []
 
-        for i in range(0, len(texts_1)):
-            assert (emb := embeddings[i]) is not None
-            emb_texts_1.append(emb)
-
-        for i in range(len(texts_1), len(embeddings)):
-            assert (emb := embeddings[i]) is not None
-            emb_texts_2.append(emb)
-
+        emb_texts_1 = embeddings[:len(texts_1)]
+        emb_texts_2 = embeddings[len(texts_1):]
+        assert all(e is not None for e in emb_texts_1) and all(
+            e is not None for e in emb_texts_2
+        ), "Embedding generation failed, resulting in None values."
         if len(emb_texts_1) == 1:
             emb_texts_1 = emb_texts_1 * len(emb_texts_2)
 
