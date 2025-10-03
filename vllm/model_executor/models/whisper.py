@@ -45,7 +45,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
                          SupportsTranscription)
 from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
-                    make_layers)
+                    make_layers, maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -885,7 +885,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         self.unpadded_vocab_size = config.vocab_size
         self.proj_out = ParallelLMHead(config.vocab_size,
                                        config.d_model,
-                                       quant_config=quant_config)
+                                       quant_config=quant_config,
+                                       prefix=maybe_prefix(prefix, "proj_out"))
         self.proj_out = self.proj_out.tie_weights(
             self.model.decoder.embed_tokens)
         logit_scale = getattr(config, "logit_scale", 1.0)
