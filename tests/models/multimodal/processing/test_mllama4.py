@@ -17,23 +17,23 @@ def test_profiling(model_id: str, max_model_len: int):
     model_config_kwargs = {
         "max_model_len": max_model_len,
     }
+    mm_counts = {"image": 1}
     ctx = build_model_context(
         model_id,
         model_config_kwargs=model_config_kwargs,
-        limit_mm_per_prompt={"image": 1},
+        limit_mm_per_prompt=mm_counts,
     )
 
-    mm_config = ctx.get_mm_config()
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     profiler = MultiModalProfiler(processor)
 
     decoder_dummy_data = profiler.get_decoder_dummy_data(
         max_model_len,
-        mm_counts=mm_config.limit_per_prompt,
+        mm_counts=mm_counts,
     )
     dummy_mm_data = processor.dummy_inputs.get_dummy_processor_inputs(
         max_model_len,
-        mm_counts=mm_config.limit_per_prompt,
+        mm_counts=mm_counts,
     )
 
     hf_config = ctx.get_hf_config(Llama4Config)
@@ -58,7 +58,7 @@ def test_profiling(model_id: str, max_model_len: int):
 
     profiled_tokens = profiler.get_mm_max_contiguous_tokens(
         max_model_len,
-        mm_counts=mm_config.limit_per_prompt,
+        mm_counts=mm_counts,
     )
 
     assert total_tokens == profiled_tokens["image"]

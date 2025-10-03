@@ -10,6 +10,8 @@ import numpy.typing as npt
 from PIL import Image
 
 import vllm.envs as envs
+from vllm.config.multimodal import (AudioDummyOptions, BaseDummyOptions,
+                                    ImageDummyOptions, VideoDummyOptions)
 from vllm.logger import init_logger
 
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
@@ -73,10 +75,19 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         """
         Build the multimodal input which, after processing, results in
         the maximum possible number of placeholder tokens.
+
+        Args:
+            seq_len: Sequence length
+            mm_counts: Count of items per modality
+            mm_options: Configurable options per modality (optional).
+                       If None, use model defaults for backward compatibility.
+                       If provided, models can use these to customize dummy 
+                       data generation.
         """
         raise NotImplementedError
 
@@ -84,13 +95,22 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> ProcessorInputs:
         """
         Build the input which, after processing, results in
         the maximum possible number of placeholder tokens.
+
+        Args:
+            seq_len: Sequence length
+            mm_counts: Count of items per modality
+            mm_options: Configurable options per modality (optional)
         """
         dummy_text = self.get_dummy_text(mm_counts)
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
+
+        # Use the unified function for both legacy and configurable cases
+        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+
         tokenization_kwargs = {"truncation": False}
 
         return ProcessorInputs(prompt=dummy_text,
@@ -102,9 +122,17 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         *,
         length: int,
         num_audios: int,
+        overrides: Optional[AudioDummyOptions] = None,
     ) -> list[npt.NDArray]:
         if num_audios == 0:
             return []
+        if overrides and overrides.length:
+            if overrides.length > length:
+                logger.warning(
+                    "audio.length override (%d) exceeds model's "
+                    "maximum length (%d), will be ignored", overrides.length,
+                    length)
+            length = min(length, overrides.length)
         audio = np.zeros((length, ))
         return [audio] * num_audios
 
@@ -114,9 +142,25 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         width: int,
         height: int,
         num_images: int,
+        overrides: Optional[ImageDummyOptions] = None,
     ) -> list[Image.Image]:
         if num_images == 0:
             return []
+        if overrides:
+            if overrides.width:
+                if overrides.width > width:
+                    logger.warning(
+                        "image.width override (%d) exceeds model's "
+                        "maximum width (%d), will be ignored", overrides.width,
+                        width)
+                width = min(width, overrides.width)
+            if overrides.height:
+                if overrides.height > height:
+                    logger.warning(
+                        "image.height override (%d) exceeds model's "
+                        "maximum height (%d), will be ignored",
+                        overrides.height, height)
+                height = min(height, overrides.height)
         image = Image.new("RGB", (width, height), color=255)
         return [image] * num_images
 
@@ -127,9 +171,32 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         height: int,
         num_frames: int,
         num_videos: int,
+        overrides: Optional[VideoDummyOptions] = None,
     ) -> list[npt.NDArray]:
         if num_videos == 0:
             return []
+        if overrides:
+            if overrides.num_frames:
+                if overrides.num_frames > num_frames:
+                    logger.warning(
+                        "video.num_frames override (%d) exceeds model's "
+                        "maximum number of frames (%d), will be ignored",
+                        overrides.num_frames, num_frames)
+                num_frames = min(num_frames, overrides.num_frames)
+            if overrides.width:
+                if overrides.width > width:
+                    logger.warning(
+                        "video.width override (%d) exceeds model's "
+                        "maximum width (%d), will be ignored", overrides.width,
+                        width)
+                width = min(width, overrides.width)
+            if overrides.height:
+                if overrides.height > height:
+                    logger.warning(
+                        "video.height override (%d) exceeds model's "
+                        "maximum height (%d), will be ignored",
+                        overrides.height, height)
+                height = min(height, overrides.height)
         video = np.full((num_frames, width, height, 3), 255)
         return [video] * num_videos
 
@@ -162,13 +229,14 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalInputs:
         if mm_counts is None:
             mm_counts = self.get_mm_limits()
 
         factory = self.dummy_inputs
         processor_inputs = factory.get_dummy_processor_inputs(
-            seq_len, mm_counts)
+            seq_len, mm_counts, mm_options)
 
         return self.processor.apply(
             prompt=processor_inputs.prompt,
@@ -195,8 +263,9 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> DummyEncoderData:
-        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts, mm_options)
         mm_inputs = cast(MultiModalEncDecInputs, mm_inputs)
 
         # For encoder-decoder models, use encoder prompt token ids instead of
@@ -228,8 +297,9 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> DummyDecoderData:
-        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts, mm_options)
 
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         total_len = len(prompt_token_ids)
@@ -274,7 +344,7 @@ class MultiModalProfiler(Generic[_I]):
 
         `<im_start> [IMG] [IMG] [IMG] <row_break> [IMG] [IMG] [IMG] <im_end>`
         Returns 9, even when the number of image embeddings is 6.
-        
+
         This is important to take into account when profiling and
         initializing the encoder cache size.
         """
