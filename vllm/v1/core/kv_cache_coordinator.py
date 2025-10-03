@@ -3,7 +3,8 @@
 from abc import ABC, abstractmethod
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
+                                         SingleTypeKVCacheBlocks)
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     FullAttentionManager,
@@ -50,7 +51,7 @@ class KVCacheCoordinator(ABC):
 
     def get_num_blocks_to_allocate(self, request_id: str, num_tokens: int,
                                    new_computed_blocks: tuple[
-                                       list[KVCacheBlock], ...],
+                                       SingleTypeKVCacheBlocks, ...],
                                    num_encoder_tokens: int) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
@@ -82,7 +83,7 @@ class KVCacheCoordinator(ABC):
 
     def save_new_computed_blocks(
             self, request_id: str,
-            new_computed_blocks: tuple[list[KVCacheBlock], ...]) -> None:
+            new_computed_blocks: tuple[SingleTypeKVCacheBlocks, ...]) -> None:
         """
         Add the new computed blocks to the request.
 

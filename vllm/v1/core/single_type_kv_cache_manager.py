@@ -6,16 +6,12 @@ from collections import defaultdict
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
-from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    CrossAttentionSpec,
-    FullAttentionSpec,
-    KVCacheSpec,
-    MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowSpec,
-)
+from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
+                                         SingleTypeKVCacheBlocks)
+from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
+                                        CrossAttentionSpec, FullAttentionSpec,
+                                        KVCacheSpec, MambaSpec,
+                                        MLAAttentionSpec, SlidingWindowSpec)
 from vllm.v1.request import Request
 
 
@@ -62,7 +58,7 @@ class SingleTypeKVCacheManager(ABC):
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
-            new_computed_blocks: list[KVCacheBlock]) -> int:
+            new_computed_blocks: SingleTypeKVCacheBlocks) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
 
@@ -94,7 +90,7 @@ class SingleTypeKVCacheManager(ABC):
 
     def save_new_computed_blocks(
             self, request_id: str,
-            new_computed_blocks: list[KVCacheBlock]) -> None:
+            new_computed_blocks: SingleTypeKVCacheBlocks) -> None:
         """
         Add the new computed blocks to the request.
 
@@ -594,7 +590,7 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
-            new_computed_blocks: list[KVCacheBlock]) -> int:
+            new_computed_blocks: SingleTypeKVCacheBlocks) -> int:
         # Allocate extra `num_speculative_blocks` blocks for
         # speculative decoding (MTP/EAGLE) with linear attention.
         """
@@ -639,7 +635,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
 
     def save_new_computed_blocks(
             self, request_id: str,
-            new_computed_blocks: list[KVCacheBlock]) -> None:
+            new_computed_blocks: SingleTypeKVCacheBlocks) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so  `new_computed_blocks` should always be empty.
         assert len(new_computed_blocks) == 0

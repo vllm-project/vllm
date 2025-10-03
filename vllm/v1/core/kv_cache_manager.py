@@ -7,7 +7,7 @@ from typing import Literal, overload
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, SingleTypeKVCacheBlocks
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
@@ -22,7 +22,7 @@ class KVCacheBlocks:
     Scheduler and KVCacheManager, to hide KVCacheManager's internal data
     structure from the Scheduler.
     """
-    blocks: tuple[tuple[KVCacheBlock, ...], ...]
+    blocks: tuple[SingleTypeKVCacheBlocks, ...]
     """
     `blocks[i][j]` refers to the i-th kv_cache_group
     and the j-th block of tokens.We don't use block of
@@ -30,18 +30,14 @@ class KVCacheBlocks:
     kv_cache_groups have the same number of blocks, which is true for now but
     will be broken if we want to give different block_size to different
     kv_cache_groups in the future.
-
-    tuple[tuple[]] is used for the following reasons:
-    - claim immutable
-    - precompute an empty KVCacheBlocks instance in KVCacheManager
-      to avoid GC overhead
     """
 
     def __add__(self, other: "KVCacheBlocks") -> "KVCacheBlocks":
         """Adds two KVCacheBlocks instances."""
         return KVCacheBlocks(
-            tuple(blk1 + blk2 for blk1, blk2 in zip(self.blocks, other.blocks))
-        )
+            tuple(
+                list(blk1) + list(blk2)
+                for blk1, blk2 in zip(self.blocks, other.blocks)))
 
     @overload
     def get_block_ids(
@@ -67,8 +63,6 @@ class KVCacheBlocks:
                 - the outer tuple corresponds to KV cache groups
                 - each inner list contains the block_ids of the blocks in that
                   group
-
-        TODO(Jialin): replace the return type to tuple[tuple[int...], ...]
         """
         if allow_none and all(len(group) == 0 for group in self.blocks):
             return None
@@ -80,7 +74,9 @@ class KVCacheBlocks:
         return [block.block_id for block in self.blocks[0] if block.block_hash is None]
 
     def new_empty(self) -> "KVCacheBlocks":
-        """Creates a new KVCacheBlocks instance with no blocks."""
+        """
+        Creates a new KVCacheBlocks instance with no blocks.
+        """
         return KVCacheBlocks(tuple(() for _ in range(len(self.blocks))))
 
 
@@ -136,6 +132,7 @@ class KVCacheManager:
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
+
         # Pre-constructed KVCacheBlocks with no blocks, callers should use this
         # via create_kv_cache_blocks instead of creating new ones to avoid GC
         # overhead.
@@ -412,4 +409,5 @@ class KVCacheManager:
     def create_kv_cache_blocks(
             self, blocks: tuple[list[KVCacheBlock], ...]) -> KVCacheBlocks:
         # Only create new KVCacheBlocks for non-empty blocks
-        return KVCacheBlocks(blocks) if any(blocks) else self.empty_block_list
+        return KVCacheBlocks(blocks) if any(
+            blocks) else self.empty_kv_cache_blocks
