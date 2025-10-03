@@ -1152,7 +1152,7 @@ def fast_plan_decode(
     qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
 
     try:
-        # Make sure we pass exactly 17 arguments for tensor core version
+        # Make sure we pass exactly 18 arguments for tensor core version
         self._plan_info = self._cached_module.plan(
             self._float_workspace_buffer,
             self._int_workspace_buffer,
