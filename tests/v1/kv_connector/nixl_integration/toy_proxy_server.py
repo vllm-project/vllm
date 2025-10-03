@@ -193,6 +193,8 @@ async def stream_service_response(client_info: dict, endpoint: str,
                                             endpoint,
                                             json=req_data,
                                             headers=headers) as response:
+        logger.info("Decode server response status: %s for request %s",
+                    response.status_code, request_id)
         response.raise_for_status()
         async for chunk in response.aiter_bytes():
             yield chunk
