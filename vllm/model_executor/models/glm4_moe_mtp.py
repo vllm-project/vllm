@@ -50,13 +50,15 @@ class SharedHead(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        prefix: str,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.head = ParallelLMHead(config.vocab_size,
                                    config.hidden_size,
-                                   quant_config=quant_config)
+                                   quant_config=quant_config,
+                                   prefix=maybe_prefix(prefix, "head"))
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.norm(hidden_states)
@@ -77,7 +79,9 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         self.eh_proj = nn.Linear(config.hidden_size * 2,
                                  config.hidden_size,
                                  bias=False)
-        self.shared_head = SharedHead(config=config, quant_config=quant_config)
+        self.shared_head = SharedHead(config=config,
+                                      prefix=prefix,
+                                      quant_config=quant_config)
         self.mtp_block = Glm4MoeDecoderLayer(config=config,
                                              cache_config=cache_config,
                                              quant_config=quant_config,
@@ -132,6 +136,9 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -172,6 +179,9 @@ class Glm4MoeMTP(nn.Module, SupportsPP):
         self.model = Glm4MoeMultiTokenPredictor(vllm_config=vllm_config,
                                                 prefix=maybe_prefix(
                                                     prefix, "model"))
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,

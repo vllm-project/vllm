@@ -30,7 +30,8 @@ from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.tpu import TPUModelLoader
-from vllm.model_executor.models.interfaces import supports_transcription
+from vllm.model_executor.models.interfaces import (SupportsMultiModal,
+                                                   supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -261,6 +262,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                         device="cpu",
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
+
+        # Only relevant for multimodal models
+        if self.supports_mm_inputs:
+            self.is_mm_embed_cpu = torch.zeros(self.max_num_tokens,
+                                               dtype=torch.bool,
+                                               device="cpu",
+                                               pin_memory=self.pin_memory)
 
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
@@ -529,7 +537,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
-                        use_mla=False,
                     )
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -537,7 +544,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
-                        use_mla=False,
                     )
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
@@ -834,11 +840,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # in the same batch while still being able to benefit from batching
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
+        model = cast(SupportsMultiModal, self.model)
         encoder_outputs = []
         for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
                 mm_kwargs,
                 device=self.device,
                 pin_memory=self.pin_memory,
+                merge_by_field_config=model.merge_by_field_config,
         ):
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -848,7 +856,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
             torch_xla.sync(wait=False)
-            curr_group_outputs = self.model.get_multimodal_embeddings(
+            curr_group_outputs = model.get_multimodal_embeddings(
                 **mm_kwargs_group)
             torch_xla.sync(wait=False)
 
@@ -876,13 +884,22 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> list[torch.Tensor]:
-        mm_embeds: list[torch.Tensor] = []
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        padded_total_num_scheduled_tokens = _get_padded_token_len(
+            self.num_tokens_paddings, total_num_scheduled_tokens)
+
+        is_mm_embed = self.is_mm_embed_cpu
+        is_mm_embed[:padded_total_num_scheduled_tokens] = False
+        mm_embeds = list[torch.Tensor]()
+        req_start_idx = 0
+
         for req_id in self.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens
+
             # TODO unroll loop and assume/enforce --disable_chunked_mm_input
             # NOTE (NickLucche) here we diverge from logic in other runners, as
             # we assume to only have whole mm items to process. Hence we avoid
@@ -903,26 +920,53 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # The encoder output is already processed and stored
                     # in the decoder's KV cache.
                     continue
+
+                start_idx = max(num_computed_tokens - start_pos, 0)
+                end_idx = min(
+                    num_computed_tokens - start_pos + num_scheduled_tokens,
+                    num_encoder_tokens,
+                )
+                assert start_idx < end_idx
+
                 mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
                 assert encoder_output is not None,\
                       f"Encoder cache miss for {mm_hash}."
+
                 assert pos_info.is_embed is None, "Expected all positions to"\
                 " be contiguous and embeddings."
-                encoder_output = self.encoder_cache[mm_hash]
-                mm_embeds.append(encoder_output)
-        return mm_embeds
 
-    def _get_model_inputs(self, input_ids: torch.Tensor,
-                          mm_embeds: list[torch.Tensor]):
+                req_start_pos = req_start_idx + start_pos - num_computed_tokens
+                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
+                    = True
+
+                # Only whole mm items are processed
+                mm_embeds.append(encoder_output)
+
+            req_start_idx += num_scheduled_tokens
+
+        is_mm_embed = is_mm_embed[:padded_total_num_scheduled_tokens] \
+            .to(self.device)
+
+        return mm_embeds, is_mm_embed
+
+    def _get_model_inputs(
+        self,
+        input_ids: torch.Tensor,
+        mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]],
+    ):
         if self.supports_mm_inputs:
+            mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
+
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             inputs_embeds = self.model.get_input_embeddings(
-                input_ids=input_ids,
+                input_ids,
                 multimodal_embeddings=mm_embeds,
+                is_multimodal=is_mm_embed,
             )
+
             return None, inputs_embeds
         else:
             # For text-only models, we use token ids as input.
@@ -950,9 +994,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.supports_mm_inputs:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
-            mm_embeds = self._gather_mm_embeddings(scheduler_output)
+            mm_embed_inputs = self._gather_mm_embeddings(scheduler_output)
         else:
-            mm_embeds = []
+            mm_embed_inputs = None
+
         torch_xla.sync(wait=False)
         # Prepare inputs, the requests might be split into multiple
         # executions, combine the result of each execution.
@@ -969,7 +1014,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             attn_metadata, logits_indices, padded_num_reqs, num_reqs,\
                 end_index = self._prepare_inputs(scheduler_output, start_index)
             input_ids, inputs_embeds = self._get_model_inputs(
-                self.input_ids, mm_embeds)
+                self.input_ids, mm_embed_inputs)
             torch_xla.sync(wait=False)
             # Run the decoder
             with set_forward_context(
@@ -1322,9 +1367,15 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             hf_config.image_token_index
 
                         placeholders_ids = placeholders_ids.to(self.device)
+
+                        mm_mask = torch.tensor([False] * num_tokens)
+                        mm_mask[:items_size] = True
+                        mm_mask = mm_mask.to(self.device)
                         # Assign outputs or the graph will be cut short.
-                        a, b = self._get_model_inputs(placeholders_ids,
-                                                      [mm_embeds])
+                        a, b = self._get_model_inputs(
+                            placeholders_ids,
+                            mm_embed_inputs=([mm_embeds], mm_mask),
+                        )
                         assert a is None
                         torch_xla.sync(wait=False)
 
@@ -1335,7 +1386,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                dtype=torch.int32,
                                                device="cpu")
                 placeholders_ids = placeholders_ids.to(self.device)
-                a, b = self._get_model_inputs(placeholders_ids, [])
+                a, b = self._get_model_inputs(
+                    placeholders_ids,
+                    mm_embed_inputs=None,
+                )
                 assert a is None
                 torch_xla.sync(wait=False)
 
@@ -1795,7 +1849,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
-            seq_len=self.max_num_tokens,
+            seq_len=self.max_model_len,
             mm_counts={modality: 1},
             cache=self.mm_budget.cache,
         )
@@ -1805,11 +1859,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dummy_mm_item = dummy_mm_data[modality][0]
         dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
+        model = cast(SupportsMultiModal, self.model)
         return next(grouped_mm_kwargs
                     for _, _, grouped_mm_kwargs in group_mm_kwargs_by_modality(
                         dummy_mm_items,
                         device=self.device,
                         pin_memory=self.pin_memory,
+                        merge_by_field_config=model.merge_by_field_config,
                     ))
 
 

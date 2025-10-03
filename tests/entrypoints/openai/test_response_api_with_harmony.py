@@ -379,6 +379,14 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             if event.type == "response.created":
                 resp_id = event.response.id
 
+            # test vllm custom types are in the response
+            if event.type in [
+                    "response.completed", "response.in_progress",
+                    "response.created"
+            ]:
+                assert 'input_messages' in event.response.model_extra
+                assert 'output_messages' in event.response.model_extra
+
             if current_event_mode != event.type:
                 current_event_mode = event.type
                 print(f"\n[{event.type}] ", end="", flush=True)
@@ -454,7 +462,13 @@ async def test_web_search(client: OpenAI, model_name: str):
 async def test_code_interpreter(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="Multiply 64548*15151 using builtin python interpreter.",
+        # TODO: Ideally should be able to set max tool calls
+        # to prevent multi-turn, but it is not currently supported
+        # would speed up the test
+        input=("What's the first 4 digits after the decimal point of "
+               "cube root of `19910212 * 20250910`? "
+               "Show only the digits. The python interpreter is not stateful "
+               "and you must print to see the output."),
         tools=[{
             "type": "code_interpreter",
             "container": {
@@ -464,6 +478,7 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
     )
     assert response is not None
     assert response.status == "completed"
+    assert response.usage.output_tokens_details.tool_output_tokens > 0
 
 
 def get_weather(latitude, longitude):
@@ -516,6 +531,7 @@ async def test_function_calling(client: OpenAI, model_name: str):
         input="What's the weather like in Paris today?",
         tools=tools,
         temperature=0.0,
+        extra_body={"request_id": "test_function_calling_non_resp"},
     )
     assert response is not None
     assert response.status == "completed"
@@ -680,6 +696,22 @@ async def test_function_calling_required(client: OpenAI, model_name: str):
             tools=tools,
             tool_choice="required",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_system_message_with_tools(client: OpenAI, model_name: str):
+    from vllm.entrypoints.harmony_utils import get_system_message
+
+    # Test with custom tools enabled - commentary channel should be available
+    sys_msg = get_system_message(with_custom_tools=True)
+    valid_channels = sys_msg.content[0].channel_config.valid_channels
+    assert "commentary" in valid_channels
+
+    # Test with custom tools disabled - commentary channel should be removed
+    sys_msg = get_system_message(with_custom_tools=False)
+    valid_channels = sys_msg.content[0].channel_config.valid_channels
+    assert "commentary" not in valid_channels
 
 
 @pytest.mark.asyncio

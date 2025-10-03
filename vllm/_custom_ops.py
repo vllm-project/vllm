@@ -1447,17 +1447,24 @@ def LLMM1(a: torch.Tensor, b: torch.Tensor,
     return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
 
 
-def wvSplitK(a: torch.Tensor, b: torch.Tensor, cu_count: int) -> torch.Tensor:
-    return torch.ops._rocm_C.wvSplitK(a, b, cu_count)
+def wvSplitK(a: torch.Tensor,
+             b: torch.Tensor,
+             cu_count: int,
+             bias: torch.Tensor = None) -> torch.Tensor:
+    return torch.ops._rocm_C.wvSplitK(a, b, bias, cu_count)
 
 
-def wvSplitKQ(a: torch.Tensor, b: torch.Tensor, out_dtype: torch.dtype,
-              scale_a: torch.Tensor, scale_b: torch.Tensor,
-              cu_count: int) -> torch.Tensor:
+def wvSplitKQ(a: torch.Tensor,
+              b: torch.Tensor,
+              out_dtype: torch.dtype,
+              scale_a: torch.Tensor,
+              scale_b: torch.Tensor,
+              cu_count: int,
+              bias: torch.Tensor = None) -> torch.Tensor:
     out = torch.empty((b.shape[0], a.shape[0]),
                       dtype=out_dtype,
                       device=b.device)
-    torch.ops._rocm_C.wvSplitKQ(a, b, out, scale_a, scale_b, cu_count)
+    torch.ops._rocm_C.wvSplitKQ(a, b, bias, out, scale_a, scale_b, cu_count)
     return out
 
 
@@ -1669,6 +1676,15 @@ def cp_gather_cache(src_cache: torch.Tensor,
                     seq_starts: Optional[torch.Tensor] = None) -> None:
     torch.ops._C_cache_ops.cp_gather_cache(src_cache, dst, block_table,
                                            cu_seq_lens, batch_size, seq_starts)
+
+
+def indexer_k_quant_and_cache(k: torch.Tensor, kv_cache: torch.Tensor,
+                              slot_mapping: torch.Tensor,
+                              quant_block_size: int,
+                              kv_cache_dtype: str) -> None:
+    torch.ops._C_cache_ops.indexer_k_quant_and_cache(k, kv_cache, slot_mapping,
+                                                     quant_block_size,
+                                                     kv_cache_dtype)
 
 
 def get_device_attribute(attribute: int, device: int) -> int:

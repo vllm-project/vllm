@@ -24,6 +24,7 @@ from transformers.models.pixtral.modeling_pixtral import (
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -50,9 +51,9 @@ from vllm.transformers_utils.tokenizer import (MistralTokenizer,
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
-from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
+from .utils import flatten_bn, init_vllm_registered_model, maybe_prefix
+from .vision import (VisionEncoderInfo, VisionFeatureSelectStrategy,
+                     resolve_visual_encoder_outputs)
 
 try:
     from xformers import ops as xops
@@ -228,28 +229,33 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images)
+                                   num_images=num_images,
+                                   overrides=image_overrides)
         }
 
     def get_dummy_processor_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 
         dummy_text = self.get_dummy_text(mm_counts)
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
+        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
         dummy_images = dummy_mm_data.get("image", [])
         tokenization_kwargs = {"truncation": False}
 
@@ -433,22 +439,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return self._process_image_input(image_input)
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                self.vision_args.image_token_id,
-            )
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -460,14 +450,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         """Run forward pass for pixtral."""
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
-            input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
@@ -1243,7 +1225,9 @@ class PixtralHFVisionModel(nn.Module):
     def forward(
         self,
         pixel_values: list[torch.Tensor],
-        feature_sample_layers: Optional[list[int]] = None,
+        *,
+        select_layers: Optional[list[int]] = None,
+        feature_select_strategy: Optional[VisionFeatureSelectStrategy] = None,
     ) -> tuple[torch.Tensor, ...]:
         """
         Args:
@@ -1251,7 +1235,7 @@ class PixtralHFVisionModel(nn.Module):
                 in pixel_values. This means it will be a list of tensors
                 because multiple requests batched can have multiple images,
                 each with their own shape potentially
-            feature_sample_layers: Layer indices whose features should be
+            select_layers: Layer indices whose features should be
                 concatenated and used as the visual encoder output. If none
                 are provided, the last layer is used.
 
@@ -1292,15 +1276,20 @@ class PixtralHFVisionModel(nn.Module):
                 [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
                 patch_embeds)
 
-        return_all_hidden_states = feature_sample_layers is not None
         out = self.transformer(
             patch_embeds,
             attention_mask,
             position_embedding,
-            return_all_hidden_states=return_all_hidden_states)
+            return_all_hidden_states=select_layers is not None,
+        )
 
-        out = resolve_visual_encoder_outputs(out, feature_sample_layers, None,
-                                             self.config.num_hidden_layers)
+        out = resolve_visual_encoder_outputs(
+            out,
+            None,
+            select_layers=select_layers,
+            max_possible_layers=self.config.num_hidden_layers,
+            feature_select_strategy=feature_select_strategy,
+        )
 
         # squeeze dim 0 and split into separate tensors for each image
         return torch.split(out.squeeze(0), embed_sizes)

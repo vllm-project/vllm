@@ -41,8 +41,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
@@ -308,13 +307,11 @@ class GraniteModel(nn.Module):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
-            residual = None
 
             hidden_states *= self.config.embedding_multiplier
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(positions, hidden_states)
@@ -322,7 +319,6 @@ class GraniteModel(nn.Module):
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
-                "residual": residual
             })
 
         hidden_states = self.norm(hidden_states)
@@ -472,10 +468,6 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             device: torch.device) -> IntermediateTensors:
         return IntermediateTensors({
             "hidden_states":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-            "residual":
             torch.zeros((batch_size, self.config.hidden_size),
                         dtype=dtype,
                         device=device),

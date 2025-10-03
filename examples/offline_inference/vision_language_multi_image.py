@@ -309,7 +309,7 @@ def load_idefics3(question: str, image_urls: list[str]) -> ModelRequestData:
 
 
 def load_interns1(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "internlm/Intern-S1"
+    model_name = "internlm/Intern-S1-mini"
 
     engine_args = EngineArgs(
         model=model_name,
