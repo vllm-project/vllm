@@ -100,7 +100,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 logger.warning_once(
                     "Using KV cache scaling factor 1.0 for fp8_e4m3. "
                     "If this is unintended, verify that k/v_scale "
-                    "scaling factors are properly set in the fp8 checkpoint.")
+                    "scaling factors are properly set in the checkpoint.")
 
         if layer.q_scale > 0.0:
             q_scale = layer.q_scale
