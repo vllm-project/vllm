@@ -894,8 +894,25 @@ class Scheduler(SchedulerInterface):
 
         # handle requests that encountered unrecoverable transfer failures
         if kv_connector_output and kv_connector_output.failed_req_ids:
-            self.finish_requests(list(kv_connector_output.failed_req_ids),
-                                 RequestStatus.FINISHED_ABORTED)
+            for req_id in kv_connector_output.failed_req_ids:
+                request = self.requests.get(req_id)
+                if request is not None:
+                    request.status = RequestStatus.FINISHED_ABORTED
+                    kv_transfer_params = self._free_request(request)
+                    outputs[request.client_index].append(
+                        EngineCoreOutput(
+                            request_id=req_id,
+                            new_token_ids=[],
+                            finish_reason=request.get_finished_reason(),
+                            new_logprobs=None,
+                            new_prompt_logprobs_tensors=None,
+                            pooling_output=None,
+                            stop_reason=None,
+                            events=request.take_events(),
+                            kv_transfer_params=kv_transfer_params,
+                            trace_headers=request.trace_headers,
+                            num_cached_tokens=request.num_cached_tokens,
+                        ))
             logger.info(
                 "Aborted %d requests due to unrecoverable KV transfer failures",
                 len(kv_connector_output.failed_req_ids))
