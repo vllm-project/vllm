@@ -86,7 +86,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 logger.warning_once(
                     "Checkpoint does not provide a q scaling factor. "
                     "Setting it to k_scale. This only matters for "
-                    "the flash-attn backend.")
+                    "FP8 Attention backends (flash-attn or flashinfer).")
                 layer._q_scale.copy_(k_scale)
                 layer._q_scale_float = k_scale
 
@@ -98,9 +98,9 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             if (k_scale == 1.0 and v_scale == 1.0
                     and "e5m2" not in layer.kv_cache_dtype):
                 logger.warning_once(
-                    "Using KV cache scaling factor 1.0 for fp8_e4m3. This "
-                    "may cause accuracy issues. Please make sure k/v_scale "
-                    "scaling factors are available in the fp8 checkpoint.")
+                    "Using KV cache scaling factor 1.0 for fp8_e4m3. "
+                    "If this is unintended, verify that k/v_scale "
+                    "scaling factors are properly set in the checkpoint.")
 
         if layer.q_scale > 0.0:
             q_scale = layer.q_scale
