@@ -847,8 +847,7 @@ def flatten_and_concat(x: list[torch.Tensor]) -> torch.Tensor:
         "inputs_embeds": 0,
     },
     enable_if=can_enable_torch_compile)
-class TransformersForMultimodalLM(SupportsMultiModal, TransformersForCausalLM):
-    """`SupportsMultiModal` mixin must come first for MRO to work."""
+class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
     supports_multimodal_raw_input_only = True
     merge_by_field_config = True
     # Backwards compatibility for prev released models. State dicts back then
@@ -936,6 +935,9 @@ class TransformersForMultimodalLM(SupportsMultiModal, TransformersForCausalLM):
                 ]
 
             return vision_embeddings
+
+    def get_input_embeddings(self, *args, **kwargs) -> torch.Tensor:
+        return SupportsMultiModal.get_input_embeddings(self, *args, **kwargs)
 
     def _get_text_embeddings(self, *args, **kwargs) -> torch.Tensor:
         inputs_embeds = super()._get_text_embeddings(*args, **kwargs)

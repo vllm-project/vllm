@@ -264,7 +264,8 @@ class TransformersMoEForCausalLM(TransformersMoEBase, TransformersForCausalLM):
         "inputs_embeds": 0,
     },
     enable_if=can_enable_torch_compile)
-class TransformersMoEForMultimodalLM(SupportsMultiModal, TransformersMoEBase,
+class TransformersMoEForMultimodalLM(TransformersMoEBase,
                                      TransformersForMultimodalLM):
-    """`SupportsMultiModal` mixin must come first for MRO to work."""
-    pass
+
+    def get_input_embeddings(self, *args, **kwargs) -> torch.Tensor:
+        return SupportsMultiModal.get_input_embeddings(self, *args, **kwargs)
