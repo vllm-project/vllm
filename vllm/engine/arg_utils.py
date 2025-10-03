@@ -30,8 +30,8 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ModelDType, ObservabilityConfig, ParallelConfig,
                          PoolerConfig, PrefixCachingHashAlgo, ReasoningConfig,
                          RunnerOption, SchedulerConfig, SchedulerPolicy,
-                         SpeculativeConfig, StructuredOutputsConfig, TaskOption,
-                         TokenizerMode, VllmConfig, get_attr_docs)
+                         SpeculativeConfig, StructuredOutputsConfig,
+                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs)
 from vllm.config.multimodal import MMCacheType, MultiModalConfig
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.config.utils import get_field

@@ -21,11 +21,11 @@ from vllm.config.observability import DetailedTraceModules, ObservabilityConfig
 from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.pooler import PoolerConfig
+from vllm.config.reasoning import ReasoningConfig
 from vllm.config.scheduler import RunnerType, SchedulerConfig, SchedulerPolicy
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.speech_to_text import SpeechToTextConfig
 from vllm.config.structured_outputs import StructuredOutputsConfig
-from vllm.config.reasoning import ReasoningConfig
 from vllm.config.utils import (ConfigType, SupportsMetricsInfo, config,
                                get_attr_docs, is_init_field, update_config)
 from vllm.config.vllm import (VllmConfig, get_cached_compilation_config,
