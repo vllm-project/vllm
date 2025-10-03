@@ -2,11 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
-from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
 
 
 class CudagraphDispatcher:
@@ -22,10 +19,10 @@ class CudagraphDispatcher:
 
     At runtime, the dispatch method generates the runtime cudagraph mode (FULL, 
     PIECEWISE, or NONE for no cudagraph) and the valid key (batch descriptor)
-    based on the input key. After dispatching (communicate via forward context),
-    the cudagraph wrappers will trust the dispatch key to do either capturing
-    or replaying (if mode matched), or pass through to the underlying runnable 
-    without cudagraph (if mode no match or mode is NONE).
+    based on the input key. After dispatching (communicated via forward 
+    context), the cudagraph wrappers will trust the dispatch key to either
+    capture or replay (if the mode matches), or pass through to the underlying
+    runnable without cudagraph (if the mode does not match or mode is NONE).
     """
 
     def __init__(self, vllm_config: VllmConfig):
@@ -39,11 +36,15 @@ class CudagraphDispatcher:
             CUDAGraphMode.FULL: set(),
         }
 
-        assert not self.cudagraph_mode.requires_piecewise_compilation() or \
-            (self.compilation_config.level == CompilationLevel.PIECEWISE and
-             self.compilation_config.splitting_ops_contain_attention()), \
+        not_use_piecewise_compilation = (
+            not self.cudagraph_mode.requires_piecewise_compilation())
+
+        assert not_use_piecewise_compilation or \
+            self.compilation_config.is_attention_compiled_piecewise(), \
             "Compilation level should be CompilationLevel.PIECEWISE when "\
             "cudagraph_mode piecewise cudagraphs is used, "\
+            "and attention should be in splitting_ops or "\
+            "inductor splitting should be used. " \
             f"cudagraph_mode={self.cudagraph_mode}, "\
             f"compilation_level={self.compilation_config.level}, "\
             f"splitting_ops={self.compilation_config.splitting_ops}"
@@ -53,19 +54,15 @@ class CudagraphDispatcher:
     def add_cudagraph_key(self, runtime_mode: CUDAGraphMode,
                           batch_descriptor: BatchDescriptor):
         assert runtime_mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL], \
-            f"Invalid cudagraph runtime mode: {runtime_mode}"
+            f"Invalid cudagraph runtime mode for keys: {runtime_mode}"
         self.cudagraph_keys[runtime_mode].add(batch_descriptor)
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode,
                                   uniform_decode_query_len: int):
         # This should be called only after attention backend is initialized.
 
-        # Note: we create all valid keys possible for cudagraph but do not
-        # guarantee all keys would be used. For example, we create keys for
-        # piecewise cudagraphs when it is piecewise compilation, which is always
-        # valid, but for attention backend support unified routine, we may not
-        # trigger capturing/replaying the piecewise cudagraphs depending on
-        # CompilationConfig.cudagraph_mode. In addition, if we allow lazy
+        # Note: we create all valid keys for cudagraph here but do not
+        # guarantee all keys would be used. For example, if we allow lazy
         # capturing in future PR, some keys may never be triggered.
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
             for bs in self.compilation_config.cudagraph_capture_sizes:
@@ -90,27 +87,30 @@ class CudagraphDispatcher:
         self.keys_initialized = True
 
     def dispatch(
-        self, batch_descriptor: BatchDescriptor
+        self,
+        batch_descriptor: BatchDescriptor,
+        use_cascade_attn: bool = False
     ) -> tuple[CUDAGraphMode, Optional[BatchDescriptor]]:
         """
-        Given a batch descriptor, dispatch to a cudagraph mode.
+        Given conditions(e.g.,batch descriptor and if using cascade attention),
+        dispatch to a cudagraph runtime mode and the valid batch descriptor.
         A new batch descriptor is returned as we might dispatch a uniform batch 
         to a graph that supports a more general batch (uniform to non-uniform).
         """
         # if not initialized, just skip dispatching.
         if not self.keys_initialized:
-            logger.warning_once("cudagraph dispatching keys are not "
-                                "initialized. No cudagraph will be used.")
             return CUDAGraphMode.NONE, None
 
-        # check if key exists for full cudagraph
-        if batch_descriptor in self.cudagraph_keys[CUDAGraphMode.FULL]:
-            return CUDAGraphMode.FULL, batch_descriptor
-
-        # otherwise, check if non-uniform key exists
         non_uniform_key = batch_descriptor.non_uniform
-        if non_uniform_key in self.cudagraph_keys[CUDAGraphMode.FULL]:
-            return CUDAGraphMode.FULL, non_uniform_key
+        # if a batch use cascade attention, bypass checking full cudagraphs
+        if not use_cascade_attn:
+            # check if key exists for full cudagraph
+            if batch_descriptor in self.cudagraph_keys[CUDAGraphMode.FULL]:
+                return CUDAGraphMode.FULL, batch_descriptor
+
+            # otherwise, check if non-uniform key exists
+            if non_uniform_key in self.cudagraph_keys[CUDAGraphMode.FULL]:
+                return CUDAGraphMode.FULL, non_uniform_key
 
         # also check if non-uniform key exists for more "general"
         # piecewise cudagraph

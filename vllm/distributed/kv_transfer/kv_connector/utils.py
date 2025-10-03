@@ -44,7 +44,7 @@ class model_aware_kv_ops_helper:
         # When VLLM_MLA_DISABLE=1, standard FA is used instead, leading
         # to a kv_cache shape of [2, num_blks, blk_size,
         # num_key_value_heads / tp, qk_nope_head_dim + qk_rope_head_dim].
-        # For more details, see vllm/attention/backends/mla/common.py.
+        # For more details, see vllm/v1/attention/backends/mla/common.py.
         if self.is_deepseek_mla and self.use_mla_opt:
             head_size = model_config.kv_lora_rank + \
                 model_config.qk_rope_head_dim
@@ -117,7 +117,7 @@ def get_kv_connector_cache_layout():
 
 
 class KVOutputAggregator:
-    """Utility class to aggregate the output of all workers into a single 
+    """Utility class to aggregate the output of all workers into a single
     output corresponding to Rank 0 for scheduler."""
 
     def __init__(self, world_size: int):
@@ -129,7 +129,7 @@ class KVOutputAggregator:
     def aggregate(self,
                   outputs: list[ModelRunnerOutput],
                   output_rank: int = 0) -> ModelRunnerOutput:
-        # aggregate kv_connector_output from all workers
+        # Aggregate kv_connector_output from all workers
 
         def update_finished_set(req_ids: Optional[set[str]],
                                 remaining_count_dict: dict[str, int],
@@ -142,8 +142,10 @@ class KVOutputAggregator:
 
         finished_sending = set[str]()
         finished_recving = set[str]()
-        for output in outputs:
-            output = output.kv_connector_output
+        aggregated_kv_connector_stats = None
+        invalid_block_ids = set[int]()
+        for model_runner_output in outputs:
+            output = model_runner_output.kv_connector_output
             if not output:
                 continue
             update_finished_set(output.finished_sending,
@@ -151,12 +153,29 @@ class KVOutputAggregator:
             update_finished_set(output.finished_recving,
                                 self._recv_remaining_count, finished_recving)
 
+            # Aggregate kv_connector_stats from all workers.
+            if aggregated_kv_connector_stats is None:
+                # Use the first worker's kv_connector_stats as accumulator.
+                aggregated_kv_connector_stats = output.kv_connector_stats
+            elif kv_connector_stats := output.kv_connector_stats:
+                if aggregated_kv_connector_stats is None:
+                    aggregated_kv_connector_stats = kv_connector_stats
+                else:
+                    assert isinstance(aggregated_kv_connector_stats,
+                                      type(kv_connector_stats))
+                    aggregated_kv_connector_stats = \
+                        aggregated_kv_connector_stats.aggregate(kv_connector_stats)
+
+            invalid_block_ids |= output.invalid_block_ids
+
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
 
         output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
+            kv_connector_stats=aggregated_kv_connector_stats or None,
+            invalid_block_ids=invalid_block_ids,
         )
 
         return output

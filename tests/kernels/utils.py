@@ -15,10 +15,10 @@ from torch._prims_common import TensorLikeType
 
 from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
+from vllm.attention.backends.registry import _Backend
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
-from vllm.platforms.interface import _Backend
 from vllm.utils import (STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL,
                         STR_XFORMERS_ATTN_VAL, make_tensor_with_pad)
 
@@ -513,10 +513,6 @@ def make_backend(backend_name: str) -> AttentionBackend:
     Construct the backend instance determined by the backend_name string
     argument.
 
-    "XFORMERS" -> construct xformers backend
-
-    TODO: other backends
-
     Note: at time of writing the Attention wrapper automatically selects
     its own backend for Attention.forward(); so the backend instance which
     you generate with this function is not meant to be used for *running*
@@ -529,15 +525,65 @@ def make_backend(backend_name: str) -> AttentionBackend:
     * Backend instance
     '''
     if backend_name == STR_XFORMERS_ATTN_VAL:
-        # NOTE: xFormers backend cannot be imported for CPU and AMD GPUs.
-        from vllm.attention.backends.xformers import XFormersBackend
-        return XFormersBackend()
-    elif backend_name == STR_FLASH_ATTN_VAL:
-        from vllm.attention.backends.flash_attn import FlashAttentionBackend
+        from vllm.v1.attention.backends.xformers import (
+            XFormersAttentionBackend)
+        return XFormersAttentionBackend()
+    if backend_name == STR_FLASH_ATTN_VAL:
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
         return FlashAttentionBackend()
+    if backend_name == "TRITON_ATTN":
+        from vllm.v1.attention.backends.triton_attn import (
+            TritonAttentionBackend)
+        return TritonAttentionBackend()
+    if backend_name == "FLEX_ATTENTION":
+        from vllm.v1.attention.backends.flex_attention import (
+            FlexAttentionBackend)
+        return FlexAttentionBackend()
+    if backend_name == "TORCH_SDPA":
+        from vllm.v1.attention.backends.cpu_attn import TorchSDPABackend
+        return TorchSDPABackend()
+    if backend_name == "FLASHINFER":
+        from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+        return FlashInferBackend()
 
     raise AssertionError(
         f"Unrecognized backend_name {backend_name} for unit test")
+
+
+def make_alibi_bias(
+    alibi_slopes: torch.Tensor,
+    num_kv_heads: int,
+    dtype: torch.dtype,
+    seq_lens: list[int],
+) -> list[Any]:
+    """Create ALiBi biases compatible with xFormers attention tests."""
+    from xformers.ops.fmha.attn_bias import LowerTriangularMaskWithTensorBias
+
+    if alibi_slopes is None:
+        return [None for _ in seq_lens]
+
+    attn_biases: list[Any] = []
+    num_heads = alibi_slopes.shape[0]
+    assert num_heads >= num_kv_heads, (
+        "ALiBi slopes expect at least as many heads as KV heads")
+
+    for seq_len in seq_lens:
+        bias = torch.arange(seq_len, dtype=dtype, device=alibi_slopes.device)
+        bias = bias[None, :] - bias[:, None]
+
+        padded_len = (seq_len + 7) // 8 * 8
+        bias_tensor = torch.empty(
+            1,
+            num_heads,
+            seq_len,
+            padded_len,
+            device=alibi_slopes.device,
+            dtype=dtype,
+        )[:, :, :, :seq_len].copy_(bias)
+        bias_tensor.mul_(alibi_slopes[:, None, None])
+        attn_biases.append(LowerTriangularMaskWithTensorBias(bias_tensor))
+
+    return attn_biases
 
 
 def _make_metadata_tensors(
@@ -913,7 +959,6 @@ def make_test_metadata(
         return attn_backend_obj.make_metadata(
             num_prefills=num_prefills,
             slot_mapping=(None if kv_mmap is None else kv_mmap.slot_mapping),
-            multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=True,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
@@ -963,7 +1008,6 @@ def make_test_metadata(
         return attn_backend_obj.make_metadata(
             num_prefills=num_prefills,
             slot_mapping=kv_mmap.slot_mapping,
-            multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=True,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,

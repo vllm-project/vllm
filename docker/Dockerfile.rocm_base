@@ -1,25 +1,23 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:6.4.1-complete
-ARG HIPBLASLT_BRANCH="aa0bda7b"
-ARG HIPBLAS_COMMON_BRANCH="9b80ba8e"
-ARG LEGACY_HIPBLASLT_OPTION=
-ARG TRITON_BRANCH="e5be006"
-ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
-ARG PYTORCH_BRANCH="f717b2af"
-ARG PYTORCH_VISION_BRANCH="v0.21.0"
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.0-complete
+ARG TRITON_BRANCH="f9e5bf54"
+ARG TRITON_REPO="https://github.com/ROCm/triton.git"
+ARG PYTORCH_BRANCH="b2fb6885"
+ARG PYTORCH_VISION_BRANCH="v0.23.0"
 ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
-ARG FA_BRANCH="1a7f4dfa"
+ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="4822e675"
+ARG AITER_BRANCH="2ab9f4cd"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
 FROM ${BASE_IMAGE} AS base
 
-ENV PATH=/opt/rocm/llvm/bin:$PATH
+ENV PATH=/opt/rocm/llvm/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENV ROCM_PATH=/opt/rocm
 ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
-ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx1100;gfx1101;gfx1200;gfx1201
+ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
+ENV AITER_ROCM_ARCH=gfx942;gfx950
 
 ARG PYTHON_VERSION=3.12
 
@@ -45,29 +43,6 @@ RUN apt-get update -y \
 
 RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
 
-FROM base AS build_hipblaslt
-ARG HIPBLASLT_BRANCH
-ARG HIPBLAS_COMMON_BRANCH
-# Set to "--legacy_hipblas_direct" for ROCm<=6.2
-ARG LEGACY_HIPBLASLT_OPTION
-RUN git clone https://github.com/ROCm/hipBLAS-common.git
-RUN apt-get remove -y hipblaslt && apt-get autoremove -y && apt-get autoclean -y
-RUN cd hipBLAS-common \
-    && git checkout ${HIPBLAS_COMMON_BRANCH} \
-    && mkdir build \
-    && cd build \
-    && cmake .. \
-    && make package \
-    && dpkg -i ./*.deb
-RUN git clone https://github.com/ROCm/hipBLASLt
-RUN cd hipBLASLt \
-    && git checkout ${HIPBLASLT_BRANCH} \
-    && apt-get install -y llvm-dev \
-    && ./install.sh -dc --architecture ${PYTORCH_ROCM_ARCH} ${LEGACY_HIPBLASLT_OPTION} \
-    && cd build/release \
-    && make package
-RUN mkdir -p /app/install && cp /app/hipBLASLt/build/release/*.deb /app/hipBLAS-common/build/*.deb /app/install
-
 FROM base AS build_triton
 ARG TRITON_BRANCH
 ARG TRITON_REPO
@@ -90,8 +65,6 @@ ARG PYTORCH_BRANCH
 ARG PYTORCH_VISION_BRANCH
 ARG PYTORCH_REPO
 ARG PYTORCH_VISION_REPO
-ARG FA_BRANCH
-ARG FA_REPO
 RUN git clone ${PYTORCH_REPO} pytorch
 RUN cd pytorch && git checkout ${PYTORCH_BRANCH} && \
     pip install -r requirements.txt && git submodule update --init --recursive \
@@ -102,14 +75,20 @@ RUN git clone ${PYTORCH_VISION_REPO} vision
 RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && pip install dist/*.whl
+RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install \
+    && cp /app/vision/dist/*.whl /app/install
+
+FROM base AS build_fa
+ARG FA_BRANCH
+ARG FA_REPO
+RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    pip install /install/*.whl
 RUN git clone ${FA_REPO}
 RUN cd flash-attention \
     && git checkout ${FA_BRANCH} \
     && git submodule update --init \
     && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist
-RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install \
-    && cp /app/vision/dist/*.whl /app/install \
-    && cp /app/flash-attention/dist/*.whl /app/install
+RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 
 FROM base AS build_aiter
 ARG AITER_BRANCH
@@ -121,14 +100,14 @@ RUN cd aiter \
     && git checkout ${AITER_BRANCH} \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt
-RUN pip install pyyaml && cd aiter && PREBUILD_KERNELS=1 GPU_ARCHS=gfx942 python3 setup.py bdist_wheel --dist-dir=dist && ls /app/aiter/dist/*.whl
+RUN pip install pyyaml && cd aiter && PREBUILD_KERNELS=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist && ls /app/aiter/dist/*.whl
 RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
 FROM base AS debs
 RUN mkdir /app/debs
-RUN --mount=type=bind,from=build_hipblaslt,src=/app/install/,target=/install \
-    cp /install/*.deb /app/debs
 RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
@@ -138,24 +117,10 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
 FROM base AS final
-RUN --mount=type=bind,from=build_hipblaslt,src=/app/install/,target=/install \
-    dpkg -i /install/*deb \
-    && perl -p -i -e 's/, hipblas-common-dev \([^)]*?\), /, /g' /var/lib/dpkg/status \
-    && perl -p -i -e 's/, hipblaslt-dev \([^)]*?\), /, /g' /var/lib/dpkg/status \
-    && perl -p -i -e 's/, hipblaslt \([^)]*?\), /, /g' /var/lib/dpkg/status
-RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    pip install /install/*.whl
-RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
-    pip install /install/*.whl
-RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-    pip install /install/*.whl
-RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
+RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip install /install/*.whl
 
 ARG BASE_IMAGE
-ARG HIPBLAS_COMMON_BRANCH
-ARG HIPBLASLT_BRANCH
-ARG LEGACY_HIPBLASLT_OPTION
 ARG TRITON_BRANCH
 ARG TRITON_REPO
 ARG PYTORCH_BRANCH
@@ -167,9 +132,6 @@ ARG FA_REPO
 ARG AITER_BRANCH
 ARG AITER_REPO
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
-    && echo "HIPBLAS_COMMON_BRANCH: ${HIPBLAS_COMMON_BRANCH}" >> /app/versions.txt \
-    && echo "HIPBLASLT_BRANCH: ${HIPBLASLT_BRANCH}" >> /app/versions.txt \
-    && echo "LEGACY_HIPBLASLT_OPTION: ${LEGACY_HIPBLASLT_OPTION}" >> /app/versions.txt \
     && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
     && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
     && echo "PYTORCH_BRANCH: ${PYTORCH_BRANCH}" >> /app/versions.txt \
@@ -177,5 +139,6 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "PYTORCH_REPO: ${PYTORCH_REPO}" >> /app/versions.txt \
     && echo "PYTORCH_VISION_REPO: ${PYTORCH_VISION_REPO}" >> /app/versions.txt \
     && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
+    && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
     && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt

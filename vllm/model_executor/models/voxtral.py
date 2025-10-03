@@ -21,6 +21,7 @@ from transformers import BatchFeature, TensorType, WhisperConfig
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -30,7 +31,6 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 # yapf: disable
 from vllm.model_executor.models.whisper import WhisperEncoder
 # yapf: enable
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, MultiModalUUIDDict,
@@ -46,10 +46,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import (MistralTokenizer,
                                                cached_tokenizer_from_config)
 
-from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
-                         SupportsMultiModal, SupportsTranscription)
-from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsTranscription
+from .utils import flatten_bn, init_vllm_registered_model, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -207,25 +205,31 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
 
         target_length = self.info.get_max_audio_array_len()
 
+        audio_overrides = mm_options.get("audio") if mm_options else None
+
         return {
             "audio":
-            self._get_dummy_audios(length=target_length, num_audios=num_audios)
+            self._get_dummy_audios(length=target_length,
+                                   num_audios=num_audios,
+                                   overrides=audio_overrides)
         }
 
     def get_dummy_processor_inputs(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 
         dummy_text = self.get_dummy_text(mm_counts)
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
+        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
         dummy_audios = dummy_mm_data.get("audio", [])
 
         audio_chunks: list[AudioChunk] = []
@@ -374,14 +378,6 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            audio_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      audio_embeddings)
-            input_ids = None
-
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
                                                   intermediate_tensors,
@@ -422,20 +418,6 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return audio_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        audio_encoder = self.tokenizer.instruct.audio_encoder
-        audio_tok_id = audio_encoder.audio_token
-
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings, audio_tok_id)
-        return inputs_embeds
-
     def _parse_and_validate_audio_arrays(
             self, **kwargs: object) -> Union[list[torch.Tensor], None]:
         audio_arrays = kwargs.pop("audio_arrays", None)
@@ -454,10 +436,8 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     @classmethod
     def get_speech_to_text_config(cls, model_config: ModelConfig,

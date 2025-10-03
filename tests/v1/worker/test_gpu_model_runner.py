@@ -39,7 +39,6 @@ def initialize_kv_cache(runner: GPUModelRunner):
             runner.parallel_config),
         head_size=runner.model_config.get_head_size(),
         dtype=runner.kv_cache_dtype,
-        use_mla=False,
     )
     tensor_size = attn_spec.page_size_bytes * NUM_BLOCKS
     kv_cache_config = KVCacheConfig(
@@ -165,7 +164,7 @@ def _is_req_state_block_table_match(model_runner, req_id: str) -> bool:
             req_state.block_ids[0]):
         return False
     num_blocks = block_table.num_blocks_per_row[req_index]
-    return (block_table.block_table_np[req_index, :num_blocks] ==
+    return (block_table.block_table.np[req_index, :num_blocks] ==
             req_state.block_ids[0]).all()
 
 
@@ -251,6 +250,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         new_token_ids=[[]],
         new_block_ids=([[0]], ),
         num_computed_tokens=[0],
+        num_output_tokens=[0],
     )
 
     scheduler_output = SchedulerOutput(

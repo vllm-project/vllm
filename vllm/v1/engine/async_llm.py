@@ -29,8 +29,8 @@ from vllm.tasks import SupportedTask
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, as_list, cancel_task_threadsafe, cdiv,
                         deprecate_kwargs)
@@ -112,9 +112,7 @@ class AsyncLLM(EngineClient):
         else:
             # Tokenizer (+ ensure liveness if running in another process).
             self.tokenizer = init_tokenizer_from_configs(
-                model_config=vllm_config.model_config,
-                scheduler_config=vllm_config.scheduler_config,
-                lora_config=vllm_config.lora_config)
+                model_config=vllm_config.model_config)
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
@@ -263,7 +261,7 @@ class AsyncLLM(EngineClient):
     async def add_request(
         self,
         request_id: str,
-        prompt: PromptType,
+        prompt: Union[EngineCoreRequest, PromptType],
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -271,6 +269,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        prompt_text: Optional[str] = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -283,22 +282,39 @@ class AsyncLLM(EngineClient):
         queue = RequestOutputCollector(output_kind=params.output_kind)
 
         # Convert Input --> Request.
-        prompt_str, request = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, priority, data_parallel_rank)
+        if isinstance(prompt, EngineCoreRequest):
+            request = prompt
+        else:
+            assert prompt_text is None
+            logger.warning_once(
+                "Processor has been moved under OpenAIServing and will "
+                "be removed from AsyncLLM in v0.13.")
+            request = self.processor.process_inputs(request_id, prompt, params,
+                                                    arrival_time, lora_request,
+                                                    tokenization_kwargs,
+                                                    trace_headers, priority,
+                                                    data_parallel_rank)
+            prompt_text = (prompt if isinstance(prompt, str) else
+                           prompt.get("prompt"))
 
         if is_pooling or params.n == 1:
-            await self._add_request(request, prompt_str, None, 0, queue)
+            await self._add_request(request, prompt_text, None, 0, queue)
             return queue
 
+        # Get the updated SamplingParams from the request, which
+        # were cloned/updated in processor.process_inputs above.
+        parent_params = request.sampling_params
+        assert parent_params is not None
+
         # Fan out child requests (for n>1).
-        parent_request = ParentRequest(request_id, params)
-        for idx in range(params.n):
-            request_id, params = parent_request.get_child_info(idx)
-            child_request = request if idx == params.n - 1 else copy(request)
+        parent_request = ParentRequest(request_id, parent_params)
+        for idx in range(parent_params.n):
+            request_id, child_params = parent_request.get_child_info(idx)
+            child_request = request if idx == parent_params.n - 1 else copy(
+                request)
             child_request.request_id = request_id
-            child_request.sampling_params = params
-            await self._add_request(child_request, prompt_str, parent_request,
+            child_request.sampling_params = child_params
+            await self._add_request(child_request, prompt_text, parent_request,
                                     idx, queue)
         return queue
 
@@ -324,10 +340,13 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        prompt: PromptType,
+        prompt: Union[EngineCoreRequest, PromptType],
         sampling_params: SamplingParams,
         request_id: str,
+        *,
+        prompt_text: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
@@ -360,25 +379,25 @@ class AsyncLLM(EngineClient):
             # to handle startup failure gracefully in the OpenAI server.
             self._run_output_handler()
 
-            tokenization_kwargs: dict[str, Any] = {}
-            truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
+            if tokenization_kwargs is None:
+                tokenization_kwargs = {}
+                truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
 
-            _validate_truncation_size(
-                self.model_config.max_model_len,
-                truncate_prompt_tokens,
-                tokenization_kwargs,
-            )
+                _validate_truncation_size(
+                    self.model_config.max_model_len,
+                    truncate_prompt_tokens,
+                    tokenization_kwargs,
+                )
 
-            q = await self.add_request(
-                request_id,
-                prompt,
-                sampling_params,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                priority=priority,
-                tokenization_kwargs=tokenization_kwargs,
-                data_parallel_rank=data_parallel_rank,
-            )
+            q = await self.add_request(request_id,
+                                       prompt,
+                                       sampling_params,
+                                       lora_request=lora_request,
+                                       tokenization_kwargs=tokenization_kwargs,
+                                       trace_headers=trace_headers,
+                                       priority=priority,
+                                       data_parallel_rank=data_parallel_rank,
+                                       prompt_text=prompt_text)
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
@@ -527,7 +546,7 @@ class AsyncLLM(EngineClient):
             self._run_output_handler()
 
             if tokenization_kwargs is None:
-                tokenization_kwargs = dict[str, Any]()
+                tokenization_kwargs = {}
             _validate_truncation_size(
                 self.model_config.max_model_len,
                 truncate_prompt_tokens,
@@ -539,9 +558,9 @@ class AsyncLLM(EngineClient):
                 prompt,
                 pooling_params,
                 lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
-                tokenization_kwargs=tokenization_kwargs,
             )
 
             # The output_handler task pushes items into the queue.
@@ -590,30 +609,20 @@ class AsyncLLM(EngineClient):
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
 
-    async def get_decoding_config(self):
-        raise ValueError("Not Supported on V1 yet.")
-
     async def get_input_preprocessor(self) -> InputPreprocessor:
         return self.processor.input_preprocessor
 
-    async def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
+    async def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
             raise ValueError("Unable to get tokenizer because "
                              "skip_tokenizer_init is True")
 
-        return self.tokenizer.get_lora_tokenizer(lora_request)
+        return self.tokenizer
 
     async def is_tracing_enabled(self) -> bool:
         return self.observability_config.otlp_traces_endpoint is not None
 
-    async def do_log_stats(
-        self,
-        scheduler_outputs=None,
-        model_output=None,
-    ) -> None:
+    async def do_log_stats(self) -> None:
         if self.logger_manager:
             self.logger_manager.log()
 
