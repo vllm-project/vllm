@@ -274,11 +274,10 @@ class EagleProposer:
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
-        logits = self.model.compute_logits(sample_hidden_states)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
-            draft_token_ids = logits.argmax(dim=-1)
+            draft_token_ids = self.model.propose_chain(sample_hidden_states)
             return draft_token_ids.view(-1, 1)
 
         if self.uses_mrope:
@@ -292,6 +291,7 @@ class EagleProposer:
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention.
+            logits = self.model.compute_logits(sample_hidden_states)
             draft_token_ids_list = self.propose_tree(
                 batch_size=batch_size,
                 logits=logits,
@@ -302,7 +302,7 @@ class EagleProposer:
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
 
-        draft_token_ids = logits.argmax(dim=-1)
+        draft_token_ids = self.model.propose_chain(sample_hidden_states)
 
         if self.allowed_attn_types is not None and \
             not isinstance(attn_metadata, self.allowed_attn_types):
@@ -425,8 +425,8 @@ class EagleProposer:
                 else:
                     last_hidden_states, hidden_states = ret_hidden_states
             hidden_states = hidden_states[:batch_size]
-            logits = self.model.compute_logits(last_hidden_states[:batch_size])
-            draft_token_ids = logits.argmax(dim=-1)
+            draft_token_ids = self.model.propose_chain(
+                last_hidden_states[:batch_size])
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
