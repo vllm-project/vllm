@@ -675,7 +675,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         a2_scale: Optional[torch.Tensor],
         expert_tokens_meta: Optional[ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
-        extra_expert_args: Optional[dict] = None,
     ) -> torch.Tensor:
 
         _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
@@ -720,7 +719,6 @@ class FusedMoEModularKernel(torch.nn.Module):
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            extra_expert_args=extra_expert_args
         )
 
         return fused_out
@@ -740,7 +738,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         a1q_scale: Optional[torch.Tensor],
         expert_tokens_meta: Optional[ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
-        extra_expert_args: Optional[dict] = None,
     ) -> torch.Tensor:
 
         _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
@@ -768,7 +765,6 @@ class FusedMoEModularKernel(torch.nn.Module):
                 a2_scale=self.fused_experts.a2_scale,
                 expert_tokens_meta=expert_tokens_meta,
                 apply_router_weight_on_input=apply_router_weight_on_input,
-                extra_expert_args = extra_expert_args,
             )
 
         # Chunking required case
@@ -857,7 +853,6 @@ class FusedMoEModularKernel(torch.nn.Module):
                 a2_scale=c_a2_scale,
                 expert_tokens_meta=c_expert_tokens_meta,
                 apply_router_weight_on_input=apply_router_weight_on_input,
-                extra_expert_args = extra_expert_args,
             )
 
         return fused_out
@@ -991,7 +986,6 @@ class FusedMoEModularKernel(torch.nn.Module):
                 a1q_scale=a1q_scale,
                 expert_tokens_meta=expert_tokens_meta,
                 apply_router_weight_on_input=apply_router_weight_on_input,
-                extra_expert_args = extra_expert_args,
             )
 
         shared_output: Optional[torch.Tensor] = None

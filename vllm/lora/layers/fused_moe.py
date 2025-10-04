@@ -1,19 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 from typing import Optional
 
 import torch
+import torch.nn as nn
+from transformers import PretrainedConfig
+
 from vllm import envs
 from vllm.config.lora import LoRAConfig
-from vllm.distributed.parallel_state import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from transformers import PretrainedConfig
-import torch.nn as nn
-import torch.nn.functional as F
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    modular_triton_fused_moe, try_get_optimal_moe_config)
+from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+    moe_lora_align_block_size)
 
-from vllm.model_executor.layers.fused_moe.fused_moe import modular_triton_fused_moe, try_get_optimal_moe_config
-from vllm.model_executor.layers.fused_moe.moe_align_block_size import moe_lora_align_block_size
 
 def get_config_dtype_str(
         dtype: torch.dtype,
@@ -35,8 +41,8 @@ def get_config_dtype_str(
         return "float32"
     return None
 
+
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
-    
 
     def __init__(self, base_layer: FusedMoE) -> None:
         super().__init__()
@@ -64,13 +70,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 self.base_layer._lora["expert_map"] = kwargs["expert_map"]
                 self.base_layer._lora["apply_router_weight_on_input"] = kwargs[
                     "apply_router_weight_on_input"]
-                # TODO A temporary workaround to adapt the
-                # 'FusedMoEModularKernel.forward' interface, to be used until
-                # the 'FusedMoEModularKernel' refactoring is completed.
-                kwargs["extra_expert_args"] = {
-                    k: kwargs.pop(k)
-                    for k in ["w1_bias", "w2_bias"] if k in kwargs
-                }
                 result = func(*args, **kwargs)
                 return result
 
@@ -103,7 +102,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     layer.w2_weight.size(),
                     top_k,
                     config_dtype,
-                    block_shape=layer.quant_method.moe.block_shape,
+                    block_shape=layer.quant_method.moe_quant_config.
+                    block_shape,
                 )
 
                 config = get_config_func(M)
@@ -174,7 +174,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     layer.w2_weight.size(),
                     top_k,
                     config_dtype,
-                    block_shape=layer.quant_method.moe.block_shape,
+                    block_shape=layer.quant_method.moe_quant_config.
+                    block_shape,
                 )
 
                 config = get_config_func(M)
@@ -208,7 +209,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
             return wrapper
 
-        m_fused_moe_fn = modular_triton_fused_moe(quant_config)
+        m_fused_moe_fn = modular_triton_fused_moe(
+            quant_config
+            if quant_config is not None else FusedMoEQuantConfig.make(),
+            shared_experts=base_layer.shared_experts)
+
         fused_experts = m_fused_moe_fn.fused_experts
 
         m_fused_moe_fn.forward = fwd_decorator(base_layer,
@@ -356,26 +361,26 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 w2_lora_a = w2_lora_a[start_idx:end_idx, :]
 
             self.w1_lora_a_stacked[
-                index, eid, :w1_lora_a.shape[1], :w1_lora_a.shape[0]].copy_(
-                    w1_lora_a.T, non_blocking=True)
+                index, eid, :w1_lora_a.shape[0], :w1_lora_a.shape[1]].copy_(
+                    w1_lora_a, non_blocking=True)
 
             self.w3_lora_a_stacked[
-                index, eid, :w3_lora_a.shape[1], :w3_lora_a.shape[0]].copy_(
-                    w3_lora_a.T, non_blocking=True)
+                index, eid, :w3_lora_a.shape[0], :w3_lora_a.shape[1]].copy_(
+                    w3_lora_a, non_blocking=True)
 
             self.w2_lora_b_stacked[
-                index, eid, :w2_lora_b.shape[1], :w2_lora_b.shape[0]].copy_(
-                    w2_lora_b.T, non_blocking=True)
+                index, eid, :w2_lora_b.shape[0], :w2_lora_b.shape[1]].copy_(
+                    w2_lora_b, non_blocking=True)
 
             self.w1_lora_b_stacked[
-                index, eid, :w1_lora_b.shape[1], :w1_lora_b.shape[0]].copy_(
-                    w1_lora_b.T, non_blocking=True)
+                index, eid, :w1_lora_b.shape[0], :w1_lora_b.shape[1]].copy_(
+                    w1_lora_b, non_blocking=True)
             self.w3_lora_b_stacked[
-                index, eid, :w3_lora_b.shape[1], :w3_lora_b.shape[0]].copy_(
-                    w3_lora_b.T, non_blocking=True)
+                index, eid, :w3_lora_b.shape[0], :w3_lora_b.shape[1]].copy_(
+                    w3_lora_b, non_blocking=True)
             self.w2_lora_a_stacked[
-                index, eid, :w2_lora_a.shape[1], :w2_lora_a.shape[0]].copy_(
-                    w2_lora_a.T, non_blocking=True)
+                index, eid, :w2_lora_a.shape[0], :w2_lora_a.shape[1]].copy_(
+                    w2_lora_a, non_blocking=True)
 
     def set_mapping(
         self,
@@ -396,14 +401,17 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # return type(source_layer) is FusedMoE
         return isinstance(source_layer, FusedMoE)
 
-
     def forward(self, *args, **kwargs):
         return self.base_layer.forward(*args, **kwargs)
 
     def maybe_all_reduce_tensor_model_parallel(self, *args, **kwargs):
         return self.base_layer.maybe_all_reduce_tensor_model_parallel(
             *args, **kwargs)
-    
+
     @property
     def _shared_experts(self):
         return self.base_layer._shared_experts
+
+    @property
+    def quant_method(self):
+        return self.base_layer.quant_method

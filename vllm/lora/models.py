@@ -22,7 +22,6 @@ from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model
@@ -432,20 +431,35 @@ class LoRAModelManager:
                     raise ValueError(
                         f"Adapter bias cannot be used for {module_name}"
                         " without --enable-lora-bias.")
-                # Note (gnovack) - If MOE lora weights are not split into num_experts chunks, we split them here
-                if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(module_lora.lora_a):
-                    # Handle FSDP file format where experts.base_layer is the gate_up_proj and experts is the down_proj
-                    gate_up_proj_lora = self._get_lora_layer_weights(lora_model, module_name + ".base_layer")
+                # Note (gnovack) - If MOE lora weights are not split into
+                # um_experts chunks, we split them here
+                if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(
+                        module_lora.lora_a):
+                    # Handle FSDP file format where experts.base_layer is the
+                    # gate_up_proj and experts is the down_proj
+                    gate_up_proj_lora = self._get_lora_layer_weights(
+                        lora_model, module_name + ".base_layer")
+
+                    assert gate_up_proj_lora is not None
+                    assert module_lora is not None
+
                     down_proj_lora = module_lora
-                    num_experts = module_lora.lora_a.shape[-1] // module_lora.rank
-                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=-1)
-                    up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts, dim=-1)
+                    num_experts = module_lora.lora_a.shape[
+                        -1] // module_lora.rank
+                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts,
+                                                                 dim=-1)
+                    up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts,
+                                                               dim=-1)
 
-                    gate_proj_b = gate_up_proj_lora.lora_b[..., ::2].chunk(num_experts, dim=0)
-                    up_proj_b = gate_up_proj_lora.lora_b[..., 1::2].chunk(num_experts, dim=0)
+                    gate_proj_b = gate_up_proj_lora.lora_b[..., ::2].chunk(
+                        num_experts, dim=0)
+                    up_proj_b = gate_up_proj_lora.lora_b[..., 1::2].chunk(
+                        num_experts, dim=0)
 
-                    down_proj_a = down_proj_lora.lora_a.chunk(num_experts, dim=-1)
-                    down_proj_b = down_proj_lora.lora_b.chunk(num_experts, dim=0)
+                    down_proj_a = down_proj_lora.lora_a.chunk(num_experts,
+                                                              dim=-1)
+                    down_proj_b = down_proj_lora.lora_b.chunk(num_experts,
+                                                              dim=0)
 
                     lora_a = []
                     lora_b = []
@@ -515,9 +529,6 @@ class LoRAModelManager:
             if isinstance(module, PPMissingLayer):
                 continue
 
-            if isinstance(module, SharedFusedMoE):
-                print(1)
-
             if not self._match_target_modules(module_name):
                 continue
             # A temporary approach for multimodal models to support LoRA
@@ -568,7 +579,10 @@ class LoRAModelManager:
             new_module.set_mapping(self.punica_wrapper)
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
-        assert isinstance(module, BaseLayerWithLoRA), f"Module {module_name} must be a BaseLayerWithLoRA instance, got {type(module)}"
+        assert isinstance(
+            module, BaseLayerWithLoRA
+        ), f"Module {module_name} must be a BaseLayerWithLoRA instance,"
+        f" got {type(module)}"
         self.modules[module_name] = module
 
     def create_dummy_lora(
