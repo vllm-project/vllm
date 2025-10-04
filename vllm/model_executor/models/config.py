@@ -416,7 +416,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             attn_block_size = 16 * cdiv(mamba_page_size,
                                         16 * attn_page_size_1_token)
 
-        print("cache_config.mamba_block_size: ", cache_config.mamba_block_size)
         # override attention block size if either (a) the
         # user has not set it or (b) the user has set it
         # too small.
