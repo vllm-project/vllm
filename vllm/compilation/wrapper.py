@@ -10,6 +10,7 @@ from typing import Callable, Optional
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import (CompilationLevel, CUDAGraphMode,
                          get_current_vllm_config)
 from vllm.logger import init_logger
@@ -45,6 +46,21 @@ class TorchCompileWrapperWithCustomDispatcher:
             if isinstance(backend, str) and backend == "inductor":
                 options = get_current_vllm_config(
                 ).compilation_config.inductor_compile_config
+            if envs.VLLM_USE_AOT_COMPILE:
+                options = options or {}
+                # This effectively drop all the guards.
+                # We need this because bytecode hook is not used any more to
+                # drop guards in the AOT compile mode.
+                options["guard_filter_fn"] = lambda guards: [
+                    False for _ in guards
+                ]
+                if hasattr(torch._dynamo.config, "enable_aot_compile"):
+                    torch._dynamo.config.enable_aot_compile = True
+                else:
+                    msg = "torch._dynamo.config.enable_aot_compile is not "
+                    msg += "available. AOT compile is disabled and please "
+                    msg += "upgrade PyTorch version to use AOT compile."
+                    logger.warning(msg)
 
             compiled_callable = torch.compile(self.forward,
                                               fullgraph=True,
@@ -61,6 +77,14 @@ class TorchCompileWrapperWithCustomDispatcher:
         # and the default Dynamo guard mechanism.
         self.use_custom_dispatcher: bool = \
             compilation_level >= CompilationLevel.DYNAMO_ONCE
+
+    def aot_compile(self, *args, **kwargs):
+        if not hasattr(self.compiled_callable, "aot_compile"):
+            raise RuntimeError(
+                "aot_compile is not supported by the current configuration. " +
+                "Please make sure torch.compile is enabled with the latest " +
+                "version of PyTorch")
+        return self.compiled_callable.aot_compile((args, kwargs))
 
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.
