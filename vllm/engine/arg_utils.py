@@ -485,6 +485,10 @@ class EngineArgs:
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
 
+    enable_dcpp: bool = SchedulerConfig.enable_dcpp
+    dcpp_min_chunk: Optional[int] = SchedulerConfig.dcpp_min_chunk
+    dcpp_length_threshold: int = SchedulerConfig.dcpp_length_threshold
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -914,6 +918,13 @@ class EngineArgs:
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
         scheduler_group.add_argument("--async-scheduling",
                                      **scheduler_kwargs["async_scheduling"])
+        # DCPP-related flags (experimental)
+        scheduler_group.add_argument("--enable-dcpp",
+                                     **scheduler_kwargs["enable_dcpp"])
+        scheduler_group.add_argument("--dcpp-min-chunk",
+                                     **scheduler_kwargs["dcpp_min_chunk"])
+        scheduler_group.add_argument("--dcpp-length-threshold",
+                                     **scheduler_kwargs["dcpp_length_threshold"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1382,6 +1393,9 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            enable_dcpp=self.enable_dcpp,
+            dcpp_min_chunk=self.dcpp_min_chunk,
+            dcpp_length_threshold=self.dcpp_length_threshold,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:

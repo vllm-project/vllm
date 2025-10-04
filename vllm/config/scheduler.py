@@ -149,6 +149,18 @@ class SchedulerConfig:
     structured outputs, speculative decoding, and pipeline parallelism.
     """
 
+    # --- DCPP (Dynamic Chunked Prefill Planning) ---
+    enable_dcpp: bool = False
+    """EXPERIMENTAL: Enable dynamic chunked prefill planning (DCPP)."""
+
+    dcpp_min_chunk: Optional[int] = None
+    """Minimum prefill chunk size when DCPP is enabled. If None, a backend
+    specific default will be used."""
+
+    dcpp_length_threshold: int = 0
+    """Input length threshold to trigger DCPP logic. Requests with prompt
+    length below this value will not use DCPP even if enabled."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
