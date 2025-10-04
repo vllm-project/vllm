@@ -15,7 +15,8 @@ from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig, mxfp4_w4a4_moe_quant_config,
     mxfp4_w4a16_moe_quant_config)
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import MarlinExperts
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+    BatchedMarlinExperts, MarlinExperts)
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     OAITritonExperts)
 from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
@@ -679,8 +680,19 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         if (prepare_finalize.activation_format ==
                 mk.FusedMoEActivationFormat.BatchedExperts):
-            raise NotImplementedError(
-                "Mxfp4 does not support batched experts format for EP")
+
+            if (self.mxfp4_backend == Mxfp4Backend.MARLIN):
+                max_num_tokens_per_rank = (
+                    prepare_finalize.max_num_tokens_per_rank())
+                assert max_num_tokens_per_rank is not None
+                assert self.moe_quant_config is not None
+                return BatchedMarlinExperts(
+                    max_num_tokens=max_num_tokens_per_rank,
+                    num_dispatchers=prepare_finalize.num_dispatchers(),
+                    quant_config=self.moe_quant_config)
+            else:
+                raise NotImplementedError(
+                    "Incompatible Mxfp4 backend for EP batched experts format")
         else:
             assert self.moe_quant_config is not None
             if (self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
