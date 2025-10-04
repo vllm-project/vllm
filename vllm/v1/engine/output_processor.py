@@ -21,7 +21,7 @@ from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
                                    RequestStateStats)
-
+from vllm.sequence import RequestMetrics
 
 class RequestOutputCollector:
     """
@@ -446,6 +446,13 @@ class OutputProcessor:
             if request_output := req_state.make_request_output(
                     new_token_ids, pooling_output, finish_reason, stop_reason,
                     kv_transfer_params):
+                request_output.metrics = RequestMetrics(
+                        arrival_time=req_state.stats.arrival_time,
+                        last_token_time=req_state.stats.last_token_ts,
+                        first_token_time=req_state.stats.first_token_ts,
+                        num_generation_tokens=req_state.stats.num_generation_tokens,
+                        first_token_latency=req_state.stats.first_token_latency,
+                    )
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)

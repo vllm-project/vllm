@@ -38,13 +38,16 @@ class RequestMetrics:
     """
     arrival_time: float
     last_token_time: float
-    first_scheduled_time: Optional[float]
-    first_token_time: Optional[float]
-    time_in_queue: Optional[float]
+    first_scheduled_time: Optional[float] = None
+    first_token_time: Optional[float] = None
+    time_in_queue: Optional[float] = None
     finished_time: Optional[float] = None
     scheduler_time: Optional[float] = None
     model_forward_time: Optional[float] = None
     model_execute_time: Optional[float] = None
+    num_generation_tokens: Optional[int] = None
+    first_token_latency: Optional[float] = None
+
 
 
 # cannot use msgspec.Struct here because Dynamo does not support it
