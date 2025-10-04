@@ -80,7 +80,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of,
+from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of, make_async,
                         merge_async_iterators, random_uuid)
 
 logger = init_logger(__name__)
@@ -240,6 +240,8 @@ class OpenAIServing:
         self.enable_force_include_usage = enable_force_include_usage
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
+        self._apply_mistral_chat_template_async = make_async(
+            apply_mistral_chat_template, executor=self._tokenizer_executor)
 
         self._async_tokenizer_pool: dict[AnyTokenizer,
                                          AsyncMicrobatchTokenizer] = {}
@@ -749,6 +751,22 @@ class OpenAIServing:
                     tokenizer=tokenizer,
                 )
 
+    def _validate_chat_template(
+        self,
+        request_chat_template: Optional[str],
+        chat_template_kwargs: Optional[dict[str, Any]],
+        trust_request_chat_template: bool,
+    ) -> Optional[ErrorResponse]:
+        if not trust_request_chat_template and (
+                request_chat_template is not None or
+            (chat_template_kwargs
+             and chat_template_kwargs.get("chat_template") is not None)):
+            return self.create_error_response(
+                "Chat template is passed with request, but "
+                "--trust-request-chat-template is not set. "
+                "Refused request with untrusted chat template.")
+        return None
+
     async def _preprocess_chat(
         self,
         request: Union[ChatLikeRequest, ResponsesRequest],
@@ -798,7 +816,7 @@ class OpenAIServing:
         if tokenizer is None:
             request_prompt = "placeholder"
         elif isinstance(tokenizer, MistralTokenizer):
-            request_prompt = apply_mistral_chat_template(
+            request_prompt = await self._apply_mistral_chat_template_async(
                 tokenizer,
                 messages=messages,
                 **_chat_template_kwargs,
