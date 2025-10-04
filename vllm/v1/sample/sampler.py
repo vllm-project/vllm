@@ -106,10 +106,20 @@ class Sampler(nn.Module):
         # return int32 (while PyTorch argmax and topk return int64).
         sampled = sampled.long()
 
-        # Gather the logprobs of the topk and sampled token (if requested).
-        # Get logprobs and rank tensors (if requested)
-        logprobs_tensors = None if num_logprobs is None else \
-            self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled)
+        if num_logprobs is None:
+            logprobs_tensors = None
+        elif num_logprobs == -1:
+            # Return the full logprobs.
+            logprobs_tensors = LogprobsTensors(
+                torch.empty(0),
+                raw_logprobs,
+                torch.empty(0),
+            )
+        else:
+            # Gather the logprobs and ranks of the topk and sampled token.
+            logprobs_tensors = self.gather_logprobs(raw_logprobs,
+                                                    num_logprobs,
+                                                    token_ids=sampled)
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
