@@ -14,7 +14,7 @@ from vllm.triton_utils import triton
 
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
-from .ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd
+from .ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd, _state_cache_fwd, _init_state_fwd
 from .ssd_state_passing import _state_passing_fwd
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
@@ -34,7 +34,15 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    D=None,
                                    z=None,
                                    dt_bias=None,
-                                   initial_states=None,
+                                   ssm_state=None,
+                                   state_indices=None,
+                                   initial_state_idx=None,
+                                   has_initial_states=None,
+                                   prep_initial_states=False,
+                                   block_size_to_align=None,
+                                   block_idx_first_scheduled_token=None,
+                                   block_idx_last_scheduled_token=None,
+                                   num_computed_tokens=None,
                                    return_intermediate_states=False,
                                    seq_idx=None,
                                    cu_seqlens=None,
@@ -71,10 +79,6 @@ def _mamba_chunk_scan_combined_fwd(x,
         D = D.contiguous()
     assert cu_seqlens is not None, "Assuming varlen input - must supply cu_seqlens"
 
-    if initial_states is not None:
-        assert initial_states.shape == (len(cu_seqlens) - 1, nheads, headdim,
-                                        dstate)
-
     # This function executes 5 sub-functions for computing mamba
     # - a good resource is the blog https://goombalab.github.io/blog/2024/mamba2-part3-algorithm/
     #   which has a minimal implementation to understand the below operations
@@ -109,6 +113,16 @@ def _mamba_chunk_scan_combined_fwd(x,
     #   ii) seq_idx to be all specified.
     # - When a new seq_idx is detected, we will stop passing the prev_state
     #   and switch accordingly to the init_state corresponding to the new seq_idx.
+    initial_states = None
+    if has_initial_states is not None and prep_initial_states:
+        initial_states = torch.empty_like(ssm_state[:(len(cu_seqlens) - 1), :])
+        _init_state_fwd(cache_ssm_states=ssm_state,
+                        init_states=initial_states,
+                        cu_seqlens=cu_seqlens,
+                        state_indices=state_indices,
+                        initial_state_idx=initial_state_idx,
+                        has_initial_states=has_initial_states)
+    
     states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum,  # (nheads, nchunks, chunk_size)
@@ -119,6 +133,18 @@ def _mamba_chunk_scan_combined_fwd(x,
         seq_idx=seq_idx,
         out_dtype=state_dtype if state_dtype is not None else C.dtype)
     states = rearrange(states, "... (p n) -> ... p n", n=dstate)
+    
+    # 3.1 store the computed states
+    _state_cache_fwd(ssm_states=states,
+                     cache_ssm_states=ssm_state,
+                     cu_seqlens=cu_seqlens,
+                     state_indices=state_indices,
+                     block_size_to_align=block_size_to_align,
+                     chunk_size=chunk_size,
+                     block_idx_first_scheduled_token=block_idx_first_scheduled_token,
+                     block_idx_last_scheduled_token=block_idx_last_scheduled_token,
+                     last_chunk_indices=last_chunk_indices,
+                     num_computed_tokens=num_computed_tokens)
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
     CB = _bmm_chunk_fwd(C,
@@ -173,7 +199,15 @@ def mamba_chunk_scan_combined_varlen(
     D=None,
     z=None,
     dt_bias=None,
-    initial_states=None,
+    ssm_state=None,
+    state_indices=None,
+    initial_state_idx=None,
+    has_initial_states=None,
+    prep_initial_states=False,
+    block_size_to_align=None,
+    block_idx_first_scheduled_token=None,
+    block_idx_last_scheduled_token=None,
+    num_computed_tokens=None,
     dt_softplus=False,
     dt_limit=(0.0, float("inf")),
     return_intermediate_states=False,
@@ -195,14 +229,25 @@ def mamba_chunk_scan_combined_varlen(
         D: (nheads, headdim) or (nheads,)
         z: (seqlen, nheads, headdim)
         dt_bias: (nheads,)
-        initial_states: (batch, nheads, headdim, dstate)
+        ssm_state: (cache_lines, nheads, headdim, dstate)
+        state_indices_tensor: (batch, n_blocks + padding) 
+          The second dimension contains
+          the block indices relevant for each sequence
+          plus potential 0-padding at the beginning and at the end
+        initial_state_idx: (batch,)
+        has_initial_states_tensor: (batch,)
+        prep_initial_states: bool
+        block_size_to_align: int
+        block_idx_first_scheduled_token: (batch,)
+        block_idx_last_scheduled_token: (batch,)
+        num_computed_tokens_tensor: (batch,)
         dt_softplus: Whether to apply softplus to dt
         out: (seqlen, nheads, headdim) preallocated output tensor
         state_dtype: The data type of the ssm state
     Return:
         varlen_states: (batch, nheads, headdim, dstate)
     """
-
+    
     assert cu_seqlens is not None, "cu_seqlens must be provided assuming varlen input"
     assert seq_idx is not None
 
@@ -217,7 +262,15 @@ def mamba_chunk_scan_combined_varlen(
         D=D,
         z=z,
         dt_bias=dt_bias,
-        initial_states=initial_states,
+        ssm_state=ssm_state,
+        state_indices=state_indices,
+        initial_state_idx=initial_state_idx,
+        has_initial_states=has_initial_states,
+        prep_initial_states=prep_initial_states,
+        block_size_to_align=block_size_to_align,
+        block_idx_first_scheduled_token=block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token=block_idx_last_scheduled_token,
+        num_computed_tokens=num_computed_tokens,
         return_intermediate_states=return_intermediate_states,
         seq_idx=seq_idx,
         cu_seqlens=cu_seqlens,
