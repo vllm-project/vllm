@@ -29,7 +29,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Any, Callable, Literal, Optional, Union, override
+from typing import Annotated, Any, Callable, Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -1170,7 +1170,7 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
                         "video.height override (%d) exceeds model's "
                         "maximum height (%d), will be ignored",
                         overrides.height, height)
-                height = min(height, override.height)
+                height = min(height, overrides.height)
 
         video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
         video_items = []
