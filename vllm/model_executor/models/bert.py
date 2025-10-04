@@ -351,7 +351,7 @@ class BertModel(nn.Module, SupportsQuant):
                                    prefix=f"{prefix}.encoder")
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embeddings(input_ids)
+        return self.embeddings.word_embeddings(input_ids)
 
     def forward(
         self,
