@@ -74,8 +74,10 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
+                                              TranscriptionResponseVerbose,
                                               TranslationRequest,
                                               TranslationResponse,
+                                              TranslationResponseVerbose,
                                               UnloadLoRAAdapterRequest)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -845,7 +847,8 @@ async def create_transcriptions(raw_request: Request,
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
 
-    elif isinstance(generator, TranscriptionResponse):
+    elif isinstance(generator,
+                    (TranscriptionResponse, TranscriptionResponseVerbose)):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
@@ -890,7 +893,8 @@ async def create_translations(request: Annotated[TranslationRequest,
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
 
-    elif isinstance(generator, TranslationResponse):
+    elif isinstance(generator,
+                    (TranslationResponse, TranslationResponseVerbose)):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
