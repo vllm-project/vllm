@@ -8,6 +8,7 @@ import regex as re
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
@@ -71,6 +72,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Any] = {}
         self.config = vllm_config.kv_transfer_config
+        self._use_mla = vllm_config.model_config.use_mla
+        self._async_transfer = self._should_transfer_async(self.config)
         self.is_producer = self.config.is_kv_producer
         self.chunked_prefill: dict[str, Any] = {}
 
@@ -82,6 +85,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self.p2p_nccl_engine = P2pNcclEngine(
             local_rank=self._local_rank,
             config=self.config,
+            async_transfer=self._async_transfer,
             hostname="",
             port_offset=self._rank,
         ) if role == KVConnectorRole.WORKER else None
@@ -110,15 +114,12 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         assert self.p2p_nccl_engine is not None
 
-        attn_metadata = forward_context.attn_metadata
-        if attn_metadata is None:
-            return
-
         def inject_kv_into_layer(
             layer: torch.Tensor,
             kv_cache: torch.Tensor,
             block_ids: torch.Tensor,
             request_id: str,
+            tensor_id: str,
         ) -> None:
             """
             Inject KV cache data into a given attention layer tensor.
@@ -139,34 +140,57 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 kv_cache (torch.Tensor): The KV cache tensor to inject.
                 block_ids (torch.Tensor): Indices of the blocks to update.
                 request_id (str): Request identifier used for logging.
+                tensor_id (str): The id of the tensor.
 
             Returns:
                 None. The function modifies `layer` in-place.
             """
-            if (isinstance(attn_metadata, MLACommonMetadata)
-                    or layer.shape[1] == 2):  # MLA or FlashInfer
+            if (self._use_mla or layer.shape[1] == 2):  # MLA or FlashInfer
                 num_block = kv_cache.shape[0]
-                self.check_tensors_except_dim(layer, kv_cache, 0)
-                if len(block_ids) == num_block:
+                num_available_blocks = len(block_ids)
+                
+                if num_available_blocks == num_block:
+                    # Perfect match - no truncation needed
+                    self.check_tensors_except_dim(layer, kv_cache, 0)
                     layer[block_ids, ...] = kv_cache
                 else:
-                    layer[block_ids[:num_block], ...] = kv_cache
+                    # Mismatch - truncate to the smaller size
+                    min_blocks = min(num_available_blocks, num_block)
+                    truncated_block_ids = block_ids[:min_blocks]
+                    truncated_kv_cache = kv_cache[:min_blocks, ...]
+                    
+                    # Check compatibility after truncation
+                    self.check_tensors_except_dim(layer, truncated_kv_cache, 0)
+                    layer[truncated_block_ids, ...] = truncated_kv_cache
+                    
                     logger.warning(
-                        "🚧kv_cache does not match, block_ids:%d, "
-                        "num_block:%d, request_id:%s", len(block_ids),
-                        num_block, request_id)
+                        "🚧kv_cache size mismatch - truncated to %d blocks. "
+                        "block_ids:%d, kv_cache_blocks:%d, request_id:%s", 
+                        min_blocks, num_available_blocks, num_block, request_id)
 
             elif layer.shape[0] == 2:  # FlashAttention
                 num_block = kv_cache.shape[1]
-                self.check_tensors_except_dim(layer, kv_cache, 1)
-                if len(block_ids) == num_block:
+                num_available_blocks = len(block_ids)
+                
+                if num_available_blocks == num_block:
+                    # Perfect match - no truncation needed
+                    self.check_tensors_except_dim(layer, kv_cache, 1)
                     layer[:, block_ids, ...] = kv_cache
                 else:
-                    layer[:, block_ids[:num_block], ...] = kv_cache
+                    # Mismatch - truncate to the smaller size
+                    min_blocks = min(num_available_blocks, num_block)
+                    truncated_block_ids = block_ids[:min_blocks]
+                    truncated_kv_cache = kv_cache[:, :min_blocks, ...]
+                    
+                    # Check compatibility after truncation
+                    self.check_tensors_except_dim(layer, truncated_kv_cache, 1)
+                    layer[:, truncated_block_ids, ...] = truncated_kv_cache
+                    
                     logger.warning(
-                        "🚧kv_cache does not match, block_ids:%d, "
-                        "num_block:%d, request_id:%s", len(block_ids),
-                        num_block, request_id)
+                        "🚧kv_cache size mismatch - truncated to %d blocks. "
+                        "block_ids:%d, kv_cache_blocks:%d, request_id:%s", 
+                        min_blocks, num_available_blocks, num_block, request_id)
+            self.p2p_nccl_engine.have_injected_tensor_id(tensor_id)
 
         # Get the metadata
         metadata: KVConnectorMetadata = \
@@ -193,15 +217,24 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
                 layer = kv_cache[forward_context.virtual_engine]
 
+                tensor_id = request.request_id + "#" + layer_name
                 kv_cache = self.p2p_nccl_engine.recv_tensor(
-                    request.request_id + "#" + layer_name, remote_address)
+                    request_id, tensor_id, remote_address,
+                    self._async_transfer)
 
                 if kv_cache is None:
-                    logger.warning("🚧kv_cache is None, %s", request.request_id)
-                    continue
+                    if self._async_transfer:
+                        # Current layer is not ready yet,
+                        # will load in the next engine step
+                        break
+                    else:
+                        logger.warning("🚧kv_cache is None, %s",
+                                       request.request_id)
+                        continue
 
-                inject_kv_into_layer(layer, kv_cache, request.block_ids,
-                                     request.request_id)
+                if isinstance(kv_cache, torch.Tensor):
+                    inject_kv_into_layer(layer, kv_cache, request.block_ids,
+                                         request.request_id, tensor_id)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
@@ -329,10 +362,12 @@ class P2pNcclConnector(KVConnectorBase_V1):
         num_external_tokens = (len(request.prompt_token_ids) - 1 -
                                num_computed_tokens)
 
+        async_transfer = self._async_transfer
         if num_external_tokens < 0:
             num_external_tokens = 0
+            async_transfer = False
 
-        return num_external_tokens, False
+        return num_external_tokens, async_transfer
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
@@ -423,9 +458,17 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 # NOTE(rob): For resumed req, new_block_ids is all
                 # of the block_ids for the request.
                 block_ids = new_block_ids[0]
-
                 meta.add_request(request_id=req_id,
                                  token_ids=token_ids,
+                                 block_ids=block_ids,
+                                 block_size=self._block_size)
+
+        if self._async_transfer and not self.is_producer:
+            # In async transfer mode, the requests cannot be scheduled before
+            # their KV cache is loaded. We add the requests to load the KV cache.
+            for req_id, (req, block_ids) in self._requests_need_load.items():
+                meta.add_request(request_id=req_id,
+                                 token_ids=req.prompt_token_ids,
                                  block_ids=block_ids,
                                  block_size=self._block_size)
 
@@ -450,11 +493,30 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         self.chunked_prefill.pop(request.request_id, None)
 
-        return False, None
+        return self._async_transfer and self.is_producer, None
 
     # ==============================
     # Static methods
     # ==============================
+
+    @staticmethod
+    def _should_transfer_async(
+            kv_transfer_config: Optional[KVTransferConfig]) -> bool:
+        if kv_transfer_config is None:
+            logger.info("P2P NCCL: No config found, using sync mode")
+            return False
+
+        # Check for async mode in extra config
+        extra_config = getattr(kv_transfer_config, 'kv_connector_extra_config',
+                               {})
+        if extra_config is None:
+            extra_config = {}
+
+        async_transfer = extra_config.get('enable_async_transfer', False)
+        logger.info(
+            f"P2P NCCL connector initialized with async_transfer={async_transfer}"
+        )
+        return async_transfer
 
     @staticmethod
     def parse_request_id(request_id: str, is_prefill=True) -> tuple[str, int]:
