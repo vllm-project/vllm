@@ -416,6 +416,7 @@ class CompilationConfig:
         factors.append(self.custom_ops)
         factors.append(self.splitting_ops)
         factors.append(self.use_inductor)
+        factors.append(self.use_inductor_graph_partition)
         factors.append(self.inductor_compile_config)
         factors.append(self.inductor_passes)
         factors.append(self.pass_config.uuid())
