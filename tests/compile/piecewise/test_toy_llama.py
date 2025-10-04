@@ -249,6 +249,7 @@ def run_model(llama_config,
             level=CompilationLevel.PIECEWISE,
             use_cudagraph=True,
             use_inductor=use_inductor,
+            use_inductor_graph_partition=False,  # TODO try both?
             cudagraph_capture_sizes=[1, 2],
         )
         if split_attn:
@@ -257,7 +258,6 @@ def run_model(llama_config,
     else:
         compilation_config = CompilationConfig(
             level=CompilationLevel.NO_COMPILATION,
-            use_inductor_graph_partition=False,  # TODO try both?
         )
         cudagraph_runtime_mode = CUDAGraphMode.NONE
 
