@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention.layer import Attention
-from vllm.config import (CompilationLevel, VllmConfig,
+from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
@@ -80,11 +80,22 @@ class EagleProposer:
         self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
 
-        self.use_cuda_graph = (not current_platform.is_xpu()
-                               and self.vllm_config.compilation_config.level
-                               == CompilationLevel.PIECEWISE and
-                               not self.vllm_config.model_config.enforce_eager
-                               and not self.speculative_config.enforce_eager)
+        self.use_cuda_graph = False
+
+        compilation_config = self.vllm_config.compilation_config
+        if compilation_config.level == CompilationLevel.PIECEWISE:
+            cudagraph_mode = compilation_config.cudagraph_mode
+            if cudagraph_mode != CUDAGraphMode.NONE and \
+                not cudagraph_mode.has_mode(CUDAGraphMode.PIECEWISE):
+                logger.warning(
+                    "Currently the eagle proposer only supports cudagraph_mode "
+                    "PIECEWISE, if you want the drafter to use cuda graphs, "
+                    "please set compilation_config.cudagraph_mode to PIECEWISE "
+                    "or FULL_AND_PIECEWISE")
+            self.use_cuda_graph = cudagraph_mode.has_mode(
+                CUDAGraphMode.PIECEWISE) \
+                    and not self.speculative_config.enforce_eager
+
         self.cudagraph_batch_sizes = list(
             reversed(self.vllm_config.compilation_config.
                      cudagraph_capture_sizes)) if self.use_cuda_graph else []
@@ -231,13 +242,16 @@ class EagleProposer:
         per_layer_attn_metadata = {}
         for layer_name in self.attn_layer_names:
             per_layer_attn_metadata[layer_name] = attn_metadata
+
         for layer_name in self.indexer_layer_names:
             assert draft_indexer_metadata is not None
             per_layer_attn_metadata[layer_name] = draft_indexer_metadata
 
+        cudagraph_runtime_mode = CUDAGraphMode.NONE
         if self.use_cuda_graph and \
                 num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+            cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
             num_input_tokens = num_tokens
         # copy inputs to buffer for cudagraph
@@ -259,9 +273,12 @@ class EagleProposer:
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
 
-        with set_forward_context(per_layer_attn_metadata,
-                                 self.vllm_config,
-                                 num_tokens=num_input_tokens):
+        with set_forward_context(
+                per_layer_attn_metadata,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+        ):
             ret_hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self._get_positions(num_input_tokens),
@@ -318,8 +335,10 @@ class EagleProposer:
         if self.use_cuda_graph and \
                 batch_size <= self.cudagraph_batch_sizes[-1]:
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
+            cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
             input_batch_size = batch_size
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
 
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
@@ -410,9 +429,12 @@ class EagleProposer:
                 inputs_embeds = None
 
             # Run the model.
-            with set_forward_context(per_layer_attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=input_batch_size):
+            with set_forward_context(
+                    per_layer_attn_metadata,
+                    self.vllm_config,
+                    num_tokens=input_batch_size,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+            ):
                 ret_hidden_states = self.model(
                     input_ids=input_ids,
                     positions=self._get_positions(input_batch_size),
@@ -712,12 +734,17 @@ class EagleProposer:
                     num_tokens <= self.cudagraph_batch_sizes[-1]:
                 num_input_tokens = self.vllm_config.pad_for_cudagraph(
                     num_tokens)
+                cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
             else:
                 num_input_tokens = num_tokens
+                cudagraph_runtime_mode = CUDAGraphMode.NONE
             # Run the model.
-            with set_forward_context(per_layer_attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=num_input_tokens):
+            with set_forward_context(
+                    per_layer_attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_input_tokens,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+            ):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
                     positions=self.positions[:num_input_tokens],
@@ -979,9 +1006,18 @@ class EagleProposer:
     def dummy_run(
         self,
         num_tokens: int,
+        use_cudagraphs=True,
     ) -> None:
-        with set_forward_context(None, self.vllm_config,
-                                 num_tokens=num_tokens):
+        if use_cudagraphs and num_tokens <= self.cudagraph_batch_sizes[-1]:
+            num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+
+        with set_forward_context(
+                None,
+                self.vllm_config,
+                num_tokens=num_tokens,
+                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE \
+                    if use_cudagraphs else CUDAGraphMode.NONE,
+        ):
             if self.supports_mm_inputs:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
