@@ -132,6 +132,7 @@ class CuMemAllocator:
     """
     instance: "CuMemAllocator" = None
     default_tag: str = "default"
+    graphs_tag: str = "graphs"
 
     @staticmethod
     def get_instance() -> "CuMemAllocator":
@@ -155,6 +156,8 @@ class CuMemAllocator:
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
         self.allocator_and_pools: dict[str, Any] = {}
+        # CUDA graphs metadata saved before sleep
+        self._sleep_saved_cudagraphs: dict[str, Any] = {}
         # Creating strong references to the two callbacks here to prevent
         # these ephemeral bound-method objects being garbage collected.
         # See discussions in https://github.com/vllm-project/vllm/pull/22724
@@ -188,7 +191,8 @@ class CuMemAllocator:
     def sleep(
             self,
             offload_tags: Optional[Union[tuple[str, ...],
-                                         str]] = None) -> None:
+                                         str]] = None,
+            model_runner=None) -> None:
         """
         Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
@@ -196,15 +200,21 @@ class CuMemAllocator:
 
         :param offload_tags: The tags of the memory allocation that will be
             offloaded. The rest of the memory allocation will be discarded.
+        :param model_runner: Optional model runner for CUDA graph handling.
         """
         if offload_tags is None:
-            # by default, allocated tensors are offloaded
+            # by default, allocated tensors and graphs are offloaded
             # when the allocator sleeps
-            offload_tags = (CuMemAllocator.default_tag, )
+            offload_tags = (CuMemAllocator.default_tag, CuMemAllocator.graphs_tag)
         elif isinstance(offload_tags, str):
             offload_tags = (offload_tags, )
 
         assert isinstance(offload_tags, tuple)
+
+        # Handle CUDA graphs first if model_runner is provided and graphs are being offloaded
+        has_graphs = CuMemAllocator.graphs_tag in offload_tags
+        if model_runner is not None and has_graphs:
+            self._save_cuda_graphs(model_runner)
 
         total_bytes = 0
         backup_bytes = 0
@@ -228,13 +238,14 @@ class CuMemAllocator:
         logger.info(
             "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
             "%.2f GiB is backed up in CPU and the rest %.2f GiB is discarded "
-            "directly.", total_bytes / 1024**3, backup_bytes / 1024**3,
-            (total_bytes - backup_bytes) / 1024**3)
+            "directly. %s", total_bytes / 1024**3, backup_bytes / 1024**3,
+            (total_bytes - backup_bytes) / 1024**3,
+            f"CUDA graphs offloaded to CPU (tag: {CuMemAllocator.graphs_tag})" if has_graphs
+            else "CUDA graphs not managed by CuMemAllocator")
 
         gc.collect()
-        torch.cuda.empty_cache()
 
-    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+    def wake_up(self, tags: Optional[list[str]] = None, model_runner=None) -> None:
         """
         Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
@@ -243,6 +254,7 @@ class CuMemAllocator:
         :param tags: The tags of the memory allocation that will be loaded
             back to GPU memory. If None, all memory allocation will be loaded
             back to GPU memory.
+        :param model_runner: Optional model runner for CUDA graph handling.
         """
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
@@ -256,6 +268,11 @@ class CuMemAllocator:
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
+
+        # Restore CUDA graphs if model_runner is provided and graphs are being restored
+        if (model_runner is not None and
+            (tags is None or CuMemAllocator.graphs_tag in tags)):
+            self._restore_cuda_graphs(model_runner)
 
     @contextmanager
     def use_memory_pool(self, tag: Optional[str] = None):
@@ -309,3 +326,111 @@ class CuMemAllocator:
             handle = data.handle
             sum_bytes += handle[1]
         return sum_bytes
+
+    def get_graph_pool_handle(self):
+        """
+        Get a graph pool handle that uses the CuMemAllocator for CUDA graphs.
+        This allows CUDA graphs to be managed with the same sleep/wake
+        mechanism as other tagged memory allocations.
+        """
+        if not hasattr(self, '_graph_pool_context'):
+            logger.info("CuMemAllocator: Creating custom graph pool with tag '%s' "
+                       "for sleep/wake management", CuMemAllocator.graphs_tag)
+
+            # Create a persistent memory pool context for graphs
+            self._graph_pool_context = self.use_memory_pool(
+                tag=CuMemAllocator.graphs_tag)
+            self._graph_pool_context.__enter__()
+
+            # Get the actual memory pool from the context
+            mem_pool, _ = self.allocator_and_pools[CuMemAllocator.graphs_tag]
+            self._custom_graph_pool = mem_pool
+
+        return self._custom_graph_pool
+
+    def setup_graph_pool_for_sleep_mode(self) -> None:
+        """
+        Set up custom graph pool for sleep mode after CUDA graph capture is complete.
+        This ensures graphs captured with the native pool can be properly managed
+        during sleep/wake cycles by initializing our custom pool context.
+        """
+        try:
+            # Initialize the custom graph pool context
+            graph_pool_handle = self.get_graph_pool_handle()
+
+            logger.info("CuMemAllocator: Successfully set up custom graph pool for "
+                       f"sleep mode management (handle type: {type(graph_pool_handle).__name__})")
+
+        except Exception as e:
+            logger.warning("CuMemAllocator: Failed to set up custom graph pool for sleep mode: %s. "
+                          "CUDA graphs will use native PyTorch pool during sleep/wake cycles.", e)
+
+    def _save_cuda_graphs(self, model_runner) -> None:
+        """Put CUDA graphs to sleep."""
+        free_bytes_before = torch.cuda.mem_get_info()[0]
+
+        # Check if model runner has cudagraph dispatcher
+        if hasattr(model_runner, "cudagraph_dispatcher"):
+            dispatcher = model_runner.cudagraph_dispatcher
+            self._sleep_saved_cudagraphs["dispatcher"] = dispatcher.get_sleep_state()
+            logger.info(
+                "Saved cudagraph dispatcher state for %d modes",
+                len(self._sleep_saved_cudagraphs["dispatcher"]["dispatcher_keys"]),
+            )
+
+        # Handle model sleep using clean interfaces
+        cuda_graph_count = 0
+        model = model_runner.model
+        if hasattr(model, 'enter_sleep_mode'):
+            sleep_state, count = model.enter_sleep_mode()
+            self._sleep_saved_cudagraphs["model"] = sleep_state
+            cuda_graph_count += count
+
+        logger.info("Put %d CUDA graphs into sleep mode.", cuda_graph_count)
+
+        # Synchronize and try to free memory
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+        # Calculate memory freed (if any) for logging
+        free_bytes_after = torch.cuda.mem_get_info()[0]
+        cuda_graph_memory_freed = free_bytes_after - free_bytes_before
+        if cuda_graph_memory_freed > 0:
+            from vllm.utils import GiB_bytes
+            logger.info(
+                "CUDA graph sleep freed %.2f GiB memory.",
+                cuda_graph_memory_freed / GiB_bytes,
+            )
+
+
+    def _restore_cuda_graphs(self, model_runner) -> None:
+        """Wake up CUDA graphs using cleaner interfaces."""
+        if not self._sleep_saved_cudagraphs:
+            logger.info("No saved CUDA graphs to restore.")
+            return
+
+        logger.info("Waking up CUDA graphs...")
+        cuda_graph_count = 0
+
+        # Verify dispatcher state
+        if hasattr(model_runner, "cudagraph_dispatcher") and "dispatcher" in self._sleep_saved_cudagraphs:
+            dispatcher = model_runner.cudagraph_dispatcher
+            if dispatcher.verify_wake_state(self._sleep_saved_cudagraphs["dispatcher"]):
+                logger.info("Cudagraph dispatcher state verified successfully.")
+            else:
+                logger.warning("Cudagraph dispatcher state verification failed.")
+
+        # Restore model CUDA graphs using clean interfaces
+        model = model_runner.model
+        if hasattr(model, 'exit_sleep_mode') and "model" in self._sleep_saved_cudagraphs:
+            cuda_graph_count += model.exit_sleep_mode(
+                self._sleep_saved_cudagraphs["model"]
+            )
+
+        # Trigger CUDA to fully wake up the graph memory pool
+        torch.cuda.synchronize()
+
+        logger.info("Restored %d CUDA graphs from sleep mode.", cuda_graph_count)
+
+        # Clear saved state
+        self._sleep_saved_cudagraphs.clear()
