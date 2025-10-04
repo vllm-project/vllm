@@ -701,9 +701,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 # then chunk_stride = 2
                 chunk_stride = mamba_block_size // chunk_size
 
-                # Running offset into the chunks
-                chunk_pos = 0
-
                 # Save state for sequences with more than just final state
                 for seq_idx in range(num_prefills):
 
@@ -721,8 +718,6 @@ class MambaMixer2(MambaBase, CustomOp):
 
                     # Skip sequences that don't have any blocks to fill
                     if n_blocks_to_fill == 0:
-                        # Move the chunk pos to the start of the next seq
-                        chunk_pos = 1 + last_chunk_indices_p[seq_idx]
                         continue
 
                     # Look up the state indices
@@ -730,12 +725,17 @@ class MambaMixer2(MambaBase, CustomOp):
                         seq_idx, block_idx_first_scheduled_token:
                         block_idx_last_scheduled_token]
 
-                    # Get the location of the first chunk that is aligned on the
-                    # block boundary.
-                    first_aligned_chunk = chunk_pos + chunk_stride - 1
+                    # First chunk index for this sequence
+                    if seq_idx == 0:
+                        first_chunk = 0
+                    else:
+                        first_chunk = 1 + last_chunk_indices_p[seq_idx - 1]
 
-                    # Calculate the number of computed tokens running into
-                    # the next mamba block
+                    # First chunk that is aligned on the mamba block boundary
+                    first_aligned_chunk = first_chunk + chunk_stride - 1
+
+                    # Calculate the number of computed tokens that were not
+                    # already cached
                     num_unaligned_computed_tokens = \
                         num_computed_tokens_p[seq_idx] % mamba_block_size
 
@@ -752,9 +752,6 @@ class MambaMixer2(MambaBase, CustomOp):
 
                     # Write the states
                     ssm_state[cache_blocks_to_fill] = from_where
-
-                    # Move the chunk pos to the start of the next seq
-                    chunk_pos = 1 + last_chunk_indices_p[seq_idx]
 
                 # For all seqs, store the last state (note: might be partial):
                 ssm_state[state_indices_tensor_p.gather(
