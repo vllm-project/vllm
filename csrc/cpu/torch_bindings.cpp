@@ -27,6 +27,8 @@ int64_t create_onednn_mm_handler(const torch::Tensor& b,
 void onednn_mm(torch::Tensor& c, const torch::Tensor& a,
                const std::optional<torch::Tensor>& bias, int64_t handler);
 
+bool is_onednn_acl_supported();
+
 void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
                         torch::Tensor& kv_cache, double scale,
                         torch::Tensor& block_tables, torch::Tensor& seq_lens);
@@ -180,6 +182,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "onednn_mm(Tensor! c, Tensor a, Tensor? bias, "
       "int handler) -> ()");
   ops.impl("onednn_mm", torch::kCPU, &onednn_mm);
+
+  // Check if oneDNN was built with ACL backend
+  ops.def("is_onednn_acl_supported() -> bool", &is_onednn_acl_supported);
 
   // Create oneDNN W8A8 handler
   ops.def(
