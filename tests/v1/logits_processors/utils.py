@@ -14,7 +14,7 @@ from vllm.v1.sample.logits_processor import (LOGITSPROCS_GROUP,
                                              AdapterLogitsProcessor,
                                              BatchUpdate, LogitsProcessor,
                                              RequestLogitsProcessor)
-from vllm.v1.sample.logits_processor.builtin import process_dict_updates
+from vllm.v1.sample.logits_processor.interface import process_dict_updates
 
 logger = init_logger(__name__)
 
