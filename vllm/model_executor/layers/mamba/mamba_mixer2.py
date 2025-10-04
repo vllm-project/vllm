@@ -587,12 +587,12 @@ class MambaMixer2(MambaBase, CustomOp):
                 dim=0)
             # Prefill-only variables:
             current_first_idx_p = attn_metadata.current_first_idx_p
-            context_lens_p = attn_metadata.context_lens_p
+            num_computed_tokens_p = attn_metadata.num_computed_tokens_p
         else:
             last_state_idx_d, last_state_idx_p = None, None
             current_last_idx_d, current_last_idx_p = None, None
             current_first_idx_p = None
-            context_lens_p = None
+            num_computed_tokens_p = None
 
         # Preallocate output tensor to avoid memcpy cost for merging prefill
         # and decode outputs
@@ -637,7 +637,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 current_first_idx=current_first_idx_p,
                 current_last_idx=current_last_idx_p,
                 initial_state_idx=last_state_idx_p,
-                context_lens=context_lens_p,
+                num_computed_tokens=num_computed_tokens_p,
                 block_size_to_align=mamba_block_size,
                 metadata=attn_metadata,
                 query_start_loc=query_start_loc_p).transpose(
@@ -725,7 +725,7 @@ class MambaMixer2(MambaBase, CustomOp):
                     # Calculate the number of computed tokens running into
                     # the next mamba block
                     num_unaligned_computed_tokens = \
-                        context_lens_p[seq_idx] % mamba_block_size
+                        num_computed_tokens_p[seq_idx] % mamba_block_size
 
                     if num_unaligned_computed_tokens > 0:
                         # If the number of computed tokens is not block aligned,

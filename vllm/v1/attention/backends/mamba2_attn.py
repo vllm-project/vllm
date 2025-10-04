@@ -125,7 +125,7 @@ class Mamba2AttentionMetadata:
     current_last_idx: torch.Tensor
     current_first_idx_p: torch.Tensor
     last_state_idx: torch.Tensor
-    context_lens_p: torch.Tensor
+    num_computed_tokens_p: torch.Tensor
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: Optional[dict] = None
@@ -180,7 +180,7 @@ class Mamba2AttentionMetadataBuilder(
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
-        context_lens, context_lens_p = None, None
+        num_computed_tokens, num_computed_tokens_p = None, None
         current_first_idx, current_first_idx_p = None, None
 
         if self.vllm_config.cache_config.enable_prefix_caching:
@@ -189,10 +189,8 @@ class Mamba2AttentionMetadataBuilder(
 
             # Additional cache-related varaiables:
             mamba_block_size = self.kv_cache_spec.block_size
-            query_lens = common_attn_metadata.query_start_loc[1:] - \
-                common_attn_metadata.query_start_loc[:-1]
-            context_lens = common_attn_metadata.seq_lens - \
-                                 query_lens
+            num_computed_tokens = \
+                common_attn_metadata.num_computed_tokens_cpu.to(self.device)
             # Indices: last_computed <= current_first <= current_last
             # Cases:
             #  last_computed == current_first  if last state was partially
@@ -202,8 +200,9 @@ class Mamba2AttentionMetadataBuilder(
             # 0th based indexing leads to "-1" -> e.g. 16 computed -> state[15]:
             current_last_idx = cdiv(common_attn_metadata.seq_lens,
                                     mamba_block_size) - 1
-            current_first_idx = cdiv(context_lens + 1, mamba_block_size) - 1
-            last_state_idx = cdiv(context_lens, mamba_block_size) - 1
+            current_first_idx = cdiv(num_computed_tokens + 1,
+                                     mamba_block_size) - 1
+            last_state_idx = cdiv(num_computed_tokens, mamba_block_size) - 1
             # -1 in case it's non-computed and causes later issues with indexing
             last_state_idx = last_state_idx.clamp(min=0)
         else:
@@ -233,8 +232,9 @@ class Mamba2AttentionMetadataBuilder(
                 -num_prefills - 1:] - num_decode_tokens
 
             if self.vllm_config.cache_config.enable_prefix_caching:
-                assert context_lens is not None
-                context_lens_p = context_lens[num_reqs - num_prefills:num_reqs]
+                assert num_computed_tokens is not None
+                num_computed_tokens_p = num_computed_tokens[
+                    num_reqs - num_prefills:num_reqs]
                 assert current_first_idx is not None
                 current_first_idx_p = current_first_idx[num_reqs -
                                                         num_prefills:num_reqs]
@@ -346,6 +346,6 @@ class Mamba2AttentionMetadataBuilder(
             current_last_idx=current_last_idx,
             current_first_idx_p=current_first_idx_p,
             last_state_idx=last_state_idx,
-            context_lens_p=context_lens_p,
+            num_computed_tokens_p=num_computed_tokens_p,
         )
         return attn_metadata

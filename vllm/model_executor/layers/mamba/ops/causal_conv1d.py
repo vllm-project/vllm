@@ -30,7 +30,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     current_first_idx,  # (batch,)
     current_last_idx,  # (batch,)
     initial_state_idx,  # (batch,)
-    context_lens,  # (batch,)
+    num_computed_tokens,  # (batch,)
     o_ptr,  # (dim, seqlen) - actually pointing to x_ptr
     # Matrix dimensions
     dim: tl.constexpr,
@@ -95,7 +95,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         # Get the length of the completed sequence so far and compute the offset.
         current_first_index = tl.load(current_first_idx + idx_seq)
         current_last_index = tl.load(current_last_idx + idx_seq)
-        sequence_completed_index = tl.load(context_lens + idx_seq)
+        sequence_completed_index = tl.load(num_computed_tokens + idx_seq)
 
         # Compute the offset where the first stride_block_m-aligned first full block is
         # Value in "token-space"
@@ -448,7 +448,7 @@ def causal_conv1d_fn(
     current_first_idx: Optional[torch.Tensor] = None,
     current_last_idx: Optional[torch.Tensor] = None,
     initial_state_idx: Optional[torch.Tensor] = None,
-    context_lens: Optional[torch.Tensor] = None,
+    num_computed_tokens: Optional[torch.Tensor] = None,
     block_size_to_align=0,
     metadata=None,
     validate_data=False,
@@ -498,7 +498,7 @@ def causal_conv1d_fn(
         The pointer into cache_indices, where the last cache block to be filled is located.
     initial_state_idx: (batch,), dtype int32
         The pointer into cache_indices, where the cache block containing the initial state is located.
-    context_lens: (batch,), dtype int32
+    num_computed_tokens: (batch,), dtype int32
         The number of tokens already completed for each sequence
     block_size_to_align: int
         The block size to align the cached states to
@@ -682,7 +682,7 @@ def causal_conv1d_fn(
         current_first_idx,
         current_last_idx,
         initial_state_idx,
-        context_lens,
+        num_computed_tokens,
         out,
         # Matrix dimensions
         dim,
