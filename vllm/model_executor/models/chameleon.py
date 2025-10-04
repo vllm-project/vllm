@@ -14,6 +14,7 @@ from transformers import (BatchFeature, ChameleonConfig, ChameleonProcessor,
 
 from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -42,7 +43,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
                          SupportsQuant)
-from .utils import (flatten_bn, is_pp_missing_parameter,
+from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -92,17 +93,21 @@ class ChameleonDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         config = self.info.get_hf_config()
 
         width = height = config.vq_config.resolution
         num_images = mm_counts.get("image", 0)
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=width,
                                    height=height,
-                                   num_images=num_images)
+                                   num_images=num_images,
+                                   overrides=image_overrides)
         }
 
 
@@ -935,6 +940,8 @@ class ChameleonModel(nn.Module):
     dummy_inputs=ChameleonDummyInputsBuilder)
 class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP, SupportsQuant):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
@@ -981,8 +988,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         expected_h = expected_w = vq_config.resolution
 
         return ChameleonImagePixelInputs(type="pixel_values",
-                                         data=flatten_bn(pixel_values,
-                                                         concat=True),
+                                         data=pixel_values,
                                          resolve_bindings={
                                              "h": expected_h,
                                              "w": expected_w

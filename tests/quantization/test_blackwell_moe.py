@@ -3,6 +3,7 @@
 
 import json
 import os
+from typing import Optional
 
 import pytest
 
@@ -20,9 +21,10 @@ os.environ["FLASHINFER_NVCC_THREADS"] = "16"
 dummy_hf_overrides = {"num_layers": 4, "num_hidden_layers": 4}
 
 
-def can_initialize(model: str, extra_args: list[str]):
+def can_initialize(model: str, extra_args: Optional[list[str]] = None):
 
     # Server arguments
+    extra_args = extra_args if extra_args is not None else []
     server_args = [
         "--max-model-len",
         "2048",
@@ -65,7 +67,7 @@ def test_llama4_fp8_tensor_moe_flashinfer_cutlass(
         monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
-    can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", [])
+    can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8")
 
 
 @pytest.mark.skip(reason="Works, but takes too long to run")
@@ -73,21 +75,21 @@ def test_llama4_fp8_tensor_moe_flashinfer_trtllm(
         monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "latency")
-    can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8", [])
+    can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8")
 
 
 @pytest.mark.skip(reason="Works, but takes too long to run")
 def test_llama4_nvfp4_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
-    can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4", [])
+    can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4")
 
 
 @pytest.mark.skip(reason="RuntimeError: No kernel found for the given options")
 def test_llama4_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "latency")
-    can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4", [])
+    can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4")
 
 
 ## DeepSeekV3 ##
@@ -95,21 +97,37 @@ def test_llama4_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
 
 def test_deepseek_fp8_block_moe_deep_gemm(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
-    can_initialize("deepseek-ai/DeepSeek-V3.1", [])
+    can_initialize("deepseek-ai/DeepSeek-V3.1")
+
+
+@pytest.mark.skip(reason=("Known issue: lack of kernel support. "
+                          "Expected failure: assert self.block_quant is None"))
+def test_deepseek_fp8_block_moe_flashinfer_cutlass(
+        monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
+    can_initialize("deepseek-ai/DeepSeek-V3.1")
+
+
+def test_deepseek_fp8_block_moe_flashinfer_trtllm(
+        monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "latency")
+    can_initialize("deepseek-ai/DeepSeek-V3.1")
 
 
 def test_deepseek_nvfp4_moe_flashinfer_cutlass(
         monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
-    can_initialize("nvidia/DeepSeek-R1-0528-FP4-v2", [])
+    can_initialize("nvidia/DeepSeek-R1-0528-FP4-v2")
 
 
 @pytest.mark.skip(reason="RuntimeError: No kernel found for the given options")
 def test_deepseek_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "latency")
-    can_initialize("nvidia/DeepSeek-R1-0528-FP4-v2", [])
+    can_initialize("nvidia/DeepSeek-R1-0528-FP4-v2")
 
 
 ## GPT-OSS ##
@@ -117,16 +135,16 @@ def test_deepseek_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
 
 def test_gptoss_mxfp4bf16_moe_flashinfer(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "1")
-    can_initialize("openai/gpt-oss-20b", [])
+    can_initialize("openai/gpt-oss-20b")
 
 
 def test_gptoss_mxfp4mxfp8_moe_flashinfer_cutlass(
         monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS", "1")
-    can_initialize("openai/gpt-oss-20b", [])
+    can_initialize("openai/gpt-oss-20b")
 
 
 def test_gptoss_mxfp4mxfp8_moe_flashinfer_trtllm(
         monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
-    can_initialize("openai/gpt-oss-20b", [])
+    can_initialize("openai/gpt-oss-20b")

@@ -246,8 +246,34 @@ def get_quant_config(model_config: ModelConfig,
         # compressed-tensors uses a compressions_config
         hf_quant_config = getattr(model_config.hf_config, "compression_config",
                                   None)
+
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
+
+    # if hf_quant_config is None, we will try to get config from
+    # hf_overrides
+    hf_overrides = model_config.hf_overrides
+    quantization_config_file = hf_overrides.get("quantization_config_file",
+                                                None)
+    if quantization_config_file is not None:
+        if hasattr(quant_cls, "from_config_file"):
+            return quant_cls.from_config_file(quantization_config_file)
+        else:
+            raise NotImplementedError(
+                "from_config_file is specified in hf_override config, "
+                "but quant_cls.from_config_file is not implemented in "
+                f"{quant_cls}")
+    quantization_config_json = hf_overrides.get(
+        "quantization_config_dict_json", None)
+    if quantization_config_json is not None:
+        if hasattr(quant_cls, "from_config_dict_json"):
+            return quant_cls.from_config_dict_json(quantization_config_json)
+        else:
+            raise NotImplementedError(
+                "from_config_dict_json is specified in hf_override config, "
+                "but quant_cls.from_config_dict_json is not implemented in "
+                f"{quant_cls}")
+
     # Inflight BNB quantization
     if model_config.quantization == "bitsandbytes":
         return quant_cls.from_config({})
@@ -977,12 +1003,18 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
             return None
         return remapped_name
 
+    if any("mla_attn" in key for key in params_dict):
+        attn_str = "mla_attn.mla_attn"
+        logger.debug_once(f"Found mla_attn with k_scale and v_scale in "
+                          f"the checkpoint, using {attn_str} as attn_str")
+    else:
+        attn_str = "attn"
     # Define scale name mapping patterns in order of precedence
     scale_mapping_patterns = [
         # ModelOpt format: .self_attn.{k,v}_proj.{k,v}_scale ->
         # .self_attn.attn.{k,v}_scale
         (r"\.self_attn\.([kv])_proj\.([kv])_scale$",
-         r".self_attn.attn.\2_scale"),
+         rf".self_attn.{attn_str}.\2_scale"),
         # QKV proj format: .self_attn.qkv_proj.{k,v}_scale ->
         # .self_attn.attn.{k,v}_scale
         (r"\.self_attn\.qkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
