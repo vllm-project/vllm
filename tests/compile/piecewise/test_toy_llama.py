@@ -298,18 +298,22 @@ def run_model(llama_config, compile_config: CompilationConfig) -> torch.Tensor:
             return output.cpu()
 
 
-@pytest.mark.parametrize("use_inductor, use_inductor_graph_partition", [
-    (False, False), # No inductor
-    (True, False), # Inductor, Dynamo partition
-    (True, True), # Inductor, Inductor partition
-])
-def test_toy_llama(use_inductor: bool, use_inductor_graph_partition: bool, monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "use_inductor, use_inductor_graph_partition",
+    [
+        (False, False),  # No inductor
+        (True, False),  # Inductor, Dynamo partition
+        (True, True),  # Inductor, Inductor partition
+    ])
+def test_toy_llama(use_inductor: bool, use_inductor_graph_partition: bool,
+                   monkeypatch, tmp_path):
     # We disable the vLLM compile cache into a new tmp dir for 2 reasons:
     # 1. To make sure we can properly track the number of Inductor compilations.
     # 2. Inductor partitioning does not play nicely with Autograd cache (below)
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
-    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+    if use_inductor_graph_partition and not is_torch_equal_or_newer(
+            "2.9.0.dev"):
         pytest.skip("Inductor graph partition only supported in torch>=2.9")
 
     # compare output with and without piecewise compilation
