@@ -78,7 +78,7 @@ class TopKTopPSampler(nn.Module):
             self.aiter_ops = torch.ops.aiter
             logger.info_once(
                 "Using aiter sampler on ROCm (lazy import, sampling-only).")
-            self.forward = self.forward_rocm
+            self.forward = self.forward_hip
         else:
             self.forward = self.forward_native
 
@@ -170,7 +170,7 @@ class TopKTopPSampler(nn.Module):
 
             return probs.div_(q).argmax(dim=-1).view(-1), logits_to_return
 
-    def forward_rocm(
+    def forward_hip(
         self,
         logits: torch.Tensor,
         generators: dict[int, torch.Generator],
