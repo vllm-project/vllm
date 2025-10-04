@@ -260,6 +260,12 @@ class TorchAOLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.quant_config.is_checkpoint_torchao_serialized:
+            from torchao.prototype.tensor_conversion.api import (
+                convert_to_packed_tensor_based_on_current_hardware)
+            if hasattr(layer, "weight"):
+                layer.weight = Parameter(
+                    convert_to_packed_tensor_based_on_current_hardware(
+                        layer.weight))
             return
 
         # quantize the weight on the fly if the checkpoint is not already
