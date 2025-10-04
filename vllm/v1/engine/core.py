@@ -476,9 +476,9 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
 
-        with self._perform_handshakes(handshake_address, identity,
-                                      local_client, vllm_config,
-                                      client_handshake_address) as addresses:
+        with self._perform_handshakes(
+                handshake_address, identity, local_client, vllm_config,
+                client_handshake_address) as (addresses, zmq_socket):
             self.client_count = len(addresses.outputs)
 
             # Set up data parallel environment.
@@ -496,37 +496,53 @@ class EngineCoreProc(EngineCore):
 
             self._init_data_parallel(vllm_config)
 
-            super().__init__(vllm_config, executor_class, log_stats,
-                             executor_fail_callback)
+            try:
+                super().__init__(vllm_config, executor_class, log_stats,
+                                 executor_fail_callback)
 
-            # Background Threads and Queues for IO. These enable us to
-            # overlap ZMQ socket IO with GPU since they release the GIL,
-            # and to overlap some serialization/deserialization with the
-            # model forward pass.
-            # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-            ready_event = threading.Event()
-            input_thread = threading.Thread(target=self.process_input_sockets,
-                                            args=(addresses.inputs,
-                                                  addresses.coordinator_input,
-                                                  identity, ready_event),
-                                            daemon=True)
-            input_thread.start()
+                # Background Threads and Queues for IO. These enable us to
+                # overlap ZMQ socket IO with GPU since they release the GIL,
+                # and to overlap some serialization/deserialization with the
+                # model forward pass.
+                # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+                ready_event = threading.Event()
+                input_thread = threading.Thread(
+                    target=self.process_input_sockets,
+                    args=(addresses.inputs, addresses.coordinator_input,
+                          identity, ready_event),
+                    daemon=True)
+                input_thread.start()
 
-            self.output_thread = threading.Thread(
-                target=self.process_output_sockets,
-                args=(addresses.outputs, addresses.coordinator_output,
-                      self.engine_index),
-                daemon=True)
-            self.output_thread.start()
+                self.output_thread = threading.Thread(
+                    target=self.process_output_sockets,
+                    args=(addresses.outputs, addresses.coordinator_output,
+                          self.engine_index),
+                    daemon=True)
+                self.output_thread.start()
 
-            # Don't complete handshake until DP coordinator ready message is
-            # received.
-            while not ready_event.wait(timeout=10):
-                if not input_thread.is_alive():
-                    raise RuntimeError(
-                        "Input socket thread died during startup")
-                assert addresses.coordinator_input is not None
-                logger.info("Waiting for READY message from DP Coordinator...")
+                # Don't complete handshake until DP coordinator ready message is
+                # received.
+                while not ready_event.wait(timeout=10):
+                    if not input_thread.is_alive():
+                        raise RuntimeError(
+                            "Input socket thread died during startup")
+                    assert addresses.coordinator_input is not None
+                    logger.info(
+                        "Waiting for READY message from DP Coordinator...")
+
+            except Exception as e:
+                zmq_socket.send(
+                    msgspec.msgpack.encode({
+                        "status":
+                        "FAILED",
+                        "local":
+                        local_client and client_handshake_address is None,
+                        "headless":
+                        not local_client,
+                        "error_msg":
+                        str(e),
+                    }))
+                raise
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -544,7 +560,7 @@ class EngineCoreProc(EngineCore):
         local_client: bool,
         vllm_config: VllmConfig,
         client_handshake_address: Optional[str],
-    ) -> Generator[EngineZmqAddresses, None, None]:
+    ) -> Generator[tuple[EngineZmqAddresses, zmq.Socket], None, None]:
         """
         Perform startup handshakes.
 
@@ -582,10 +598,11 @@ class EngineCoreProc(EngineCore):
             local_handshake = self._perform_handshake(
                 input_ctx, client_handshake_address, identity, True, False,
                 vllm_config)
-            with handshake as addresses, local_handshake as client_addresses:
+            with handshake as (addresses, 
+                               _), local_handshake as (client_addresses, zmq_socket):
                 addresses.inputs = client_addresses.inputs
                 addresses.outputs = client_addresses.outputs
-                yield addresses
+                yield (addresses, zmq_socket)
 
         # Update config which may have changed from the handshake
         vllm_config.__post_init__()
@@ -600,7 +617,7 @@ class EngineCoreProc(EngineCore):
         headless: bool,
         vllm_config: VllmConfig,
         parallel_config_to_update: Optional[ParallelConfig] = None,
-    ) -> Generator[EngineZmqAddresses, None, None]:
+    ) -> Generator[tuple[EngineZmqAddresses, zmq.Socket], None, None]:
         with make_zmq_socket(ctx,
                              handshake_address,
                              zmq.DEALER,
@@ -611,7 +628,7 @@ class EngineCoreProc(EngineCore):
             addresses = self.startup_handshake(handshake_socket, local_client,
                                                headless,
                                                parallel_config_to_update)
-            yield addresses
+            yield addresses, handshake_socket
 
             # Send ready message.
             num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks
