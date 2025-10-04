@@ -72,10 +72,12 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.shared_head = SharedHead(config=config,
                                       prefix=prefix,
                                       quant_config=quant_config)
-        self.mtp_block = DeepseekV2DecoderLayer(vllm_config,
-                                                prefix,
-                                                topk_indices_buffer,
-                                                config=self.config)
+        self.mtp_block = DeepseekV2DecoderLayer(
+            vllm_config,
+            prefix,
+            config=self.config,
+            topk_indices_buffer=topk_indices_buffer,
+        )
 
     def forward(
         self,
