@@ -149,7 +149,7 @@ class OpenAIServingPooling(OpenAIServing):
                     request,
                     tokenizer,
                     request.messages,
-                    chat_template=request.chat_template or self.chat_template,
+                    chat_template=request_chat_template or self.chat_template,
                     chat_template_content_format=self.
                     chat_template_content_format,
                     # In pooling requests, we are not generating tokens,
