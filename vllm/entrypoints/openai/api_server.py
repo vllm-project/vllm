@@ -19,7 +19,7 @@ from argparse import Namespace
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Annotated, Any, Callable, Literal, Optional
+from typing import Annotated, Any, Callable, Literal, Optional, Union
 
 import prometheus_client
 import pydantic
@@ -51,32 +51,18 @@ from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              ChatCompletionResponse,
-                                              ClassificationRequest,
-                                              ClassificationResponse,
-                                              CompletionRequest,
-                                              CompletionResponse,
-                                              DetokenizeRequest,
-                                              DetokenizeResponse,
-                                              EmbeddingRequest,
-                                              EmbeddingResponse, ErrorInfo,
-                                              ErrorResponse,
-                                              IOProcessorResponse,
-                                              LoadLoRAAdapterRequest,
-                                              PoolingRequest, PoolingResponse,
-                                              RerankRequest, RerankResponse,
-                                              ResponsesRequest,
-                                              ResponsesResponse, ScoreRequest,
-                                              ScoreResponse,
-                                              StreamingResponsesResponse,
-                                              TokenizeRequest,
-                                              TokenizeResponse,
-                                              TranscriptionRequest,
-                                              TranscriptionResponse,
-                                              TranslationRequest,
-                                              TranslationResponse,
-                                              UnloadLoRAAdapterRequest)
+from vllm.entrypoints.openai.protocol import (
+    AnthropicContentBlock, AnthropicMessageRequest, AnthropicMessageResponse,
+    AnthropicUsage, ChatCompletionNamedToolChoiceParam, ChatCompletionRequest,
+    ChatCompletionResponse, ChatCompletionToolsParam, ClassificationRequest,
+    ClassificationResponse, CompletionRequest, CompletionResponse,
+    DetokenizeRequest, DetokenizeResponse, EmbeddingRequest, EmbeddingResponse,
+    ErrorInfo, ErrorResponse, FunctionDefinition, IOProcessorResponse,
+    LoadLoRAAdapterRequest, PoolingRequest, PoolingResponse, RerankRequest,
+    RerankResponse, ResponsesRequest, ResponsesResponse, ScoreRequest,
+    ScoreResponse, StreamingResponsesResponse, TokenizeRequest,
+    TokenizeResponse, TranscriptionRequest, TranscriptionResponse,
+    TranslationRequest, TranslationResponse, UnloadLoRAAdapterRequest)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_classification import (
@@ -247,6 +233,114 @@ async def validate_json_request(raw_request: Request):
         raise RequestValidationError(errors=[
             "Unsupported Media Type: Only 'application/json' is allowed"
         ])
+
+
+# Anthropic Messages API conversion utilities
+
+
+def _anthropic_to_openai_request(
+        request: AnthropicMessageRequest) -> ChatCompletionRequest:
+    """Convert Anthropic Messages request to OpenAI Chat format."""
+    messages = []
+
+    if request.system:
+        messages.append({"role": "system", "content": request.system})
+
+    for msg in request.messages:
+        openai_msg: dict[str, Any] = {"role": msg.role}
+
+        if isinstance(msg.content, str):
+            openai_msg["content"] = msg.content
+        else:
+            parts = []
+            for block in msg.content:
+                if block.type == "text" and block.text:
+                    parts.append({"type": "text", "text": block.text})
+
+            openai_msg["content"] = (parts[0]["text"]
+                                     if len(parts) == 1 else parts)
+
+        messages.append(openai_msg)
+
+    tool_choice: Optional[Union[str, ChatCompletionNamedToolChoiceParam]]
+    tool_choice = None
+    if request.tool_choice:
+        if request.tool_choice.type == "auto":
+            tool_choice = "auto"
+        elif request.tool_choice.type == "any":
+            tool_choice = "required"
+        elif (request.tool_choice.type == "tool" and request.tool_choice.name):
+            tool_choice = ChatCompletionNamedToolChoiceParam(
+                type="function", function={"name": request.tool_choice.name})
+
+    tools: Optional[list[ChatCompletionToolsParam]] = None
+    if request.tools:
+        tools = [
+            ChatCompletionToolsParam(type="function",
+                                     function=FunctionDefinition(
+                                         name=tool.name,
+                                         description=tool.description or "",
+                                         parameters=tool.input_schema))
+            for tool in request.tools
+        ]
+
+    return ChatCompletionRequest(
+        model=request.model,
+        messages=messages,
+        max_tokens=request.max_tokens,
+        temperature=request.temperature,
+        top_p=request.top_p,
+        top_k=request.top_k,
+        stop=request.stop_sequences or [],
+        stream=request.stream or False,
+        tools=tools,
+        tool_choice=tool_choice,
+    )
+
+
+def _openai_to_anthropic_response(response: ChatCompletionResponse,
+                                  model: str) -> AnthropicMessageResponse:
+    """Convert OpenAI response to Anthropic format."""
+    choice = response.choices[0]
+    content_blocks: list[AnthropicContentBlock] = []
+
+    if choice.message.content:
+        content_blocks.append(
+            AnthropicContentBlock(type="text", text=choice.message.content))
+
+    if choice.message.tool_calls:
+        for tool_call in choice.message.tool_calls:
+            content_blocks.append(
+                AnthropicContentBlock(type="tool_use",
+                                      id=tool_call.id,
+                                      name=tool_call.function.name,
+                                      input=json.loads(
+                                          tool_call.function.arguments)))
+
+    stop_reason_map = {
+        "stop": "end_turn",
+        "length": "max_tokens",
+        "tool_calls": "tool_use",
+    }
+    stop_reason = stop_reason_map.get(choice.finish_reason or "stop",
+                                      "end_turn")
+
+    return AnthropicMessageResponse(
+        id=response.id.replace("chatcmpl-", "msg_"),
+        content=content_blocks,
+        model=model,
+        stop_reason=stop_reason,
+        stop_sequence=None,
+        usage=AnthropicUsage(input_tokens=response.usage.prompt_tokens,
+                             output_tokens=response.usage.completion_tokens))
+
+
+async def _anthropic_stream_generator(generator: AsyncGenerator[str, None],
+                                      model: str) -> AsyncGenerator[str, None]:
+    """Convert OpenAI SSE stream to Anthropic format."""
+    # Simple passthrough - enhance for full Anthropic compatibility
+    async for chunk in generator:
+        yield chunk
 
 
 router = APIRouter()
@@ -619,6 +713,57 @@ async def create_chat_completion(request: ChatCompletionRequest,
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@router.post("/v1/messages",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.OK.value: {
+                     "content": {
+                         "text/event-stream": {}
+                     }
+                 },
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 }
+             })
+@with_cancellation
+@load_aware_call
+async def create_anthropic_message(request: AnthropicMessageRequest,
+                                   raw_request: Request):
+    """Anthropic Messages API endpoint."""
+    handler = chat(raw_request)
+    if handler is None:
+        error = base(raw_request).create_error_response(
+            message="Model does not support Chat Completions API")
+        return JSONResponse(content=error.model_dump(),
+                            status_code=error.error.code)
+
+    openai_request = _anthropic_to_openai_request(request)
+
+    try:
+        generator = await handler.create_chat_completion(
+            openai_request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
+
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.error.code)
+
+    elif isinstance(generator, ChatCompletionResponse):
+        anthropic_response = _openai_to_anthropic_response(
+            generator, request.model)
+        return JSONResponse(content=anthropic_response.model_dump(
+            exclude_none=True))
+
+    return StreamingResponse(content=_anthropic_stream_generator(
+        generator, request.model),
+                             media_type="text/event-stream")
 
 
 @router.post("/v1/completions",

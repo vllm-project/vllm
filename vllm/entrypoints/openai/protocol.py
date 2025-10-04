@@ -2781,3 +2781,83 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 
     words: Optional[list[TranslationWord]] = None
     """Extracted words and their corresponding timestamps."""
+
+
+# Anthropic Messages API models
+# https://docs.anthropic.com/en/api/messages
+
+
+class AnthropicContentBlock(OpenAIBaseModel):
+    """Content block (text or tool_use)."""
+    type: Literal["text", "tool_use"]
+    text: Optional[str] = None
+    id: Optional[str] = None
+    name: Optional[str] = None
+    input: Optional[dict[str, Any]] = None
+
+
+class AnthropicMessage(OpenAIBaseModel):
+    """Message with role and content."""
+    role: Literal["user", "assistant"]
+    content: Union[str, list[AnthropicContentBlock]]
+
+
+class AnthropicTool(OpenAIBaseModel):
+    """Tool definition."""
+    name: str
+    description: Optional[str] = None
+    input_schema: dict[str, Any]
+
+    @field_validator("input_schema")
+    @classmethod
+    def validate_input_schema(cls, v: dict[str, Any]) -> dict[str, Any]:
+        if "type" not in v:
+            v["type"] = "object"
+        return v
+
+
+class AnthropicToolChoice(OpenAIBaseModel):
+    """Tool selection strategy."""
+    type: Literal["auto", "any", "tool"]
+    name: Optional[str] = None
+
+
+class AnthropicMessageRequest(OpenAIBaseModel):
+    """Anthropic Messages API request."""
+    model: str
+    messages: list[AnthropicMessage]
+    max_tokens: int
+    system: Optional[str] = None
+    temperature: Optional[float] = 1.0
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    stop_sequences: Optional[list[str]] = None
+    stream: Optional[bool] = False
+    tools: Optional[list[AnthropicTool]] = None
+    tool_choice: Optional[AnthropicToolChoice] = None
+
+    @field_validator("max_tokens")
+    @classmethod
+    def validate_max_tokens(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("max_tokens must be positive")
+        return v
+
+
+class AnthropicUsage(OpenAIBaseModel):
+    """Token usage."""
+    input_tokens: int
+    output_tokens: int
+
+
+class AnthropicMessageResponse(OpenAIBaseModel):
+    """Anthropic Messages API response."""
+    id: str = Field(default_factory=lambda: f"msg_{random_uuid()}")
+    type: Literal["message"] = "message"
+    role: Literal["assistant"] = "assistant"
+    content: list[AnthropicContentBlock]
+    model: str
+    stop_reason: Optional[Literal["end_turn", "max_tokens", "stop_sequence",
+                                  "tool_use"]] = None
+    stop_sequence: Optional[str] = None
+    usage: AnthropicUsage

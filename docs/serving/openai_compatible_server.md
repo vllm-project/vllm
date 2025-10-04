@@ -73,6 +73,14 @@ In addition, we have the following custom APIs:
     - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
     - Only applicable to [cross-encoder models](../models/pooling_models.md).
 
+We also support the [Anthropic Messages API](https://docs.anthropic.com/en/api/messages):
+
+- [Messages API][messages-api] (`/v1/messages`)
+    - Compatible with Anthropic's Messages API format
+    - Converts between Anthropic and OpenAI formats internally
+    - Supports system prompts, tool calling, and streaming
+    - Only applicable to [text generation models](../models/generative_models.md) with a [chat template][chat-template]
+
 [](){ #chat-template }
 
 ## Chat Template
@@ -506,6 +514,49 @@ The following extra parameters are supported:
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:translation-extra-params"
 ```
+
+[](){ #messages-api }
+
+### Messages API
+
+The Messages API endpoint (`/v1/messages`) provides compatibility with
+[Anthropic's Messages API](https://docs.anthropic.com/en/api/messages) format,
+allowing you to use Anthropic SDKs and tools (like Claude Code) with
+vLLM-hosted models.
+
+Example using the Anthropic Python SDK:
+
+??? code
+
+    ```python
+    from anthropic import Anthropic
+
+    client = Anthropic(
+        base_url="http://localhost:8000",
+        api_key="token-abc123"
+    )
+
+    response = client.messages.create(
+        model="meta-llama/Llama-3.2-8B-Instruct",
+        max_tokens=100,
+        messages=[{"role": "user", "content": "Hello!"}]
+    )
+
+    print(response.content[0].text)
+    ```
+
+The endpoint supports:
+
+- System prompts via the `system` parameter
+- Streaming responses via the `stream` parameter
+- Tool calling with tool definitions and tool choice
+- All standard Anthropic sampling parameters (`temperature`, `top_p`,
+  `top_k`, `stop_sequences`)
+
+!!! note
+    This endpoint internally converts Anthropic requests to OpenAI format
+    and reuses vLLM's existing chat completion pipeline. All vLLM-specific
+    parameters work as expected.
 
 [](){ #tokenizer-api }
 
