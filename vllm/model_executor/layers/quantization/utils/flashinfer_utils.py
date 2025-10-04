@@ -21,6 +21,7 @@ logger = init_logger(__name__)
 class FlashinferMoeBackend(Enum):
     TENSORRT_LLM = "TensorRT-LLM"
     CUTLASS = "CUTLASS"
+    CUTEDSL = "CUTEDSL"
 
 
 def calculate_tile_tokens_dim(num_tokens, top_k, num_experts):
@@ -241,8 +242,10 @@ def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
         return FlashinferMoeBackend.CUTLASS
     elif flashinfer_moe_backend == "latency":
         return FlashinferMoeBackend.TENSORRT_LLM
+    elif flashinfer_moe_backend == "cutedsl":
+        return FlashinferMoeBackend.CUTEDSL
 
-    allowed_backends = ["throughput", "latency"]
+    allowed_backends = ["throughput", "latency", "cutedsl"]
     raise ValueError(
         f"Unknown flashinfer moe backend: {flashinfer_moe_backend}"
         f" expected one of {allowed_backends}")

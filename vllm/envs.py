@@ -128,6 +128,7 @@ if TYPE_CHECKING:
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
+    VLLM_DEEPEPLL_BF16_DISPATCH: bool = False
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
@@ -151,8 +152,8 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
-    VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput",
-                                         "latency"] = "throughput"
+    VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency",
+                                         "cutedsl"] = "throughput"
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -1134,6 +1135,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MXFP4_USE_MARLIN":
     lambda: maybe_convert_bool(os.environ.get("VLLM_MXFP4_USE_MARLIN", None)),
 
+    "VLLM_DEEPEPLL_BF16_DISPATCH":
+    lambda: bool(int(os.getenv("VLLM_DEEPEPLL_BF16_DISPATCH", "0"))),
+
     # Whether to turn on the outlines cache for V0
     # This cache is unbounded and on disk, so it's not safe to use in
     # an environment with potentially malicious users.
@@ -1268,7 +1272,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #     Uses TensorRT-LLM kernels optimized for low-latency inference.
     "VLLM_FLASHINFER_MOE_BACKEND":
     env_with_choices("VLLM_FLASHINFER_MOE_BACKEND", "throughput",
-    ["throughput", "latency"]),
+    ["throughput", "latency", "cutedsl"]),
 
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
