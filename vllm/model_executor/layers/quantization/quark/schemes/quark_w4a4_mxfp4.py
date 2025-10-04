@@ -132,38 +132,6 @@ class QuarkW4A4MXFP4(QuarkScheme):
         if self.emulate:
             layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
                                                     requires_grad=False)
-            try:
-                from quark.torch.export.nn.modules import realquantizer
-                from quark.torch.quantization.config.config import (
-                    QuantizationSpec)
-            except ImportError as err:
-                raise ImportError(
-                    "The package `amd-quark` is required to use AMD Quark "
-                    "MX-FP4 models. Please install it with `pip install "
-                    "amd-quark`.") from err
-
-            weight_quant_spec = QuantizationSpec.from_dict(
-                self.weight_quant_spec)
-
-            weight_quantizer = realquantizer.get_real_quantizer(
-                qspec=weight_quant_spec,
-                quantizer=None,
-                real_quantized=True,
-                reorder=False,
-                float_dtype=self.out_dtype,
-                scale_shape=layer.weight_scale.shape,
-                zero_point_shape=None,
-            )
-            weight_quantizer.scale.data = layer.weight_scale.data
-
-            layer.weight = torch.nn.Parameter(
-                weight_quantizer(layer.weight.data).to(self.out_dtype),
-                requires_grad=False,
-            )
-            layer.weight_scale = None
-
-            # This call is necessary to release the scales memory.
-            torch.cuda.empty_cache()
         else:
             if self.rocm_use_aiter_fp4_asm_gemm:
                 # shuffle weight scale
