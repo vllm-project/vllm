@@ -305,7 +305,8 @@ class Mamba2AttentionMetadataBuilder(
             nums_dict, batch_ptr, token_chunk_offset_ptr = \
                 compute_causal_conv1d_metadata(query_start_loc_p)
 
-        elif num_decodes <= self.decode_cudagraph_max_bs:
+        elif (num_decodes <= self.decode_cudagraph_max_bs
+              and self.compilation_config.full_cuda_graph):
             # Pad state tensor for CUDA graph
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)
             self.state_indices_tensor[:num_decodes].copy_(state_indices_tensor,

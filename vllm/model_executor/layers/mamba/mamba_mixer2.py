@@ -580,12 +580,10 @@ class MambaMixer2(MambaBase, CustomOp):
             # If prefix caching is enabled, retrieve the relevant variables
             # for prefill and decode
             last_state_idx_d, last_state_idx_p = torch.split(
-                attn_metadata.last_state_idx[:num_actual_tokens],
-                [num_decodes, num_prefills],
+                attn_metadata.last_state_idx, [num_decodes, num_prefills],
                 dim=0)
             current_last_idx_d, current_last_idx_p = torch.split(
-                attn_metadata.current_last_idx[:num_actual_tokens],
-                [num_decodes, num_prefills],
+                attn_metadata.current_last_idx, [num_decodes, num_prefills],
                 dim=0)
             # Prefill-only variables:
             current_first_idx_p = attn_metadata.current_first_idx_p
