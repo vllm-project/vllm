@@ -57,6 +57,10 @@ check_required_files() {
 }
 
 check_hf_token() {
+    if [[ "${MODEL}" != meta-llama* ]]; then
+        echo "MODEL does not start with 'meta-llama', skipping check_hf_token."
+        return 0
+    fi
     if [ -z "$HF_TOKEN" ]; then
         echo "HF_TOKEN is not set. Please set it to your Hugging Face token."
         echo "Example: export HF_TOKEN=your_token_here"
@@ -166,7 +170,7 @@ main() {
         local kv_port=$((21001 + i))
 
         echo "  Prefill server $((i+1)): GPU $gpu_id, Port $port, KV Port $kv_port"
-        CUDA_VISIBLE_DEVICES=$gpu_id VLLM_USE_V1=1 vllm serve $MODEL \
+        CUDA_VISIBLE_DEVICES=$gpu_id VLLM_USE_V1=1 VLLM_TORCH_PROFILER_DIR=/home/ubuntu/data/vllm_traces/pd_prefill vllm serve $MODEL \
         --enforce-eager \
         --host 0.0.0.0 \
         --port $port \
@@ -194,7 +198,7 @@ main() {
         local kv_port=$((22001 + i))
 
         echo "  Decode server $((i+1)): GPU $gpu_id, Port $port, KV Port $kv_port"
-        VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=$gpu_id vllm serve $MODEL \
+        VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=$gpu_id VLLM_TORCH_PROFILER_DIR=/home/ubuntu/data/vllm_traces/pd_decode vllm serve $MODEL \
         --enforce-eager \
         --host 0.0.0.0 \
         --port $port \
@@ -231,10 +235,10 @@ main() {
     # Run Benchmark
     # =============================================================================
     cd ../../../benchmarks/
-    vllm bench serve --port 10001 --seed $(date +%s) \
+    vllm bench serve --port 8000 --seed $(date +%s) \
         --model $MODEL \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
-        --num-prompts 200 --burstiness 100 --request-rate 2 | tee benchmark.log
+        --num-prompts 1 --burstiness 100 --request-rate 2 --profile | tee benchmark.log
 
     echo "Benchmarking done. Cleaning up..."
 
