@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Generator
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import Callable, Optional, Union, final
+from typing import Callable, Generic, Optional, TypeVar, Union, final
 
 import torch
 
@@ -13,9 +14,12 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (  # yapf: disable
     _resize_cache, count_expert_num_tokens)
 from vllm.utils import cdiv
-from vllm.v1.worker.ubatching import (dbo_current_ubatch_id, dbo_enabled,
-                                      dbo_maybe_run_recv_hook,
-                                      dbo_register_recv_hook, dbo_yield)
+from vllm.v1.worker.ubatching import (
+    Schedule, dbo_current_ubatch_id, dbo_maybe_run_recv_hook,
+    dbo_register_recv_hook, dbo_switch_to_comm, dbo_switch_to_compute,
+    dbo_switch_to_compute_sync, dbo_yield,
+    dbo_yield_and_switch_from_comm_to_compute,
+    dbo_yield_and_switch_from_compute_to_comm)
 
 #
 # This file defines a set of base classes used to make MoE kernels more modular.
@@ -125,6 +129,121 @@ PrepareResultType = tuple[
 ]
 
 ReceiverType = Callable[[], PrepareResultType]
+_R = TypeVar('_R')
+
+
+#
+# Prepare and Finalize Op Chains
+#
+# The prepare and finalize functions are broken down into a chain of sequential
+# operations/steps.
+#
+class _PhasedGen(Generic[_R]):
+    """
+    Enforce an exact number of yields (phases), then a final return.
+
+    Contract:
+      - The generator must yield exactly `expected_yields` times.
+      - The next advance must StopIteration with a return value (may be None).
+      - Early StopIteration or extra yields raise RuntimeError.
+      - Duplicate step/finish after completion raises RuntimeError.
+    """
+    __slots__ = ("_gen", "_expected", "_steps", "_done", "_ret")
+
+    def __init__(self, gen: Generator[None, None, _R], expected_yields: int):
+        self._gen = gen
+        self._expected = expected_yields
+        self._steps = 0
+        self._done = False
+        self._ret: Optional[_R] = None
+
+    def step(self, label: str) -> None:
+        if self._done:
+            raise RuntimeError(
+                f"Generator already finished; unexpected '{label}'.")
+        if self._steps >= self._expected:
+            raise RuntimeError(
+                f"Too many steps: called '{label}' after {self._expected} "
+                "phases; expected to finish instead.")
+        try:
+            next(self._gen)
+        except StopIteration as exc:
+            raise RuntimeError(
+                f"Generator ended early during '{label}' "
+                f"(completed {self._steps}/{self._expected} phases).") from exc
+        self._steps += 1
+
+    def finish(self, label: str) -> _R:
+        if self._done:
+            raise RuntimeError(
+                f"Generator already finished; duplicate '{label}'.")
+        if self._steps != self._expected:
+            raise RuntimeError(
+                f"Cannot finish at '{label}': only {self._steps}/"
+                f"{self._expected} phases completed.")
+        try:
+            next(self._gen)
+        except StopIteration as e:
+            self._done = True
+            self._ret = e.value  # may be None
+            return self._ret  # type: ignore[return-value]
+        else:
+            raise RuntimeError(
+                f"Generator yielded more than expected ({self._expected}); "
+                f"should have finished at '{label}'.")
+
+
+@dataclass
+class AsyncOps(Generic[_R]):
+    """
+    3-phase async:
+      1) prepare()
+      2) send()
+      3) recv()
+      4) finish() -> R
+    """
+    prepare: Callable[[], None]
+    send: Callable[[], None]
+    recv: Callable[[], None]
+    finish: Callable[[], _R]
+
+    @classmethod
+    def from_generator(cls, gen: Generator[None, None, _R]) -> 'AsyncOps[_R]':
+        ph = _PhasedGen[_R](gen, expected_yields=3)
+        return cls(
+            prepare=lambda: ph.step("prepare"),
+            send=lambda: ph.step("send"),
+            recv=lambda: ph.step("recv"),
+            finish=lambda: ph.finish("finish"),
+        )
+
+
+@dataclass
+class SyncOps(Generic[_R]):
+    """
+    2-phase sync:
+      1) prepare()
+      2) send_recv()
+      3) finish() -> R
+    """
+    prepare: Callable[[], None]
+    send_recv: Callable[[], None]
+    finish: Callable[[], _R]
+
+    @classmethod
+    def from_generator(cls, gen: Generator[None, None, _R]) -> 'SyncOps[_R]':
+        ph = _PhasedGen[_R](gen, expected_yields=2)
+        return cls(
+            prepare=lambda: ph.step("prepare"),
+            send_recv=lambda: ph.step("send_recv"),
+            finish=lambda: ph.finish("finish"),
+        )
+
+
+AsyncPrepareOps = AsyncOps[PrepareResultType]
+SyncPrepareOps = SyncOps[PrepareResultType]
+AsyncFinalizeOps = AsyncOps[None]
+SyncFinalizeOps = SyncOps[None]
 
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
@@ -135,7 +254,7 @@ class FusedMoEPrepareAndFinalize(ABC):
     """
 
     @abstractmethod
-    def prepare(
+    def create_prepare_ops(
         self,
         a1: torch.Tensor,
         topk_weights: torch.Tensor,
@@ -144,7 +263,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> PrepareResultType:
+    ) -> Union[SyncPrepareOps, AsyncPrepareOps]:
         """
         Perform any quantization (and/or) dispatching needed for this kernel.
         - a1: The (unquantized) input to the MoE layer.
@@ -175,56 +294,8 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         return False
 
-    def prepare_async(
-        self,
-        a1: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool,
-        quant_config: FusedMoEQuantConfig,
-    ) -> Union[tuple[Callable, ReceiverType], ReceiverType]:
-        """
-        Perform any quantization (and/or) dispatching needed for this kernel
-        but do not wait for results from other workers.
-        - a1: The (unquantized) input to the MoE layer.
-        - a1_scale: Optional scales for a1
-        - a2_scale: Optional scales for the second MoE gemm.  Required to make
-          sure the quantization is consistent for both gemms.
-        - topk_ids: The topk ids.
-        - topk_weights: The topk weights.
-        - num_experts: The total number of experts in the global expert space.
-        - expert_map: A tensor mapping expert indices from the global expert
-          space to the local expert space of the expert parallel shard.
-        - apply_router_weight_on_input: When True, apply the weights to the
-          activations, before quantization + dispatching.
-
-        Returns a callback or a hook callback pair that when invoked waits for 
-        results from other workers and has the same return signature as 
-        `prepare`, if a hook is returned this is more lightweight check that
-        the recv is complete without doing extra work (used by DBO, will be 
-        refactored in the very near future)
-        
-        e.g.
-
-        ret = obj.prepare_async(...)
-        
-        if isinstance(ret, tuple):
-            hook, receiver = ret
-            hook()
-
-        if hook is not None:
-        a, a_scales, expert_meta, topk_ids, topk_weights = receiver()
-
-        is equivalent to:
-
-        a, a_scales, expert_meta, topk_ids, topk_weights = obj.prepare(...)
-        """
-        raise NotImplementedError
-
     @abstractmethod
-    def finalize(
+    def create_finalize_ops(
         self,
         output: torch.Tensor,
         fused_expert_output: torch.Tensor,
@@ -232,7 +303,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: TopKWeightAndReduce,
-    ) -> None:
+    ) -> Union[SyncFinalizeOps, AsyncFinalizeOps]:
         """
         Perform any combine plus apply weights and perform a reduction on the
         fused experts output.
@@ -245,48 +316,6 @@ class FusedMoEPrepareAndFinalize(ABC):
           fused_expert_output.
         - weight_and_reduce_impl: An optional TopKWeightAndReduce
           implementation.
-        """
-        raise NotImplementedError
-
-    def finalize_async(
-        self,
-        output: torch.Tensor,
-        fused_expert_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: TopKWeightAndReduce,
-    ) -> Union[tuple[Callable, Callable], Callable]:
-        """
-        Perform any combine plus apply weights and perform a reduction on the
-        fused experts output but do not wait for results from other workers.
-        - output: The output tensor, written in place.  Must be (M, K) shape.
-        - fused_expert_output: The unweighted, unreduced output of the fused
-          experts, it will have (M, topk, K) shape.
-        - topk_weights: The weights to be applied to the fused_experts_output.
-        - topk_ids: The topk_ids.
-        - apply_router_weight_on_input: When False, apply the weights to
-          fused_expert_output.
-        - weight_and_reduce_impl: An optional TopKWeightAndReduce
-          implementation.
-
-        Returns a callback or a hook callback pair that when invoked waits for 
-        results from other workers and has the same return signature as 
-        `finalize`, if a hook is returned this is more lightweight check that
-        the recv is complete without doing extra work (used by DBO, will be 
-        refactored in the very near future)
-
-        ret = obj.finalize_async(output, ...)
-        ... output not valid yet ...
-        if isinstance(ret, tuple):
-            hook, receiver = ret
-            hook()
-        receiver()
-        ... output valid here ...
-
-        is equivalent to:
-
-        obj.finalize(output, ...)
         """
         raise NotImplementedError
 
@@ -624,6 +653,9 @@ class FusedMoEModularKernel(torch.nn.Module):
     layer due to any layer specific state that may be used by the component
     objects.
     """
+    fused_out_buffer = SharedResizableBuffer()
+    workspace13_buffer = SharedResizableBuffer()
+    workspace2_buffer = SharedResizableBuffer()
 
     class SharedBuffers:
 
@@ -777,6 +809,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         (_, _, fused_out_shape, _) = self.fused_experts.workspace_shapes(
             a1, a1q, M, N, K, top_k, global_num_experts, local_num_experts,
             expert_tokens_meta)
+
         ubatch_idx = dbo_current_ubatch_id()
         buffers = self.shared_buffers[ubatch_idx]
         fused_out = buffers.fused_out.get(fused_out_shape,
@@ -911,53 +944,43 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
-        if not self.prepare_finalize.supports_async():
-            # We shouldn't be running an a2a kernel that doesn't
-            # support async prepare/finalize
-            # TODO(lucas): enable in follow-up
-            assert not dbo_enabled()
+        shared_output: Optional[torch.Tensor] = None
 
-            (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
-             _expert_topk_weights) = self.prepare_finalize.prepare(
-                 a1,
-                 topk_weights,
-                 topk_ids,
-                 global_num_experts,
-                 expert_map,
-                 apply_router_weight_on_input,
-                 self.fused_experts.quant_config,
-             )
+        prepare_ops = self.prepare_finalize.create_prepare_ops(
+            a1,
+            topk_weights,
+            topk_ids,
+            global_num_experts,
+            expert_map,
+            apply_router_weight_on_input,
+            self.fused_experts.quant_config,
+        )
+
+        prepare_ops.prepare()
+
+        if isinstance(prepare_ops, SyncOps):
+            # We yield before launching the dispatch kernel since the dispatch
+            # kernel will block the CPU so we want to queue up all the compute
+            # for the other ubatch before the dispatch kernel starts.
+            dbo_yield_and_switch_from_compute_to_comm()
+            prepare_ops.send_recv()
+            dbo_switch_to_compute_sync()
         else:
+            assert isinstance(prepare_ops, AsyncOps)
+
             # Overlap shared expert compute with all2all dispatch.
             dbo_maybe_run_recv_hook()
-            prepare_ret = self.prepare_finalize.prepare_async(
-                a1,
-                topk_weights,
-                topk_ids,
-                global_num_experts,
-                expert_map,
-                apply_router_weight_on_input,
-                self.fused_experts.quant_config,
-            )
+            prepare_ops.send()
 
-            # TODO(lucas): refactor this in the alternative schedules followup
-            # currently unpack if we have hook + receiver pair or just
-            # receiver (see finalize_async docstring)
-            hook, receiver = prepare_ret \
-                if isinstance(prepare_ret, tuple) else (None, prepare_ret)
+            if dbo_register_recv_hook(
+                    lambda: prepare_ops.recv(),
+                    schedules=(Schedule.MLP_SHARED_OVERLAP, )):
+                dbo_yield(all_schedules=True)
+            else:
+                prepare_ops.recv()
 
-            if hook is not None:
-                if dbo_enabled():
-                    # If DBO is being used, register the hook with the ubatch
-                    # context and call it in dbo_maybe_run_recv_hook instead of
-                    #  passing it to the receiver.
-                    dbo_register_recv_hook(hook)
-                    dbo_yield()
-                else:
-                    hook()
-
-            (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
-             _expert_topk_weights) = receiver()
+        (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
+         _expert_topk_weights) = prepare_ops.finish()
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
@@ -991,51 +1014,42 @@ class FusedMoEModularKernel(torch.nn.Module):
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
 
-        shared_output: Optional[torch.Tensor] = None
+        finalize_ops = self.prepare_finalize.create_finalize_ops(
+            output,
+            fused_out,
+            topk_weights,
+            topk_ids,
+            apply_router_weight_on_input,
+            self.fused_experts.finalize_weight_and_reduce_impl(),
+        )
 
-        if not self.prepare_finalize.supports_async():
-            assert not dbo_enabled()
+        finalize_ops.prepare()
 
-            self.prepare_finalize.finalize(
-                output,
-                fused_out,
-                topk_weights,
-                topk_ids,
-                apply_router_weight_on_input,
-                self.fused_experts.finalize_weight_and_reduce_impl(),
-            )
-            if self.shared_experts is not None:
+        if isinstance(finalize_ops, SyncOps):
+            dbo_yield_and_switch_from_compute_to_comm()
+            finalize_ops.send_recv()
+
+            dbo_switch_to_compute()
+            if self.shared_experts is not None and shared_output is None:
                 shared_output = self.shared_experts(a1)
+            dbo_switch_to_comm()
+
+            dbo_yield_and_switch_from_comm_to_compute()
+            finalize_ops.finish()
         else:
-            finalize_ret = self.prepare_finalize.finalize_async(
-                output,
-                fused_out,
-                topk_weights,
-                topk_ids,
-                apply_router_weight_on_input,
-                self.fused_experts.finalize_weight_and_reduce_impl(),
-            )
+            assert isinstance(finalize_ops, AsyncOps)
+            dbo_maybe_run_recv_hook()
+            finalize_ops.send()
 
-            if self.shared_experts is not None:
+            if self.shared_experts is not None and shared_output is None:
                 shared_output = self.shared_experts(a1)
 
-            # TODO(lucas): refactor this in the alternative schedules followup
-            # currently unpack if we have hook + receiver pair or just
-            # receiver (see finalize_async docstring)
-            hook, receiver = finalize_ret \
-                if isinstance(finalize_ret, tuple) else (None, finalize_ret)
-
-            if hook is not None:
-                if dbo_enabled():
-                    # If DBO is being used, register the hook with the ubatch
-                    # context and call it in dbo_maybe_run_recv_hook instead of
-                    #  passing it to the receiver.
-                    dbo_register_recv_hook(hook)
-                    dbo_yield()
-                else:
-                    hook()
-
-            receiver()
+            if dbo_register_recv_hook(lambda: finalize_ops.recv(),
+                                      all_schedules=True):
+                dbo_yield(all_schedules=True)
+            else:
+                finalize_ops.recv()
+            finalize_ops.finish()
 
         if self.shared_experts is None:
             return output

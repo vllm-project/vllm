@@ -219,6 +219,7 @@ from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               infer_global_hyperparameters,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.ubatching import Schedule, dbo_yield
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -1699,6 +1700,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 kv_cache_dtype=self.kv_cache_dtype,
                 scale=layer._k_scale,
             )
+
+        dbo_yield(schedules=(Schedule.ATTN_SHARED_OVERLAP, ))
 
         if fp8_attention:
             kv_cache = kv_cache.view(current_platform.fp8_dtype())

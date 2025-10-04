@@ -334,6 +334,7 @@ class EngineArgs:
         ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = \
         ParallelConfig.dbo_prefill_token_threshold
+    microbatch_schedule: str = ParallelConfig.microbatch_schedule
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
     expert_placement_strategy: ExpertPlacementStrategy = \
@@ -705,6 +706,10 @@ class EngineArgs:
         parallel_group.add_argument(
             "--dbo-prefill-token-threshold",
             **parallel_kwargs["dbo_prefill_token_threshold"])
+        parallel_group.add_argument(
+            "--microbatch-schedule",
+            dest="microbatch_schedule",
+            **parallel_kwargs["microbatch_schedule"])
         parallel_group.add_argument("--enable-eplb",
                                     **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--eplb-config",
@@ -1332,6 +1337,7 @@ class EngineArgs:
             enable_dbo=self.enable_dbo,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
+            microbatch_schedule=self.microbatch_schedule,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
             expert_placement_strategy=self.expert_placement_strategy,
