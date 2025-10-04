@@ -80,7 +80,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of,
+from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of, make_async,
                         merge_async_iterators, random_uuid)
 
 logger = init_logger(__name__)
@@ -240,6 +240,8 @@ class OpenAIServing:
         self.enable_force_include_usage = enable_force_include_usage
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
+        self._apply_mistral_chat_template_async = make_async(
+            apply_mistral_chat_template, executor=self._tokenizer_executor)
 
         self._async_tokenizer_pool: dict[AnyTokenizer,
                                          AsyncMicrobatchTokenizer] = {}
@@ -798,7 +800,7 @@ class OpenAIServing:
         if tokenizer is None:
             request_prompt = "placeholder"
         elif isinstance(tokenizer, MistralTokenizer):
-            request_prompt = apply_mistral_chat_template(
+            request_prompt = await self._apply_mistral_chat_template_async(
                 tokenizer,
                 messages=messages,
                 **_chat_template_kwargs,
