@@ -102,4 +102,4 @@ def _inductor_partition_rule_context(op_names: list[str]):
     try:
         yield
     finally:
-        inductor_scheduler._custom_should_partition_fns.reset()
+        inductor_scheduler._custom_should_partition_fns.clear()
