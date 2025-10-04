@@ -134,7 +134,6 @@ class BlockTable:
             # Use a "virtual block" which equals to world_size * block_size
             # for block_table_indices calculation.
             virtual_block_size = self.block_size * self.dcp_world_size
-
             block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                    positions // virtual_block_size)
 

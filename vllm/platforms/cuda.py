@@ -130,6 +130,7 @@ class CudaPlatformBase(Platform):
         # Note: model_config may be None during testing
         # Note: block_size is initialized in
         # HybridAttentionMambaModelConfig.verify_and_update_config
+        # for models with both attention and mamba,
         # and doesn't need to be reinitialized here
         if model_config is not None and model_config.use_mla \
         and cache_config.block_size is not None:
