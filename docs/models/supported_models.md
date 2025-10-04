@@ -32,8 +32,9 @@ If the Transformers model implementation follows all the steps in [writing a cus
 - All the features listed in the [compatibility matrix](../features/README.md#feature-x-feature)
 - Any combination of the following vLLM parallelisation schemes:
     - Data parallel
-    - Pipeline parallel
     - Tensor parallel
+    - Expert parallel
+    - Pipeline parallel
 
 Checking if the modeling backend is Transformers is as simple as:
 
