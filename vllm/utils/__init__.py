@@ -2747,6 +2747,8 @@ class MemorySnapshot:
             self.measure()
 
     def measure(self):
+        from vllm.platforms import current_platform
+
         # we measure the torch peak memory usage via allocated_bytes,
         # rather than `torch.cuda.memory_reserved()` .
         # After `torch.cuda.reset_peak_memory_stats()`,
@@ -2756,6 +2758,24 @@ class MemorySnapshot:
             "allocated_bytes.all.peak", 0)
 
         self.free_memory, self.total_memory = torch.cuda.mem_get_info()
+        shared_sysmem_device_mem_sms = (
+            (8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
+        if current_platform.is_cuda() and \
+            current_platform.get_device_capability() in \
+            shared_sysmem_device_mem_sms:
+            # On UMA (Orin, Thor and Spark) platform,
+            # where both CPU and GPU rely on system memory,
+            # the cudaMemGetInfo function shows the amount of free system memory
+            # rather than what’s actually available.
+            # In the case,
+            # torch.cuda.mem_get_info() only reports "free" memory,
+            # which can be lower than what is actually
+            # available due to not including cache memory.
+            # There’s also a comprehensive reference page
+            # that explains how you can compute the proper value yourself.
+            # https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
+            self.free_memory = psutil.virtual_memory().available
+
         self.cuda_memory = self.total_memory - self.free_memory
 
         # torch.cuda.memory_reserved() is how many bytes

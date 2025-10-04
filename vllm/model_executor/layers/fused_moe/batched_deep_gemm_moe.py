@@ -303,7 +303,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         assert w2.size(1) == K
 
-        E, max_num_tokens, N, K, top_k_num = mk._moe_problem_size(
+        E, max_num_tokens, N, K, top_k_num = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids)
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))

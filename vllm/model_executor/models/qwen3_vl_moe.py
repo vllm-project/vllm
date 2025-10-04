@@ -296,7 +296,8 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
                                       prefix=maybe_prefix(prefix, "model"))
         self.lm_head = ParallelLMHead(self.config.vocab_size,
                                       self.config.hidden_size,
-                                      quant_config=self.quant_config)
+                                      quant_config=self.quant_config,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
