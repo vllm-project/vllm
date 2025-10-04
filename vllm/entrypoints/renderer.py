@@ -4,6 +4,7 @@
 import asyncio
 import io
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Annotated, Optional, Union
 
@@ -14,7 +15,7 @@ from pydantic import Field
 from vllm.config import ModelConfig
 from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
-from vllm.inputs.parse import parse_and_batch_prompt
+from vllm.inputs.parse import get_prompt_components, parse_raw_prompts
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import AsyncMicrobatchTokenizer
 
@@ -201,35 +202,37 @@ class CompletionRenderer(BaseRenderer):
         if truncate_prompt_tokens == 0:
             return []
 
-        # Parse and batch the input prompts
-        batch_inputs = parse_and_batch_prompt(prompt_or_prompts)
+        tasks = list[Awaitable[EngineTokensPrompt]]()
+        for prompt_input in parse_raw_prompts(prompt_or_prompts):
+            prompt, prompt_token_ids, _ = get_prompt_components(prompt_input)
 
-        tasks = []
-        for prompt_input in batch_inputs:
-            if prompt_input["is_tokens"] is True:
+            if prompt_token_ids is not None:
                 # Token input
                 # Note: detokenization is needed when echo is enabled,
                 # where the input token IDs are decoded back to text.
-                task = self._maybe_detokenize(prompt_input["content"],
-                                              config.max_length,
-                                              truncate_prompt_tokens,
-                                              config.cache_salt,
-                                              config.needs_detokenization)
-            else:
+                task = self._create_prompt_from_token_ids(
+                    prompt_token_ids,
+                    config.max_length,
+                    truncate_prompt_tokens,
+                    config.cache_salt,
+                    config.needs_detokenization,
+                )
+            elif prompt is not None:
                 # Text input
-                task = self._tokenize(prompt_input["content"],
-                                      config.max_length,
-                                      truncate_prompt_tokens,
-                                      config.add_special_tokens,
-                                      config.cache_salt)
+                task = self._create_prompt_from_text(
+                    prompt,
+                    config.max_length,
+                    truncate_prompt_tokens,
+                    config.add_special_tokens,
+                    config.cache_salt,
+                )
+            else:
+                raise NotImplementedError
+
             tasks.append(task)
 
         # Wait for all text tokenization to finish
-        if tasks:
-            tokenized_text_prompts = await asyncio.gather(*tasks)
-            return tokenized_text_prompts
-
-        return []
+        return await asyncio.gather(*tasks)
 
     async def render_prompt_and_embeds(
         self,
@@ -299,7 +302,7 @@ class CompletionRenderer(BaseRenderer):
 
         return token_ids[-truncate_prompt_tokens:]
 
-    async def _tokenize(
+    async def _create_prompt_from_text(
         self,
         text: str,
         max_length: Optional[int],
@@ -330,7 +333,7 @@ class CompletionRenderer(BaseRenderer):
         return self._create_tokens_prompt(encoded.input_ids, max_length,
                                           cache_salt, text)
 
-    async def _maybe_detokenize(
+    async def _create_prompt_from_token_ids(
         self,
         token_ids: list[int],
         max_length: Optional[int],
