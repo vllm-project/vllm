@@ -450,8 +450,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens  # noqa
         self.valid_sampled_token_count_event: Optional[torch.cuda.Event] = None
-        self.device_valid_sampled_token_count_event: Optional[torch.cuda.Event] = None
-        self.valid_sampled_token_count_copy_stream: Optional[torch.cuda.Stream] = None
+        self.device_valid_sampled_token_count_event: Optional[
+            torch.cuda.Event] = None
+        self.valid_sampled_token_count_copy_stream: Optional[
+            torch.cuda.Stream] = None
         if self.use_async_scheduling and self.num_spec_tokens:
             self.valid_sampled_token_count_event = torch.cuda.Event()
             self.device_valid_sampled_token_count_event = torch.cuda.Event()
@@ -983,7 +985,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # spec_flattened_indices = [1,   3, 4,    6, 7]
                 sample_flattened_indices.append(flattened_index - draft_len)
                 spec_flattened_indices.extend(
-                    range(flattened_index - draft_len + 1, flattened_index + 1))
+                    range(flattened_index - draft_len + 1,
+                          flattened_index + 1))
                 start = prev_index * self.num_spec_tokens
                 # prev_draft_token_indices is used to find which draft_tokens_id
                 # should be copied to input_ids
@@ -991,11 +994,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # flatten draft_tokens_id [1,2,3,4,5,6]
                 # draft_len of each request [1, 2, 1]
                 # then prev_draft_token_indices is [0,   2, 3,   4]
-                prev_draft_token_indices.extend(range(start, start + draft_len))
+                prev_draft_token_indices.extend(range(start,
+                                                      start + draft_len))
                 indices_match &= (prev_index == flattened_index)
                 max_flattened_index = max(max_flattened_index, flattened_index)
                 num_commmon_tokens += 1
             if request_is_resumed:
+                assert req_state is not None
                 cache_sampled_tokens.append(req_state.prev_sampled_tokens)
                 # resumed because num_new_tokens=0 in schedule
                 #  but in next step num_new_tokens>0 which in
@@ -2408,19 +2413,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 n_tokens_cache = len(sampled_ids)
 
                 # Sampled token IDs exceed the max model length by 1. This is
-                # legitimate as we can still sample 1 last token when the context
-                # length equals the max model length. Note that we do not need to
-                # cache this token ID as the sequence finishes after this step.
-                # Additionally, the buffers token_ids_cpu and is_token_ids are of
-                # size max model length only.
+                # legitimate as we can still sample 1 last token when the
+                # context length equals the max model length. Note that we do
+                # not need to  this token ID as the sequence finishes after
+                # this step. Additionally, the buffers token_ids_cpu and
+                # is_token_ids are of size max model length only.
                 if end_idx == self.max_model_len + 1:
                     n_tokens_cache -= 1
 
                 self.input_batch.token_ids_cpu[req_idx, start_idx:(
                     start_idx + n_tokens_cache)] = sampled_ids[:n_tokens_cache]
-                self.input_batch.is_token_ids[req_idx,
-                                            start_idx:(start_idx +
-                                                        n_tokens_cache)] = True
+                self.input_batch.is_token_ids[req_idx, start_idx:(
+                    start_idx + n_tokens_cache)] = True
 
                 self.input_batch.num_tokens_no_spec[req_idx] = end_idx
                 self.input_batch.num_tokens[req_idx] = end_idx
@@ -2799,24 +2803,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     )
                 if self.valid_sampled_token_count_event is not None:
                     default_stream = torch.cuda.current_stream()
-                    self.device_valid_sampled_token_count_event.record(default_stream)
+                    self.device_valid_sampled_token_count_event.record(
+                        default_stream)
                     self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(  # noqa
-                            1)
+                        1)
                     # initialize a new stream to overlap the copy operation with
                     # prepare_input of draft model.
-                    with torch.cuda.stream(self.valid_sampled_token_count_copy_stream):
+                    with torch.cuda.stream(
+                            self.valid_sampled_token_count_copy_stream):
                         self.valid_sampled_token_count_copy_stream.wait_event(
                             self.device_valid_sampled_token_count_event)
-                        self.valid_sampled_token_count_cpu[:valid_sampled_tokens_count.
-                                                        shape[0]].copy_(
-                                                            valid_sampled_tokens_count,
-                                                            non_blocking=True,
-                                                        )
-                    
+                        self.valid_sampled_token_count_cpu[:
+                                                           valid_sampled_tokens_count
+                                                           .shape[0]].copy_(
+                                                               valid_sampled_tokens_count,
+                                                               non_blocking=
+                                                               True,
+                                                           )
+
                         self.valid_sampled_token_count_event.record(
-                            self.valid_sampled_token_count_copy_stream
-                        )
-                        
+                            self.valid_sampled_token_count_copy_stream)
 
             if spec_decode_metadata is None:
                 token_indices_to_sample = None

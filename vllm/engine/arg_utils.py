@@ -21,17 +21,17 @@ from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
-from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigType, ConvertOption, DetailedTraceModules,
-                         Device, DeviceConfig, DistributedExecutorBackend,
-                         EPLBConfig, HfOverrides, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LogprobsMode,
-                         LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
-                         ModelDType, ObservabilityConfig, ParallelConfig,
-                         PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         StructuredOutputsConfig, TaskOption, TokenizerMode,
-                         VllmConfig, get_attr_docs, EAGLES)
+from vllm.config import (EAGLES, BlockSize, CacheConfig, CacheDType,
+                         CompilationConfig, ConfigType, ConvertOption,
+                         DetailedTraceModules, Device, DeviceConfig,
+                         DistributedExecutorBackend, EPLBConfig, HfOverrides,
+                         KVEventsConfig, KVTransferConfig, LoadConfig,
+                         LogprobsMode, LoRAConfig, MambaDType, MMEncoderTPMode,
+                         ModelConfig, ModelDType, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
+                         RunnerOption, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, StructuredOutputsConfig,
+                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs)
 from vllm.config.multimodal import MMCacheType, MultiModalConfig
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.config.utils import get_field
@@ -1289,7 +1289,7 @@ class EngineArgs:
         data_parallel_rpc_port = self.data_parallel_rpc_port if (
             self.data_parallel_rpc_port
             is not None) else ParallelConfig.data_parallel_rpc_port
-        
+
         if self.async_scheduling:
             # Async scheduling does not work with the uniprocess backend.
             if self.distributed_executor_backend is None:
