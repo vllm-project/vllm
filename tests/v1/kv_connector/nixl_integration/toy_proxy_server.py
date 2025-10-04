@@ -195,7 +195,25 @@ async def stream_service_response(client_info: dict, endpoint: str,
                                             headers=headers) as response:
         logger.info("Decode server response status: %s for request %s",
                     response.status_code, request_id)
-        response.raise_for_status()
+
+        # handle error responses with context
+        if response.status_code >= 400:
+            error_body = await response.aread()
+            try:
+                import json
+                error_data = json.loads(error_body)
+                logger.error(
+                    "Decode server error %d for request %s: %s. " \
+                    "Error context: %s",
+                    response.status_code, request_id,
+                    error_data.get('message', 'no message'),
+                    error_data.get('error_context', 'no context'))
+            except json.JSONDecodeError:
+                logger.error("Decode server error %d for request %s: %s",
+                             response.status_code, request_id,
+                             error_body.decode('utf-8'))
+            response.raise_for_status()
+
         async for chunk in response.aiter_bytes():
             yield chunk
 
