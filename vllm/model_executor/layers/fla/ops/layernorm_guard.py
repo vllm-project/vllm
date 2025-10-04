@@ -160,16 +160,15 @@ def layer_norm_fwd_kernel(
     tl.store(Y_base, y, mask=mask)
 
 
-# Cache for device properties to avoid repeated queries
-_device_sm_count_cache = {}
+@lru_cache
+def _get_sm_count(device: torch.device) -> int:
+    """Get and cache the SM count for a given device."""
+    props = torch.cuda.get_device_properties(device)
+    return props.multi_processor_count
 
 
 def calc_rows_per_block(M: int, device: torch.device) -> int:
-    # Cache SM count per device
-    if device not in _device_sm_count_cache:
-        props = torch.cuda.get_device_properties(device)
-        _device_sm_count_cache[device] = props.multi_processor_count
-    sm_count = _device_sm_count_cache[device]
+    sm_count = _get_sm_count(device)
     rows_per_block = next_power_of_2(cdiv(M, 2 * sm_count))
     rows_per_block = min(rows_per_block, 4)
     return rows_per_block
