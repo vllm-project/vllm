@@ -576,6 +576,7 @@ class OpenAIServingEmbedding(EmbeddingMixin):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
+        trust_request_chat_template: bool = False,
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(engine_client=engine_client,
@@ -586,6 +587,7 @@ class OpenAIServingEmbedding(EmbeddingMixin):
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.trust_request_chat_template = trust_request_chat_template
 
     async def create_embedding(
         self,
@@ -629,3 +631,29 @@ class OpenAIServingEmbedding(EmbeddingMixin):
             return self.create_error_response(str(e))
 
         return pooling_params
+
+    def _verify_chat_template(
+        self,
+        request: EmbeddingRequest,
+    ) -> Optional[ErrorResponse]:
+        if isinstance(request, EmbeddingChatRequest):
+            request_chat_template = request.chat_template
+            chat_template_kwargs = request.chat_template_kwargs
+            if not self.trust_request_chat_template and (
+                    request_chat_template is not None or
+                (chat_template_kwargs
+                 and chat_template_kwargs.get("chat_template") is not None)):
+                return self.create_error_response(
+                    "Chat template is passed with request, but "
+                    "--trust-request-chat-template is not set. "
+                    "Refused request with untrusted chat template.")
+        return None
+
+    async def _preprocess(
+        self,
+        ctx: ServeContext,
+    ) -> Optional[ErrorResponse]:
+        error_check_ret = self._verify_chat_template(ctx.request)
+        if error_check_ret is not None:
+            return error_check_ret
+        return await super()._preprocess(ctx)

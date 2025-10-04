@@ -40,6 +40,7 @@ class OpenAIServingTokenization(OpenAIServing):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
+        trust_request_chat_template: bool = False,
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(engine_client=engine_client,
@@ -50,6 +51,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.trust_request_chat_template = trust_request_chat_template
 
     async def create_tokenize(
         self,
@@ -71,6 +73,16 @@ class OpenAIServingTokenization(OpenAIServing):
             if isinstance(request, TokenizeChatRequest):
                 tool_dicts = (None if request.tools is None else
                               [tool.model_dump() for tool in request.tools])
+                request_chat_template = request.chat_template
+                chat_template_kwargs = request.chat_template_kwargs
+                if not self.trust_request_chat_template and (
+                        request_chat_template is not None or
+                    (chat_template_kwargs and
+                     chat_template_kwargs.get("chat_template") is not None)):
+                    return self.create_error_response(
+                        "Chat template is passed with request, but "
+                        "--trust-request-chat-template is not set. "
+                        "Refused request with untrusted chat template.")
                 (
                     _,
                     _,
@@ -80,7 +92,7 @@ class OpenAIServingTokenization(OpenAIServing):
                     tokenizer,
                     request.messages,
                     tool_dicts=tool_dicts,
-                    chat_template=request.chat_template or self.chat_template,
+                    chat_template=request_chat_template or self.chat_template,
                     chat_template_content_format=self.
                     chat_template_content_format,
                     add_generation_prompt=request.add_generation_prompt,

@@ -65,6 +65,7 @@ class OpenAIServingPooling(OpenAIServing):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
+        trust_request_chat_template: bool = False,
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(engine_client=engine_client,
@@ -75,6 +76,7 @@ class OpenAIServingPooling(OpenAIServing):
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.trust_request_chat_template = trust_request_chat_template
         io_processor_plugin = self.model_config.io_processor_plugin
         self.io_processor = get_io_processor(vllm_config, io_processor_plugin)
 
@@ -129,6 +131,16 @@ class OpenAIServingPooling(OpenAIServing):
                     prompt=validated_prompt, request_id=request_id)
 
             elif isinstance(request, PoolingChatRequest):
+                request_chat_template = request.chat_template
+                chat_template_kwargs = request.chat_template_kwargs
+                if not self.trust_request_chat_template and (
+                        request_chat_template is not None or
+                    (chat_template_kwargs and
+                     chat_template_kwargs.get("chat_template") is not None)):
+                    return self.create_error_response(
+                        "Chat template is passed with request, but "
+                        "--trust-request-chat-template is not set. "
+                        "Refused request with untrusted chat template.")
                 (
                     _,
                     _,
