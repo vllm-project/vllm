@@ -36,7 +36,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -127,7 +127,21 @@ class Ernie4_5_MoeMoE(nn.Module):
         self.gate.e_score_correction_bias = nn.Parameter(
             torch.empty(config.moe_num_experts, dtype=torch.float32))
 
-        self.experts = FusedMoE(
+        if self.has_shared_experts:
+            intermediate_size = (config.moe_intermediate_size *
+                                 config.moe_num_shared_experts)
+            self.shared_experts = Ernie4_5_MoeMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                prefix=f"{prefix}.shared_experts",
+                reduce_results=False)
+        else:
+            self.shared_experts = None
+
+        self.experts = SharedFusedMoE(
+            shared_experts=self.shared_experts,
             num_experts=config.moe_num_experts,
             top_k=config.moe_k,
             hidden_size=config.hidden_size,
@@ -138,34 +152,19 @@ class Ernie4_5_MoeMoE(nn.Module):
             prefix=f"{prefix}.experts",
             e_score_correction_bias=self.gate.e_score_correction_bias)
 
-        if self.has_shared_experts:
-            intermediate_size = (config.moe_intermediate_size *
-                                 config.moe_num_shared_experts)
-            self.shared_experts = Ernie4_5_MoeMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                prefix=f"{prefix}.shared_experts",
-                reduce_results=self.experts.must_reduce_shared_expert_outputs(
-                ))
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
-        shared_output = None
-        if self.has_shared_experts:
-            shared_output = self.shared_experts(hidden_states)
 
         router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
 
         final_hidden_states = self.experts(hidden_states=hidden_states,
                                            router_logits=router_logits)
 
-        if self.has_shared_experts and \
-              shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
+        if self.has_shared_experts:
+            final_hidden_states = final_hidden_states[0] + final_hidden_states[
+                1]
 
         if self.tp_size > 1:
             final_hidden_states = (
@@ -437,7 +436,7 @@ class Ernie4_5_MoeModel(nn.Module):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
+        return SharedFusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

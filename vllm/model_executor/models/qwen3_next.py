@@ -6,7 +6,6 @@ from itertools import islice
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
@@ -23,7 +22,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fla.ops import (
     RMSNormGated, chunk_gated_delta_rule, fused_recurrent_gated_delta_rule)
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.model_executor.layers.layernorm import (
@@ -108,18 +107,6 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.physical_expert_end = (self.physical_expert_start +
                                     self.n_local_physical_experts)
 
-        self.experts = FusedMoE(num_experts=self.n_routed_experts,
-                                top_k=config.num_experts_per_tok,
-                                hidden_size=config.hidden_size,
-                                intermediate_size=config.moe_intermediate_size,
-                                reduce_results=False,
-                                renormalize=config.norm_topk_prob,
-                                quant_config=quant_config,
-                                prefix=f"{prefix}.experts",
-                                enable_eplb=self.enable_eplb,
-                                num_redundant_experts=self.n_redundant_experts,
-                                is_sequence_parallel=self.is_sequence_parallel)
-
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.num_experts,
                                      bias=False,
@@ -132,15 +119,26 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 intermediate_size=config.shared_expert_intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=self.experts.must_reduce_shared_expert_outputs(
-                ),
+                reduce_results=False,
+                expert_gate=torch.nn.Linear(config.hidden_size, 1, bias=False),
                 prefix=f"{prefix}.shared_expert",
             )
         else:
             self.shared_expert = None
-        self.shared_expert_gate = torch.nn.Linear(config.hidden_size,
-                                                  1,
-                                                  bias=False)
+
+        self.experts = SharedFusedMoE(
+            shared_experts=self.shared_expert,
+            num_experts=self.n_routed_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            reduce_results=False,
+            renormalize=config.norm_topk_prob,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
+            is_sequence_parallel=self.is_sequence_parallel)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
@@ -151,20 +149,14 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        shared_output = None
-        if self.shared_expert is not None:
-            shared_output = self.shared_expert(hidden_states)
-            if self.shared_expert_gate is not None:
-                shared_output = F.sigmoid(
-                    self.shared_expert_gate(hidden_states)) * shared_output
-
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states=hidden_states,
                                            router_logits=router_logits)
 
-        if shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
+        if self.shared_expert is not None:
+            final_hidden_states = final_hidden_states[0] + final_hidden_states[
+                1]
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
@@ -942,7 +934,7 @@ class Qwen3NextModel(nn.Module):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
+        return SharedFusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -1073,7 +1065,7 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         # Set MoE hyperparameters
         self.expert_weights = []
 
-        self.moe_layers: list[FusedMoE] = []
+        self.moe_layers: list[SharedFusedMoE] = []
         example_layer = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):

@@ -10,6 +10,8 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat, FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize)
+from vllm.model_executor.layers.fused_moe.shared_fused_moe import (
+    SharedFusedMoE)
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
 from vllm.triton_utils import HAS_TRITON
 
@@ -37,6 +39,7 @@ __all__ = [
     "FusedMoEPermuteExpertsUnpermute",
     "FusedMoEActivationFormat",
     "FusedMoEPrepareAndFinalize",
+    "SharedFusedMoE",
     "activation_without_mul",
     "override_config",
     "get_config",
