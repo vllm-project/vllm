@@ -122,6 +122,11 @@ class Mamba2AttentionMetadata:
     last_chunk_indices_p: Optional[torch.Tensor]
 
     state_indices_tensor: torch.Tensor  # shape: [batch,]
+    current_last_idx: torch.Tensor
+    current_first_idx_p: torch.Tensor
+    last_state_idx: torch.Tensor
+    context_lens_p: torch.Tensor
+    last_computed_offset_p: torch.Tensor
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: Optional[dict] = None
@@ -138,6 +143,24 @@ class Mamba2AttentionMetadataBuilder(
         self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
         assert self.chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models")
+        if self.vllm_config.cache_config.enable_prefix_caching:
+            self.state_indices_tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,
+                 cdiv(vllm_config.model_config.max_model_len,
+                      kv_cache_spec.block_size)),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.current_last_idx = torch.empty(
+                (self.decode_cudagraph_max_bs, ),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.last_state_idx = torch.empty(
+                (self.decode_cudagraph_max_bs, ),
+                dtype=torch.int32,
+                device=device,
+            )
 
     def build(self,
               common_prefix_len: int,
@@ -158,7 +181,45 @@ class Mamba2AttentionMetadataBuilder(
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
-        state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
+        context_lens, context_lens_p = None, None
+        current_first_idx, current_first_idx_p = None, None
+        last_computed_offset, last_computed_offset_p = None, None
+
+        if self.vllm_config.cache_config.enable_prefix_caching:
+            # Return a tensor of shape (#requests, #max blocks)
+            state_indices_tensor = common_attn_metadata.block_table_tensor
+
+            # Additional cache-related varaiables:
+            mamba_block_size = self.kv_cache_spec.block_size
+            seq_lens_pending = (
+                torch.roll(common_attn_metadata.query_start_loc, -1, -1) -
+                common_attn_metadata.query_start_loc)[:-1]
+            context_lens = common_attn_metadata.seq_lens - \
+                                 seq_lens_pending
+            last_computed_offset = \
+                context_lens % mamba_block_size
+            # Indices: last_computed <= current_first <= current_last
+            # Cases:
+            #  last_computed == current_first  if last state was partially
+            #                                  computed and needs to be updated
+            #  current_first == current_last   if no block crossing occurs, and
+            #                                  only one state will be stored
+            # 0th based indexing leads to "-1" -> e.g. 16 computed -> state[15]:
+            current_last_idx = cdiv(context_lens + seq_lens_pending,
+                                    mamba_block_size) - 1
+            current_first_idx = cdiv(context_lens + 1, mamba_block_size) - 1
+            last_state_idx = cdiv(context_lens, mamba_block_size) - 1
+            # -1 in case it's non-computed and causes later issues with indexing
+            last_state_idx = \
+                last_state_idx.clamp(min=0)
+
+        else:
+            # Always return just a single block per each request:
+            state_indices_tensor = common_attn_metadata.block_table_tensor[:,
+                                                                           0]
+            # Additional cache-related varaiables:
+            current_last_idx = None
+            last_state_idx = None
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -177,6 +238,16 @@ class Mamba2AttentionMetadataBuilder(
 
             query_start_loc_p = common_attn_metadata.query_start_loc[
                 -num_prefills - 1:] - num_decode_tokens
+
+            if self.vllm_config.cache_config.enable_prefix_caching:
+                assert context_lens is not None
+                context_lens_p = context_lens[num_reqs - num_prefills:num_reqs]
+                assert last_computed_offset is not None
+                last_computed_offset_p = last_computed_offset[
+                    num_reqs - num_prefills:num_reqs]
+                assert current_first_idx is not None
+                current_first_idx_p = current_first_idx[num_reqs -
+                                                        num_prefills:num_reqs]
 
             num_computed_tokens_p = \
                 common_attn_metadata.num_computed_tokens_cpu[
@@ -252,6 +323,19 @@ class Mamba2AttentionMetadataBuilder(
             state_indices_tensor = self.state_indices_tensor[:num_input_tokens]
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
+            if self.vllm_config.cache_config.enable_prefix_caching:
+                self.current_last_idx[:num_decodes].copy_(current_last_idx,
+                                                          non_blocking=True)
+                current_last_idx = \
+                    self.current_last_idx[:num_input_tokens]
+                current_last_idx[num_decodes:] = 0
+
+                self.last_state_idx[:num_decodes].copy_(last_state_idx,
+                                                        non_blocking=True)
+                last_state_idx = \
+                    self.last_state_idx[:num_input_tokens]
+                last_state_idx[num_decodes:] = 0
+
         attn_metadata = Mamba2AttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -269,5 +353,10 @@ class Mamba2AttentionMetadataBuilder(
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
+            current_last_idx=current_last_idx,
+            current_first_idx_p=current_first_idx_p,
+            last_state_idx=last_state_idx,
+            context_lens_p=context_lens_p,
+            last_computed_offset_p=last_computed_offset_p,
         )
         return attn_metadata
