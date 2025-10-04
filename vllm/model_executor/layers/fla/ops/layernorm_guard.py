@@ -13,6 +13,7 @@
 # This backward pass is faster for dimensions up to 8k, but after that it's much slower due to register spilling.
 # The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
 
+from functools import lru_cache
 from typing import Optional
 
 import torch
