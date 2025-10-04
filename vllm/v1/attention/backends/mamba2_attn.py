@@ -122,10 +122,10 @@ class Mamba2AttentionMetadata:
     last_chunk_indices_p: Optional[torch.Tensor]
 
     state_indices_tensor: torch.Tensor  # shape: [batch,]
-    block_idx_last_scheduled_token: torch.Tensor
-    block_idx_first_scheduled_token_p: torch.Tensor
-    block_idx_last_computed_token: torch.Tensor
-    num_computed_tokens_p: torch.Tensor
+    block_idx_last_scheduled_token: torch.Tensor  # shape: [batch,]
+    block_idx_first_scheduled_token_p: torch.Tensor  # shape: [batch,]
+    block_idx_last_computed_token: torch.Tensor  # shape: [batch,]
+    num_computed_tokens_p: torch.Tensor  # shape: [batch,]
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: Optional[dict] = None
