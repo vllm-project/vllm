@@ -18,7 +18,9 @@ apt autoremove -y
 
 echo 'import os; os.system("touch /tmp/changed.file")' >> vllm/__init__.py
 
-VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL=1 VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
+# TESTING, TO BE REMOVED
+VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL=1 VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e . \
+    --extra-index-url https://download.pytorch.org/whl/test/cu128
 
 # Run the script
 python3 -c 'import vllm'
