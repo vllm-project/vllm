@@ -191,11 +191,10 @@ class Mamba2AttentionMetadataBuilder(
 
             # Additional cache-related varaiables:
             mamba_block_size = self.kv_cache_spec.block_size
-            seq_lens_pending = (
-                torch.roll(common_attn_metadata.query_start_loc, -1, -1) -
-                common_attn_metadata.query_start_loc)[:-1]
+            query_lens = common_attn_metadata.query_start_loc[1:] - \
+                common_attn_metadata.query_start_loc[:-1]
             context_lens = common_attn_metadata.seq_lens - \
-                                 seq_lens_pending
+                                 query_lens
             last_computed_offset = \
                 context_lens % mamba_block_size
             # Indices: last_computed <= current_first <= current_last
@@ -205,7 +204,7 @@ class Mamba2AttentionMetadataBuilder(
             #  current_first == current_last   if no block crossing occurs, and
             #                                  only one state will be stored
             # 0th based indexing leads to "-1" -> e.g. 16 computed -> state[15]:
-            current_last_idx = cdiv(context_lens + seq_lens_pending,
+            current_last_idx = cdiv(context_lens + query_lens,
                                     mamba_block_size) - 1
             current_first_idx = cdiv(context_lens + 1, mamba_block_size) - 1
             last_state_idx = cdiv(context_lens, mamba_block_size) - 1
