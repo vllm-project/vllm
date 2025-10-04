@@ -33,6 +33,15 @@ class PrefixCacheStats:
 
 
 @dataclass
+class EngineStateStats:
+    """Stats for the engine state (sleep or awake)."""
+    # Whether engine is sleeping or not
+    sleep: int = 0
+    # Sleep level
+    level: int = 0
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
