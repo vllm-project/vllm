@@ -20,7 +20,7 @@ class LoRALayerWeights:
         rank: int,
         lora_alpha: int,
         lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
+        lora_b: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         embeddings_tensor: Optional[torch.Tensor] = None,
         scaling: Optional[float] = None,
@@ -197,3 +197,70 @@ class PackedLoRALayerWeights(LoRALayerWeights):
     @property
     def is_packed(self) -> bool:
         return True
+
+
+class ClassifierLoRALayerWeights(LoRALayerWeights):
+
+    def __init__(
+        self,
+        module_name,
+        rank,
+        lora_alpha,
+        lora_a: Optional[torch.Tensor] = None,
+        scaling=None,
+    ):
+        super().__init__(
+            module_name,
+            rank,
+            lora_alpha,
+            lora_a,
+            None,
+            None,
+            None,
+            scaling,
+        )
+        self.class_num = self.rank
+
+    @classmethod
+    def create_dummy_lora_weights(
+        cls,
+        module_name: str,
+        input_dim: int,
+        rank: int,
+        dtype: torch.dtype,
+        device: torch.types.Device,
+        embeddings_tensor_dim: Optional[int] = None,
+        bias_enabled: Optional[bool] = False,
+    ) -> "LoRALayerWeights":
+        pin_memory = str(device) == "cpu" and is_pin_memory_available()
+        lora_a = torch.zeros([rank, input_dim],
+                             dtype=dtype,
+                             device=device,
+                             pin_memory=pin_memory)
+        return cls(
+            module_name,
+            rank=rank,
+            lora_alpha=1,
+            lora_a=lora_a,
+        )
+
+    @classmethod
+    def from_config(
+        cls,
+        module_name: str,
+        rank: int,
+        lora_alpha: int,
+        scaling: float,
+    ) -> "LoRALayerWeights":
+        return cls(module_name, rank, lora_alpha, None, scaling)
+
+    def optimize(self) -> "LoRALayerWeights":
+        return self
+
+    @property
+    def output_dim(self) -> int:
+        return self.rank
+
+    @property
+    def input_dim(self) -> int:
+        raise NotImplementedError()

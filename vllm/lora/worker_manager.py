@@ -108,6 +108,11 @@ class WorkerLoRAManager:
             # to ensure correct loading of lora weights.
             model = self._adapter_manager.model
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
+            classifier_lora_name = None
+            if (peft_helper.task_type == "SEQ_CLS"
+                    and peft_helper.modules_to_save
+                    and self._adapter_manager.is_pooling_model):
+                classifier_lora_name = ".model.score.weight"
 
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_path,
@@ -121,7 +126,8 @@ class WorkerLoRAManager:
                 embedding_modules=self.embedding_modules,
                 embedding_padding_modules=self.embedding_padding_modules,
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
-                weights_mapper=hf_to_vllm_mapper)
+                weights_mapper=hf_to_vllm_mapper,
+                classifier_lora_name=classifier_lora_name)
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both

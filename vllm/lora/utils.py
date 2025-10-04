@@ -16,7 +16,8 @@ from vllm.logger import init_logger
 # being imported for _all_lora_classes below
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+from vllm.lora.layers import (BaseLayerWithLoRA, ClassifierWithLoRA,
+                              ColumnParallelLinearWithLoRA,
                               ColumnParallelLinearWithShardedLoRA,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
@@ -88,6 +89,16 @@ def from_layer_logits_processor(
                                   lm_head.get_sharded_to_full_mapping())
     ret.create_lora_weights(max_loras, lora_config, model_config)
     return ret
+
+
+def from_layer_classifier(
+        layer: nn.Module,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None) -> nn.Module:
+    classify_layer = ClassifierWithLoRA(layer)
+    classify_layer.create_lora_weights(max_loras, lora_config, model_config)
+    return classify_layer
 
 
 def replace_submodule(model: nn.Module, module_name: str,

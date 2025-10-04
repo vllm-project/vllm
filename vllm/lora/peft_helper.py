@@ -15,6 +15,10 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 logger = init_logger(__name__)
 
+SUPPORTED_TASK_TYPE = ["CAUSAL_LM", "SEQ_CLS"]
+
+SUPPORTED_MODULE_TO_SAVE = ["score", "classifier"]
+
 
 @dataclass
 class PEFTHelper:
@@ -28,7 +32,7 @@ class PEFTHelper:
     r: int
     lora_alpha: int
     target_modules: Union[list[str], str]
-
+    task_type: Literal["CAUSAL_LM", "SEQ_CLS"] = field(default="CAUSAL_LM")
     bias: Literal["none", "all", "lora_only"] = field(default="none")
     modules_to_save: Optional[list[str]] = field(default=None)
     # True to use Rank-Stabilized LoRA (rsLoRA, see: https://arxiv.org/abs/2312.03732)
@@ -39,16 +43,28 @@ class PEFTHelper:
     vllm_lora_scaling_factor: float = field(default=1.0)
     vllm_max_position_embeddings: Optional[int] = field(default=False)
 
-    def _validate_features(self) -> list[str]:
-        """
-        Check if there are any unsupported LoRA features.
-        """
-        error_msg = []
+    def _validate_modules_to_save(self) -> Optional[str]:
+
         if self.modules_to_save:
-            error_msg.append("vLLM only supports modules_to_save being None.")
+            if self.task_type == "SEQ_CLS":
+                unsupported_modules = [
+                    module for module in self.modules_to_save
+                    if module not in SUPPORTED_MODULE_TO_SAVE
+                ]
+                if unsupported_modules:
+                    return (
+                        f"For pooler model, vLLM only supports modules_to_save "
+                        f"include {', '.join(SUPPORTED_MODULE_TO_SAVE)} rather "
+                        f"than {', '.join(unsupported_modules)}.")
+            else:
+                return "vLLM only supports modules_to_save being None."
+
+        return None
+
+    def _validate_dora(self) -> Optional[str]:
+
         if self.use_dora:
-            error_msg.append("vLLM does not yet support DoRA.")
-        return error_msg
+            return "vLLM does not yet support DoRA."
 
     def __post_init__(self):
         if self.use_rslora:
@@ -115,7 +131,11 @@ class PEFTHelper:
         Validates the LoRA configuration settings against application 
         constraints and requirements.
         """
-        error_msg = self._validate_features()
+        error_msg = []
+        if mst_msg := self._validate_modules_to_save():
+            error_msg.append(mst_msg)
+        if dora_msg := self._validate_dora():
+            error_msg.append(dora_msg)
         if self.r > lora_config.max_lora_rank:
             error_msg.append(
                 f"LoRA rank {self.r} is greater than max_lora_rank"
