@@ -588,7 +588,6 @@ class MambaMixer2(MambaBase, CustomOp):
             # Prefill-only variables:
             current_first_idx_p = attn_metadata.current_first_idx_p
             context_lens_p = attn_metadata.context_lens_p
-            last_computed_offset_p = attn_metadata.last_computed_offset_p
         else:
             last_state_idx_d, last_state_idx_p = None, None
             current_last_idx_d, current_last_idx_p = None, None
@@ -722,11 +721,17 @@ class MambaMixer2(MambaBase, CustomOp):
                     # Get the location of the first chunk that is aligned on the
                     # block boundary.
                     first_aligned_chunk = chunk_pos + chunk_stride
-                    if last_computed_offset_p[seq_idx] > 0:
+
+                    # Calculate the number of computed tokens running into
+                    # the next mamba block
+                    num_unaligned_computed_tokens = \
+                        context_lens_p[seq_idx] % mamba_block_size
+
+                    if num_unaligned_computed_tokens > 0:
                         # If the number of computed tokens is not block aligned,
                         # then we need to shift the index accordingly
-                        first_aligned_chunk -= last_computed_offset_p[
-                            seq_idx] // chunk_size
+                        first_aligned_chunk -= \
+                            num_unaligned_computed_tokens // chunk_size
 
                     # Get states to write
                     from_where = varlen_states[

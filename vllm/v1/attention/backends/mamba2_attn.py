@@ -126,7 +126,6 @@ class Mamba2AttentionMetadata:
     current_first_idx_p: torch.Tensor
     last_state_idx: torch.Tensor
     context_lens_p: torch.Tensor
-    last_computed_offset_p: torch.Tensor
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: Optional[dict] = None
@@ -183,7 +182,6 @@ class Mamba2AttentionMetadataBuilder(
 
         context_lens, context_lens_p = None, None
         current_first_idx, current_first_idx_p = None, None
-        last_computed_offset, last_computed_offset_p = None, None
 
         if self.vllm_config.cache_config.enable_prefix_caching:
             # Return a tensor of shape (#requests, #max blocks)
@@ -195,7 +193,6 @@ class Mamba2AttentionMetadataBuilder(
                 common_attn_metadata.query_start_loc[:-1]
             context_lens = common_attn_metadata.seq_lens - \
                                  query_lens
-            last_computed_offset = context_lens % mamba_block_size
             # Indices: last_computed <= current_first <= current_last
             # Cases:
             #  last_computed == current_first  if last state was partially
@@ -238,9 +235,6 @@ class Mamba2AttentionMetadataBuilder(
             if self.vllm_config.cache_config.enable_prefix_caching:
                 assert context_lens is not None
                 context_lens_p = context_lens[num_reqs - num_prefills:num_reqs]
-                assert last_computed_offset is not None
-                last_computed_offset_p = last_computed_offset[
-                    num_reqs - num_prefills:num_reqs]
                 assert current_first_idx is not None
                 current_first_idx_p = current_first_idx[num_reqs -
                                                         num_prefills:num_reqs]
@@ -353,6 +347,5 @@ class Mamba2AttentionMetadataBuilder(
             current_first_idx_p=current_first_idx_p,
             last_state_idx=last_state_idx,
             context_lens_p=context_lens_p,
-            last_computed_offset_p=last_computed_offset_p,
         )
         return attn_metadata
