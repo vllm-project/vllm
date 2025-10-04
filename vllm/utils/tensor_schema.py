@@ -137,8 +137,7 @@ class TensorSchema:
 
             if i == 0:
                 first_shape = shape
-
-            if not self._match_shape_with_dynamic(
+            elif not self._match_shape_with_dynamic(
                     shape,
                     first_shape,
                     expected_shape,
@@ -146,7 +145,7 @@ class TensorSchema:
             ):
                 raise ValueError(
                     f"{field_name}{self._fmt_indexer(leading_idxs)} "
-                    f"contains inconsistent shapes: {first_shape} at "
+                    f"contains inconsistent shapes: {first_shape} "
                     f"(index 0) vs {shape} (index {i})")
 
         # Treat the list as a stacked tensor:
