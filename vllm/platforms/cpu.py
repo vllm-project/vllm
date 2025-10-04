@@ -71,6 +71,10 @@ class CpuPlatform(Platform):
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
     dist_backend: str = "gloo"
+    ray_device_key: str = "CPU"
+    additional_env_vars: list[str] = [
+        "GLOO_SOCKET_IFNAME",
+    ]
     device_control_env_var = "CPU_VISIBLE_MEMORY_NODES"
 
     @property
@@ -138,6 +142,7 @@ class CpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        import vllm.envs as envs
         model_config = vllm_config.model_config
 
         if model_config is not None:
@@ -180,13 +185,20 @@ class CpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         if (parallel_config.world_size > 1
                 and parallel_config.distributed_executor_backend is not None
-                and parallel_config.distributed_executor_backend != "mp"):
+                and parallel_config.distributed_executor_backend
+                not in ["mp", "ray"]):
             logger.warning(("%s is not supported on CPU, fallback to mp "
                             "distributed executor backend."),
                            parallel_config.distributed_executor_backend)
             parallel_config.distributed_executor_backend = "mp"
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
+        if (parallel_config.distributed_executor_backend == "ray"
+                and envs.VLLM_CPU_OMP_THREADS_BIND != "auto"):
+            logger.warning(
+                "VLLM_CPU_OMP_THREADS_BIND is set but Ray distributed"
+                "executor on CPU will fallback"
+                "to VLLM_CPU_OMP_THREADS_BIND=auto")
         # Disable DBO
         if parallel_config.enable_dbo:
             logger.warning(

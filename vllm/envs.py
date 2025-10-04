@@ -126,6 +126,7 @@ if TYPE_CHECKING:
     VLLM_MLA_DISABLE: bool = False
     VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH: int = 32
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
+    VLLM_RAY_PER_WORKER_CPUS: int = 1
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_DP_RANK: int = 0
@@ -243,13 +244,13 @@ def env_with_choices(
         case_sensitive: bool = True) -> Callable[[], Optional[str]]:
     """
     Create a lambda that validates environment variable against allowed choices
-    
+
     Args:
         env_name: Name of the environment variable
         default: Default value if not set (can be None)
         choices: List of valid string options or callable that returns list
         case_sensitive: Whether validation should be case sensitive
-        
+
     Returns:
         Lambda function for environment_variables dict
     """
@@ -1067,6 +1068,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # so that users can colocate other actors on the same GPUs as vLLM.
     "VLLM_RAY_PER_WORKER_GPUS":
     lambda: float(os.getenv("VLLM_RAY_PER_WORKER_GPUS", "1.0")),
+
+
+     # (CPU platform) Number of CPU cores per worker in Ray, must be >=1,
+     # will influence how ray schedules actors across nodes
+    "VLLM_RAY_PER_WORKER_CPUS":
+    lambda: int(os.getenv("VLLM_RAY_PER_WORKER_CPUS", "1")),
 
     # Bundle indices for Ray, if it is set, it can control precisely
     # which indices are used for the Ray bundle, for every worker.

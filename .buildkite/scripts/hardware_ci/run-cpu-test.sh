@@ -84,7 +84,6 @@ function cpu_tests() {
     set -e
     pytest -x -s -v \
     tests/lora/test_qwen2vl.py"
-
   # online serving: tp+pp
   docker exec cpu-test-"$NUMA_NODE" bash -c '
     set -e
@@ -111,6 +110,42 @@ function cpu_tests() {
       --model meta-llama/Llama-3.2-3B-Instruct \
       --num-prompts 20 \
       --endpoint /v1/completions
+    kill -s SIGTERM $server_pid &'
+}
+  # online serving: Ray dp+tp
+  docker exec cpu-test-"$NUMA_NODE" bash -c '
+    set -e
+    VLLM_CPU_KVCACHE_SPACE=1 VLLM_RAY_PER_WORKER_CPUS=1 VLLM_CPU_SGL_KERNEL=1 vllm serve Qwen/Qwen3-0.6B -tp=2 -dp=2 --data-parallel-backend=ray --max-model-len=20 &
+    server_pid=$!
+    timeout 600 bash -c "until curl localhost:8000/v1/models; do sleep 1; done" || exit 1
+    vllm bench serve \
+        --backend vllm \
+        --dataset-name random \
+        --model Qwen/Qwen3-0.6B \
+        --num-prompts 10 \
+        --random-output-len 10 \
+        --random-input-len 10 \
+        --endpoint /v1/completions
+    output=$(ray list actors --detail --filter "State=ALIVE")
+    echo "$output" && [ $(echo "$output" | grep -c "RayWorkerWrapper") -eq 4 ] && echo "Ray: OK" || echo "unexpected number of workers"
+    kill -s SIGTERM $server_pid &'
+}
+  # online serving: Ray pp+tp
+  docker exec cpu-test-"$NUMA_NODE" bash -c '
+    set -e
+    VLLM_CPU_KVCACHE_SPACE=1 VLLM_RAY_PER_WORKER_CPUS=1 VLLM_CPU_SGL_KERNEL=1 vllm serve Qwen/Qwen3-0.6B -tp=2 -pp=2 --distributed-executor-backend=ray --max-model-len=20 &
+    server_pid=$!
+    timeout 600 bash -c "until curl localhost:8000/v1/models; do sleep 1; done" || exit 1
+    vllm bench serve \
+        --backend vllm \
+        --dataset-name random \
+        --model Qwen/Qwen3-0.6B \
+        --num-prompts 10 \
+        --random-output-len 10 \
+        --random-input-len 10 \
+        --endpoint /v1/completions
+    output=$(ray list actors --detail --filter "State=ALIVE")
+    echo "$output" && [ $(echo "$output" | grep -c "RayWorkerWrapper") -eq 4 ] && echo "Ray: OK" || echo "unexepected number of workers"
     kill -s SIGTERM $server_pid &'
 }
 

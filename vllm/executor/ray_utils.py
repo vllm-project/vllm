@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import msgspec
 
+import vllm.envs as envs
 import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.distributed import get_pp_group
@@ -62,8 +63,11 @@ try:
             if not device_key:
                 raise RuntimeError("current platform %s does not support ray.",
                                    vllm.platforms.current_platform.device_name)
-            gpu_ids = ray.get_runtime_context().get_accelerator_ids(
-            )[device_key]
+            if device_key == "CPU":
+                gpu_ids = []
+            else:
+                gpu_ids = ray.get_runtime_context().get_accelerator_ids(
+                )[device_key]
             return node_id, gpu_ids
 
         def execute_model_spmd(
@@ -331,11 +335,12 @@ def initialize_ray_cluster(
 
         # We are in a placement group
         bundles = current_placement_group.bundle_specs
+
         # Verify that we can use the placement group.
         device_bundles = 0
         for bundle in bundles:
             bundle_devices = bundle.get(device_str, 0)
-            if bundle_devices > 1:
+            if bundle_devices > 1 and not current_platform.is_cpu():
                 raise ValueError(
                     "Placement group bundle cannot have more than 1 "
                     f"{device_str}.")
@@ -359,15 +364,20 @@ def initialize_ray_cluster(
                 "The number of required %ss exceeds the total "
                 "number of available %ss in the placement group.", device_str,
                 device_str)
+
+        num_devices = 1.0
+        if device_str == "CPU":
+            num_devices = envs.VLLM_RAY_PER_WORKER_CPUS
         # Create a new placement group
         placement_group_specs: List[Dict[str, float]] = ([{
-            device_str: 1.0
+            device_str:
+            num_devices
         } for _ in range(parallel_config.world_size)])
 
         # vLLM engine is also a worker to execute model with an accelerator,
         # so it requires to have the device in a current node. Check if
         # the current node has at least one device.
-        current_ip = get_ip()
+        current_ip = ray.util.get_node_ip_address()
         current_node_id = ray.get_runtime_context().get_node_id()
         current_node_resource = available_resources_per_node()[current_node_id]
         if current_node_resource.get(device_str, 0) < 1:
@@ -414,3 +424,16 @@ def get_num_nodes_in_placement_group() -> int:
         num_nodes = len(nodes_in_pg)
 
     return num_nodes
+
+
+def get_local_world_size() -> int:
+    pg_table = ray.util.placement_group_table()
+    current_pg = ray.util.get_current_placement_group()
+    current_node_id = ray.get_runtime_context().get_node_id()
+    num_local_workers = 0
+    if current_pg:
+        for pg_key, pg in pg_table.items():
+            if pg_key == current_pg.id.hex():
+                num_local_workers = list(
+                    pg["bundles_to_node_id"].values()).count(current_node_id)
+    return num_local_workers

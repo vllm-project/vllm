@@ -759,6 +759,10 @@ async def collect_from_async_generator(
 
 def get_ip() -> str:
     host_ip = envs.VLLM_HOST_IP
+    if is_in_ray_actor():
+        import ray
+        host_ip = ray.util.get_node_ip_address()
+
     if "HOST_IP" in os.environ and "VLLM_HOST_IP" not in os.environ:
         logger.warning(
             "The environment variable HOST_IP is deprecated and ignored, as"
