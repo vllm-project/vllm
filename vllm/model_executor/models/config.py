@@ -4,7 +4,6 @@ from copy import deepcopy
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
-from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
@@ -290,7 +289,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
-        compilation_config = vllm_config.compilation_config
 
         # Set mamba block size to max_model_len (this may get
         # override by prefix caching logic later)
@@ -319,19 +317,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         logger.info("Disabling cascade attention since it is not supported "
                     "for hybrid models.")
         model_config.disable_cascade_attn = True
-
-        # TODO(tdoublep): remove as full cuda graph support is added
-        FCG_NOT_SUPPORTED_MODELS = [
-            "Lfm2ForCausalLM",
-            "MiniMaxText01ForCausalLM",
-        ]
-
-        if (model_config.architecture not in FCG_NOT_SUPPORTED_MODELS
-                and compilation_config.cudagraph_mode is None):
-            logger.info(
-                "Hybrid or mamba-based model detected: setting cudagraph mode "
-                "to FULL_AND_PIECEWISE in order to optimize performance.")
-            compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
 
 
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
