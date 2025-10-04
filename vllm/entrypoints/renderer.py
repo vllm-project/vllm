@@ -231,7 +231,6 @@ class CompletionRenderer(BaseRenderer):
 
             tasks.append(task)
 
-        # Wait for all text tokenization to finish
         return await asyncio.gather(*tasks)
 
     async def render_prompt_and_embeds(
