@@ -56,8 +56,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
-                         SupportsMultiModal, SupportsPP, SupportsQuant)
+from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
+                         SupportsQuant)
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     flatten_bn, make_empty_intermediate_tensors_factory,
                     maybe_prefix)
@@ -371,7 +371,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         prompt_ids, = processed_data.pop("input_ids").tolist()
         mm_token_type_ids = processed_data.pop(
             "mm_token_type_ids"
-        ) if "mm_token_type_ids" in processed_data else processed_data.pop(
+        ) if "mm_token_type_ids" in processed_data else processed_data.get(
             "token_type_ids")  # for gemma3 only
 
         return prompt_ids, processed_data, mm_token_type_ids
@@ -528,7 +528,10 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         self.attention_instances = self.create_attention_instances()
 
         # Input embeddings
-        if not isinstance(self.model.get_input_embeddings(), PPMissingLayer):
+        input_embeddings = self.model.get_input_embeddings()
+        if not isinstance(input_embeddings, PPMissingLayer):
+            # Some models use embedding scales
+            self.embed_scale = getattr(input_embeddings, "embed_scale", None)
             names = ("embedding_size", "hidden_size")
             embedding_dim = getattr_iter(self.text_config, names, None)
             assert embedding_dim is not None
@@ -661,6 +664,8 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             self.parallel_config)
         head_size = self.model_config.get_head_size()
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
+        logits_soft_cap = getattr(self.text_config, "attn_logit_softcapping",
+                                  None)
         start, end = get_pp_indices(self.text_config.num_hidden_layers,
                                     self.pp_rank, self.pp_size)
 
@@ -681,6 +686,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
+                logits_soft_cap=logits_soft_cap,
                 per_layer_sliding_window=per_layer_sliding_window,
                 prefix=f"{i}.attn",
                 attn_type=attn_type)
@@ -720,6 +726,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if not get_pp_group().is_first_rank:
             assert intermediate_tensors is not None
@@ -742,7 +749,8 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             use_cache=False,
             position_ids=position_ids,
             attention_instances=self.attention_instances,
-            return_dict=False)[0][0, ...]  # we remove batch dimension for now
+            return_dict=False,
+            **kwargs)[0][0, ...]  # we remove batch dimension for now
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -802,7 +810,10 @@ class TransformersForCausalLM(TransformersBase):
             self.lm_head = PPMissingLayer()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings()(input_ids)
+        inputs_embeds = self.model.get_input_embeddings()(input_ids)
+        if self.embed_scale is not None:
+            inputs_embeds *= self.embed_scale
+        return inputs_embeds
 
     def compute_logits(
         self,
@@ -837,6 +848,7 @@ def flatten_and_concat(x: list[torch.Tensor]) -> torch.Tensor:
     },
     enable_if=can_enable_torch_compile)
 class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
+    supports_multimodal_raw_input_only = True
     merge_by_field_config = True
     # Backwards compatibility for prev released models. State dicts back then
     # had different formats and cannot be loaded with `AutoModel` mapping as is
@@ -874,8 +886,12 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        # Gemma3 and PaliGemma needs `token_type_ids` to work correctly
+        # Other models will not have `token_type_ids` in kwargs
+        kwargs = {k: v for k, v in kwargs.items() if k == "token_type_ids"}
         model_output = super().forward(input_ids, positions,
-                                       intermediate_tensors, inputs_embeds)
+                                       intermediate_tensors, inputs_embeds,
+                                       **kwargs)
         return model_output
 
     def get_language_model(self) -> torch.nn.Module:
@@ -895,6 +911,7 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
             return None
 
         num_image_patches = kwargs.pop("num_image_patches")
+        kwargs.pop("token_type_ids", None)  # used only in `forward`
         if pixel_values is not None:
             vision_embeddings = self.model.get_image_features(
                 pixel_values, **kwargs)
@@ -919,45 +936,10 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
 
             return vision_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-        *,
-        is_multimodal: Optional[torch.Tensor] = None,
-        handle_oov_mm_token: bool = False,
-    ) -> torch.Tensor:
-        """
-        Apply token embeddings to `input_ids`.
+    get_input_embeddings = SupportsMultiModal.get_input_embeddings
 
-        If `multimodal_embeddings` is passed, scatter them into
-        `input_ids` according to the mask `is_multimodal`.
-
-        In case the multi-modal token IDs exceed the vocabulary size of
-        the language model, you can set `handle_oov_mm_token=False`
-        to avoid calling the language model's `get_input_embeddings` method
-        on those tokens.
-        """
-        from .utils import _merge_multimodal_embeddings
-
-        inputs_embeds = self._get_text_embeddings(
-            input_ids,
-            self.model.get_input_embeddings(),
-            is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
-        )
-
-        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
-            return inputs_embeds
-
-        if is_multimodal is None:
-            raise ValueError(
-                "`get_input_embeddings` now requires `is_multimodal` arg, "
-                "please update your model runner according to "
-                "https://github.com/vllm-project/vllm/pull/16229.")
-
-        return _merge_multimodal_embeddings(
-            inputs_embeds=inputs_embeds,
-            multimodal_embeddings=multimodal_embeddings,
-            is_multimodal=is_multimodal,
-        )
+    def _get_text_embeddings(self, *args, **kwargs) -> torch.Tensor:
+        inputs_embeds = super()._get_text_embeddings(*args, **kwargs)
+        if self.embed_scale is not None:
+            inputs_embeds *= self.embed_scale
+        return inputs_embeds
