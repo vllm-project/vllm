@@ -1926,6 +1926,10 @@ else:
     _supports_onednn = False
 
 
+def is_onednn_acl_supported():
+    return torch.ops._C.is_onednn_acl_supported()
+
+
 def create_onednn_mm(
     weight: torch.Tensor,  # [K, N]
     primitive_cache_size: int = 128,
