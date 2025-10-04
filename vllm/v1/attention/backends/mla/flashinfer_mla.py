@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
+from typing import ClassVar, Optional, Union
 
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
 from vllm.attention.backends.abstract import AttentionLayer, AttentionType
 from vllm.logger import init_logger
+from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
-                                                   MLACommonMetadata)
+                                                   MLACommonMetadata,
+                                                   MLACommonMetadataBuilder)
 
 logger = init_logger(__name__)
 
@@ -24,6 +26,10 @@ class FlashInferMLABackend(MLACommonBackend):
         return "FLASHINFER_MLA"
 
     @staticmethod
+    def get_builder_cls() -> type["FlashInferMLAMetadataBuilder"]:
+        return FlashInferMLAMetadataBuilder
+
+    @staticmethod
     def get_impl_cls() -> type["FlashInferMLAImpl"]:
         return FlashInferMLAImpl
 
@@ -33,6 +39,11 @@ g_fi_workspace = torch.zeros(
     dtype=torch.uint8,
     device="cuda",
 )
+
+class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+    cudagraph_support: ClassVar[
+        AttentionCGSupport] = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    pass
 
 
 class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
