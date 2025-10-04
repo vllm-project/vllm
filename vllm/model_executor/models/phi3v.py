@@ -109,7 +109,7 @@ class Phi3VImagePixelInputs(TensorSchema):
     type: Literal["pixel_values", "image_embeds"] = "pixel_values"
 
     # Supports either a stacked tensor or a list of (p, 3, h, w) tensors
-    data: Annotated[
+    pixel_values: Annotated[
         Union[torch.Tensor, list[torch.Tensor]],
         TensorShape("bn", "p", 3, "h", "w", dynamic_dims={"p"}
                     ),  # 'p' may vary across items
@@ -594,7 +594,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         if pixel_values is not None:
             return Phi3VImagePixelInputs(
                 type="pixel_values",
-                data=flatten_bn(pixel_values),
+                pixel_values=flatten_bn(pixel_values),
                 image_sizes=flatten_bn(image_sizes, concat=True),
                 resolve_bindings={
                     "h": CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size,
@@ -628,7 +628,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             )
 
         assert self.vision_embed_tokens is not None
-        image_embeds = self.vision_embed_tokens(image_input["data"],
+        image_embeds = self.vision_embed_tokens(image_input["pixel_values"],
                                                 image_input["image_sizes"])
 
         return image_embeds

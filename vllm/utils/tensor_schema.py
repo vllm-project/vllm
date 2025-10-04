@@ -94,34 +94,63 @@ class TensorSchema:
                 return False
         return True
 
-    def _validate_nested_tensors(
-        self,
-        value: Union[list[torch.Tensor], tuple[torch.Tensor, ...]],
-        field_name: str,
-        expected_shape: tuple[Union[int, str], ...],
-        dynamic_dims: set[str],
+    def _fmt_indexer(self, idxs: tuple[int, ...]) -> str:
+        if not idxs:
+            return ""
+
+        return str(list(idxs))
+
+    def _validate_field(
+            self,
+            value: object,
+            field_name: str,
+            expected_shape: tuple[Union[int, str], ...],
+            dynamic_dims: set[str],
+            leading_idxs: tuple[int, ...] = (),
     ) -> tuple[int, ...]:
-        """Validate a list/tuple of tensors and return the actual shape."""
+        """Validate a field and return the actual shape."""
+        if isinstance(value, (int, float)):
+            return ()  # Scalar
+        if isinstance(value, torch.Tensor):
+            return value.shape
+
+        if not isinstance(value, (list, tuple)):
+            raise TypeError(
+                f"{field_name}{self._fmt_indexer(leading_idxs)} is not "
+                f"one of the expected types: int, float, Tensor, list, tuple. "
+                f"Got: {type(value)}")
+
+        if len(value) == 0:
+            raise ValueError(f"{field_name}{self._fmt_indexer(leading_idxs)} "
+                             f"is an empty sequence")
+
         # Ensure all tensors in the list have the same
         # shape, besides dynamic dimensions
-        first = value[0]
         for i, v in enumerate(value):
-            if not isinstance(v, torch.Tensor):
-                raise ValueError(f"{field_name}[{i}] is not a "
-                                 f"torch.Tensor")
-            if not self._match_shape_with_dynamic(
-                    v.shape,
-                    first.shape,
+            shape = self._validate_field(
+                v,
+                field_name,
+                expected_shape[1:],
+                dynamic_dims,
+                leading_idxs=leading_idxs + (i, ),
+            )
+
+            if i == 0:
+                first_shape = shape
+            elif not self._match_shape_with_dynamic(
+                    shape,
+                    first_shape,
                     expected_shape,
                     dynamic_dims,
             ):
-                raise ValueError(f"{field_name} contains inconsistent "
-                                 f"shapes: {first.shape} vs {v.shape} "
-                                 f"at index {i}")
+                raise ValueError(
+                    f"{field_name}{self._fmt_indexer(leading_idxs)} "
+                    f"contains inconsistent shapes: {first_shape} "
+                    f"(index 0) vs {shape} (index {i})")
 
         # Treat the list as a stacked tensor:
         # shape = (len(list), *tensor.shape)
-        return (len(value), ) + first.shape
+        return (len(value), ) + first_shape
 
     def _validate_tensor_shape_expected(
         self,
@@ -187,36 +216,12 @@ class TensorSchema:
                 for arg in args:
                     if isinstance(arg, TensorShape):
                         expected_shape = arg.resolve(**self._resolve_bindings)
-                        if isinstance(value, (list, tuple)):
-                            # list/tuple of Tensors → shape = (len(value), ...)
-                            if value and isinstance(value[0], torch.Tensor):
-                                actual_shape = self._validate_nested_tensors(
-                                    value, field_name, expected_shape,
-                                    arg.dynamic_dims)
-                            elif value:
-                                # list/tuple of scalars → shape = (len(value),)
-                                actual_shape = (len(value), )
-                            else:
-                                raise ValueError(
-                                    f"{field_name} is an empty list")
-
-                        # Tensor → shape = tensor.shape
-                        elif isinstance(value, torch.Tensor):
-                            actual_shape = value.shape
-
-                        # Otherwise, it's an unsupported type
-                        else:
-                            type_names = []
-                            for arg in args:
-                                if hasattr(arg, "__name__"):
-                                    type_names.append(str(arg.__name__))
-                                else:
-                                    type_names.append(str(arg))
-
-                            expected_types = ", ".join(type_names)
-                            raise ValueError(
-                                f"{field_name} is not one of the expected "
-                                f"types: {expected_types}")
+                        actual_shape = self._validate_field(
+                            value,
+                            field_name,
+                            expected_shape,
+                            arg.dynamic_dims,
+                        )
 
                         self._validate_tensor_shape_expected(
                             actual_shape, expected_shape, field_name,
