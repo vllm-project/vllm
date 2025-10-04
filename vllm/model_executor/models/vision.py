@@ -92,8 +92,10 @@ def get_vit_attn_backend(head_size: int, dtype: torch.dtype) -> _Backend:
     return current_platform.get_vit_attn_backend(head_size, dtype)
 
 
+VisionFeatureSelectStrategyStr = Literal["class", "default", "full"]
+
 VisionFeatureSelectStrategy = Union[
-    Literal["class", "default", "full"],
+    VisionFeatureSelectStrategyStr,
     Callable[[torch.Tensor], torch.Tensor],
 ]
 
@@ -106,7 +108,7 @@ def _get_vision_feature_selector(
 
     # https://github.com/huggingface/transformers/blob/cd74917ffc3e8f84e4a886052c5ab32b7ac623cc/src/transformers/models/clip/modeling_clip.py#L762
     if strategy == "class":
-        return lambda feats: feats[:, 0, :]
+        return lambda feats: feats[:, :1, :]
 
     # https://github.com/huggingface/transformers/blob/4a02bc7004285bdb12cc033e87ad2578ce2fa900/src/transformers/models/llava/modeling_llava.py#L196
     if strategy == "default":
