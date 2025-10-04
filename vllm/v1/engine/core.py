@@ -866,22 +866,27 @@ class EngineCoreProc(EngineCore):
             ready_event.set()
             del ready_event
             while True:
-                for input_socket, _ in poller.poll():
-                    # (RequestType, RequestData)
-                    type_frame, *data_frames = input_socket.recv_multipart(
-                        copy=False)
-                    request_type = EngineCoreRequestType(
-                        bytes(type_frame.buffer))
+                try:
+                    for input_socket, _ in poller.poll():
+                        # (RequestType, RequestData)
+                        type_frame, *data_frames = input_socket.recv_multipart(
+                            copy=False)
+                        request_type = EngineCoreRequestType(
+                            bytes(type_frame.buffer))
 
-                    # Deserialize the request data.
-                    if request_type == EngineCoreRequestType.ADD:
-                        request = add_request_decoder.decode(data_frames)
-                        request = self.preprocess_add_request(request)
-                    else:
-                        request = generic_decoder.decode(data_frames)
+                        # Deserialize the request data.
+                        if request_type == EngineCoreRequestType.ADD:
+                            request = add_request_decoder.decode(data_frames)
+                            request = self.preprocess_add_request(request)
+                        else:
+                            request = generic_decoder.decode(data_frames)
 
-                    # Push to input queue for core busy loop.
-                    self.input_queue.put_nowait((request_type, request))
+                        # Push to input queue for core busy loop.
+                        self.input_queue.put_nowait((request_type, request))
+                except Exception as e:
+                    logger.exception(f"EngineCore input socket error. {e}")
+                    self._send_engine_dead()
+
 
     def process_output_sockets(self, output_paths: list[str],
                                coord_output_path: Optional[str],
