@@ -102,7 +102,6 @@ class GuidanceGrammar(StructuredOutputGrammar):
     ll_tokenizer: llguidance.LLTokenizer
     vocab_size: int
     printed_error: bool = False
-    terminated: bool = False
 
     def check_error(self):
         if not self.printed_error:
@@ -117,9 +116,6 @@ class GuidanceGrammar(StructuredOutputGrammar):
         Returns True if the parser was advanced successfully.
         Returns False if the parser failed to advance.
         """
-
-        if self.ll_tokenizer.eos_token in tokens:
-            self.terminated = True
 
         if self.ll_matcher.is_stopped():
             return True
@@ -165,7 +161,7 @@ class GuidanceGrammar(StructuredOutputGrammar):
         self.check_error()
 
     def is_terminated(self) -> bool:
-        return self.terminated
+        return self.ll_matcher.is_stopped()
 
     def reset(self):
         # This method may be not needed anymore? TODO
