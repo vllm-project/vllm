@@ -31,6 +31,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import merge_async_iterators
+from vllm.utils.lite_profiler import maybe_emit_lite_profiler_report
 
 
 def run_vllm(
@@ -715,3 +716,5 @@ def main(args: argparse.Namespace):
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
         save_to_pytorch_benchmark_format(args, results)
+    
+    maybe_emit_lite_profiler_report()
