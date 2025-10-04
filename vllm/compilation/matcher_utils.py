@@ -57,6 +57,10 @@ class MatcherCustomOp(ABC):
     def empty_f32(self, *args, **kws):
         return torch.empty(*args, dtype=torch.float32, device="cuda", **kws)
 
+    def inputs(self) -> list[torch.Tensor]:
+        """Utility for inputs to the pattern"""
+        raise NotImplementedError
+
 
 class MatcherRMSNorm(MatcherCustomOp):
     def __init__(self, epsilon: float, enabled: Optional[bool] = None):
