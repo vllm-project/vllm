@@ -554,17 +554,27 @@ class LoRAModelManager:
             if module_name not in self.packed_modules:
                 assert embedding_modules is not None
                 if parts[-1] in embedding_modules:
-                    input_dim = (module.base_layer.org_vocab_size +
-                                 self.lora_config.lora_extra_vocab_size if
-                                 hasattr(module.base_layer, "org_vocab_size")
-                                 else module.base_layer.weight.shape[1])
-                    output_dim = module.base_layer.embedding_dim if hasattr(
-                        module.base_layer,
-                        "embedding_dim") else module.base_layer.weight.shape[0]
-                    embeddings_tensor_dim = (module.base_layer.embedding_dim if
-                                             hasattr(module.base_layer,
-                                                     "embedding_dim") else
-                                             module.base_layer.weight.shape[1])
+                    # Special-case lm_head: wrapped by LogitsProcessorWithLoRA.
+                    # LoRA input dim is hidden_size, output dim is vocab size.
+                    # LogitsProcessorWithLoRA handles extra vocab size directly.
+                    if parts[-1] == "lm_head":
+                        input_dim = module.lora_a_stacked[0].shape[-1]
+                        output_dim = module.lora_b_stacked[0].shape[-2]
+                        embeddings_tensor_dim = input_dim
+                    else:
+                        input_dim = (module.base_layer.org_vocab_size +
+                                     self.lora_config.lora_extra_vocab_size
+                                     if hasattr(module.base_layer,
+                                                "org_vocab_size") else
+                                     module.base_layer.weight.shape[1])
+                        output_dim = (module.base_layer.embedding_dim
+                                      if hasattr(module.base_layer,
+                                                 "embedding_dim") else
+                                      module.base_layer.weight.shape[0])
+                        embeddings_tensor_dim = (
+                            module.base_layer.embedding_dim if hasattr(
+                                module.base_layer, "embedding_dim") else
+                            module.base_layer.weight.shape[1])
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
                         input_dim,

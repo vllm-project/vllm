@@ -582,14 +582,23 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
         ],
     }
 
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
+        "unembed_tokens": "output_embeddings",
+    }
+    embedding_padding_modules = ["lm_head", "unembed_tokens"]
+
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_text_config
         quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
         self.config = config
         self.quant_config = quant_config
+        self.lora_config = lora_config
         self.model = Qwen3MoeModel(vllm_config=vllm_config,
                                    prefix=maybe_prefix(prefix, "model"))
         self.lm_head = ParallelLMHead(config.vocab_size,

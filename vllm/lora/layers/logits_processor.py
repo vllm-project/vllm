@@ -145,7 +145,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[index,
                             0, :lora_b.shape[0], :lora_b.shape[1]].copy_(
                                 lora_b, non_blocking=True)
-        if embeddings_tensor is not None:
+        if embeddings_tensor is not None and self.embeddings_tensors.shape[
+                1] > 0:
             self.embeddings_tensors[
                 index,
                 :embeddings_tensor.shape[0],
@@ -159,7 +160,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
-        logits = lm_head.quant_method.apply(lm_head, hidden_states)
+        # When LoRA is enabled, lm_head is wrapped, so we need to unwrap it
+        if hasattr(lm_head, 'base_layer'):
+            actual_lm_head = lm_head.base_layer
+        else:
+            actual_lm_head = lm_head
+        logits = actual_lm_head.quant_method.apply(actual_lm_head,
+                                                   hidden_states)
         if embedding_bias is not None:
             logits += embedding_bias
 
@@ -188,37 +195,40 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             # token_id: [0, 1, 2, 3, 4, 5, -1, -1]
             logits = logits[:, self.sharded_to_full_mapping_gpu]
 
-        lora_logits = torch.empty(
-            self.embeddings_tensors.shape[0] + 1,
-            self.embeddings_tensors.shape[1],
-            hidden_states.shape[0],
-            dtype=self.embeddings_tensors.dtype,
-            device=self.embeddings_tensors.device,
-        )
-        torch.matmul(self.embeddings_tensors,
-                     hidden_states.T,
-                     out=lora_logits[:-1])
+        if self.embeddings_tensors.shape[1] > 0:  # extra_vocab_size > 0
+            lora_logits = torch.empty(
+                self.embeddings_tensors.shape[0] + 1,
+                self.embeddings_tensors.shape[1],
+                hidden_states.shape[0],
+                dtype=self.embeddings_tensors.dtype,
+                device=self.embeddings_tensors.device,
+            )
+            torch.matmul(self.embeddings_tensors,
+                         hidden_states.T,
+                         out=lora_logits[:-1])
 
-        neg_inf, pos_inf = current_platform.get_infinity_values(
-            lora_logits.dtype)
+            neg_inf, pos_inf = current_platform.get_infinity_values(
+                lora_logits.dtype)
 
-        lora_logits[-1] = neg_inf
-        lora_logits = lora_logits.mT
-        indices_padded = self.punica_wrapper.sampler_indices_padded
+            lora_logits[-1] = neg_inf
+            lora_logits = lora_logits.mT
+            indices_padded = self.punica_wrapper.sampler_indices_padded
 
-        if current_platform.is_tpu() or current_platform.is_xpu():
-            indices_padded = indices_padded[:logits.size(0)]
+            if current_platform.is_tpu() or current_platform.is_xpu():
+                indices_padded = indices_padded[:logits.size(0)]
 
-        lora_logits = (lora_logits.reshape(
-            lora_logits.shape[0] * lora_logits.shape[1],
-            lora_logits.shape[2],
-        ).index_select(0, indices_padded).nan_to_num_(nan=neg_inf,
-                                                      posinf=pos_inf,
-                                                      neginf=neg_inf))
+            lora_logits = (lora_logits.reshape(
+                lora_logits.shape[0] * lora_logits.shape[1],
+                lora_logits.shape[2],
+            ).index_select(0, indices_padded).nan_to_num_(nan=neg_inf,
+                                                          posinf=pos_inf,
+                                                          neginf=neg_inf))
 
-        logits[:,
-               self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
-               lora_logits.shape[1]] = lora_logits
+            # Only assign if lora_logits has data (not empty after index_select)
+            if lora_logits.shape[1] > 0:
+                logits[:, self.base_layer.
+                       org_vocab_size:self.base_layer.org_vocab_size +
+                       lora_logits.shape[1]] = lora_logits
 
         lora_output: Optional[
             torch.Tensor] = self.punica_wrapper.add_lora_logits(
