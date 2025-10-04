@@ -495,9 +495,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     ] = "none"
     reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
     include_reasoning: bool = True
+    parallel_tool_calls: Optional[bool] = True
 
-    # NOTE this will be ignored by vLLM -- the model determines the behavior
-    parallel_tool_calls: Optional[bool] = False
+    # NOTE this will be ignored by vLLM
     user: Optional[str] = None
 
     # --8<-- [start:chat-completion-sampling-params]
