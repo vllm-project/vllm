@@ -4,7 +4,9 @@
 import enum
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from functools import partial
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import torch
@@ -21,6 +23,59 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
+
+
+@dataclass
+class RequestErrorContext:
+    """Rich error context for request failures.
+
+    This class encapsulates all relevant information about why a request
+    failed, enabling better error handling and more informative responses
+    to clients.
+    """
+
+    # Error category for programmatic handling
+    # Examples: "kv_transfer_failure", "preemption", "client_disconnect",
+    #           "internal_error", "nan_in_logits"
+    error_type: str
+
+    # Human-readable error message
+    message: str
+
+    # HTTP status code to return (if applicable)
+    # Examples: HTTPStatus.BAD_GATEWAY for KV transfer failures,
+    #           HTTPStatus.INTERNAL_SERVER_ERROR for internal errors
+    http_status: Optional[HTTPStatus] = None
+
+    # Additional structured metadata
+    metadata: Optional[dict[str, Any]] = None
+
+    # Timestamp when error occurred
+    timestamp: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for serialization across processes."""
+        return {
+            "error_type": self.error_type,
+            "message": self.message,
+            "http_status_code":
+            self.http_status.value if self.http_status else None,
+            "metadata": self.metadata,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RequestErrorContext":
+        """Reconstruct from dict after deserialization."""
+        http_status_code = data.get("http_status_code")
+        return cls(
+            error_type=data["error_type"],
+            message=data["message"],
+            http_status=HTTPStatus(http_status_code)
+            if http_status_code else None,
+            metadata=data.get("metadata"),
+            timestamp=data.get("timestamp", time.time()),
+        )
 
 
 class Request:
@@ -63,6 +118,9 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: Optional[dict[str, Any]] = None
+
+        # Error context for request failures
+        self.error_context: Optional[RequestErrorContext] = None
 
         if pooling_params is not None:
             # Pooling models.

@@ -119,6 +119,10 @@ class EngineCoreOutput(
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
 
+    # Error context for failed requests.
+    # Note: This is serialized as a dict when sent across processes.
+    error_context: Optional[dict[str, Any]] = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

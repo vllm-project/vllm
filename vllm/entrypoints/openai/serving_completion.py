@@ -273,10 +273,21 @@ class OpenAIServingCompletion(OpenAIServing):
                 # check for aborted requests due to unrecoverable errors
                 for output in final_res.outputs:
                     if output.finish_reason == "abort":
-                        return self.create_error_response(
-                            "Request aborted due to an internal error.",
-                            err_type="InternalServerError",
-                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+                        # check for rich error context
+                        if final_res.error_context:
+                            from vllm.v1.request import RequestErrorContext
+                            error_ctx = RequestErrorContext.from_dict(
+                                final_res.error_context)
+                            return self.create_error_response(
+                                error_ctx.message,
+                                err_type=error_ctx.error_type,
+                                status_code=error_ctx.http_status
+                                or HTTPStatus.INTERNAL_SERVER_ERROR)
+                        else:
+                            return self.create_error_response(
+                                "Request aborted due to an internal error.",
+                                err_type="InternalServerError",
+                                status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
 
                 # The output should contain the input text
                 # We did not pass it into vLLM engine to avoid being redundant
@@ -352,10 +363,21 @@ class OpenAIServingCompletion(OpenAIServing):
                 # check for aborted requests due to unrecoverable errors
                 for output in res.outputs:
                     if output.finish_reason == "abort":
-                        yield self.create_streaming_error_response(
-                            "Request aborted due to an internal error.",
-                            err_type="InternalServerError",
-                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+                        # check for rich error context
+                        if res.error_context:
+                            from vllm.v1.request import RequestErrorContext
+                            error_ctx = RequestErrorContext.from_dict(
+                                res.error_context)
+                            yield self.create_streaming_error_response(
+                                error_ctx.message,
+                                err_type=error_ctx.error_type,
+                                status_code=error_ctx.http_status
+                                or HTTPStatus.INTERNAL_SERVER_ERROR)
+                        else:
+                            yield self.create_streaming_error_response(
+                                "Request aborted due to an internal error.",
+                                err_type="InternalServerError",
+                                status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
                         return
 
                 prompt_token_ids = res.prompt_token_ids

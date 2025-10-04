@@ -12,7 +12,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import msgspec
 import numpy as np
@@ -632,20 +632,6 @@ class NixlConnectorWorker:
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         self.xfer_stats = NixlKVConnectorStats()
 
-        # failure recovery policy configuration
-        # controls whether to recover via local prefill or fail requests
-        # modes:
-        # - "auto" (cost-based), "always", "never" (fail)
-        self.nixl_retry_mode: Literal["auto", "always", "never"] = \
-            vllm_config.kv_transfer_config.get_from_extra_config(
-            "nixl_retry_mode", "never"
-        )
-        # in "auto" mode: max tokens to prefill locally before failing request
-        self.nixl_retry_token_threshold: int = \
-            vllm_config.kv_transfer_config.get_from_extra_config(
-            "nixl_retry_token_threshold", 64
-        )
-
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
                                  ready_event: threading.Event, base_port: int,
@@ -1234,37 +1220,12 @@ class NixlConnectorWorker:
                     in_progress = True
                     continue
                 else:
-                    # transfer failed - decide local prefill vs fail request
-                    meta = self._recving_metadata.get(req_id)
-                    if meta:
-                        should_prefill_locally = (
-                            self._should_retry_transfer_failure(
-                                meta.local_block_ids, is_state_failure=True))
-
-                        if should_prefill_locally:
-                            # mark blocks invalid → scheduler does local prefill
-                            logger.error(
-                                "NIXL transfer failed for request %s with "
-                                "state %s. Marking blocks invalid to trigger "
-                                "local prefill.", req_id, xfer_state)
-                            self._invalid_block_ids.update(
-                                meta.local_block_ids)
-                        else:
-                            # don't mark invalid → request will fail
-                            logger.error(
-                                "NIXL transfer failed for request %s with "
-                                "state %s. Failing request (would require "
-                                "reprefilling %d tokens).", req_id, xfer_state,
-                                len(meta.local_block_ids) * self.block_size)
-                            self._failed_req_ids.add(req_id)
-
-                        # clean up metadata after handling failure
-                        self._recving_metadata.pop(req_id, None)
-                    else:
-                        logger.error(
-                            "NIXL transfer failed for request %s with state "
-                            "%s, but no metadata found.", req_id, xfer_state)
-
+                    # transfer failed - fail the request
+                    logger.error(
+                        "NIXL transfer failed for request %s with state %s. "
+                        "Failing request.", req_id, xfer_state)
+                    self._failed_req_ids.add(req_id)
+                    self._recving_metadata.pop(req_id, None)
                     self.nixl_wrapper.release_xfer_handle(handle)
                     self.xfer_stats.record_failed_transfer()
             if not in_progress:
@@ -1325,44 +1286,6 @@ class NixlConnectorWorker:
             local_block_ids=meta.local_block_ids,
             remote_block_ids=meta.remote_block_ids,
         )
-
-    def _should_retry_transfer_failure(self,
-                                       local_block_ids: list[int],
-                                       error: Optional[Exception] = None,
-                                       is_state_failure: bool = False) -> bool:
-        """
-        decide whether to recover from transfer failure via local prefill.
-
-        Returns:
-            True = mark blocks invalid (triggers local prefill)
-            False = don't mark invalid (request fails)
-        """
-        if is_state_failure:
-            return True
-
-        # check if this is a remote disconnect error (permanent failure)
-        is_disconnect = (error is not None
-                         and nixlRemoteDisconnectError is not None
-                         and isinstance(error, nixlRemoteDisconnectError))
-
-        # TODO: implement NIXL operation retry for transient errors instead
-        if not is_disconnect:
-            return True
-
-        if self.nixl_retry_mode == "always":
-            return True
-        elif self.nixl_retry_mode == "never":
-            return False
-        else:
-            tokens_to_reprefill = len(local_block_ids) * self.block_size
-            should_prefill_locally = (tokens_to_reprefill
-                                      <= self.nixl_retry_token_threshold)
-            if not should_prefill_locally:
-                logger.info(
-                    "Failing request on disconnect: would require "
-                    "reprefilling %d tokens (threshold: %d)",
-                    tokens_to_reprefill, self.nixl_retry_token_threshold)
-            return should_prefill_locally
 
     def _read_blocks(self, local_block_ids: list[int],
                      remote_block_ids: list[int], dst_engine_id: str,
@@ -1475,23 +1398,10 @@ class NixlConnectorWorker:
             self._recving_transfers[request_id].append(
                 (handle, time.perf_counter()))
         except nixlExceptions as e:
-            should_prefill_locally = self._should_retry_transfer_failure(
-                local_block_ids, error=e)
-
-            if should_prefill_locally:
-                logger.error(
-                    "NIXL transfer setup/initiation failed for request "
-                    "%s: %s. Marking blocks invalid to trigger local "
-                    "prefill.", request_id, e)
-                self._invalid_block_ids.update(local_block_ids)
-            else:
-                logger.error(
-                    "NIXL transfer setup/initiation failed for request %s: %s. "
-                    "Failing request (would require reprefilling %d tokens).",
-                    request_id, e,
-                    len(local_block_ids) * self.block_size)
-                self._failed_req_ids.add(request_id)
-
+            logger.error(
+                "NIXL transfer setup/initiation failed for request %s: %s. "
+                "Failing request.", request_id, e)
+            self._failed_req_ids.add(request_id)
             self._failed_initiation_reqs.add(request_id)
             self.xfer_stats.record_failed_transfer()
             # release handle if it was created before failure

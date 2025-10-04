@@ -896,6 +896,10 @@ class Scheduler(SchedulerInterface):
 
         # handle requests that encountered unrecoverable transfer failures
         if kv_connector_output and kv_connector_output.failed_req_ids:
+            from http import HTTPStatus
+
+            from vllm.v1.request import RequestErrorContext
+
             for req_id in kv_connector_output.failed_req_ids:
                 request = self.requests.get(req_id)
                 if request is not None:
@@ -904,6 +908,28 @@ class Scheduler(SchedulerInterface):
                         stopped_running_reqs.add(request)
                     else:
                         stopped_preempted_reqs.add(request)
+
+                    # extract metadata for error context
+                    metadata = {}
+                    if request.kv_transfer_params:
+                        if remote_engine_id := request.kv_transfer_params.get(
+                                "remote_engine_id"):
+                            metadata["remote_engine_id"] = remote_engine_id
+                        if remote_host := request.kv_transfer_params.get(
+                                "remote_host"):
+                            metadata["remote_host"] = remote_host
+                        if remote_port := request.kv_transfer_params.get(
+                                "remote_port"):
+                            metadata["remote_port"] = remote_port
+
+                    # set error context for rich error reporting
+                    request.error_context = RequestErrorContext(
+                        error_type="kv_transfer_failure",
+                        message=
+                        "Failed to transfer KV cache from remote instance",
+                        http_status=HTTPStatus.BAD_GATEWAY,
+                        metadata=metadata if metadata else None,
+                    )
 
                     # now abort and free the request
                     request.status = RequestStatus.FINISHED_ABORTED
@@ -921,6 +947,8 @@ class Scheduler(SchedulerInterface):
                             kv_transfer_params=kv_transfer_params,
                             trace_headers=request.trace_headers,
                             num_cached_tokens=request.num_cached_tokens,
+                            error_context=request.error_context.to_dict()
+                            if request.error_context else None,
                         ))
             logger.info(
                 "Aborted %d requests due to unrecoverable KV transfer failures",
@@ -1024,6 +1052,8 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
+                        error_context=request.error_context.to_dict()
+                        if request.error_context else None,
                     ))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
