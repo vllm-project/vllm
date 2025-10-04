@@ -215,7 +215,7 @@ class RocmPlatform(Platform):
                 selected_backend = (_Backend.ROCM_AITER_MLA if
                                     is_aiter_mla_enabled() or block_size == 1
                                     else _Backend.TRITON_MLA)
-
+            print("use_mla - selected_backend: ", selected_backend)
             if selected_backend == _Backend.TRITON_MLA:
                 if block_size != 1:
                     logger.info_once("Using Triton MLA backend on V1 engine.")
@@ -237,6 +237,7 @@ class RocmPlatform(Platform):
                 f"is not MLA type while requested for MLA backend.")
 
         if envs.VLLM_USE_V1:
+            print("use_v1 - selected_backend - use aiter: ",envs.VLLM_ROCM_USE_AITER, envs.VLLM_ROCM_USE_AITER_MHA)
             if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA \
                 and on_gfx9():
                 logger.info("Using Flash Attention backend on V1 engine.")

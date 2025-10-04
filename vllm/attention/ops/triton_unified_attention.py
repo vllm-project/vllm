@@ -47,6 +47,185 @@ def find_seq_idx(query_start_len_ptr, target_idx, num_seqs,
 
     return left - 1
 
+@triton.jit
+def _get_max_quant_val(dtype: tl.constexpr):
+    if dtype == tl.uint8:
+        return 6.0
+    elif dtype == tl.float8e5:
+        return 57344.0
+    elif dtype == tl.float8e4nv:
+        return 448.0
+    else:
+        tl.static_assert(False, f"Invalid {dtype=}")
+
+
+@triton.jit
+def _get_max_quant_exp(dtype: tl.constexpr):
+    if dtype == tl.uint8:
+        return 2
+    else:
+        tl.static_assert(False, f"Invalid {dtype=}")
+
+# fmt: off
+@triton.jit
+def _compute_quant_and_scale(src_tensor, valid_src_mask, mx_tensor_dtype: tl.constexpr,
+                             DEQUANT_SCALE_ROUNDING_MODE: tl.constexpr = 0):
+    is_fp8: tl.constexpr = mx_tensor_dtype == tl.float8e4nv or mx_tensor_dtype == tl.float8e5
+    BLOCK_SIZE_OUT_DIM: tl.constexpr = src_tensor.shape[0]
+    BLOCK_SIZE_QUANT_DIM: tl.constexpr = src_tensor.shape[1]
+    BLOCK_SIZE_QUANT_MX_SCALE: tl.constexpr = src_tensor.shape[1] // 32
+
+    # Explicit cast to fp32 since most ops are not supported on bfloat16. We avoid needless conversions to and from bf16
+    f32_tensor = src_tensor.to(tl.float32)
+    abs_tensor = tl.abs(f32_tensor)
+    abs_tensor = tl.where(valid_src_mask, abs_tensor, -1.0)  # Don't consider padding tensors in scale computation
+    abs_tensor = tl.reshape(abs_tensor, [BLOCK_SIZE_OUT_DIM, BLOCK_SIZE_QUANT_MX_SCALE, 32])
+    max_val = tl.max(abs_tensor, axis=2, keep_dims=True)
+    if DEQUANT_SCALE_ROUNDING_MODE == 0:
+        # DequantScaleRoundingMode.ROUND_UP
+        # compute 2 ** ceil(log2(dequant_scale))
+        # Adding 0x007FFFFF adds exponent by 1 unless mantissa is all zeros
+        # A corner case: exponent is 0xFF that will overflow but that's already
+        # NaN so assume we don't care.
+        dequant_scale = max_val / _get_max_quant_val(mx_tensor_dtype)
+        dequant_scale_exponent = (dequant_scale.to(tl.uint32, bitcast=True) + 0x007FFFFF) & 0x7F800000
+    elif DEQUANT_SCALE_ROUNDING_MODE == 1:
+        # DequantScaleRoundingMode.ROUND_DOWN
+        # compute 2 ** floor(log2(dequant_scale))
+        dequant_scale = max_val / _get_max_quant_val(mx_tensor_dtype)
+        dequant_scale_exponent = dequant_scale.to(tl.uint32, bitcast=True) & 0x7F800000
+    else:
+        # DequantScaleRoundingMode.EVEN
+        # compute 2 ** (floor(log2(rounding(max_abs(v)))-max_exp))
+        assert DEQUANT_SCALE_ROUNDING_MODE == 2
+        # eps =  tl.where(max_val == 0.0, 2**(-126), 0.0)
+        max_val = max_val.to(tl.int32, bitcast=True)
+        max_val = (max_val + 0x200000).to(tl.uint32, bitcast=True) & 0x7F800000
+        max_val = max_val.to(tl.float32, bitcast=True)
+        # scale_e8m0_unbiased = tl.log2(max_val + eps).floor() - _get_max_quant_exp(mx_tensor_dtype)
+        scale_e8m0_unbiased = tl.log2(max_val).floor() - _get_max_quant_exp(mx_tensor_dtype)  # no eps
+        scale_e8m0_unbiased = tl.clamp(scale_e8m0_unbiased, min=-127, max=127)
+        dequant_scale_rounded = tl.exp2(scale_e8m0_unbiased)
+        dequant_scale_exponent = dequant_scale_rounded.to(tl.uint32, bitcast=True)
+
+    dequant_scale_rounded = dequant_scale_exponent.to(tl.float32, bitcast=True)
+    quant_scale = tl.where(dequant_scale_rounded == 0, 0, 1.0 / dequant_scale_rounded)
+
+    f32_tensor = tl.reshape(f32_tensor, [BLOCK_SIZE_OUT_DIM, BLOCK_SIZE_QUANT_MX_SCALE, 32])
+    quant_tensor = f32_tensor * quant_scale
+
+    # Reshape the tensors after scaling
+    quant_tensor = quant_tensor.reshape([BLOCK_SIZE_OUT_DIM, BLOCK_SIZE_QUANT_DIM])
+    # Set the invalid portions of the tensor to 0. This will ensure that any padding tensors are 0 in the mx format.
+    quant_tensor = tl.where(valid_src_mask, quant_tensor, 0)
+    dequant_scale_exponent = dequant_scale_exponent.reshape([BLOCK_SIZE_OUT_DIM, BLOCK_SIZE_QUANT_MX_SCALE])
+
+    # First, we simply extract the exponent part of the scales and store the result
+    dequant_scale_exponent = (dequant_scale_exponent >> 23).to(tl.uint8)
+    # Now we must convert the tensors to the mx format.
+    if is_fp8:
+        out_tensor = quant_tensor.to(mx_tensor_dtype)
+    else:
+        quant_tensor = quant_tensor.to(tl.uint32, bitcast=True)
+        signs = quant_tensor & 0x80000000
+        exponents = (quant_tensor >> 23) & 0xFF
+        mantissas = (quant_tensor & 0x7FFFFF)
+
+        # 0.25 <= x < 0.75 maps to 0.5, a denormal number
+        E8_BIAS = 127
+        E2_BIAS = 1
+        # Move implicit bit 1 at the beginning to mantissa for denormals
+        adjusted_exponents = tl.core.sub(E8_BIAS, exponents + 1, sanitize_overflow=False)
+        mantissas = tl.where(exponents < E8_BIAS, (0x400000 | (mantissas >> 1)) >> adjusted_exponents, mantissas)
+
+        # For normal numbers, we change the bias from 127 to 1, and for subnormals, we keep exponent as 0.
+        exponents = tl.maximum(exponents, E8_BIAS - E2_BIAS) - (E8_BIAS - E2_BIAS)
+
+        # Combine sign, exponent, and mantissa, while saturating
+        # rounding nearest with tie breaking up by adding +1 to one bit right of the LSB, then shift right
+        e2m1_tmp = tl.minimum((((exponents << 2) | (mantissas >> 21)) + 1) >> 1, 0x7)
+        e2m1_value = ((signs >> 28) | e2m1_tmp).to(tl.uint8)
+
+        e2m1_value = tl.reshape(e2m1_value, [BLOCK_SIZE_OUT_DIM, BLOCK_SIZE_QUANT_DIM // 2, 2])
+        evens, odds = tl.split(e2m1_value)
+        out_tensor = evens | (odds << 4)
+
+    return out_tensor, dequant_scale_exponent
+
+# This function is borrowed from Aiter
+@triton.jit
+def _mxfp4_quant_op(
+    x,
+    BLOCK_SIZE_N,
+    BLOCK_SIZE_M,
+    MXFP4_QUANT_BLOCK_SIZE,
+):
+    """
+    Converts given x (in fp32) to mxfp4 format.
+    x: [BLOCK_SIZE_M, BLOCK_SIZE_N], fp32
+
+    """
+    NUM_QUANT_BLOCKS: tl.constexpr = BLOCK_SIZE_N // MXFP4_QUANT_BLOCK_SIZE
+    x = x.reshape(BLOCK_SIZE_M, NUM_QUANT_BLOCKS, MXFP4_QUANT_BLOCK_SIZE)
+    # Calculate scale
+    amax = tl.max(tl.abs(x), axis=-1, keep_dims=True)
+    amax = amax.to(tl.int32, bitcast=True)
+    amax = (amax + 0x200000).to(tl.uint32, bitcast=True) & 0xFF800000
+    amax = amax.to(tl.float32, bitcast=True)
+    #scale_e8m0_unbiased = (tl.log2(amax) + 0.5).floor() - 2
+    scale_e8m0_unbiased = tl.log2(amax).floor() - 2
+    scale_e8m0_unbiased = tl.clamp(scale_e8m0_unbiased, min=-127, max=127)
+
+    # blockscale_e8m0
+    bs_e8m0 = scale_e8m0_unbiased.to(tl.uint8) + 127  # in fp32, we have 2&(e - 127)
+
+    quant_scale = tl.exp2(-scale_e8m0_unbiased)
+
+    # Compute quantized x
+    qx = x * quant_scale
+
+    # Convert quantized fp32 tensor to uint32 before converting to mxfp4 format
+    # Note: MXFP4  S:1-bit, E:2-bit, M:1-bit
+    #   Zeros: S000 -> +/-0
+    #   Denormal Numbers: S001 -> +/- 0.5
+    #   Normal Numbers:
+    #           S010 -> +/- 1.0
+    #           S011 -> +/- 1.5
+    #           S100 -> +/- 2.0
+    #           S101 -> +/- 3.0
+    #           S110 -> +/- 4.0
+    #           S111 -> +/- 6.0
+    #qx = tl.where(qx > 0, qx + 0.25, qx - 0.25)
+    qx = qx.to(tl.uint32, bitcast=True)
+
+    # Extract sign, exponents and mantissa fields from FP32
+    s = qx & 0x80000000
+    e = (qx >> 23) & 0xFF
+    m = qx & 0x7FFFFF
+    E8_BIAS: tl.constexpr = 127
+    E2_BIAS: tl.constexpr = 1
+
+    # Denormal numbers
+    # If exponent is less than 127, then it's a denormal number
+    # See above, for denormal number mantissa is always 1 and we set bit 1 of mantissa
+    adjusted_exponents = tl.core.sub(E8_BIAS, e + 1, sanitize_overflow=False)
+    m = tl.where(e < E8_BIAS, (0x400000 | (m >> 1)) >> adjusted_exponents, m)
+    # For normal numbers, bias is changed from 127 to 1, and for subnormals, we keep exponent as 0.
+    # Note: E8_BIAS - E2_BIAS = 126, so for normals we subtract that.
+    e = tl.maximum(e, E8_BIAS - E2_BIAS) - (E8_BIAS - E2_BIAS)
+
+    # Combine sign, exponent, and mantissa, while saturating
+    # rounding nearest with tie breaking up by adding +1 to one bit right of the LSB, then shift right
+    e2m1_tmp = tl.minimum((((e << 2) | (m >> 21)) + 1) >> 1, 0x7)
+    e2m1_value = ((s >> 28) | e2m1_tmp).to(tl.uint8)
+    e2m1_value = tl.reshape(
+        e2m1_value, [BLOCK_SIZE_M, NUM_QUANT_BLOCKS, MXFP4_QUANT_BLOCK_SIZE // 2, 2]
+    )
+    evens, odds = tl.split(e2m1_value)
+    x_fp4 = evens | (odds << 4)
+    x_fp4 = x_fp4.reshape(BLOCK_SIZE_M, BLOCK_SIZE_N // 2)
+
+    return x_fp4, bs_e8m0.reshape(BLOCK_SIZE_M, NUM_QUANT_BLOCKS)
 
 @triton.jit
 def kernel_unified_attention_2d(
@@ -96,6 +275,8 @@ def kernel_unified_attention_2d(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    use_native_fp4: tl.constexpr = 0, # options: 0 Original; 1 - native fp4 QK and fp8 PV; 2 - smoothed fp4 QK based on sage-attention2 and fp8 PV; >=3 - smoothed fp4 QK and fp4 PV
+    PACK_ALONG_K: tl.constexpr = True,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -139,6 +320,31 @@ def kernel_unified_attention_2d(
         other=0.0,
     )
 
+    pid0 = tl.program_id(axis=0)
+    pid1 = tl.program_id(axis=1)
+
+    if pid0 < -1 and pid1 < 1:
+       tl.device_print("Q:",Q.shape[0], Q.shape[1])
+
+    if use_native_fp4:
+       Q1 = tl.full(shape=Q.shape, value=1, dtype=tl.int32)
+
+       if use_native_fp4 == 1:
+          #q_fp4, scale_q = _mxfp4_quant_op(Q, HEAD_SIZE_PADDED, BLOCK_M, 32)
+          q_fp4, scale_q = _compute_quant_and_scale(Q, Q1, tl.uint8,2)
+       else:
+          q_avg = tl.sum(Q,1)/HEAD_SIZE_PADDED
+          q_avg = tl.reshape(q_avg,(BLOCK_M,1))
+          ones = tl.full((1,HEAD_SIZE_PADDED), 1.0, dtype=tl.float32)
+          q_avg = tl.dot(q_avg, ones)
+
+          if pid0 < -1 and pid1 < 1:
+              tl.device_print("q_avg:",q_avg.shape[0], q_avg.shape[1])
+
+          Qr = Q - q_avg
+          #q_fp4, scale_q = _mxfp4_quant_op(Qr, HEAD_SIZE_PADDED, BLOCK_M, 32)
+          q_fp4, scale_q = _compute_quant_and_scale(Qr, Q1, tl.uint8,2)
+
     block_table_offset = seq_idx * block_table_stride
 
     if not USE_SINKS:
@@ -152,6 +358,7 @@ def kernel_unified_attention_2d(
 
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
+    acc_fp4 = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
@@ -254,8 +461,44 @@ def kernel_unified_attention_2d(
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
+        S2 = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
 
-        S += scale * tl.dot(Q, K)
+        if use_native_fp4:
+           K1 = tl.full(shape=K.shape, value=1, dtype=tl.int32)
+           kt = tl.trans(K)
+
+           if use_native_fp4 == 2:
+              k_avg = tl.sum(kt,1) / HEAD_SIZE_PADDED
+              k_avg = tl.reshape(k_avg,(TILE_SIZE,1))
+              ones = tl.full((1,HEAD_SIZE_PADDED), 1.0, dtype=tl.float32)
+              k_avg = tl.dot(k_avg, ones)
+              kt -= k_avg
+              detS = tl.dot(q_avg, tl.trans(kt))
+           #k_fp4, scale_k = _mxfp4_quant_op(kt, HEAD_SIZE_PADDED, TILE_SIZE, 32)
+           k_fp4, scale_k = _compute_quant_and_scale(kt, tl.trans(K1), tl.uint8,2)
+
+           # fp4 debug info
+           if pid0 < -1 and pid1 < 1 and j == 0:
+              tl.device_print("k_fp4:",k_fp4.shape[0], k_fp4.shape[1])
+
+           # copied from triton def dot_scaled()
+           # M, K_LHS = lhs.type.shape[-2:]
+           # K_RHS, N = rhs.type.shape[-2:]
+           s_fp4 = tl.dot_scaled(q_fp4, scale_q, "e2m1", tl.trans(k_fp4), tl.trans(scale_k), "e2m1", S2, lhs_k_pack=PACK_ALONG_K,
+                                   rhs_k_pack=PACK_ALONG_K, out_dtype=tl.float32)
+           if use_native_fp4 >= 2:
+               S2 += scale * (s_fp4 + detS)
+           else:
+               S2 += scale * s_fp4
+        else:
+           S += scale * tl.dot(Q, K)
+
+        if pid0 < -1 and pid1 < 1 and j == 0:
+           tl.device_print("S-S2 ",S - S2)
+           #tl.device_print("S2: ",S2)
+
+        if use_native_fp4:
+           S = S2
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -307,7 +550,31 @@ def kernel_unified_attention_2d(
         M = m_j
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        acc += tl.dot(P.to(V.dtype), V)
+        if use_native_fp4 >= 3: # PV quant to fp4 will significantly increase error
+           p_fp4, scale_p = _mxfp4_quant_op(P*6.0, TILE_SIZE, BLOCK_M, 32)
+
+           vt = tl.trans(V)
+           v_fp4, scale_v = _mxfp4_quant_op(vt, TILE_SIZE, HEAD_SIZE_PADDED, 32)
+
+           v_fp4_t   =  tl.trans(v_fp4)
+           scale_v_t =  tl.trans(scale_v)
+
+           # fp4 debug info
+           if pid0 < -1 and pid1 < 1 and j == 0:
+              tl.device_print("v_fp4:",v_fp4.shape[0], v_fp4.shape[1])
+
+           # reference from triton def dot_scaled()
+           # M, K_LHS = lhs.type.shape[-2:]
+           # K_RHS, N = rhs.type.shape[-2:]
+           acc_fp4 = tl.dot_scaled(p_fp4, scale_p, "e2m1", v_fp4_t, scale_v_t, "e2m1", acc*6.0, lhs_k_pack=PACK_ALONG_K,
+                                   rhs_k_pack=PACK_ALONG_K, out_dtype=tl.float32) / 6.0
+        #elif use_native_fp4 >= 1:
+        #   acc += tl.dot(P.to(tl.float8e5), V.to(tl.float8e5))
+        else:           
+           acc += tl.dot(P.to(V.dtype), V)
+
+        if pid0 < -1 and pid1 < 1 and j == 0:
+           tl.device_print("acc - acc_fp4 ",acc - acc_fp4)
 
     # epilogue
     acc = acc / L[:, None]
@@ -706,6 +973,7 @@ def unified_attention(
     qq_bias=None,
     # Optional tensor for sinks
     sinks=None,
+    use_native_fp4=2,
 ):
 
     assert causal, "Only causal attention is supported"
@@ -727,6 +995,10 @@ def unified_attention(
 
     BLOCK_M = 16 if num_queries_per_kv <= 16 else triton.next_power_of_2(
         num_queries_per_kv)
+    if use_native_fp4 > 2:
+       BLOCK_M = 32
+    #print("num_queries_per_kv, BLOK_M, block_size: ", num_queries_per_kv, BLOCK_M, block_size, "qkv dtype: ", q.dtype, k.dtype, v.dtype,
+    #        "max seqlen q: ", max_seqlen_q, "seqused k, max seqlen k : ", seqused_k.data[0], max_seqlen_k,"num_kv_heads: ", num_kv_heads)
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Ideally we would launch with kernel with:
@@ -743,7 +1015,7 @@ def unified_attention(
     # Assigning default tile sizes for prefill and decode.
     # Note: each tile size must be at least 32 for "fp8" (q.element_size() == 1)
     # and at least 16 for all other data types.
-    TILE_SIZE_PREFILL = 32
+    TILE_SIZE_PREFILL = 64 #32
     TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
 
     # if batch contains a prefill
@@ -796,6 +1068,7 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             USE_FP8=output_scale is not None,
+            use_native_fp4=use_native_fp4,
         )
     else:
         # for initial version, NUM_SEGMENTS = 16 is chosen as a default
