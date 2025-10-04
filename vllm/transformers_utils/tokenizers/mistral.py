@@ -122,15 +122,21 @@ def list_local_repo_files(repo_id: str, revision: Optional[str]) -> list[str]:
 
 
 def find_tokenizer_file(files: list[str]):
+    # Accept both versioned (tokenizer.model.v3) and unversioned
+    # (tokenizer.model) forms, plus tekken.json and tokenizer.mm.model
+    # variants. Previous pattern only matched the versioned variants.
     file_pattern = re.compile(
-        r"^tokenizer\.model\.v.*$|^tekken\.json$|^tokenizer\.mm\.model\.v.*$")
+        r"^tokenizer\.model(\.v.*)?|tekken\.json|tokenizer\.mm\.model(\.v.*)?$"
+    )
 
     matched_files = [file for file in files if file_pattern.match(file)]
     if len(matched_files) > 1:
-        raise OSError(
-            f"Found {len(matched_files)} files matching the "
-            f"pattern: `{file_pattern.pattern}`. Make sure only one Mistral "
-            f"tokenizer is present in {files}.")
+        logger.warning(
+            "Multiple files matched pattern `%s`: %s. Using %s.",
+            file_pattern.pattern,
+            matched_files,
+            matched_files[0],
+        )
     elif len(matched_files) == 0:
         raise OSError(
             f"Found {len(matched_files)} files matching the "

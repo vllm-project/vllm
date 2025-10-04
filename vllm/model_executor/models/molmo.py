@@ -22,6 +22,7 @@ from vllm.attention import Attention
 from vllm.attention.layer import MultiHeadAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
@@ -1226,16 +1227,20 @@ class MolmoDummyInputsBuilder(BaseDummyInputsBuilder[MolmoProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images)
+                                   num_images=num_images,
+                                   overrides=image_overrides)
         }
 
 

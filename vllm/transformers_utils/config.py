@@ -515,17 +515,17 @@ def maybe_override_with_speculators(
     from vllm.transformers_utils.configs.speculators.base import (
         SpeculatorsConfig)
 
-    vllm_speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
+    speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
         config_dict=config_dict)
 
     # Set the draft model to the speculators model
-    vllm_speculative_config["model"] = model
+    speculative_config["model"] = model
 
     # Override model and tokenizer with the verifier model from config
     verifier_model = speculators_config["verifier"]["name_or_path"]
     model = tokenizer = verifier_model
 
-    return model, tokenizer, vllm_speculative_config
+    return model, tokenizer, speculative_config
 
 
 def get_config(

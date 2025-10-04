@@ -26,6 +26,7 @@ from transformers import (BatchFeature, Idefics3Config, Idefics3ImageProcessor,
                           Idefics3Processor)
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -292,17 +293,21 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         hf_processor = self.info.get_hf_processor()
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
         longest_edge = image_processor.max_image_size['longest_edge']
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=longest_edge,
                                    height=longest_edge,
-                                   num_images=num_images)
+                                   num_images=num_images,
+                                   overrides=image_overrides)
         }
 
 

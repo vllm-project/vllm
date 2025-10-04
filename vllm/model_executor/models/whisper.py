@@ -18,6 +18,7 @@ from vllm.attention.layer import MultiHeadAttention
 from vllm.attention.layers.cross_attention import CrossAttention
 from vllm.config import (CacheConfig, ModelConfig, SpeechToTextConfig,
                          VllmConfig)
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -44,7 +45,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
                          SupportsTranscription)
 from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
-                    make_layers)
+                    make_layers, maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -691,6 +692,7 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
@@ -698,9 +700,13 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
         audio_len = feature_extractor.chunk_length * sampling_rate
         num_audios = mm_counts.get("audio", 0)
 
+        audio_overrides = mm_options.get("audio") if mm_options else None
+
         return {
             "audio":
-            self._get_dummy_audios(length=audio_len, num_audios=num_audios)
+            self._get_dummy_audios(length=audio_len,
+                                   num_audios=num_audios,
+                                   overrides=audio_overrides)
         }
 
 
@@ -879,7 +885,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         self.unpadded_vocab_size = config.vocab_size
         self.proj_out = ParallelLMHead(config.vocab_size,
                                        config.d_model,
-                                       quant_config=quant_config)
+                                       quant_config=quant_config,
+                                       prefix=maybe_prefix(prefix, "proj_out"))
         self.proj_out = self.proj_out.tie_weights(
             self.model.decoder.embed_tokens)
         logit_scale = getattr(config, "logit_scale", 1.0)
