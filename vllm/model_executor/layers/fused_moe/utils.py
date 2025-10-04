@@ -11,13 +11,17 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    quant_dequant_mxfp4)
+    quant_dequant_mxfp4, use_fp4_aiter_moe)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_quantize)
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
 from vllm.utils.flashinfer import fp4_quantize
+
+if use_fp4_aiter_moe():
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+else:
+    dynamic_mxfp4_quant = None
 
 
 @triton.jit
@@ -169,14 +173,17 @@ def _mxfp4_quantize(
     A_scale: Optional[torch.Tensor],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
-) -> tuple[torch.Tensor, None]:
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     assert block_shape is None
-    if not current_platform.supports_mx():
-        A = quant_dequant_mxfp4(A)
-    else:
-        raise NotImplementedError()
 
-    return A, None
+    if not use_fp4_aiter_moe():
+        A = quant_dequant_mxfp4(A)
+        return A, A_scale
+
+    if A_scale is not None:
+        return A, A_scale
+
+    return dynamic_mxfp4_quant(A)
 
 
 def _mxfp8_quantize(

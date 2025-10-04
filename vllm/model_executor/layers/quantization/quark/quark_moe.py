@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    OCP_MX_BLOCK_SIZE)
+    OCP_MX_BLOCK_SIZE, use_fp4_aiter_moe)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -417,19 +417,12 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
                 "QuarkW4A4MXFp4MoEMethod with static input scales is currently "
                 "not implemented. Please open an issue.")
 
-        if not current_platform.supports_mx():
+        self.emulate = False
+        if use_fp4_aiter_moe():
             self.emulate = True
             logger.warning_once(
                 "The current platform does not support native MXFP4 "
                 "computation. Simulated weight dequantization and activation "
-                "QDQ (quantize and dequantize) will be used, with the linear "
-                "layers computed in high precision.")
-        else:
-            self.emulate = True
-            logger.warning_once(
-                "The current platform supports native MXFP4 "
-                "computation, but kernels are not yet integrated in vLLM. "
-                "Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
                 "layers computed in high precision.")
 
