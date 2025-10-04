@@ -48,6 +48,7 @@ buildkite-test-collector==0.1.9
 genai_perf==0.0.8
 tritonclient==2.51.0
 
+arctic-inference == 0.0.9 # Required for suffix decoding test
 numba == 0.60.0; python_version == '3.9' # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
 numba == 0.61.2; python_version > '3.9'
 numpy
