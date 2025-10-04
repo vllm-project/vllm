@@ -16,7 +16,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
+    kNvfp4Quant,
 )
+from vllm.platforms import current_platform
 
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
@@ -27,10 +29,8 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
 }
 
-# TODO
-# if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-#     QUANT_OPS[
-#         kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
+if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
+    QUANT_OPS[kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
 
 
 class MatcherCustomOp(ABC):
