@@ -63,9 +63,11 @@ serving_column_mapping = {
     "mean_ttft_ms": "Mean TTFT (ms)",
     "median_ttft_ms": "Median TTFT (ms)",
     "p99_ttft_ms": "P99 TTFT (ms)",
+    "std_ttft_ms": "STD TTFT (ms)",
     "mean_tpot_ms": "Mean TPOT (ms)",
     "median_tpot_ms": "Median",
     "p99_tpot_ms": "P99",
+    "std_tpot_ms": "STD TPOT (ms)",
     "mean_itl_ms": "Mean ITL (ms)",
     "median_itl_ms": "Median ITL (ms)",
     "p99_itl_ms": "P99 ITL (ms)",
@@ -368,7 +370,7 @@ if __name__ == "__main__":
         # The GPUs sometimes come in format of "GPUTYPE\nGPUTYPE\n...",
         # we want to turn it into "8xGPUTYPE"
         df["GPU"] = df["GPU"].apply(
-            lambda x: f"{len(x.split('\n'))}x{x.split('\n')[0]}"
+            lambda x: "{}x{}".format(len(x.split("\n")), x.split("\n")[0])
         )
 
     # get markdown tables
