@@ -388,7 +388,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         # override attention block size if either (a) the
         # user has not set it or (b) the user has set it
         # too small.
-        #
         if (cache_config.block_size is None
                 or cache_config.block_size < attn_block_size):
             cache_config.block_size = attn_block_size
