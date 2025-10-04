@@ -343,7 +343,7 @@ class CompletionRenderer(BaseRenderer):
                                                  truncate_prompt_tokens)
 
         prompt = None
-        if needs_detokenization is True:
+        if needs_detokenization:
             async_tokenizer = self._get_async_tokenizer()
             prompt = await async_tokenizer.decode(token_ids)
 
