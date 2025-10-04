@@ -343,6 +343,33 @@ class ModelConfig:
         assert_hashable(str_factors)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
+    def _update_nested(
+        self,
+        target: Union["PretrainedConfig", dict[str, Any]],
+        updates: dict[str, Any],
+    ) -> None:
+        """Recursively updates a config or dict with nested updates."""
+        for key, value in updates.items():
+            if isinstance(value, dict):
+                # Get the nested target
+                if isinstance(target, dict):
+                    nested_target = target.get(key)
+                else:
+                    nested_target = getattr(target, key, None)
+
+                # If nested target exists and can be updated recursively
+                if nested_target is not None and (
+                        isinstance(nested_target, dict)
+                        or hasattr(nested_target, '__dict__')):
+                    self._update_nested(nested_target, value)
+                    continue
+
+            # Set the value (base case)
+            if isinstance(target, dict):
+                target[key] = value
+            else:
+                setattr(target, key, value)
+
     def __post_init__(
         self,
         # Multimodal config init vars
@@ -392,8 +419,16 @@ class ModelConfig:
         if callable(self.hf_overrides):
             hf_overrides_kw = {}
             hf_overrides_fn = self.hf_overrides
+            nested_overrides: dict[str, Any] = {}
         else:
-            hf_overrides_kw = self.hf_overrides
+            # Separate flat overrides (for get_config) from nested ones
+            hf_overrides_kw = {}
+            nested_overrides = {}
+            for key, value in self.hf_overrides.items():
+                if isinstance(value, dict):
+                    nested_overrides[key] = value
+                else:
+                    hf_overrides_kw[key] = value
             hf_overrides_fn = None
 
         if self.rope_scaling:
@@ -445,6 +480,9 @@ class ModelConfig:
                                hf_overrides_fn=hf_overrides_fn)
 
         self.hf_config = hf_config
+        # Apply nested overrides that weren't applied by get_config
+        if nested_overrides:
+            self._update_nested(hf_config, nested_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.attention_chunk_size = getattr(self.hf_text_config,
                                             "attention_chunk_size", None)
