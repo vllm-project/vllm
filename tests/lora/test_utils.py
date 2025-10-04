@@ -18,7 +18,6 @@ class LoRANameParserTestConfig(NamedTuple):
     name: str
     module_name: str
     is_lora_a: bool
-    is_bias: bool
     weights_mapper: Optional[WeightsMapper] = None
 
 
@@ -98,9 +97,9 @@ def test_parse_fine_tuned_lora_name_valid():
                 orig_to_new_prefix={"model.": "language_model.model."}),
         ),
     ]
-    for name, module_name, is_lora_a, is_bias, weights_mapper in fixture:
-        assert (module_name, is_lora_a,
-                is_bias) == parse_fine_tuned_lora_name(name, weights_mapper)
+    for name, module_name, is_lora_a, weights_mapper in fixture:
+        assert (module_name, is_lora_a) == parse_fine_tuned_lora_name(name, weights_mapper)
+
 
 
 def test_parse_fine_tuned_lora_name_invalid():
