@@ -721,6 +721,8 @@ class MambaMixer2(MambaBase, CustomOp):
 
                     # Skip sequences that don't have any blocks to fill
                     if n_blocks_to_fill == 0:
+                        # Move the chunk pos to the start of the next seq
+                        chunk_pos = 1 + last_chunk_indices_p[seq_idx]
                         continue
 
                     # Look up the state indices
