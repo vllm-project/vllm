@@ -3401,6 +3401,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with self.maybe_dummy_run_with_lora(
             self.lora_config, num_scheduled_tokens, remove_lora
         ):
+        # Make sure padding doesn't exceed max_num_tokens
+        assert num_tokens_after_padding <= self.max_num_tokens
             model_kwargs = self._init_model_kwargs(num_tokens_after_padding)
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
                 input_ids = None
