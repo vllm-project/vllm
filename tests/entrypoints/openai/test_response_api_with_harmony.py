@@ -367,6 +367,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             ],
             stream=True,
             background=background,
+            extra_body={"enable_response_messages": True},
         )
 
         current_item_id = ""
@@ -386,6 +387,24 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             ]:
                 assert 'input_messages' in event.response.model_extra
                 assert 'output_messages' in event.response.model_extra
+                if event.type == "response.completed":
+                    # make sure the serialization of content works
+                    # verify skeleton of harmony message
+                    assert event.response.model_extra[
+                        'output_messages'] is not None
+                    first_harmony_message = event.response.model_extra[
+                        'output_messages'][0]
+
+                    assert first_harmony_message['content'] is not None
+                    assert 'recipient' in first_harmony_message
+                    assert 'content_type' in first_harmony_message
+                    assert first_harmony_message['author'] is not None
+                    assert first_harmony_message['channel'] is not None
+
+                    assert event.response.model_extra[
+                        'input_messages'] is not None
+                    assert event.response.model_extra['input_messages'][0][
+                        'content'] is not None
 
             if current_event_mode != event.type:
                 current_event_mode = event.type

@@ -1737,5 +1737,5 @@ class OpenAIServingResponses(OpenAIServing):
                 ResponseCompletedEvent(
                     type="response.completed",
                     sequence_number=-1,
-                    response=final_response.model_dump(),
+                    response=final_response,
                 ))
