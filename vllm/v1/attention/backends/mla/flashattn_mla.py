@@ -12,7 +12,6 @@ from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
 from vllm.attention.utils.fa_utils import (flash_attn_supports_mla,
                                            get_flash_attn_version)
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonDecodeMetadata,
@@ -97,11 +96,6 @@ class FlashAttnMLAMetadataBuilder(
             self.max_num_splits = (
                 envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH)
 
-        # TODO(lucas): Until we add support for the DCP custom masking we need
-        #   to restrict decodes to q_len == 1 when DCP is enabled.
-        self.reorder_batch_threshold = 1 \
-            if get_dcp_group().world_size > 1 else self.reorder_batch_threshold
-
     def _schedule_decode(self, num_reqs, cu_query_lens, max_query_len, seqlens,
                          max_seq_len, causal):
         if self.fa_aot_schedule:
@@ -109,7 +103,7 @@ class FlashAttnMLAMetadataBuilder(
                 batch_size=num_reqs,
                 max_seqlen_q=max_query_len,
                 max_seqlen_k=max_seq_len,
-                num_heads_q=self.num_heads,
+                num_heads_q=self.num_heads * self.dcp_world_size,
                 num_heads_kv=1,
                 headdim=self.mla_dims.qk_rope_head_dim,
                 cache_seqlens=seqlens,
@@ -122,15 +116,19 @@ class FlashAttnMLAMetadataBuilder(
             )
         return None
 
-    def _build_decode(self, block_table_tensor: torch.Tensor,
-                      seq_lens_cpu: torch.Tensor,
-                      seq_lens_device: torch.Tensor,
-                      query_start_loc_cpu: torch.Tensor,
-                      query_start_loc_device: torch.Tensor,
-                      num_decode_tokens: int) -> FlashAttnMLADecodeMetadata:
+    def _build_decode(
+        self,
+        block_table_tensor: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+        seq_lens_device: torch.Tensor,
+        query_start_loc_cpu: torch.Tensor,
+        query_start_loc_device: torch.Tensor,
+        num_decode_tokens: int,
+        cp_tot_seq_lens_device: Optional[torch.Tensor],
+    ) -> FlashAttnMLADecodeMetadata:
         query_lens_cpu = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])
         max_query_len = query_lens_cpu.max().item()
-        max_seq_len = seq_lens_cpu.max().item()
+        max_seq_len = seq_lens_device.max().item()
 
         scheduler_metadata = self._schedule_decode(
             num_reqs=seq_lens_cpu.numel(),
@@ -172,6 +170,7 @@ class FlashAttnMLAMetadataBuilder(
             max_seq_len=max_seq_len,
             scheduler_metadata=scheduler_metadata,
             max_num_splits=max_num_splits,
+            cp_tot_seq_lens=cp_tot_seq_lens_device,
         )
 
 
@@ -260,6 +259,9 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             fa_version=3,  # only version 3 is supported
             scheduler_metadata=attn_metadata.decode.scheduler_metadata,
             num_splits=attn_metadata.decode.max_num_splits,
+            cp_world_size=self.dcp_world_size,
+            cp_rank=self.dcp_rank,
+            cp_tot_seqused_k=attn_metadata.decode.cp_tot_seq_lens,
         )
 
         if self.need_to_return_lse_for_decode:

@@ -352,6 +352,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.query_start_loc = self._make_buffer(self.max_num_reqs + 1,
                                                  dtype=torch.int32)
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        if self.dcp_world_size > 1:
+            self.cp_seq_lens = self._make_buffer(self.max_num_reqs,
+                                                 dtype=torch.int32)
         # Because inputs_embeds may be bfloat16 and we don't need a numpy
         # version of this tensor, avoid a RuntimeError by not creating a
         # numpy buffer.
@@ -522,7 +525,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE(lucas): currently no backend supports the custom masking
             #  required for DCP with q_len > 1, so we assert here. Remove this
             #  assert once the custom mask is support is added to FA3.
-            if self.dcp_world_size > 1:
+            if self.dcp_world_size > 1 and \
+                envs.VLLM_ATTENTION_BACKEND != "FLASH_ATTN_MLA":
                 assert self.reorder_batch_threshold == 1, \
                     "DCP not support reorder_batch_threshold > 1 now."
             reorder_batch_to_split_decodes_and_prefills(
@@ -1240,6 +1244,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_logits_indices=logits_indices.size(0),
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
+                cp_seq_lens=self.cp_seq_lens.gpu[:num_reqs]
+                if self.dcp_world_size > 1 else None,
             )
 
             if (self.speculative_config
@@ -3176,7 +3182,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     block_table[kv_cache_group_id].get_device_tensor(num_reqs),
                     slot_mapping=self.input_batch.block_table[
                         kv_cache_group_id].slot_mapping.gpu[:num_tokens],
-                    causal=True)
+                    causal=True,
+                    cp_seq_lens=self.cp_seq_lens.gpu[:num_reqs]
+                    if self.dcp_world_size > 1 else None,
+                )
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     if ubatch_slices is not None:
                         common_attn_metadata_list = split_attn_metadata(
