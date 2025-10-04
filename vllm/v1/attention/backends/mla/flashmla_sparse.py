@@ -95,35 +95,6 @@ class FlashMLASparseBackend(AttentionBackend):
 
 
 @dataclass
-class MLASparsePrefillMetadata:
-    # NOTE(Chen): not call it "FlashMLASparsePrefillMetadata" because
-    # the kernel is not from flashmla
-    block_table: torch.Tensor
-    has_context: bool = False
-    context_lens: Optional[torch.Tensor] = None
-
-
-@dataclass
-class FlashMLASparseDecodeAndContextMetadata:
-    scheduler_metadata: torch.Tensor = None
-    num_splits: torch.Tensor = None
-    cache_lens: torch.Tensor = None
-    prefill_context_lengths: Optional[torch.Tensor] = None
-    prefill_new_k_start_locs: Optional[torch.Tensor] = None
-    dummy_block_table: torch.Tensor = None
-
-    def filter_prefill_indices(
-            self, indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self.prefill_context_lengths is not None
-        prefill_context_lengths = self.prefill_context_lengths.unsqueeze(-1)
-        context_indices = torch.where(indices < prefill_context_lengths,
-                                      indices, -1)
-        new_token_indices = torch.where(indices >= prefill_context_lengths,
-                                        indices - prefill_context_lengths, -1)
-        return context_indices, new_token_indices
-
-
-@dataclass
 class FlashMLASparseMetadata:
     num_reqs: int
     max_query_len: int
