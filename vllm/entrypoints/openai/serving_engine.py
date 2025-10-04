@@ -441,6 +441,7 @@ class OpenAIServing:
         message: str,
         err_type: str = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        error_context: Optional[dict[str, Any]] = None,
     ) -> ErrorResponse:
         if self.log_error_stack:
             exc_type, _, _ = sys.exc_info()
@@ -448,19 +449,24 @@ class OpenAIServing:
                 traceback.print_exc()
             else:
                 traceback.print_stack()
-        return ErrorResponse(error=ErrorInfo(
-            message=message, type=err_type, code=status_code.value))
+        return ErrorResponse(error=ErrorInfo(message=message,
+                                             type=err_type,
+                                             code=status_code.value,
+                                             error_context=error_context))
 
     def create_streaming_error_response(
         self,
         message: str,
         err_type: str = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        error_context: Optional[dict[str, Any]] = None,
     ) -> str:
         json_str = json.dumps(
-            self.create_error_response(message=message,
-                                       err_type=err_type,
-                                       status_code=status_code).model_dump())
+            self.create_error_response(
+                message=message,
+                err_type=err_type,
+                status_code=status_code,
+                error_context=error_context).model_dump())
         return json_str
 
     async def _check_model(

@@ -282,7 +282,8 @@ class OpenAIServingCompletion(OpenAIServing):
                                 error_ctx.message,
                                 err_type=error_ctx.error_type,
                                 status_code=error_ctx.http_status
-                                or HTTPStatus.INTERNAL_SERVER_ERROR)
+                                or HTTPStatus.INTERNAL_SERVER_ERROR,
+                                error_context=final_res.error_context)
                         else:
                             return self.create_error_response(
                                 "Request aborted due to an internal error.",
@@ -372,7 +373,8 @@ class OpenAIServingCompletion(OpenAIServing):
                                 error_ctx.message,
                                 err_type=error_ctx.error_type,
                                 status_code=error_ctx.http_status
-                                or HTTPStatus.INTERNAL_SERVER_ERROR)
+                                or HTTPStatus.INTERNAL_SERVER_ERROR,
+                                error_context=res.error_context)
                         else:
                             yield self.create_streaming_error_response(
                                 "Request aborted due to an internal error.",

@@ -115,6 +115,7 @@ class ErrorInfo(OpenAIBaseModel):
     type: str
     param: Optional[str] = None
     code: int
+    error_context: Optional[dict[str, Any]] = None
 
 
 class ErrorResponse(OpenAIBaseModel):

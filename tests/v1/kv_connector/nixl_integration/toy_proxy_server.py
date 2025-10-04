@@ -12,8 +12,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger = logging.getLogger("uvicorn.error")
 
 
 @asynccontextmanager
@@ -180,7 +179,8 @@ async def send_request_to_service(client_info: dict, endpoint: str,
 
 
 async def stream_service_response(client_info: dict, endpoint: str,
-                                  req_data: dict, request_id: str):
+                                  req_data: dict, request_id: str,
+                                  request: Request):
     """
     Asynchronously stream response from a service using a client from the pool.
     """
@@ -189,12 +189,15 @@ async def stream_service_response(client_info: dict, endpoint: str,
         "X-Request-Id": request_id
     }
 
+    # get logger from request state for ASGI integration
+    req_logger = getattr(request.app.state, 'logger', logger)
+
     async with client_info['client'].stream("POST",
                                             endpoint,
                                             json=req_data,
                                             headers=headers) as response:
-        logger.info("Decode server response status: %s for request %s",
-                    response.status_code, request_id)
+        req_logger.info("Decode server response status: %s for request %s",
+                        response.status_code, request_id)
 
         # handle error responses with context
         if response.status_code >= 400:
@@ -202,16 +205,25 @@ async def stream_service_response(client_info: dict, endpoint: str,
             try:
                 import json
                 error_data = json.loads(error_body)
-                logger.error(
-                    "Decode server error %d for request %s: %s. " \
-                    "Error context: %s",
-                    response.status_code, request_id,
-                    error_data.get('message', 'no message'),
-                    error_data.get('error_context', 'no context'))
+                error_ctx = error_data.get('error', {}).get('error_context')
+                if error_ctx:
+                    req_logger.error(
+                        "Decode server error %d for request %s: %s. "
+                        "Error type: %s, Metadata: %s", response.status_code,
+                        request_id,
+                        error_data.get('error',
+                                       {}).get('message', 'no message'),
+                        error_ctx.get('error_type'), error_ctx.get('metadata'))
+                else:
+                    req_logger.error(
+                        "Decode server error %d for request %s: %s",
+                        response.status_code, request_id,
+                        error_data.get('error',
+                                       {}).get('message', 'no message'))
             except json.JSONDecodeError:
-                logger.error("Decode server error %d for request %s: %s",
-                             response.status_code, request_id,
-                             error_body.decode('utf-8'))
+                req_logger.error("Decode server error %d for request %s: %s",
+                                 response.status_code, request_id,
+                                 error_body.decode('utf-8'))
             response.raise_for_status()
 
         async for chunk in response.aiter_bytes():
@@ -247,7 +259,8 @@ async def _handle_completions(api: str, request: Request):
             async for chunk in stream_service_response(decode_client_info,
                                                        api,
                                                        req_data,
-                                                       request_id=request_id):
+                                                       request_id=request_id,
+                                                       request=request):
                 chunk_count += 1
                 # parse SSE data to log key fields
                 chunk_str = chunk.decode('utf-8')
