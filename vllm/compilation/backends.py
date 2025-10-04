@@ -15,7 +15,7 @@ import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
-from vllm.compilation.partition_rules import _inductor_partition_rule_context
+from vllm.compilation.partition_rules import inductor_partition_rule_context
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -72,10 +72,9 @@ class CompilerManager:
     def compile_context(self):
         with ExitStack() as stack:
             if self.compilation_config.use_inductor_graph_partition:
-                partition_ops = (
-                    self.compilation_config.get_inductor_partition_ops())
+                partition_ops = self.compilation_config.splitting_ops
                 stack.enter_context(
-                    _inductor_partition_rule_context(partition_ops))
+                    inductor_partition_rule_context(partition_ops))
             yield
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:

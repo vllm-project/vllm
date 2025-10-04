@@ -639,8 +639,8 @@ class CompilationConfig:
             )
             return
 
-        if self.splitting_ops == []:
-            logger.warning_once(
+        if self.splitting_ops is not None:
+            logger.debug(
                 "Empty splitting_ops provided with "
                 "use_inductor_graph_partition; defaulting to attention ops.")
         else:
@@ -649,20 +649,6 @@ class CompilationConfig:
                 "inductor partition rules.", )
 
         self.splitting_ops = list(self._attention_ops)
-
-    def get_inductor_partition_ops(self) -> list[str]:
-        if not self.use_inductor_graph_partition:
-            return []
-
-        ops = (list(self.splitting_ops)
-               if self.splitting_ops else list(self._attention_ops))
-        seen: set[str] = set()
-        unique_ops: list[str] = []
-        for name in ops:
-            if name not in seen:
-                seen.add(name)
-                unique_ops.append(name)
-        return unique_ops
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.enable_attn_fusion

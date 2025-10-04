@@ -157,9 +157,6 @@ def test_splitting_ops_dynamic():
         assert config.compilation_config.splitting_ops == [
             "vllm.unified_attention"
         ]
-        assert config.compilation_config.get_inductor_partition_ops() == [
-            "vllm.unified_attention"
-        ]
 
     # When attn_fusion pass enabled.
     config = VllmConfig(compilation_config=CompilationConfig(
@@ -203,9 +200,8 @@ def test_splitting_ops_dynamic():
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         ))
-        default_ops = config.compilation_config.get_inductor_partition_ops()
-        assert config.compilation_config.splitting_ops == default_ops
-        assert default_ops == CompilationConfig()._attention_ops
+        assert config.compilation_config.splitting_ops == CompilationConfig(
+        )._attention_ops
         # enable_attn_fusion is directly supported under
         # use_inductor_graph_partition=True, and cudagraph_mode
         # is unchanged.
