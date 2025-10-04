@@ -217,6 +217,18 @@ def get_tokenizer(
                                                     **kwargs)
     else:
         try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_name,
+                *args,
+                trust_remote_code=trust_remote_code,
+                revision=revision,
+                **kwargs,
+            )
+        except ValueError as e:
+            # If the error pertains to the tokenizer class not existing or not
+            # currently being imported,
+            # suggest using the --trust-remote-code flag.
+
             # TODO(HelloWorldU): The IO operation could be very slow and
             # we should find a better way to do this. 
             config_path = Path(tokenizer_name) / "tokenizer_config.json"
@@ -226,28 +238,17 @@ def get_tokenizer(
                             "TikTokenTokenizer"):
                         tokenizer = TikTokenTokenizer(tokenizer_name, **kwargs)
             else:
-                tokenizer = AutoTokenizer.from_pretrained(
-                    tokenizer_name,
-                    *args,
-                    trust_remote_code=trust_remote_code,
-                    revision=revision,
-                    **kwargs,
-                )
-        except ValueError as e:
-            # If the error pertains to the tokenizer class not existing or not
-            # currently being imported,
-            # suggest using the --trust-remote-code flag.
-            if not trust_remote_code and (
-                    "does not exist or is not currently imported." in str(e)
-                    or "requires you to execute the tokenizer file" in str(e)):
-                err_msg = ("Failed to load the tokenizer. If the tokenizer "
-                           "is a custom tokenizer not yet available in the "
-                           "HuggingFace transformers library, consider "
-                           "setting `trust_remote_code=True` in LLM or using "
-                           "the `--trust-remote-code` flag in the CLI.")
-                raise RuntimeError(err_msg) from e
-            else:
-                raise e
+                if not trust_remote_code and (
+                        "does not exist or is not currently imported." in str(e)
+                        or "requires you to execute the tokenizer file" in str(e)):
+                    err_msg = ("Failed to load the tokenizer. If the tokenizer "
+                            "is a custom tokenizer not yet available in the "
+                            "HuggingFace transformers library, consider "
+                            "setting `trust_remote_code=True` in LLM or using "
+                            "the `--trust-remote-code` flag in the CLI.")
+                    raise RuntimeError(err_msg) from e
+                else:
+                    raise e
 
         # The special_tokens in tokenizer should also be
         # controlled by do_lower_case in encoder_config
