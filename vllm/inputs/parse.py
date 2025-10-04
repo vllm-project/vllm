@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import Literal, Optional, TypedDict, Union, cast, overload
+from typing import (TYPE_CHECKING, Literal, NamedTuple, Optional, TypedDict,
+                    Union, cast, overload)
 
 from typing_extensions import TypeIs
 
@@ -10,6 +11,9 @@ from vllm.utils import is_list_of
 from .data import (EmbedsPrompt, ExplicitEncoderDecoderPrompt, ProcessorInputs,
                    PromptType, SingletonInputs, SingletonPrompt, TextPrompt,
                    TokensPrompt)
+
+if TYPE_CHECKING:
+    import torch
 
 
 class ParsedText(TypedDict):
@@ -149,3 +153,23 @@ def split_enc_dec_inputs(
         )
 
     return None, inputs
+
+
+class PromptComponents(NamedTuple):
+    text: Optional[str] = None
+    token_ids: Optional[list[int]] = None
+    embeds: Optional["torch.Tensor"] = None
+
+
+def get_prompt_components(prompt: PromptType) -> PromptComponents:
+    if isinstance(prompt, str):
+        return PromptComponents(text=prompt)
+
+    if (encoder_prompt := prompt.get("encoder_prompt")):
+        return get_prompt_components(encoder_prompt)  # type: ignore[arg-type]
+
+    return PromptComponents(
+        text=prompt.get("prompt"),  # type: ignore[arg-type]
+        token_ids=prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
+        embeds=prompt.get("prompt_embeds"),
+    )

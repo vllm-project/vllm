@@ -205,11 +205,6 @@ class TokenInputs(TypedDict):
     prompt_token_ids: list[int]
     """The token IDs of the prompt."""
 
-    prompt: NotRequired[str]
-    """
-    The original prompt text corresponding to the token IDs, if available.
-    """
-
     cache_salt: NotRequired[str]
     """
     Optional cache salt to be used for prefix caching.
@@ -218,15 +213,12 @@ class TokenInputs(TypedDict):
 
 def token_inputs(
     prompt_token_ids: list[int],
-    prompt: Optional[str] = None,
     cache_salt: Optional[str] = None,
 ) -> TokenInputs:
     """Construct [`TokenInputs`][vllm.inputs.data.TokenInputs] from optional
     values."""
     inputs = TokenInputs(type="token", prompt_token_ids=prompt_token_ids)
 
-    if prompt is not None:
-        inputs["prompt"] = prompt
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
 
