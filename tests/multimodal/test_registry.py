@@ -11,6 +11,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ..models.utils import build_model_context
 
+pytestmark = pytest.mark.cpu_test
+
 
 @pytest.mark.parametrize(
     "model_id,limit_mm_per_prompt,expected",

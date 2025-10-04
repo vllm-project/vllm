@@ -52,21 +52,6 @@ TERM_PLOTLIB_AVAILABLE = ((importlib.util.find_spec("termplotlib") is not None)
                           and (shutil.which("gnuplot") is not None))
 
 
-# TODO: Remove this in v0.11.0
-class DeprecatedEndpointTypeAction(argparse.Action):
-    """Argparse action for the deprecated --endpoint-type flag.
-    """
-
-    def __call__(self, _, namespace, values, option_string=None):
-        warnings.warn(
-            "'--endpoint-type' is deprecated and will be removed in v0.11.0. "
-            "Please use '--backend' instead or remove this argument if you "
-            "have already set it.",
-            stacklevel=1,
-        )
-        setattr(namespace, self.dest, values)
-
-
 class TaskType(Enum):
     GENERATION = "generation"
     EMBEDDING = "embedding"
@@ -884,15 +869,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="The type of backend or endpoint to use for the benchmark."
     )
     parser.add_argument(
-        "--endpoint-type",
-        type=str,
-        default=None,
-        choices=list(ASYNC_REQUEST_FUNCS.keys()),
-        action=DeprecatedEndpointTypeAction,
-        help="'--endpoint-type' is deprecated and will be removed in v0.11.0. "
-        "Please use '--backend' instead.",
-    )
-    parser.add_argument(
         "--base-url",
         type=str,
         default=None,
@@ -1101,6 +1077,27 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "openai-compatible backends. If not specified, default to greedy "
         "decoding (i.e. temperature==0.0).",
     )
+    sampling_group.add_argument(
+        "--frequency-penalty",
+        type=float,
+        default=None,
+        help="Frequency penalty sampling parameter. Only has effect on "
+        "openai-compatible backends.",
+    )
+    sampling_group.add_argument(
+        "--presence-penalty",
+        type=float,
+        default=None,
+        help="Presence penalty sampling parameter. Only has effect on "
+        "openai-compatible backends.",
+    )
+    sampling_group.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=None,
+        help="Repetition penalty sampling parameter. Only has effect on "
+        "openai-compatible backends.",
+    )
 
     parser.add_argument(
         '--tokenizer-mode',
@@ -1235,6 +1232,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "top_k": args.top_k,
             "min_p": args.min_p,
             "temperature": args.temperature,
+            "frequency_penalty": args.frequency_penalty,
+            "presence_penalty": args.presence_penalty,
+            "repetition_penalty": args.repetition_penalty,
         }.items() if v is not None
     }
 

@@ -15,6 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
+from vllm.entrypoints.utils import _validate_truncation_size
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
+from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.processor import Processor
+
 if sys.version_info >= (3, 12):
     from typing import TypedDict
 else:
@@ -63,6 +68,7 @@ from vllm.entrypoints.renderer import (BaseRenderer, CompletionRenderer,
 # yapf: enable
 from vllm.inputs.data import PromptType
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
+from vllm.inputs.parse import PromptComponents, get_prompt_components
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
@@ -74,7 +80,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of,
+from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of, make_async,
                         merge_async_iterators, random_uuid)
 
 logger = init_logger(__name__)
@@ -234,10 +240,22 @@ class OpenAIServing:
         self.enable_force_include_usage = enable_force_include_usage
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
+        self._apply_mistral_chat_template_async = make_async(
+            apply_mistral_chat_template, executor=self._tokenizer_executor)
 
         self._async_tokenizer_pool: dict[AnyTokenizer,
                                          AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
+
+    async def _get_processor(self) -> Processor:
+        if not hasattr(self, "_processor"):
+            vllm_config = await self.engine_client.get_vllm_config()
+            if self.model_config.skip_tokenizer_init:
+                tokenizer = None
+            else:
+                tokenizer = init_tokenizer_from_configs(self.model_config)
+            self._processor = Processor(vllm_config, tokenizer)
+        return self._processor
 
     def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:
         """
@@ -782,7 +800,7 @@ class OpenAIServing:
         if tokenizer is None:
             request_prompt = "placeholder"
         elif isinstance(tokenizer, MistralTokenizer):
-            request_prompt = apply_mistral_chat_template(
+            request_prompt = await self._apply_mistral_chat_template_async(
                 tokenizer,
                 messages=messages,
                 **_chat_template_kwargs,
@@ -850,6 +868,34 @@ class OpenAIServing:
 
         return conversation, [request_prompt], [engine_prompt]
 
+    async def _process_inputs(
+        self,
+        request_id: str,
+        engine_prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        *,
+        lora_request: Optional[LoRARequest],
+        trace_headers: Optional[Mapping[str, str]],
+        priority: int,
+    ) -> tuple[EngineCoreRequest, dict[str, Any]]:
+        """Use the Processor to process inputs for AsyncLLM."""
+        tokenization_kwargs: dict[str, Any] = {}
+        _validate_truncation_size(self.max_model_len,
+                                  params.truncate_prompt_tokens,
+                                  tokenization_kwargs)
+
+        processor = await self._get_processor()
+        engine_request = processor.process_inputs(
+            request_id,
+            engine_prompt,
+            params,
+            lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
+            trace_headers=trace_headers,
+            priority=priority,
+        )
+        return engine_request, tokenization_kwargs
+
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
@@ -861,6 +907,7 @@ class OpenAIServing:
         priority: int = 0,
         **kwargs,
     ):
+        prompt_text, _, _ = self._get_prompt_components(request_prompt)
         orig_priority = priority
         while True:
             self._log_inputs(
@@ -869,14 +916,27 @@ class OpenAIServing:
                 params=sampling_params,
                 lora_request=lora_request,
             )
-            generator = self.engine_client.generate(
+            trace_headers = kwargs.get("trace_headers")
+            engine_request, tokenization_kwargs = (await self._process_inputs(
+                request_id,
                 engine_prompt,
+                sampling_params,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                priority=priority,
+            ))
+
+            generator = self.engine_client.generate(
+                engine_request,
                 sampling_params,
                 request_id,
                 lora_request=lora_request,
                 priority=priority,
+                prompt_text=prompt_text,
+                tokenization_kwargs=tokenization_kwargs,
                 **kwargs,
             )
+
             async for res in generator:
                 context.append_output(res)
                 # NOTE(woosuk): The stop condition is handled by the engine.
@@ -905,6 +965,15 @@ class OpenAIServing:
             # OPTIMIZATION
             priority = orig_priority - 1
 
+    def _get_prompt_components(
+        self,
+        prompt: Union[RequestPrompt, PromptType],
+    ) -> PromptComponents:
+        if isinstance(prompt, list):
+            return PromptComponents(token_ids=prompt)
+
+        return get_prompt_components(prompt)  # type: ignore[arg-type]
+
     def _log_inputs(
         self,
         request_id: str,
@@ -915,14 +984,9 @@ class OpenAIServing:
     ) -> None:
         if self.request_logger is None:
             return
-        prompt, prompt_token_ids, prompt_embeds = None, None, None
-        if isinstance(inputs, str):
-            prompt = inputs
-        elif isinstance(inputs, list):
-            prompt_token_ids = inputs
-        else:
-            prompt = getattr(inputs, 'prompt', None)
-            prompt_token_ids = getattr(inputs, 'prompt_token_ids', None)
+
+        prompt, prompt_token_ids, prompt_embeds = (
+            self._get_prompt_components(inputs))
 
         self.request_logger.log_inputs(
             request_id,

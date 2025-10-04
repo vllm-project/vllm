@@ -18,6 +18,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW4A16Fp4, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
     CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    W8A8BlockFp8LinearOp)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -742,3 +745,35 @@ def test_compressed_tensors_transforms_perplexity(vllm_runner, model, prompt,
         perplexity = llm.generate_prompt_perplexity([prompt])[0]
         print(perplexity)
         assert perplexity <= exp_perplexity
+
+
+def test_compressed_tensors_fp8_block_enabled(vllm_runner):
+    model_path = "RedHatAI/Qwen3-0.6B-FP8-BLOCK"
+    with vllm_runner(model_path) as llm:
+
+        fp8_dtype = current_platform.fp8_dtype()
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+            assert isinstance(qkv_proj.quant_method,
+                              CompressedTensorsLinearMethod)
+            assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
+            assert isinstance(qkv_proj.scheme.w8a8_block_fp8_linear,
+                              W8A8BlockFp8LinearOp)
+
+            assert qkv_proj.weight.dtype is fp8_dtype
+            assert qkv_proj.weight_scale.dtype is torch.float32
+            assert len(qkv_proj.weight.shape) == 2
+            assert len(qkv_proj.weight_scale.shape) == 2
+
+            input_quant_op = \
+                qkv_proj.scheme.w8a8_block_fp8_linear.input_quant_op
+            assert isinstance(input_quant_op, QuantFP8)
+            assert input_quant_op._forward_method == input_quant_op.forward_cuda
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        assert output

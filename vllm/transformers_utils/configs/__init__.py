@@ -8,6 +8,7 @@ Model configs may be defined in this directory for the following reasons:
 """
 
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
+from vllm.transformers_utils.configs.deepseek_v3 import DeepseekV3Config
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
@@ -37,6 +38,7 @@ from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 __all__ = [
     "ChatGLMConfig",
     "DeepseekVLV2Config",
+    "DeepseekV3Config",
     "DotsOCRConfig",
     "EAGLEConfig",
     "RWConfig",

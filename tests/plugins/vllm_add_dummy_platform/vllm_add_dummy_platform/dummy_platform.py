@@ -26,5 +26,5 @@ class DummyPlatform(Platform):
 
     def get_attn_backend_cls(self, backend_name, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla,
-                             has_sink):
+                             has_sink, use_sparse):
         return "vllm_add_dummy_platform.dummy_attention_backend.DummyAttentionBackend"  # noqa E501

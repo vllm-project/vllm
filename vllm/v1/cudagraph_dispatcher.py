@@ -4,9 +4,6 @@ from typing import Optional
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
 
 
 class CudagraphDispatcher:
@@ -102,8 +99,6 @@ class CudagraphDispatcher:
         """
         # if not initialized, just skip dispatching.
         if not self.keys_initialized:
-            logger.warning_once("cudagraph dispatching keys are not "
-                                "initialized. No cudagraph will be used.")
             return CUDAGraphMode.NONE, None
 
         non_uniform_key = batch_descriptor.non_uniform

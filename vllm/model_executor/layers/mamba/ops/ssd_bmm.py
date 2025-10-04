@@ -6,8 +6,6 @@
 
 # ruff: noqa: E501,SIM102
 
-import math
-
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -96,7 +94,7 @@ def _bmm_chunk_fwd_kernel(
     a_ptr,
     b_ptr,
     out_ptr,
-    seq_idx_ptr,
+    cu_chunk_seqlens_ptr,
     # Matrix dimensions
     seqlen,
     chunk_size: tl.constexpr,
@@ -112,7 +110,6 @@ def _bmm_chunk_fwd_kernel(
     stride_out_head: tl.int64,
     stride_outm: tl.int64,
     stride_outn: tl.constexpr,
-    stride_seq_idx_seqlen: tl.constexpr,
     # Meta-parameters
     IS_CAUSAL: tl.constexpr,
     dot_dtype: tl.constexpr,
@@ -129,10 +126,12 @@ def _bmm_chunk_fwd_kernel(
     if IS_CAUSAL:
         if pid_n * BLOCK_SIZE_N >= (pid_m + 1) * BLOCK_SIZE_M:
             return
-    a_ptr += pid_c * chunk_size * stride_a_seqlen + pid_h * stride_a_head
-    b_ptr += pid_c * chunk_size * stride_b_seqlen + pid_h * stride_b_head
 
-    seq_idx_ptr += pid_c * chunk_size * stride_seq_idx_seqlen
+    chunk_seqlen_start = tl.load(cu_chunk_seqlens_ptr + pid_c)
+    chunk_seqlen_end = tl.load(cu_chunk_seqlens_ptr + pid_c + 1)
+
+    a_ptr += chunk_seqlen_start * stride_a_seqlen + pid_h * stride_a_head
+    b_ptr += chunk_seqlen_start * stride_b_seqlen + pid_h * stride_b_head
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -141,7 +140,7 @@ def _bmm_chunk_fwd_kernel(
                       offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk +
                       offs_n[None, :] * stride_b_seqlen)
-    chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
+    chunk_size_limit = chunk_seqlen_end - chunk_seqlen_start
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
@@ -162,16 +161,6 @@ def _bmm_chunk_fwd_kernel(
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
 
-    # Zero out the results that are not from the same request
-    # in the varlen batch
-    seq_idx_m = tl.load(seq_idx_ptr + offs_m * stride_seq_idx_seqlen,
-                        mask=offs_m < chunk_size_limit,
-                        other=-1)
-    seq_idx_n = tl.load(seq_idx_ptr + offs_n * stride_seq_idx_seqlen,
-                        mask=offs_n < chunk_size_limit,
-                        other=-2)
-    acc = tl.where(seq_idx_m[:, None] == seq_idx_n[None, :], acc, 0.0)
-
     out = acc.to(out_ptr.dtype.element_ty)
     out_ptr += pid_c * stride_out_chunk + pid_h * stride_out_head
     out_ptrs = out_ptr + (stride_outm * offs_m[:, None] +
@@ -182,12 +171,18 @@ def _bmm_chunk_fwd_kernel(
              (offs_n[None, :] < chunk_size))
 
 
-def _bmm_chunk_fwd(a, b, chunk_size, seq_idx, causal=False, output_dtype=None):
+def _bmm_chunk_fwd(a,
+                   b,
+                   chunk_size,
+                   cu_chunk_seqlens,
+                   causal=False,
+                   output_dtype=None):
     """
     Argument:
         a: (seqlen, ngroups, k)
         b: (seqlen, ngroups, k)
-        seq_idx: (seqlen,). out[i, j] for seq_idx[i] != seq_idx[j] will be zeroed out.
+        chunk_size: int
+        cu_chunk_seq_lens: (nchunks+1,)
         causal: if True, then out[i, j] for i > j will be arbitrary, only out[i, j] for i <= j are
             guaranteed to be correct.
     Return:
@@ -195,14 +190,12 @@ def _bmm_chunk_fwd(a, b, chunk_size, seq_idx, causal=False, output_dtype=None):
     """
     seqlen, ngroups, k = a.shape
     assert b.shape == a.shape
-    assert seq_idx is not None
-    assert seq_idx.shape == (seqlen, )
     if a.stride(-1) != 1 and a.stride(0) != 1:
         a = a.contiguous()
     if b.stride(-1) != 1 and b.stride(0) != 1:
         b = b.contiguous()
 
-    nchunks = math.ceil(seqlen / chunk_size)
+    nchunks = len(cu_chunk_seqlens) - 1
     # Allocates output.
     out_dtype = a.dtype if output_dtype is None else output_dtype
     out = torch.empty((nchunks, ngroups, chunk_size, chunk_size),
@@ -220,7 +213,7 @@ def _bmm_chunk_fwd(a, b, chunk_size, seq_idx, causal=False, output_dtype=None):
             a_ptr=a,
             b_ptr=b,
             out_ptr=out,
-            seq_idx_ptr=seq_idx,
+            cu_chunk_seqlens_ptr=cu_chunk_seqlens,
             seqlen=seqlen,
             chunk_size=chunk_size,
             K=k,
@@ -235,7 +228,6 @@ def _bmm_chunk_fwd(a, b, chunk_size, seq_idx, causal=False, output_dtype=None):
             stride_out_head=out.stride(1),
             stride_outm=out.stride(-2),
             stride_outn=out.stride(-1),
-            stride_seq_idx_seqlen=seq_idx.stride(0),
             IS_CAUSAL=causal,
             dot_dtype=dot_dtype,
         )

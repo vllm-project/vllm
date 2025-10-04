@@ -274,7 +274,8 @@ class OpenAIServingChat(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                sampling_params: Union[SamplingParams, BeamSearchParams]
+                prompt_text, _, _ = (self._get_prompt_components(
+                    request_prompts[i]))
 
                 if self.default_sampling_params is None:
                     self.default_sampling_params = {}
@@ -285,6 +286,7 @@ class OpenAIServingChat(OpenAIServing):
                     input_length=len(engine_prompt["prompt_token_ids"]),
                     default_sampling_params=self.default_sampling_params)
 
+                sampling_params: Union[SamplingParams, BeamSearchParams]
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
                         max_tokens, self.default_sampling_params)
@@ -309,13 +311,25 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
+                    engine_request, tokenization_kwargs = (
+                        await self._process_inputs(
+                            request_id,
+                            engine_prompt,
+                            sampling_params,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            priority=request.priority,
+                        ))
+
                     generator = self.engine_client.generate(
-                        engine_prompt,
+                        engine_request,
                         sampling_params,
                         request_id,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        prompt_text=prompt_text,
+                        tokenization_kwargs=tokenization_kwargs,
                     )
 
                 generators.append(generator)
@@ -677,11 +691,13 @@ class OpenAIServingChat(OpenAIServing):
                     if self.use_harmony:
                         harmony_parser = harmony_parsers[i]
                         prev_recipient = harmony_parser.current_recipient
+                        delta_text = ""
                         for token_id in output.token_ids:
                             harmony_parser.process(token_id)
+                            delta_text += (harmony_parser.last_content_delta
+                                           or "")
                         cur_channel = harmony_parser.current_channel
                         cur_recipient = harmony_parser.current_recipient
-                        delta_text = harmony_parser.last_content_delta or ""
                     else:
                         delta_text = output.text
 
@@ -1575,7 +1591,9 @@ class OpenAIServingChat(OpenAIServing):
         sys_msg = get_system_message(
             reasoning_effort=request.reasoning_effort,
             browser_description=None,
-            python_description=None)
+            python_description=None,
+            with_custom_tools=request.tools is not None
+            )
         messages.append(sys_msg)
 
         # Add developer message.

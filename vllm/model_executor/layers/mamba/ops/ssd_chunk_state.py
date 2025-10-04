@@ -6,8 +6,6 @@
 
 # ruff: noqa: E501
 
-import math
-
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -34,6 +32,7 @@ def _chunk_cumsum_fwd_kernel(
     dt_bias_ptr,
     dt_out_ptr,
     dA_cumsum_ptr,
+    cu_chunk_seqlens_ptr,
     # Matrix dimension
     seqlen,
     nheads: tl.constexpr,
@@ -61,7 +60,11 @@ def _chunk_cumsum_fwd_kernel(
     # https://github.com/triton-lang/triton/issues/1058
     pid_c = tl.program_id(axis=0).to(tl.int64)
     pid_h = tl.program_id(axis=1)
-    dt_ptr += pid_c * chunk_size * stride_dt_seqlen
+
+    chunk_seqlen_start = tl.load(cu_chunk_seqlens_ptr + pid_c)
+    chunk_seqlen_end = tl.load(cu_chunk_seqlens_ptr + pid_c + 1)
+
+    dt_ptr += chunk_seqlen_start * stride_dt_seqlen
     dt_out_ptr += pid_c * stride_dt_out_chunk
     dA_cumsum_ptr += pid_c * stride_dA_cs_chunk
 
@@ -74,7 +77,7 @@ def _chunk_cumsum_fwd_kernel(
                                 offs_c[None, :] * stride_dt_out_csize)
     dA_cs_ptrs = dA_cumsum_ptr + (offs_h[:, None] * stride_dA_cs_head +
                                   offs_c[None, :] * stride_dA_cs_csize)
-    chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
+    chunk_size_limit = chunk_seqlen_end - chunk_seqlen_start
 
     dt = tl.load(dt_ptrs,
                  mask=(offs_h[:, None] < nheads) &
@@ -188,7 +191,7 @@ def _chunk_state_fwd_kernel(
     states_ptr,
     dt_ptr,
     dA_cumsum_ptr,
-    seq_idx_ptr,
+    cu_chunk_seqlens_ptr,
     # Matrix dimensions
     hdim: tl.constexpr,
     dstate: tl.constexpr,
@@ -212,7 +215,6 @@ def _chunk_state_fwd_kernel(
     stride_dA_cs_head: tl.int64,
     stride_dA_cs_chunk: tl.int64,
     stride_dA_cs_csize: tl.constexpr,
-    stride_seq_idx_seqlen: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -223,13 +225,13 @@ def _chunk_state_fwd_kernel(
     num_pid_n = tl.cdiv(dstate, BLOCK_SIZE_N)
     pid_m = tl.program_id(axis=0) // num_pid_n
     pid_n = tl.program_id(axis=0) % num_pid_n
-    b_ptr += pid_c * chunk_size * stride_b_seqlen + (
+    chunk_seqlen_start = tl.load(cu_chunk_seqlens_ptr + pid_c)
+    chunk_seqlen_end = tl.load(cu_chunk_seqlens_ptr + pid_c + 1)
+    b_ptr += chunk_seqlen_start * stride_b_seqlen + (
         pid_h // nheads_ngroups_ratio) * stride_b_head
-    x_ptr += pid_c * chunk_size * stride_x_seqlen + pid_h * stride_x_head
+    x_ptr += chunk_seqlen_start * stride_x_seqlen + pid_h * stride_x_head
     dt_ptr += pid_c * stride_dt_chunk + pid_h * stride_dt_head
     dA_cumsum_ptr += pid_c * stride_dA_cs_chunk + pid_h * stride_dA_cs_head
-
-    seq_idx_ptr += pid_c * chunk_size * stride_seq_idx_seqlen
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -243,10 +245,7 @@ def _chunk_state_fwd_kernel(
                          (chunk_size - 1) * stride_dA_cs_csize).to(tl.float32)
     dA_cumsum_ptrs = dA_cumsum_ptr + offs_k * stride_dA_cs_csize
 
-    seq_idx_ptrs = seq_idx_ptr + offs_k * stride_seq_idx_seqlen
-    chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
-    seq_idx_last = tl.load(seq_idx_ptr +
-                           (chunk_size_limit - 1) * stride_seq_idx_seqlen)
+    chunk_size_limit = chunk_seqlen_end - chunk_seqlen_start
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, chunk_size_limit, BLOCK_SIZE_K):
@@ -261,15 +260,9 @@ def _chunk_state_fwd_kernel(
         dA_cs_k = tl.load(dA_cumsum_ptrs,
                           mask=offs_k < chunk_size_limit - k,
                           other=0.0).to(tl.float32)
-
-        seq_idx_k = tl.load(seq_idx_ptrs,
-                            mask=offs_k < chunk_size_limit - k,
-                            other=-1)
         dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size_limit - k,
                        other=0.0).to(tl.float32)
-
-        scale = tl.where(seq_idx_k == seq_idx_last,
-                         tl.exp(dA_cs_last - dA_cs_k) * dt_k, 0.0)
+        scale = tl.exp(dA_cs_last - dA_cs_k) * dt_k
         b *= scale[:, None]
         b = b.to(x_ptr.dtype.element_ty)
         acc += tl.dot(x, b)
@@ -278,7 +271,6 @@ def _chunk_state_fwd_kernel(
         b_ptrs += BLOCK_SIZE_K * stride_b_seqlen
         dt_ptrs += BLOCK_SIZE_K * stride_dt_csize
         dA_cumsum_ptrs += BLOCK_SIZE_K * stride_dA_cs_csize
-        seq_idx_ptrs += BLOCK_SIZE_K * stride_seq_idx_seqlen
 
     states = acc.to(states_ptr.dtype.element_ty)
 
@@ -534,6 +526,7 @@ def _chunk_state_varlen_kernel(
 def _chunk_cumsum_fwd(dt,
                       A,
                       chunk_size,
+                      cu_chunk_seqlens,
                       dt_bias=None,
                       dt_softplus=False,
                       dt_limit=(0.0, float("inf"))):
@@ -541,7 +534,7 @@ def _chunk_cumsum_fwd(dt,
     assert A.shape == (nheads, )
     if dt_bias is not None:
         assert dt_bias.shape == (nheads, )
-    nchunks = math.ceil(seqlen / chunk_size)
+    nchunks = cu_chunk_seqlens.shape[0] - 1
     dt_out = torch.empty(nheads,
                          nchunks,
                          chunk_size,
@@ -561,6 +554,7 @@ def _chunk_cumsum_fwd(dt,
             dt_bias_ptr=dt_bias,
             dt_out_ptr=dt_out,
             dA_cumsum_ptr=dA_cumsum,
+            cu_chunk_seqlens_ptr=cu_chunk_seqlens,
             seqlen=seqlen,
             nheads=nheads,
             chunk_size=chunk_size,
@@ -588,7 +582,7 @@ def _chunk_state_fwd(B,
                      x,
                      dt,
                      dA_cumsum,
-                     seq_idx=None,
+                     cu_chunk_seqlens,
                      states=None,
                      states_in_fp32=True):
     seqlen, nheads, headdim = x.shape
@@ -598,9 +592,6 @@ def _chunk_state_fwd(B,
     assert B.shape == (seqlen, ngroups, dstate)
     assert dt.shape == (nheads, nchunks, chunk_size)
     assert dA_cumsum.shape == dt.shape
-
-    assert seq_idx is not None
-    assert seq_idx.shape == (seqlen, )
 
     if states is not None:
         assert states.shape == (nchunks, nheads, headdim, dstate)
@@ -619,7 +610,7 @@ def _chunk_state_fwd(B,
             states_ptr=states,
             dt_ptr=dt,
             dA_cumsum_ptr=dA_cumsum,
-            seq_idx_ptr=seq_idx,
+            cu_chunk_seqlens_ptr=cu_chunk_seqlens,
             hdim=headdim,
             dstate=dstate,
             chunk_size=chunk_size,
@@ -641,7 +632,6 @@ def _chunk_state_fwd(B,
             stride_dA_cs_head=dA_cumsum.stride(0),
             stride_dA_cs_chunk=dA_cumsum.stride(1),
             stride_dA_cs_csize=dA_cumsum.stride(2),
-            stride_seq_idx_seqlen=seq_idx.stride(0),
         )
     return states
 

@@ -8,6 +8,7 @@ from torch import nn
 from transformers import BatchFeature, PaliGemmaConfig
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -106,6 +107,7 @@ class PaliGemmaDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
@@ -113,11 +115,14 @@ class PaliGemmaDummyInputsBuilder(
 
         num_images = mm_counts.get("image", 0)
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=max_image_size,
                                    height=max_image_size,
-                                   num_images=num_images)
+                                   num_images=num_images,
+                                   overrides=image_overrides)
         }
 
 
@@ -219,7 +224,6 @@ class PaliGemmaMultiModalProcessor(
         if len(prompt_token_ids) and prompt_token_ids[-1] != newline_token_id:
             prompt_token_ids.append(newline_token_id)
             mm_inputs["prompt_token_ids"] = prompt_token_ids
-            mm_inputs["prompt"] += newline_prompt
 
         return mm_inputs
 
@@ -369,17 +373,6 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
                 **kwargs: object) -> IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
-                input_ids,
-                vision_embeddings,
-                is_multimodal=input_ids == self.config.image_token_index,
-            )
-            input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
