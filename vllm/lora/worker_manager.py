@@ -92,7 +92,9 @@ class WorkerLoRAManager:
                         packed_modules_mapping[module])
                 else:
                     expected_lora_modules.append(module)
-
+            # TODO(gnovack) - Attempting to load full-layer moe adapter
+                if module == 'experts':
+                    expected_lora_modules.append(module)
             expected_lora_modules = list(set(expected_lora_modules))
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
 

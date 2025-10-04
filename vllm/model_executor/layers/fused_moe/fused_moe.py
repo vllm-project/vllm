@@ -1816,10 +1816,21 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                             (num_tokens, top_k_num, K))
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
+            # The code `moe_align_block_size` appears to be a variable or
+            # function name in Python. Without additional context or code,
+            # it is not possible to determine exactly what it is doing.
+            # The name suggests that it may be related to aligning blocks
+            # of code or data to a specific size.
             moe_align_block_size(topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
 
         invoke_fused_moe_kernel(
+            # The code `hidden_states` is not performing any specific action in
+            # the provided snippet. It seems to be a variable name or
+            # placeholder without any associated code or context.
+            # The code `hidden_states` is not performing any specific action in
+            # the provided snippet. It seems to be a variable or placeholder
+            # that has been declared but not used or assigned any value.
             hidden_states,
             w1,
             intermediate_cache1,
@@ -1876,12 +1887,19 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             B_bias=self.w2_bias,
         )
 
-        ops.moe_sum(intermediate_cache3, output)
+        # ops.moe_sum(intermediate_cache3, output)
+        self.moe_sum(intermediate_cache3, output)
+
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+        ops.moe_sum(input, output)
 
 
 def modular_triton_fused_moe(
-        quant_config: FusedMoEQuantConfig) -> mk.FusedMoEModularKernel:
+    quant_config: FusedMoEQuantConfig,
+    shared_experts: Optional[torch.nn.Module] = None
+) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
         TritonExperts(quant_config),
+        shared_experts,
     )
