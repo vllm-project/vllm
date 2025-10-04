@@ -3,7 +3,7 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
-from typing import Optional
+from typing import Optional, TypedDict
 
 import numpy as np
 import torch
@@ -12,8 +12,9 @@ import torch.nn as nn
 from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
@@ -29,6 +30,7 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
@@ -40,12 +42,14 @@ logger = init_logger(__name__)
 PADDING_SLOT_ID = -1
 
 
-class EagleProposer:
+class SpecDecodeBaseProposer:
 
     def __init__(
         self,
         vllm_config: VllmConfig,
         device: torch.device,
+        pass_hidden_states_to_model: bool,
+        pass_cudagraph_args_to_forward_ctx: bool,
         runner=None,
     ):
         self.vllm_config = vllm_config
@@ -53,6 +57,9 @@ class EagleProposer:
         assert self.speculative_config is not None
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
+        self.pass_hidden_states_to_model = pass_hidden_states_to_model
+        self.pass_cudagraph_args_to_forward_ctx \
+            = pass_cudagraph_args_to_forward_ctx
 
         self.runner = runner
         self.device = device
@@ -188,11 +195,14 @@ class EagleProposer:
         last_token_indices: Optional[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
+        cudagraph_args: "CudaGraphArgs",
+        sampler_output: SamplerOutput,
+        spec_decode_metadata: Optional[SpecDecodeMetadata],
         mm_embed_inputs: Optional[tuple[list[torch.Tensor],
                                         torch.Tensor]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
-        batch_size = next_token_ids.shape[0]
+        batch_size = common_attn_metadata.batch_size()
 
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
@@ -202,12 +212,9 @@ class EagleProposer:
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
-        # Shift the input ids by one token.
-        # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
-        self.input_ids[:num_tokens - 1] = target_token_ids[1:]
-        # Replace the last token with the next token.
-        # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
-        self.input_ids[last_token_indices] = next_token_ids
+
+        self.set_input_ids_first_pass(target_token_ids, next_token_ids,
+                                      num_tokens, last_token_indices)
 
         assert self.runner is not None
 
@@ -242,7 +249,10 @@ class EagleProposer:
             num_input_tokens = num_tokens
         # copy inputs to buffer for cudagraph
         self._set_positions(num_tokens, target_positions)
-        self.hidden_states[:num_tokens] = target_hidden_states
+        if self.pass_hidden_states_to_model:
+            # target_hidden_states and self.hidden_states can have different
+            # hidden dims. E.g. large target model and small draft model.
+            self.hidden_states[:num_tokens] = target_hidden_states
 
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
@@ -259,16 +269,27 @@ class EagleProposer:
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
 
-        with set_forward_context(per_layer_attn_metadata,
-                                 self.vllm_config,
-                                 num_tokens=num_input_tokens):
-            ret_hidden_states = self.model(
-                input_ids=input_ids,
-                positions=self._get_positions(num_input_tokens),
-                hidden_states=self.hidden_states[:num_input_tokens],
-                inputs_embeds=inputs_embeds,
-            )
-            if self.method == "mtp":
+        model_kwargs = {
+            "input_ids": input_ids,
+            "positions": self._get_positions(num_input_tokens),
+            "inputs_embeds": inputs_embeds,
+        }
+        if self.pass_hidden_states_to_model:
+            model_kwargs[
+                "hidden_states"] = self.hidden_states[:num_input_tokens]
+
+        forward_ctx_kwargs = dict(
+            attn_metadata=per_layer_attn_metadata,
+            vllm_config=self.vllm_config,
+            num_tokens=num_input_tokens,
+        )
+        if self.pass_cudagraph_args_to_forward_ctx:
+            update_batch_descriptor(cudagraph_args, num_input_tokens)
+            forward_ctx_kwargs.update(cudagraph_args)
+
+        with set_forward_context(**forward_ctx_kwargs):
+            ret_hidden_states = self.model(**model_kwargs)
+            if not self.model_returns_tuple():
                 last_hidden_states = ret_hidden_states
                 hidden_states = last_hidden_states
             else:
@@ -285,7 +306,9 @@ class EagleProposer:
             positions = target_positions[:, last_token_indices]
         else:
             positions = target_positions[last_token_indices]
-        if self.method in ("deepseek_mtp", "ernie_mtp", "longcat_flash_mtp"):
+
+        # NOTE(Tomas): What is the intention of this ifelse?
+        if self.method == "mtp":
             hidden_states = self.hidden_states[last_token_indices]
         else:
             hidden_states = hidden_states[last_token_indices]
@@ -410,20 +433,33 @@ class EagleProposer:
                 inputs_embeds = None
 
             # Run the model.
-            with set_forward_context(per_layer_attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=input_batch_size):
-                ret_hidden_states = self.model(
-                    input_ids=input_ids,
-                    positions=self._get_positions(input_batch_size),
-                    hidden_states=self.hidden_states[:input_batch_size],
-                    inputs_embeds=inputs_embeds,
-                )
-                if self.method == "mtp":
+            model_kwargs = {
+                "input_ids": input_ids,
+                "positions": self._get_positions(input_batch_size),
+                "inputs_embeds": inputs_embeds,
+            }
+            if self.pass_hidden_states_to_model:
+                model_kwargs[
+                    "hidden_states"] = self.hidden_states[:input_batch_size]
+
+            forward_ctx_kwargs = dict(
+                attn_metadata=per_layer_attn_metadata,
+                vllm_config=self.vllm_config,
+                num_tokens=input_batch_size,
+            )
+            if self.pass_cudagraph_args_to_forward_ctx:
+                cudagraph_args = self.decoding_cudagraph_args(
+                    num_tokens=input_batch_size)
+                forward_ctx_kwargs.update(cudagraph_args)
+
+            with set_forward_context(**forward_ctx_kwargs):
+                ret_hidden_states = self.model(**model_kwargs)
+                if not self.model_returns_tuple():
                     last_hidden_states = ret_hidden_states
                     hidden_states = ret_hidden_states
                 else:
                     last_hidden_states, hidden_states = ret_hidden_states
+
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
             draft_token_ids = logits.argmax(dim=-1)
@@ -432,6 +468,29 @@ class EagleProposer:
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
+
+    def set_input_ids_first_pass(self, target_token_ids: torch.Tensor,
+                                 next_token_ids: torch.Tensor, num_tokens: int,
+                                 last_token_indices: torch.Tensor) -> None:
+        # Shift the input ids by one token.
+        # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
+        self.input_ids[:num_tokens - 1] = target_token_ids[1:]
+        # Replace the last token with the next token.
+        # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
+        self.input_ids[last_token_indices] = next_token_ids
+
+    def model_returns_tuple(self) -> bool:
+        return self.method not in ("mtp", "draft_model")
+
+    def decoding_cudagraph_args(self, num_tokens: int) -> "CudaGraphArgs":
+        batch_descriptor = BatchDescriptor(num_tokens=num_tokens,
+                                           uniform_decode=True)
+        cudagraph_runtime_mode, batch_descriptor = (
+            self.runner.cudagraph_dispatcher.dispatch(batch_descriptor))
+        return CudaGraphArgs(
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            batch_descriptor=batch_descriptor,
+        )
 
     def prepare_next_token_ids_cpu(
             self, sampled_token_ids: list[list[int]],
@@ -545,17 +604,8 @@ class EagleProposer:
         used as padding and filtered out later by `token_indices_to_sample`.
         No blocking CPU operations should be introduced in this function.
         """
-        num_draft_tokens_gpu = torch.cat([
-            spec_decode_metadata.cu_num_draft_tokens[0:1],
-            spec_decode_metadata.cu_num_draft_tokens[1:] -
-            spec_decode_metadata.cu_num_draft_tokens[:-1]
-        ])
-
-        num_rejected_tokens_gpu = torch.where(
-            num_draft_tokens_gpu > 0,
-            num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
-            torch.zeros_like(num_draft_tokens_gpu))
-
+        num_rejected_tokens_gpu = num_rejected_tokens(
+            spec_decode_metadata, valid_sampled_tokens_count)
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
         new_query_len_per_req = (query_start_loc_cpu[1:] -
@@ -1041,6 +1091,26 @@ class EagleProposer:
         ) == 1, "All eagle layers should belong to the same kv cache group"
 
 
+class CudaGraphArgs(TypedDict):
+    cudagraph_runtime_mode: CUDAGraphMode
+    batch_descriptor: BatchDescriptor
+
+
+class EagleProposer(SpecDecodeBaseProposer):
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        runner=None,
+    ):
+        super().__init__(vllm_config,
+                         device,
+                         pass_hidden_states_to_model=True,
+                         pass_cudagraph_args_to_forward_ctx=False,
+                         runner=runner)
+
+
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
 # to sample the draft tokens. We will use this after we find a way to manage
 # the draft prob tensor.
@@ -1082,3 +1152,33 @@ def compute_probs_and_sample_next_token(
             next_token_ids,
         )
     return next_token_ids, probs
+
+
+def num_rejected_tokens(
+        spec_decode_metadata: Optional[SpecDecodeMetadata],
+        valid_sampled_tokens_count: torch.Tensor) -> torch.Tensor:
+    if spec_decode_metadata is None:
+        return torch.zeros_like(valid_sampled_tokens_count)
+
+    num_draft_tokens_gpu = torch.cat([
+        spec_decode_metadata.cu_num_draft_tokens[0:1],
+        spec_decode_metadata.cu_num_draft_tokens[1:] -
+        spec_decode_metadata.cu_num_draft_tokens[:-1]
+    ])
+
+    num_rejected_tokens_gpu = torch.where(
+        num_draft_tokens_gpu > 0,
+        num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
+        torch.zeros_like(num_draft_tokens_gpu))
+    return num_rejected_tokens_gpu
+
+
+def update_batch_descriptor(cudagraph_args: CudaGraphArgs,
+                            new_num_tokens: int) -> None:
+    """The cudagraph padding can change the num_tokens, so the batch descriptor
+    should be updated. The cudagraph_args is modified in place."""
+    old: Optional[BatchDescriptor] = cudagraph_args["batch_descriptor"]
+    if old is not None:
+        new = BatchDescriptor(num_tokens=new_num_tokens,
+                              uniform_decode=old.uniform_decode)
+        cudagraph_args["batch_descriptor"] = new

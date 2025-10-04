@@ -346,11 +346,6 @@ class SpeculativeConfig:
                             )
                 else:
                     self.method = "draft_model"
-                    raise NotImplementedError(
-                        "Speculative decoding with draft model is not "
-                        "supported yet. Please consider using other "
-                        "speculative decoding methods such as ngram, medusa, "
-                        "eagle, or mtp.")
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):
@@ -560,6 +555,9 @@ class SpeculativeConfig:
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
+
+    def uses_draft_model(self) -> bool:
+        return self.method == "draft_model"
 
     def __repr__(self) -> str:
         method = self.method
