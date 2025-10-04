@@ -35,6 +35,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    z=None,
                                    dt_bias=None,
                                    initial_states=None,
+                                   return_intermediate_states=False,
                                    seq_idx=None,
                                    cu_seqlens=None,
                                    cu_chunk_seqlens=None,
@@ -151,28 +152,32 @@ def _mamba_chunk_scan_combined_fwd(x,
         initial_states=initial_states,
     )
 
-    return states[last_chunk_indices]
+    if return_intermediate_states:
+        return states
+    else:
+        return states[last_chunk_indices]
 
 
 def mamba_chunk_scan_combined_varlen(
-        x,
-        dt,
-        A,
-        B,
-        C,
-        chunk_size,
-        cu_seqlens,
-        cu_chunk_seqlens,
-        last_chunk_indices,
-        seq_idx,
-        out,
-        D=None,
-        z=None,
-        dt_bias=None,
-        initial_states=None,
-        dt_softplus=False,
-        dt_limit=(0.0, float("inf")),
-        state_dtype=None,
+    x,
+    dt,
+    A,
+    B,
+    C,
+    chunk_size,
+    cu_seqlens,
+    cu_chunk_seqlens,
+    last_chunk_indices,
+    seq_idx,
+    out,
+    D=None,
+    z=None,
+    dt_bias=None,
+    initial_states=None,
+    dt_softplus=False,
+    dt_limit=(0.0, float("inf")),
+    return_intermediate_states=False,
+    state_dtype=None,
 ):
     """
     Argument:
@@ -213,6 +218,7 @@ def mamba_chunk_scan_combined_varlen(
         z=z,
         dt_bias=dt_bias,
         initial_states=initial_states,
+        return_intermediate_states=return_intermediate_states,
         seq_idx=seq_idx,
         cu_seqlens=cu_seqlens,
         cu_chunk_seqlens=cu_chunk_seqlens,
