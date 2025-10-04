@@ -989,10 +989,12 @@ class DeepseekV2DecoderLayer(nn.Module):
     def __init__(self,
                  vllm_config: VllmConfig,
                  prefix: str,
+                 config: Optional[DeepseekV2Config] = None,
                  topk_indices_buffer: Optional[torch.Tensor] = None) -> None:
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        if config is None:
+            config = vllm_config.model_config.hf_config
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
@@ -1134,8 +1136,8 @@ class DeepseekV2Model(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: DeepseekV2DecoderLayer(vllm_config, prefix,
-                                                  topk_indices_buffer),
+            lambda prefix: DeepseekV2DecoderLayer(
+                vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
             prefix=f"{prefix}.layers")
 
         if get_pp_group().is_last_rank:
