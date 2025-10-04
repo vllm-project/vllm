@@ -137,6 +137,7 @@ class ExllamaLinearKernel(MPLinearKernel):
         assert w_g_idx is not None, "Group index is required by Exllama"
         output = ops.gptq_gemm(x_2d, w_q, w_zp, w_s, w_g_idx, True,
                                c.weight_type.size_bits)
+        # TODO: use gptq_gemm_v2 if checkpoint format is gptq_v2 (see gptq.py)
 
         if bias is not None:
             output.add_(bias)

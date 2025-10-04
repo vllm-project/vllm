@@ -46,6 +46,7 @@ class GPTQConfig(QuantizationConfig):
         dynamic: dict[str, dict[str, Union[int, bool]]],
         autoround_version: str = "",
         modules_in_block_to_quantize: Optional[list[str]] = None,
+        checkpoint_format: str = "",
     ) -> None:
         # GPTQModel use `dynamic` config property to allow per module
         # quantization config so each module can be individually optimized.
@@ -88,6 +89,12 @@ class GPTQConfig(QuantizationConfig):
         # used to identify GPTQ model quantized by autoround
         self.autoround_version = autoround_version
 
+        # GPTQ v1 and v2 format deals with zero points differently,
+        # and require different gemm kernels.
+        # Currently GPTQModel stores v1 format checkpoints by default,
+        # but provides the option to set `format='gptq_v2'` in `QuantizeConfig`.
+        self.checkpoint_format = checkpoint_format
+
     def __repr__(self) -> str:
         return (
             f"GPTQConfig(weight_bits={self.weight_bits}, "
@@ -96,7 +103,7 @@ class GPTQConfig(QuantizationConfig):
             f"lm_head_quantized={self.lm_head_quantized}, "
             f"dynamic={self.dynamic}, "
             f"modules_in_block_to_quantize={self.modules_in_block_to_quantize})"
-        )
+            f"checkpoint_format={self.checkpoint_format}), ")
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -129,8 +136,11 @@ class GPTQConfig(QuantizationConfig):
                                                  default="")
         modules_in_block_to_quantize = cls.get_from_keys_or(
             config, ["modules_in_block_to_quantize"], default=None)
+        checkpoint_format = cls.get_from_keys_or(config, ["checkpoint_format"],
+                                                 default="")
         return cls(weight_bits, group_size, desc_act, lm_head_quantized,
-                   dynamic, autoround_version, modules_in_block_to_quantize)
+                   dynamic, autoround_version, modules_in_block_to_quantize,
+                   checkpoint_format)
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
@@ -139,6 +149,7 @@ class GPTQConfig(QuantizationConfig):
             # GPTQ MoE support: fall back to MoeWNA16 for broad compatibility
             from .moe_wna16 import MoeWNA16Config
 
+            # TODO: maybe update this for GPTQv2 format checkpoints
             config = {
                 "quant_method": "gptq",
                 "bits": self.weight_bits,
@@ -197,6 +208,9 @@ class GPTQLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: GPTQConfig):
         self.quant_config = quant_config
+
+        # GPTQ v1 and v2 format deals with zero points differently
+        self.use_gptq_gemm_v2 = quant_config.checkpoint_format == 'gptq_v2'
 
     def create_weights(
         self,
@@ -335,10 +349,18 @@ class GPTQLinearMethod(LinearMethodBase):
         out_shape = x.shape[:-1] + (layer.qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])
 
-        output = ops.gptq_gemm(reshaped_x, layer.qweight, layer.qzeros,
-                               layer.scales, layer.g_idx,
-                               layer.exllama_state == ExllamaState.READY,
-                               self.quant_config.weight_bits)
+        # GPTQ v1 and v2 format checkpoints deals with zero points differently,
+        # and require different gemm kernels.
+        if self.use_gptq_gemm_v2:
+            output = ops.gptq_gemm_v2(
+                reshaped_x, layer.qweight, layer.qzeros, layer.scales,
+                layer.g_idx, layer.exllama_state == ExllamaState.READY,
+                self.quant_config.weight_bits)
+        else:
+            output = ops.gptq_gemm(reshaped_x, layer.qweight, layer.qzeros,
+                                   layer.scales, layer.g_idx,
+                                   layer.exllama_state == ExllamaState.READY,
+                                   self.quant_config.weight_bits)
         if bias is not None:
             output.add_(bias)
         return output.reshape(out_shape)
