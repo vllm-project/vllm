@@ -592,8 +592,7 @@ struct AllReduceTwoshot {
         grid_size * Codec::kTransmittedTileSize + comm_data0_offset;
 
     uint32_t comm_flags0_offset = block_id * (kWorldSize * sizeof(uint32_t));
-    uint32_t comm_flags1_offset =
-        grid_size * (kWorldSize * sizeof(uint32_t)) + comm_flags0_offset;
+    uint32_t comm_flags1_offset = (data_offset / 2) + comm_flags0_offset;
 
     for (int r = 0; r < kWorldSize; r++) {
       int32x4_t* send_buffer =
