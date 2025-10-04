@@ -3401,26 +3401,30 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with self.maybe_dummy_run_with_lora(
             self.lora_config, num_scheduled_tokens, remove_lora
         ):
-            model_kwargs = self._init_model_kwargs(num_tokens)
+            model_kwargs = self._init_model_kwargs(num_tokens_after_padding)
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
                 input_ids = None
-                inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
+                inputs_embeds = self.inputs_embeds.gpu[:
+                                                       num_tokens_after_padding]
                 model_kwargs = {
                     **model_kwargs,
                     **self._dummy_mm_kwargs(num_reqs),
                 }
             elif self.enable_prompt_embeds:
                 input_ids = None
-                inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
-                model_kwargs = self._init_model_kwargs(num_tokens)
+                inputs_embeds = self.inputs_embeds.gpu[:
+                                                       num_tokens_after_padding]
+                model_kwargs = self._init_model_kwargs(
+                    num_tokens_after_padding)
             else:
-                input_ids = self.input_ids.gpu[:num_tokens]
+                input_ids = self.input_ids.gpu[:num_tokens_after_padding]
                 inputs_embeds = None
 
             if self.uses_mrope:
-                positions = self.mrope_positions.gpu[:, :num_tokens]
+                positions = self.mrope_positions.gpu[:, :
+                                                     num_tokens_after_padding]
             else:
-                positions = self.positions.gpu[:num_tokens]
+                positions = self.positions.gpu[:num_tokens_after_padding]
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
@@ -3435,8 +3439,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     )
 
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+<<<<<<< HEAD
                     num_tokens, None, False
                 )
+=======
+                    num_tokens_after_padding, None, False)
+>>>>>>> f38a17972 (pad input buffers)
 
             # filter out the valid batch descriptor
             _cg_mode, batch_descriptor = (
