@@ -22,7 +22,7 @@ from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType, SchedulerConfig, SchedulerPolicy
-from vllm.config.speculative import SpeculativeConfig
+from vllm.config.speculative import EAGLE_MODEL_TYPES, SpeculativeConfig
 from vllm.config.speech_to_text import SpeechToTextConfig
 from vllm.config.structured_outputs import StructuredOutputsConfig
 from vllm.config.utils import (ConfigType, SupportsMetricsInfo, config,
@@ -86,6 +86,7 @@ __all__ = [
     "SchedulerPolicy",
     # From vllm.config.speculative
     "SpeculativeConfig",
+    "EAGLE_MODEL_TYPES",
     # From vllm.config.speech_to_text
     "SpeechToTextConfig",
     # From vllm.config.structured_outputs

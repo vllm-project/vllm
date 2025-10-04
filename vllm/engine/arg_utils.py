@@ -21,17 +21,17 @@ from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
-from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigType, ConvertOption, DetailedTraceModules,
-                         Device, DeviceConfig, DistributedExecutorBackend,
-                         EPLBConfig, HfOverrides, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LogprobsMode,
-                         LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
-                         ModelDType, ObservabilityConfig, ParallelConfig,
-                         PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         StructuredOutputsConfig, TaskOption, TokenizerMode,
-                         VllmConfig, get_attr_docs)
+from vllm.config import (EAGLE_MODEL_TYPES, BlockSize, CacheConfig, CacheDType,
+                         CompilationConfig, ConfigType, ConvertOption,
+                         DetailedTraceModules, Device, DeviceConfig,
+                         DistributedExecutorBackend, EPLBConfig, HfOverrides,
+                         KVEventsConfig, KVTransferConfig, LoadConfig,
+                         LogprobsMode, LoRAConfig, MambaDType, MMEncoderTPMode,
+                         ModelConfig, ModelDType, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
+                         RunnerOption, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, StructuredOutputsConfig,
+                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs)
 from vllm.config.multimodal import MMCacheType, MultiModalConfig
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.config.utils import get_field
@@ -1300,12 +1300,14 @@ class EngineArgs:
                 raise ValueError("Async scheduling is not supported with "
                                  "pipeline-parallel-size > 1.")
 
-            # Currently, async scheduling does not support speculative decoding.
-            # TODO(woosuk): Support it.
-            if self.speculative_config is not None:
-                raise ValueError(
-                    "Currently, speculative decoding is not supported with "
-                    "async scheduling.")
+            # Currently, async scheduling only support eagle speculative
+            # decoding.
+            # TODO(woosuk): Support other kinds of speculative decoding.
+            if (self.speculative_config is not None
+                    and self.speculative_config.get("method")
+                    not in EAGLE_MODEL_TYPES):
+                raise ValueError("Currently, async scheduling is only support "
+                                 "with eagle kind of speculative decodeing.")
 
         # Forward the deprecated CLI args to the EPLB config.
         if self.num_redundant_experts is not None:
