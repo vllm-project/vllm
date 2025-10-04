@@ -101,5 +101,5 @@ def inductor_partition_rule_context(op_names: list[str]):
 
     try:
         yield
-    finally:
-        inductor_scheduler._custom_should_partition_fns.clear()
+    finally: 
+        logger.debug("Partition rules remain registered")
