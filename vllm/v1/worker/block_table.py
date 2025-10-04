@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from vllm.distributed import get_dcp_group
+from vllm.distributed.parallel_state import get_context_parallel_world_size
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
@@ -36,7 +37,12 @@ class BlockTable:
                                              dtype=torch.int32)
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
 
-        self.slot_mapping = self._make_buffer(self.max_num_batched_tokens,
+        cp_size = get_context_parallel_world_size()
+        # For context parallel case (cp_size > 1), slot_mapping is also used
+        # for previously computed tokens, so we need larger buffer size
+        slot_mapping_size = (max_num_reqs * max_num_blocks_per_req * block_size
+                             if cp_size > 1 else self.max_num_batched_tokens)
+        self.slot_mapping = self._make_buffer(slot_mapping_size,
                                               dtype=torch.int64)
         try:
             self.dcp_world_size = get_dcp_group().world_size
@@ -73,8 +79,10 @@ class BlockTable:
         self.num_blocks_per_row[src_tgt] = self.num_blocks_per_row[tgt_src]
         self.block_table.np[src_tgt] = self.block_table.np[tgt_src]
 
-    def compute_slot_mapping(self, req_indices: np.ndarray,
-                             positions: np.ndarray) -> None:
+    def compute_slot_mapping(self,
+                             req_indices: np.ndarray,
+                             positions: np.ndarray,
+                             offset: int = 0) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
         # where K is the max_num_blocks_per_req and the block size is 2.
@@ -110,7 +118,8 @@ class BlockTable:
             block_offsets = positions % self.block_size
             np.add(block_numbers * self.block_size,
                    block_offsets,
-                   out=self.slot_mapping.np[:req_indices.shape[0]])
+                   out=self.slot_mapping.np[offset:offset +
+                                            req_indices.shape[0]])
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
@@ -188,10 +197,12 @@ class MultiGroupBlockTable:
         for block_table in self.block_tables:
             block_table.swap_row(src, tgt)
 
-    def compute_slot_mapping(self, req_indices: np.ndarray,
-                             positions: np.ndarray) -> None:
+    def compute_slot_mapping(self,
+                             req_indices: np.ndarray,
+                             positions: np.ndarray,
+                             offset: int = 0) -> None:
         for block_table in self.block_tables:
-            block_table.compute_slot_mapping(req_indices, positions)
+            block_table.compute_slot_mapping(req_indices, positions, offset)
 
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:

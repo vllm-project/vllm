@@ -35,7 +35,9 @@ class CachedRequestState:
     generator: Optional[torch.Generator]
 
     block_ids: tuple[list[int], ...]
-    num_computed_tokens: int
+    # List tracking the cumulative number of tokens processed after each prefill chunk,
+    # where each entry corresponds to the total tokens computed up to that chunk.
+    num_computed_tokens: list[int]
     output_token_ids: list[int]
 
     mrope_positions: Optional[torch.Tensor] = None
@@ -335,7 +337,8 @@ class InputBatch:
         # Number of tokens without spec decode tokens.
         self.num_tokens_no_spec[req_index] = request.num_tokens
 
-        self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
+        self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens[
+            -1]
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
