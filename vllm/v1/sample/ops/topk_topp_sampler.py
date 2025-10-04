@@ -39,15 +39,6 @@ class TopKTopPSampler(nn.Module):
             logprobs_mode not in ("processed_logits", "processed_logprobs")
             and current_platform.is_cuda()
         ):
-            if envs.VLLM_USE_FLASHINFER_SAMPLER:
-                # Users must opt in explicitly via VLLM_USE_FLASHINFER_SAMPLER=1.
-                logger.info_once(
-                    "Using FlashInfer for top-p & top-k sampling.",
-                    scope="global",
-                )
-                self.forward = self.forward_cuda
-        if (logprobs_mode not in ("processed_logits", "processed_logprobs")
-                and current_platform.is_cuda()):
             if is_flashinfer_available:
                 flashinfer_version = flashinfer.__version__
                 if version.parse(flashinfer_version) < version.parse("0.2.3"):
@@ -93,14 +84,17 @@ class TopKTopPSampler(nn.Module):
             else:
                 self.forward = self.forward_cpu
             self.forward = self.forward_cpu
-        elif (logprobs_mode not in ("processed_logits", "processed_logprobs")
-              and current_platform.is_rocm()
-              and envs.VLLM_ROCM_USE_AITER):
+        elif (
+            logprobs_mode not in ("processed_logits", "processed_logprobs")
+            and current_platform.is_rocm()
+            and envs.VLLM_ROCM_USE_AITER
+        ):
             import aiter.ops.sampling  # noqa: F401
 
             self.aiter_ops = torch.ops.aiter
             logger.info_once(
-                "Using aiter sampler on ROCm (lazy import, sampling-only).")
+                "Using aiter sampler on ROCm (lazy import, sampling-only)."
+            )
             self.forward = self.forward_hip
         else:
             self.forward = self.forward_native
@@ -198,7 +192,8 @@ class TopKTopPSampler(nn.Module):
             if generators:
                 logger.warning_once(
                     "aiter sampler does not support per-request generators; "
-                    "falling back to PyTorch-native.")
+                    "falling back to PyTorch-native."
+                )
             return self.forward_native(logits, generators, k, p)
         assert self.logprobs_mode not in (
             "processed_logits",
@@ -231,16 +226,17 @@ class TopKTopPSampler(nn.Module):
         elif use_top_p:
             probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
             next_token_ids = self.aiter_ops.top_p_sampling_from_probs(
-                probs, None, *_to_tensor_scalar_tuple(p), deterministic=True)
+                probs, None, *_to_tensor_scalar_tuple(p), deterministic=True
+            )
             return next_token_ids.view(-1)
         # Top-k only path
         elif use_top_k:
             probs = logits.softmax(dim=-1, dtype=torch.float32).contiguous()
             renorm_probs = self.aiter_ops.top_k_renorm_probs(
-                probs, *_to_tensor_scalar_tuple(k))
+                probs, *_to_tensor_scalar_tuple(k)
+            )
             return torch.multinomial(renorm_probs, num_samples=1).view(-1)
-        raise RuntimeError(
-            "aiter_sample was called with no active top-k or top-p.")
+        raise RuntimeError("aiter_sample was called with no active top-k or top-p.")
 
 
 # Note: this is a workaround for
