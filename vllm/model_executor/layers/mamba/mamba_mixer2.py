@@ -579,19 +579,26 @@ class MambaMixer2(MambaBase, CustomOp):
         if prefix_caching_enabled:
             # If prefix caching is enabled, retrieve the relevant variables
             # for prefill and decode
-            last_state_idx_d, last_state_idx_p = torch.split(
-                attn_metadata.last_state_idx, [num_decodes, num_prefills],
-                dim=0)
-            current_last_idx_d, current_last_idx_p = torch.split(
-                attn_metadata.current_last_idx, [num_decodes, num_prefills],
+            block_idx_last_computed_token_d, block_idx_last_computed_token_p = \
+                torch.split(
+                    attn_metadata.block_idx_last_computed_token,
+                    [num_decodes, num_prefills],
+                    dim=0)
+            block_idx_last_scheduled_token_d, \
+            block_idx_last_scheduled_token_p = torch.split(
+                attn_metadata.block_idx_last_scheduled_token,
+                [num_decodes, num_prefills],
                 dim=0)
             # Prefill-only variables:
-            current_first_idx_p = attn_metadata.current_first_idx_p
+            block_idx_first_scheduled_token_p = \
+                attn_metadata.block_idx_first_scheduled_token_p
             num_computed_tokens_p = attn_metadata.num_computed_tokens_p
         else:
-            last_state_idx_d, last_state_idx_p = None, None
-            current_last_idx_d, current_last_idx_p = None, None
-            current_first_idx_p = None
+            block_idx_last_computed_token_d = None
+            block_idx_last_computed_token_p = None
+            block_idx_last_scheduled_token_d = None
+            block_idx_last_scheduled_token_p = None
+            block_idx_first_scheduled_token_p = None
             num_computed_tokens_p = None
 
         # Preallocate output tensor to avoid memcpy cost for merging prefill
@@ -620,7 +627,8 @@ class MambaMixer2(MambaBase, CustomOp):
             #   to by "state_indices_tensor_p".
             #   In particular, it will always write the state at the
             #   sequence end.
-            #   In addition, "current_first_idx_p" and "current_last_idx_p"
+            #   In addition, "block_idx_first_scheduled_token_p" and
+            #   "block_idx_last_scheduled_token_p"
             #   are provided (which are pointers into
             #   "state_indices_tensor_p"), it will write additional cache
             #   states aligned at "block_size_to_align".
@@ -634,9 +642,10 @@ class MambaMixer2(MambaBase, CustomOp):
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
                 cache_indices=state_indices_tensor_p,
-                current_first_idx=current_first_idx_p,
-                current_last_idx=current_last_idx_p,
-                initial_state_idx=last_state_idx_p,
+                block_idx_first_scheduled_token=
+                block_idx_first_scheduled_token_p,
+                block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
+                initial_state_idx=block_idx_last_computed_token_p,
                 num_computed_tokens=num_computed_tokens_p,
                 block_size_to_align=mamba_block_size,
                 metadata=attn_metadata,
@@ -652,7 +661,8 @@ class MambaMixer2(MambaBase, CustomOp):
                 kernel_ssm_indices = state_indices_tensor_p
                 if prefix_caching_enabled:
                     kernel_ssm_indices = state_indices_tensor_p.gather(
-                        1, last_state_idx_p.unsqueeze(1)).squeeze(1)
+                        1, block_idx_last_computed_token_p.unsqueeze(
+                            1)).squeeze(1)
                 initial_states = torch.where(
                     has_initial_states_p[:, None, None, None],
                     ssm_state[kernel_ssm_indices], 0)
@@ -698,11 +708,13 @@ class MambaMixer2(MambaBase, CustomOp):
                 for seq_idx in range(num_prefills):
 
                     # Block index for the first scheduled token
-                    block_idx_first_scheduled_token = current_first_idx_p[
-                        seq_idx]
+                    block_idx_first_scheduled_token = \
+                        block_idx_first_scheduled_token_p[seq_idx]
+
                     # Block index for the last scheduled token
-                    block_idx_last_scheduled_token = current_last_idx_p[
-                        seq_idx]
+                    block_idx_last_scheduled_token = \
+                        block_idx_last_scheduled_token_p[seq_idx]
+
                     # Number of blocks that need to be written
                     n_blocks_to_fill = block_idx_last_scheduled_token - \
                         block_idx_first_scheduled_token
@@ -742,10 +754,11 @@ class MambaMixer2(MambaBase, CustomOp):
                     # Move the chunk pos to the start of the next seq
                     chunk_pos = 1 + last_chunk_indices_p[seq_idx]
 
-                #For all seqs, store the last state (Note: might be partial):
-                ssm_state[state_indices_tensor_p.gather(1,
-                        current_last_idx_p.unsqueeze(1)).squeeze(1)] = \
-                    varlen_states[last_chunk_indices_p]
+                # For all seqs, store the last state (note: might be partial):
+                ssm_state[state_indices_tensor_p.gather(
+                    1, block_idx_last_scheduled_token_p.unsqueeze(1)).squeeze(
+                        1)] = varlen_states[last_chunk_indices_p]
+
             else:
                 # update ssm states
                 # - varlen state is a (num_prefills, nheads, headdim, dstate)
@@ -757,13 +770,16 @@ class MambaMixer2(MambaBase, CustomOp):
             if prefix_caching_enabled:
                 state_indices_tensor_d_input = \
                     state_indices_tensor_d.gather(1,
-                        last_state_idx_d.unsqueeze(1)).squeeze(1)
+                        block_idx_last_computed_token_d.unsqueeze(1)).squeeze(1)
                 state_indices_tensor_d_output = \
                     state_indices_tensor_d.gather(1,
-                        current_last_idx_d.unsqueeze(1)).squeeze(1)
-                #Note:
-                # for decode always: current_first_idx_d == current_last_idx_d
-                # at block boundaries: current_first_idx_d > last_state_idx_d
+                        block_idx_last_scheduled_token_d.unsqueeze(1)).squeeze(1)
+                # for decode:
+                #   block_idx_first_scheduled_token_d ==
+                #       block_idx_last_scheduled_token_d
+                # at block boundaries:
+                #   block_idx_first_scheduled_token_d >
+                #       block_idx_last_computed_token_d
             else:
                 # Without caching, read and write in-place to the same blocks:
                 state_indices_tensor_d_input = state_indices_tensor_d
@@ -777,8 +793,8 @@ class MambaMixer2(MambaBase, CustomOp):
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=state_indices_tensor_d,
-                current_last_idx=current_last_idx_d,
-                initial_state_idx=last_state_idx_d,
+                block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
+                initial_state_idx=block_idx_last_computed_token_d,
             )
 
             hidden_states_d, B_d, C_d = split_hidden_states_B_C_fn(
