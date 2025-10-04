@@ -113,6 +113,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.reqs_in_batch: set[ReqId] = set()
+        self.reqs_not_processed: set[ReqId] = set()
 
     def add_new_req(
         self,
@@ -287,6 +288,9 @@ class NixlConnectorScheduler:
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
         self._reqs_in_batch: set[ReqId] = set()
+        # Reqs to remove from processed set because they're not to send after
+        # remote prefill or aborted.
+        self._reqs_not_processed: set[ReqId] = set()
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -401,11 +405,13 @@ class NixlConnectorScheduler:
 
         meta.reqs_to_send = self._reqs_need_send
         meta.reqs_in_batch = self._reqs_in_batch
+        meta.reqs_not_processed = self._reqs_not_processed
 
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
         self._reqs_need_save.clear()
         self._reqs_in_batch = set()
+        self._reqs_not_processed = set()
         self._reqs_need_send = {}
 
         return meta
@@ -439,8 +445,12 @@ class NixlConnectorScheduler:
             params["do_remote_prefill"] = False
             return False, None
 
-        if (not params.get("do_remote_decode")
-                or request.status != RequestStatus.FINISHED_LENGTH_CAPPED):
+        if not params.get("do_remote_decode"):
+            return False, None
+        if request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
+            # Also include the case of a P/D Prefill request with immediate
+            # block free (eg abort). Stop tracking this request.
+            self._reqs_not_processed.add(request.request_id)
             return False, None
 
         # TODO: check whether block_ids actually ever be 0. If not we could
@@ -1233,6 +1243,10 @@ class NixlConnectorWorker:
         # expiration for requests that have not been read from D yet.
         for req_id in metadata.reqs_in_batch:
             self._reqs_to_process.add(req_id)
+
+        # Remove all requests that are not to be processed (eg aborted).
+        for req_id in metadata.reqs_not_processed:
+            self._reqs_to_process.discard(req_id)
 
         # Add to requests that are waiting to be read and track expiration.
         for req_id, expiration_time in metadata.reqs_to_send.items():
