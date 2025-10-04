@@ -72,21 +72,12 @@ class TopKTopPSampler(nn.Module):
         elif current_platform.is_cpu():
             self.forward = self.forward_cpu
         elif (logprobs_mode not in ("processed_logits", "processed_logprobs")
-              and current_platform.is_rocm()
-              and envs.VLLM_ROCM_USE_AITER_SAMPLER):
-            try:
-                import importlib
+              and current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER):
 
-                importlib.import_module("aiter.ops.sampling")
-                self.aiter_ops = torch.ops.aiter
-                logger.info_once(
-                    "Using aiter sampler on ROCm (lazy import, sampling-only)."
-                )
-                self.forward = self.forward_rocm
-            except ImportError as e:
-                logger.warning_once(f"Failed to import aiter ops ({e}); "
-                                    "falling back to native implementation.")
-                self.forward = self.forward_native
+            self.aiter_ops = torch.ops.aiter
+            logger.info_once(
+                "Using aiter sampler on ROCm (lazy import, sampling-only).")
+            self.forward = self.forward_rocm
         else:
             self.forward = self.forward_native
 

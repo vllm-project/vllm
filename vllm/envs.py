@@ -110,7 +110,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
-    VLLM_ROCM_USE_AITER_SAMPLER: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -968,12 +967,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "True").lower() in
              ("true", "1")),
 
-    # Whether to use aiter sampling kernel
-    # By default is enabled.
-    "VLLM_ROCM_USE_AITER_SAMPLER":
-    lambda: (os.getenv("VLLM_ROCM_USE_AITER_SAMPLER", "True").lower() in
-             ("true", "1")),
-
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM":
     lambda: (os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in
@@ -1583,7 +1576,6 @@ def compute_hash() -> str:
         "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
         "VLLM_ROCM_USE_TRITON_ROPE",
         "VLLM_ROCM_USE_AITER_FP8BMM",
-        "VLLM_ROCM_USE_AITER_SAMPLER",
         "VLLM_ROCM_USE_SKINNY_GEMM",
         "VLLM_ROCM_FP8_PADDING",
         "VLLM_ROCM_MOE_PADDING",
