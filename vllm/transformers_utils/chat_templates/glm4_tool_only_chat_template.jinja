@@ -1,0 +1,88 @@
+[gMASK]<sop>
+{%- if tools -%}
+<|system|>
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{% for tool in tools %}
+{{ tool | tojson(ensure_ascii=False) }}
+{% endfor %}
+</tools>
+
+For each function call, output the function name and arguments within the following XML format:
+<tool_call>{function-name}
+<arg_key>{arg-key-1}</arg_key>
+<arg_value>{arg-value-1}</arg_value>
+<arg_key>{arg-key-2}</arg_key>
+<arg_value>{arg-value-2}</arg_value>
+...
+</tool_call>{%- endif -%}
+{%- macro visible_text(content) -%}
+    {%- if content is string -%}
+        {{- content }}
+    {%- elif content is iterable and content is not mapping -%}
+        {%- for item in content -%}
+            {%- if item is mapping and item.type == 'text' -%}
+                {{- item.text }}
+            {%- elif item is string -%}
+                {{- item }}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- else -%}
+        {{- content }}
+    {%- endif -%}
+{%- endmacro -%}
+{% for m in messages %}
+{%- if m.role == 'user' -%}<|user|>
+{{ visible_text(m.content) }}/nothing
+{%- elif m.role == 'assistant' -%}
+<|assistant|>
+<think></think>
+{%- set content = visible_text(m.content) %}
+{%- if '</think>' in content %}
+    {%- set content = content.split('</think>')[-1].lstrip('\n') %}
+{%- endif %}
+{% if m.tool_calls %}
+{% for tc in m.tool_calls %}
+{%- if tc.function %}
+    {%- set tc = tc.function %}
+{%- endif %}
+{{ '\n<tool_call>' + tc.name }}
+{% set _args = tc.arguments %}
+{% for k, v in _args.items() %}
+<arg_key>{{ k }}</arg_key>
+<arg_value>{{ v | tojson(ensure_ascii=False) if v is not string else v }}</arg_value>
+{% endfor %}
+</tool_call>{% endfor %}
+{% endif %}
+{%- if content.strip() -%}
+{{ '\n' + content.strip() }}
+{%- endif %}
+{%- elif m.role == 'tool' -%}
+{%- if m.content is string -%}
+{%- if loop.first or (messages[loop.index0 - 1].role != "tool") %}
+    {{- '<|observation|>' }}
+{%- endif %}
+{{- '\n<tool_response>\n' }}
+{{- m.content }}
+{{- '\n</tool_response>' }}
+{%- else -%}
+<|observation|>{% for tr in m.content %}
+
+<tool_response>
+{{ tr.output if tr.output is defined else tr }}
+</tool_response>{% endfor -%}
+{% endif -%}
+{%- elif m.role == 'system' -%}
+<|system|>
+{{ visible_text(m.content) }}
+{%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+<|assistant|>
+<think></think>
+<tool_call>
+{%- endif -%}

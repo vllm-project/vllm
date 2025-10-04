@@ -22,6 +22,43 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 logger = init_logger(__name__)
 
 
+def glm4_is_string_type(
+        tool_name: str, arg_name: str,
+        tools: Optional[list[ChatCompletionToolsParam]]) -> bool:
+    """
+    Check if a tool argument should be treated as a string type.
+    Shared utility for GLM4 tool parsers.
+    """
+    if tools is None:
+        return False
+    for tool in tools:
+        if tool.function.name == tool_name:
+            if tool.function.parameters is None:
+                return False
+            arg_type = tool.function.parameters.get("properties", {}).get(
+                arg_name, {}).get("type", None)
+            return arg_type == "string"
+    logger.warning("No tool named '%s'.", tool_name)
+    return False
+
+
+def glm4_deserialize(value: str) -> Any:
+    """
+    Deserialize a value from string representation.
+    Shared utility for GLM4 tool parsers.
+    """
+    try:
+        return json.loads(value)
+    except Exception:
+        pass
+
+    try:
+        return ast.literal_eval(value)
+    except Exception:
+        pass
+    return value
+
+
 @ToolParserManager.register_module("glm45")
 class Glm4MoeModelToolParser(ToolParser):
 
@@ -59,33 +96,6 @@ class Glm4MoeModelToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
 
-        def _is_string_type(
-                tool_name: str, arg_name: str,
-                tools: Optional[list[ChatCompletionToolsParam]]) -> bool:
-            if tools is None:
-                return False
-            for tool in tools:
-                if tool.function.name == tool_name:
-                    if tool.function.parameters is None:
-                        return False
-                    arg_type = tool.function.parameters.get(
-                        "properties", {}).get(arg_name, {}).get("type", None)
-                    return arg_type == "string"
-            logger.warning("No tool named '%s'.", tool_name)
-            return False
-
-        def _deserialize(value: str) -> Any:
-            try:
-                return json.loads(value)
-            except Exception:
-                pass
-
-            try:
-                return ast.literal_eval(value)
-            except Exception:
-                pass
-            return value
-
         matched_tool_calls = self.func_call_regex.findall(model_output)
         logger.debug("model_output: %s", model_output)
         try:
@@ -99,8 +109,9 @@ class Glm4MoeModelToolParser(ToolParser):
                 for key, value in pairs:
                     arg_key = key.strip()
                     arg_val = value.strip()
-                    if not _is_string_type(tc_name, arg_key, request.tools):
-                        arg_val = _deserialize(arg_val)
+                    if not glm4_is_string_type(tc_name, arg_key,
+                                               request.tools):
+                        arg_val = glm4_deserialize(arg_val)
                     logger.debug("arg_key = %s, arg_val = %s", arg_key,
                                  arg_val)
                     arg_dct[arg_key] = arg_val
