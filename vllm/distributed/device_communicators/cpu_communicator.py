@@ -2,19 +2,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup
 
+if TYPE_CHECKING:
+    from vllm.distributed.device_communicators.ucc_communicator import (
+        UCCCommunicator)
+
+import vllm.envs as envs
 from vllm.distributed.utils import pickle
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
 from .base_device_communicator import DeviceCommunicatorBase
 
+logger = init_logger(__name__)
+
 
 class CpuCommunicator(DeviceCommunicatorBase):
+    ucc_comm: Optional["UCCCommunicator"]
 
     def __init__(self,
                  cpu_group: ProcessGroup,
@@ -24,6 +33,23 @@ class CpuCommunicator(DeviceCommunicatorBase):
         super().__init__(cpu_group, device, device_group, unique_name)
         self.dist_module = torch.distributed
 
+        # Initialize UCC communicator if available
+        self.ucc_comm = None
+        if envs.VLLM_USE_UCC and self.world_size > 1:
+            from vllm.distributed.device_communicators.ucc_communicator import (
+                UCCCommunicator)
+            self.ucc_group = torch.distributed.new_group(self.ranks,
+                                                         backend="ucc")
+            self.ucc_comm = UCCCommunicator(
+                group=self.ucc_group,
+                device=self.device,
+            )
+            logger.info(
+                "UCCCommunicator initialized successfully with UCC backend "
+                "on device %s, world size: %d", self.device, self.world_size)
+        else:
+            self.ucc_group = None
+
         if (current_platform.get_cpu_architecture()
                 == CpuArchEnum.X86) and hasattr(
                     torch.ops._C,
@@ -32,6 +58,14 @@ class CpuCommunicator(DeviceCommunicatorBase):
             self.dist_module = _CPUSHMDistributed(self)
 
     def all_reduce(self, input_):
+        """Perform all-reduce operation using the optimal backend."""
+        # Try UCC allreduce if available
+        if (self.ucc_comm is not None and not self.ucc_comm.disabled
+                and self.ucc_comm.should_use_ucc_allreduce(input_)):
+            out = self.ucc_comm.all_reduce(input_)
+            if out is not None:
+                return out
+
         self.dist_module.all_reduce(input_, group=self.device_group)
         return input_
 
@@ -108,6 +142,12 @@ class CpuCommunicator(DeviceCommunicatorBase):
         src: int,
     ) -> dict[str, Union[torch.Tensor, Any]]:
         return self.dist_module.recv_tensor_dict(src)
+
+    def destroy(self):
+        """Clean up resources."""
+        if self.ucc_comm is not None:
+            self.ucc_comm.close()
+            self.ucc_comm = None
 
 
 class _CPUSHMDistributed:

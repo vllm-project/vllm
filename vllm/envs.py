@@ -208,6 +208,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
+    VLLM_USE_UCC: bool = False
 
 
 def get_default_cache_root():
@@ -243,13 +244,13 @@ def env_with_choices(
         case_sensitive: bool = True) -> Callable[[], Optional[str]]:
     """
     Create a lambda that validates environment variable against allowed choices
-    
+
     Args:
         env_name: Name of the environment variable
         default: Default value if not set (can be None)
         choices: List of valid string options or callable that returns list
         case_sensitive: Whether validation should be case sensitive
-        
+
     Returns:
         Lambda function for environment_variables dict
     """
@@ -284,15 +285,15 @@ def env_list_with_choices(
         choices: Union[list[str], Callable[[], list[str]]],
         case_sensitive: bool = True) -> Callable[[], list[str]]:
     """
-    Create a lambda that validates environment variable 
+    Create a lambda that validates environment variable
     containing comma-separated values against allowed choices
-    
+
     Args:
         env_name: Name of the environment variable
         default: Default list of values if not set
         choices: List of valid string options or callable that returns list
         case_sensitive: Whether validation should be case sensitive
-        
+
     Returns:
         Lambda function for environment_variables
         dict that returns list of strings
@@ -1496,6 +1497,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
+
+    # If set to 1, use UCC allreduce
+    "VLLM_USE_UCC":
+    lambda: bool(int(os.getenv("VLLM_USE_UCC", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
