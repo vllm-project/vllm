@@ -40,6 +40,7 @@ if current_platform.is_rocm():
         E_DIM: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
+        E_DIM_P2: tl.constexpr = triton.next_power_of_2(E_DIM)
         batch_idx = tl.program_id(0)
         block_idx = tl.program_id(1)
 
@@ -64,9 +65,11 @@ if current_platform.is_rocm():
                              block_idx).to(tl.int64)
 
             kv_buffer_off = kv_idx * BLOCK_SIZE * E_DIM + tl.arange(
-                0, BLOCK_SIZE)[:, None] * E_DIM + tl.arange(0, E_DIM)[None, :]
+                0, BLOCK_SIZE)[:, None] * E_DIM + tl.arange(0,
+                                                            E_DIM_P2)[None, :]
+            load_mask = tl.arange(0, E_DIM_P2)[None, :] < E_DIM
             k_vals = tl.load(k_buffer_ptr + kv_buffer_off,
-                             mask=block_mask,
+                             mask=block_mask & load_mask,
                              other=0.0)
             if k_vals.dtype.is_fp8():
                 k_vals = (k_vals.to(tl.float32) *
@@ -75,7 +78,7 @@ if current_platform.is_rocm():
                 k_vals = k_vals.to(output_dtype)
 
             v_vals = tl.load(v_buffer_ptr + kv_buffer_off,
-                             mask=block_mask,
+                             mask=block_mask & load_mask,
                              other=0.0)
             if v_vals.dtype.is_fp8():
                 v_vals = (v_vals.to(tl.float32) *
@@ -85,27 +88,42 @@ if current_platform.is_rocm():
             kv_values_off = batch_token_start * E_DIM + \
                 block_idx * BLOCK_SIZE * E_DIM + \
                 tl.arange(0, BLOCK_SIZE)[:, None] * E_DIM + \
-                tl.arange(0, E_DIM)[None, :]
-            tl.store(k_values_ptr + kv_values_off, k_vals, mask=block_mask)
-            tl.store(v_values_ptr + kv_values_off, v_vals, mask=block_mask)
+                tl.arange(0, E_DIM_P2)[None, :]
+            tl.store(k_values_ptr + kv_values_off,
+                     k_vals,
+                     mask=block_mask & load_mask)
+            tl.store(v_values_ptr + kv_values_off,
+                     v_vals,
+                     mask=block_mask & load_mask)
 
-    def vllm_layout_trans(b_query_lens_loc, b_seq_lens_loc, block_table,
-                          k_cache, v_cache, max_seq_len, k_scale, v_scale,
-                          output_dtype, total_tokens):
+    @torch.inference_mode()
+    def vllm_layout_trans(b_query_lens_loc,
+                          b_seq_lens_loc,
+                          block_table,
+                          k_cache,
+                          v_cache,
+                          max_seq_len,
+                          k_scale,
+                          v_scale,
+                          output_dtype,
+                          total_tokens,
+                          k_values=None,
+                          v_values=None):
         H_KV = v_cache.shape[2]
         D = v_cache.shape[3]
         BLOCK_SIZE = v_cache.shape[1]
-
-        k_values = torch.empty(
-            (total_tokens, H_KV, D),
-            dtype=output_dtype,
-            device=k_cache.device,
-        )
-        v_values = torch.empty(
-            (total_tokens, H_KV, D),
-            dtype=output_dtype,
-            device=v_cache.device,
-        )
+        if k_values is None:
+            k_values = torch.empty(
+                (total_tokens, H_KV, D),
+                dtype=output_dtype,
+                device=k_cache.device,
+            )
+        if v_values is None:
+            v_values = torch.empty(
+                (total_tokens, H_KV, D),
+                dtype=output_dtype,
+                device=v_cache.device,
+            )
 
         grid = (block_table.shape[0],
                 (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
@@ -148,13 +166,14 @@ if current_platform.is_rocm():
         block_table: torch.Tensor,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
-        total_tokens: int = 0,
+        total_tokens: int,
+        k_values: Optional[torch.Tensor] = None,
+        v_values: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if total_tokens == 0:
-            total_tokens = int(cu_seqlens_k[-1].item())
         k, v = vllm_layout_trans(cu_seqlens_q, cu_seqlens_k, block_table,
                                  k_cache, v_cache, max_seqlen_k, k_scale,
-                                 v_scale, q.dtype, total_tokens)
+                                 v_scale, q.dtype, total_tokens, k_values,
+                                 v_values)
 
         output = aiter.flash_attn_varlen_func(
             q=q,
@@ -188,7 +207,9 @@ if current_platform.is_rocm():
         block_table: torch.Tensor,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
-        total_tokens: int = 0,
+        total_tokens: int,
+        k_values: Optional[torch.Tensor] = None,
+        v_values: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return torch.empty(q.shape[0],
                            q.shape[1],
@@ -222,12 +243,14 @@ class AiterFlashAttentionMetadata:
     seq_lens: torch.Tensor
     slot_mapping: torch.Tensor
     block_table: torch.Tensor
-    cu_seq_lens: Optional[torch.Tensor]
 
     # For cascade attention.
     use_cascade: bool
     common_prefix_len: int
-    total_tokens: int
+    k_buffer: torch.Tensor
+    v_buffer: torch.Tensor
+    workspace_buffer: torch.Tensor
+    cu_seq_lens: torch.Tensor
 
 
 class AiterFlashAttentionMetadataBuilder(
@@ -241,59 +264,76 @@ class AiterFlashAttentionMetadataBuilder(
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
+        self.compilation_config = vllm_config.compilation_config
 
         self.num_heads_q = self.model_config.get_num_attention_heads(
             self.parallel_config)
         self.num_heads_kv = self.model_config.get_num_kv_heads(
             self.parallel_config)
         self.headdim = self.model_config.get_head_size()
-        self.block_size = kv_cache_spec.block_size
-        # Sliding window size to be used with the AOT scheduler will be
-        # populated on first build() call.
-        self.aot_sliding_window: Optional[tuple[int, int]] = None
-        self.total_tokens: int = 0
-
-    def build_for_cudagraph_capture(
-            self, common_attn_metadata: CommonAttentionMetadata):
-        self.total_tokens = self.model_config.max_model_len \
-            * self.vllm_config.scheduler_config.max_num_partial_prefills
-        res = self.build(common_prefix_len=0,
-                         common_attn_metadata=common_attn_metadata)
-        self.total_tokens = 0
-        return res
+        self.workspace_buffer = None
 
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> 'AiterFlashAttentionMetadata':
-
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
-        max_seq_len = common_attn_metadata.max_seq_len
+
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
-        if max_query_len > 1:
-            # We pre-compute cumulative seq len needed for prefill attention
-            # here to avoid recomputing it for every layer
-            cu_seq_lens = torch.zeros(seq_lens.shape[0] + 1,
-                                      dtype=torch.int32,
-                                      device=seq_lens.device)
-            torch.cumsum(seq_lens,
-                         dim=0,
-                         dtype=cu_seq_lens.dtype,
-                         out=cu_seq_lens[1:])
-            num_actual_kv_tokens = int(cu_seq_lens[-1].item())
-        else:
-            cu_seq_lens = None
-            num_actual_kv_tokens = 0
-
-        def schedule(batch_size, cu_query_lens, max_query_len, seqlens,
-                     max_seq_len, causal):
-            return None
+        num_seqs = common_attn_metadata.num_reqs
+        max_seq_len = common_attn_metadata.max_seq_len
+        num_actual_kv_tokens = int(seq_lens.sum())
 
         use_cascade = common_prefix_len > 0
+
+        nbytes_per_qo_elem = torch.finfo(self.model_config.dtype).bits // 8
+        max_num_partitions = (max_seq_len + _PARTITION_SIZE_ROCM -
+                              1) // _PARTITION_SIZE_ROCM
+        empty_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        k_buffer = None
+        v_buffer = None
+        cu_seq_lens = None
+        if max_query_len > 1:
+            required_memory = num_actual_kv_tokens * \
+                self.num_heads_kv * self.headdim * 2 * 2
+            if required_memory >= empty_gpu_memory:
+                raise ValueError(
+                    f"Not enough GPU memory to allocate k_buffer and v_buffer. "
+                    f"Required: {required_memory} bytes, "
+                    f"Available: {empty_gpu_memory} bytes, please reduce the "
+                    f"max_num_seqs or max_model_len.")
+            if not torch.cuda.graphs.is_current_stream_capturing():
+                k_buffer = torch.empty(
+                    (num_actual_kv_tokens, self.num_heads_kv, self.headdim),
+                    dtype=self.model_config.dtype,
+                    device=self.device,
+                )
+                v_buffer = torch.empty(
+                    (num_actual_kv_tokens, self.num_heads_kv, self.headdim),
+                    dtype=self.model_config.dtype,
+                    device=self.device,
+                )
+                cu_seq_lens = torch.zeros(seq_lens.shape[0] + 1,
+                                          dtype=torch.int32,
+                                          device=self.device)
+                torch.cumsum(seq_lens,
+                             dim=0,
+                             dtype=cu_seq_lens.dtype,
+                             out=cu_seq_lens[1:])
+
+        # FIXME(zejun): Here is fixing a hip illegal memory access bug issue
+        # by assigning the workspace_buffer to self.workspace_buffer.
+        self.workspace_buffer = torch.empty(
+            (num_seqs * self.num_heads_q * max_num_partitions * self.headdim) *
+            nbytes_per_qo_elem + 2 *
+            (num_seqs * self.num_heads_q * max_num_partitions) * 4,
+            dtype=torch.uint8,
+            device=self.device,
+        )
 
         attn_metadata = AiterFlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -304,10 +344,12 @@ class AiterFlashAttentionMetadataBuilder(
             seq_lens=seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
-            cu_seq_lens=cu_seq_lens,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
-            total_tokens=self.total_tokens,
+            k_buffer=k_buffer,
+            v_buffer=v_buffer,
+            workspace_buffer=self.workspace_buffer,
+            cu_seq_lens=cu_seq_lens,
         )
         return attn_metadata
 
@@ -381,6 +423,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
+        sinks: Optional[torch.Tensor] = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -410,6 +453,9 @@ class AiterFlashAttentionImpl(AttentionImpl):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "FlashAttentionImpl")
+        self.sinks = sinks
+        if self.sinks is not None:
+            raise NotImplementedError("Sinks are not supported for ROCM AITER")
 
     def forward(
         self,
@@ -491,6 +537,17 @@ class AiterFlashAttentionImpl(AttentionImpl):
             block_table = attn_metadata.block_table
 
             if max_seqlen_q > 1:
+                if attn_metadata.cu_seq_lens is None:
+                    cu_seq_lens = torch.zeros(seqused_k.shape[0] + 1,
+                                              dtype=torch.int32,
+                                              device=query.device)
+                    torch.cumsum(seqused_k,
+                                 dim=0,
+                                 dtype=cu_seq_lens.dtype,
+                                 out=cu_seq_lens[1:])
+                else:
+                    cu_seq_lens = attn_metadata.cu_seq_lens
+
                 torch.ops.vllm.flash_attn_varlen_func(
                     query[:num_actual_tokens],
                     key_cache,
@@ -503,25 +560,29 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     alibi_slopes=self.alibi_slopes,
                     window_size=self.sliding_window,
                     block_table=block_table,
-                    cu_seqlens_k=attn_metadata.cu_seq_lens,
+                    cu_seqlens_k=cu_seq_lens,
                     k_scale=layer._k_scale,
                     v_scale=layer._v_scale,
                     total_tokens=attn_metadata.num_actual_kv_tokens,
+                    k_values=attn_metadata.k_buffer,
+                    v_values=attn_metadata.v_buffer,
                 )
+            if attn_metadata.workspace_buffer is None:
+                _, num_heads, head_size = query.shape
+                nbytes_per_qo_elem = torch.finfo(query.dtype).bits // 8
+                num_seqs = seqused_k.shape[0]
+                max_num_partitions = (max_seqlen_k + _PARTITION_SIZE_ROCM -
+                                      1) // _PARTITION_SIZE_ROCM
 
-            _, num_heads, head_size = query.shape
-            nbytes_per_qo_elem = torch.finfo(query.dtype).bits // 8
-            num_seqs = seqused_k.shape[0]
-            max_num_partitions = (max_seqlen_k + _PARTITION_SIZE_ROCM -
-                                  1) // _PARTITION_SIZE_ROCM
-
-            workspace_buffer = torch.empty(
-                (num_seqs * num_heads * max_num_partitions * head_size) *
-                nbytes_per_qo_elem + 2 *
-                (num_seqs * num_heads * max_num_partitions) * 4,
-                dtype=torch.uint8,
-                device=output.device,
-            )
+                workspace_buffer = torch.empty(
+                    (num_seqs * num_heads * max_num_partitions * head_size) *
+                    nbytes_per_qo_elem + 2 *
+                    (num_seqs * num_heads * max_num_partitions) * 4,
+                    dtype=torch.uint8,
+                    device=output.device,
+                )
+            else:
+                workspace_buffer = attn_metadata.workspace_buffer
 
             torch.ops.aiter.paged_attention_v1(
                 output[:num_actual_tokens],
@@ -543,6 +604,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 None,
                 _PARTITION_SIZE_ROCM,
             )
+            if workspace_buffer is not None:
+                workspace_buffer.zero_()
+            if attn_metadata.k_buffer is not None:
+                attn_metadata.k_buffer.zero_()
+            if attn_metadata.v_buffer is not None:
+                attn_metadata.v_buffer.zero_()
             return output
         else:
             raise NotImplementedError(
