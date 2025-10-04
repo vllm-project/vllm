@@ -732,7 +732,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
                     # Get the location of the first chunk that is aligned on the
                     # block boundary.
-                    first_aligned_chunk = chunk_pos + chunk_stride
+                    first_aligned_chunk = chunk_pos + chunk_stride - 1
 
                     # Calculate the number of computed tokens running into
                     # the next mamba block

@@ -237,7 +237,7 @@ class Mamba2AttentionMetadataBuilder(
                 block_idx_first_scheduled_token_p = \
                     block_idx_first_scheduled_token[
                         num_reqs - num_prefills:num_reqs]
-            num_computed_tokens_p = \
+            num_computed_tokens_p_cpu = \
                 common_attn_metadata.num_computed_tokens_cpu[
                     num_reqs - num_prefills:num_reqs]
             query_start_loc_p_cpu = common_attn_metadata.query_start_loc_cpu[
@@ -258,7 +258,7 @@ class Mamba2AttentionMetadataBuilder(
             last_chunk_indices = []
             seqlen_pos = 0
             for req_idx in range(num_prefills):
-                this_num_computed = num_computed_tokens_p[req_idx].item()
+                this_num_computed = num_computed_tokens_p_cpu[req_idx].item()
                 this_new_tokens = query_start_loc_p_cpu[req_idx + 1].item(
                 ) - query_start_loc_p_cpu[req_idx].item()
 
