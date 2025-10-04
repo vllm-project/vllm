@@ -751,6 +751,22 @@ class OpenAIServing:
                     tokenizer=tokenizer,
                 )
 
+    def _validate_chat_template(
+        self,
+        request_chat_template: Optional[str],
+        chat_template_kwargs: Optional[dict[str, Any]],
+        trust_request_chat_template: bool,
+    ) -> Optional[ErrorResponse]:
+        if not trust_request_chat_template and (
+                request_chat_template is not None or
+            (chat_template_kwargs
+             and chat_template_kwargs.get("chat_template") is not None)):
+            return self.create_error_response(
+                "Chat template is passed with request, but "
+                "--trust-request-chat-template is not set. "
+                "Refused request with untrusted chat template.")
+        return None
+
     async def _preprocess_chat(
         self,
         request: Union[ChatLikeRequest, ResponsesRequest],
