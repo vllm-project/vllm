@@ -21,6 +21,7 @@ def start_monitoring_torch_compile(vllm_config: VllmConfig):
     if compilation_config.level == CompilationLevel.PIECEWISE and path:
         import depyf
         path.mkdir(parents=True, exist_ok=True)
+        logger.debug("Dumping depyf output to %s", path)
         global context_manager
         context_manager = depyf.prepare_debug(path.as_posix())
         context_manager.__enter__()
