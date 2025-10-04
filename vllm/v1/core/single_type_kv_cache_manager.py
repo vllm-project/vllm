@@ -6,7 +6,8 @@ from collections import defaultdict
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
+                                         SingleTypeKVCacheBlocks)
 from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         CrossAttentionSpec, FullAttentionSpec,
                                         KVCacheSpec, MambaSpec,
@@ -58,7 +59,7 @@ class SingleTypeKVCacheManager(ABC):
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
-            new_computed_blocks: list[KVCacheBlock]) -> int:
+            new_computed_blocks: SingleTypeKVCacheBlocks) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
 
@@ -87,7 +88,7 @@ class SingleTypeKVCacheManager(ABC):
 
     def save_new_computed_blocks(
             self, request_id: str,
-            new_computed_blocks: list[KVCacheBlock]) -> None:
+            new_computed_blocks: SingleTypeKVCacheBlocks) -> None:
         """
         Add the new computed blocks to the request.
 
@@ -582,9 +583,22 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
-            new_computed_blocks: list[KVCacheBlock]) -> int:
+            new_computed_blocks: SingleTypeKVCacheBlocks) -> int:
         # Allocate extra `num_speculative_blocks` blocks for
         # speculative decoding (MTP/EAGLE) with linear attention.
+        """
+        Get the number of blocks needed to be allocated for the request.
+
+        Args:
+            request_id: The request ID.
+            num_tokens: The total number of tokens that need a slot (including
+                tokens that are already allocated).
+            new_computed_blocks: The new computed blocks just hitting the
+                prefix caching.
+
+        Returns:
+            The number of blocks
+        """
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.kv_cache_spec.num_speculative_blocks > 0:
             num_tokens += (self.kv_cache_spec.block_size *
@@ -608,7 +622,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
 
     def save_new_computed_blocks(
             self, request_id: str,
-            new_computed_blocks: list[KVCacheBlock]) -> None:
+            new_computed_blocks: SingleTypeKVCacheBlocks) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so  `new_computed_blocks` should always be empty.
         assert len(new_computed_blocks) == 0
