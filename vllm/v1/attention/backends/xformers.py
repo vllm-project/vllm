@@ -9,6 +9,7 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -35,6 +36,7 @@ from vllm import _custom_ops as ops
 logger = init_logger(__name__)
 
 
+@register_attn_backend(_Backend.XFORMERS)
 class XFormersAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True

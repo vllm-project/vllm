@@ -8,6 +8,7 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash)
 from vllm.attention.ops.triton_unified_attention import unified_attention
@@ -135,6 +136,7 @@ class TritonAttentionMetadataBuilder(
         return attn_metadata
 
 
+@register_attn_backend(_Backend.TRITON_ATTN)
 class TritonAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True

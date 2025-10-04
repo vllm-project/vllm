@@ -7,6 +7,7 @@ import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
 from vllm.attention.backends.abstract import AttentionLayer, AttentionType
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
@@ -17,6 +18,7 @@ logger = init_logger(__name__)
 FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 
 
+@register_attn_backend(_Backend.FLASHINFER_MLA)
 class FlashInferMLABackend(MLACommonBackend):
 
     @staticmethod

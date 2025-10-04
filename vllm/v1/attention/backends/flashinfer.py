@@ -18,6 +18,7 @@ from flashinfer.utils import FP4Tensor
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -141,6 +142,7 @@ def trtllm_prefill_attn_kvfp8_dequant(
     return mock_kv_cache, mock_block_table
 
 
+@register_attn_backend(_Backend.FLASHINFER)
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
 

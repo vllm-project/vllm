@@ -7,6 +7,7 @@ from typing import ClassVar, Optional, Union
 import torch
 
 from vllm.attention.backends.abstract import AttentionLayer, AttentionType
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
@@ -23,6 +24,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 logger = init_logger(__name__)
 
 
+@register_attn_backend(_Backend.FLASHMLA)
 class FlashMLABackend(MLACommonBackend):
 
     @staticmethod
