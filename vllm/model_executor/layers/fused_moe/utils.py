@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from math import prod
 from typing import Optional, Union
 
@@ -14,7 +15,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_quantize)
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
 from vllm.utils.flashinfer import fp4_quantize
@@ -171,10 +171,7 @@ def _mxfp4_quantize(
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, None]:
     assert block_shape is None
-    if not current_platform.supports_mx():
-        A = quant_dequant_mxfp4(A)
-    else:
-        raise NotImplementedError()
+    A = quant_dequant_mxfp4(A)
 
     return A, None
 
