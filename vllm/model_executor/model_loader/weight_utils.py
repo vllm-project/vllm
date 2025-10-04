@@ -809,29 +809,87 @@ def gguf_quant_weights_iterator(
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """
     Iterate over the quant weights in the model gguf files and convert
-    them to torch tensors
+    them to torch tensors.
+    
+    This iterator handles both quantized and unquantized GGUF weights,
+    applying model-specific corrections where needed (e.g., Gemma3 RMSNorm).
     """
 
     reader = gguf.GGUFReader(gguf_file)
 
+    # Detect Gemma3 models to apply architecture-specific weight corrections.
+    # Gemma3 uses a different RMSNorm convention than standard GGUF format:
+    # - GGUF stores: full weight values
+    # - vLLM expects: weight - 1.0 (due to "x * (1 + weight)" computation)
+    is_gemma3 = False
+    try:
+        arch_field = reader.get_field("general.architecture")
+        if arch_field and arch_field.parts[-1].tobytes().decode(
+                'utf-8') == "gemma3":
+            is_gemma3 = True
+            logger.info(
+                "Detected Gemma3 model: will apply RMSNorm weight correction")
+    except Exception:
+        # Architecture field may not exist in older GGUF files
+        pass
+
+    # First pass: yield quantization type metadata for GGUF quantized layers.
+    # This metadata tells vLLM's GGUF quantization layers what format to expect.
     for tensor in reader.tensors:
         if tensor.name in gguf_to_hf_name_map:
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
 
-            if weight_type.name != "F32":
+            # Only yield qweight_type for truly quantized weights
+            # (not F16/BF16/F32). F16/BF16 embeddings are stored
+            # unquantized and handled as regular PyTorch tensors,
+            # so they should not get quantization metadata.
+            if weight_type.name not in ("F32", "F16", "BF16"):
                 weight_type_name = name.replace("weight", "qweight_type")
-                weight_type = torch.tensor(weight_type)
+                # GGUF quantization layers expect qweight_type as
+                # a 1D tensor [1] not a scalar []. This matches the
+                # parameter shape created in
+                # GGUFLinearMethod.create_weights()
+                weight_type = torch.tensor([weight_type])
                 yield weight_type_name, weight_type
 
+    # Second pass: yield actual weight data
     for tensor in reader.tensors:
         if tensor.name in gguf_to_hf_name_map:
             weight = tensor.data
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
-            if weight_type.name != "F32":
+
+            # Handle quantized weights (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, etc.)
+            if weight_type.name not in ("F32", "F16", "BF16"):
+                # For quantized weights, yield raw GGUF tensor data.
+                # The GGUF quantization layers will handle
+                # dequantization on-demand during inference, keeping
+                # weights compressed in GPU memory.
                 name = name.replace("weight", "qweight")
-            param = torch.tensor(weight)
+                param = torch.tensor(weight)
+            else:
+                # Handle unquantized weights (F32/F16/BF16)
+                # These are typically used for embeddings and bias terms
+
+                # Do NOT reshape F16/BF16 weights.
+                # GGUF stores F16/BF16 data in the same memory layout
+                # as PyTorch. While GGUF metadata may show transposed
+                # dimensions, the raw data is already correct and
+                # reshaping would corrupt it.
+                param = torch.tensor(weight)
+
+            # Apply Gemma3-specific RMSNorm weight correction
+            # GemmaRMSNorm computes: output = x * (1 + weight)
+            # Standard PyTorch: output = x * weight
+            #
+            # GGUF stores full weight values (for x * weight)
+            # but vLLM's GemmaRMSNorm expects (weight - 1) since
+            # it adds 1 during forward pass. Without this
+            # correction, the model produces gibberish output.
+            if is_gemma3 and 'norm' in name and len(param.shape) == 1:
+                param = param - 1.0
+
             yield name, param
 
 
