@@ -204,7 +204,7 @@ class Mamba2AttentionMetadataBuilder(
             #  current_first == current_last   if no block crossing occurs, and
             #                                  only one state will be stored
             # 0th based indexing leads to "-1" -> e.g. 16 computed -> state[15]:
-            current_last_idx = cdiv(context_lens + query_lens,
+            current_last_idx = cdiv(common_attn_metadata.seq_lens,
                                     mamba_block_size) - 1
             current_first_idx = cdiv(context_lens + 1, mamba_block_size) - 1
             last_state_idx = cdiv(context_lens, mamba_block_size) - 1
