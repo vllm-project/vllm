@@ -21,6 +21,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig, fp8_w8a8_moe_quant_config)
 from vllm.model_executor.layers.fused_moe.layer import (
     UnquantizedFusedMoEMethod)
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -658,7 +660,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            is_rocm_aiter_moe_enabled, shuffle_weights)
+            shuffle_weights)
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
 
@@ -868,8 +870,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def maybe_make_prepare_finalize(
             self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
-        if (self.rocm_aiter_moe_enabled or self.use_marlin
-                or self.flashinfer_moe_backend
+        if (self.use_marlin or self.flashinfer_moe_backend
                 == FlashinferMoeBackend.TENSORRT_LLM):
             return None
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
@@ -886,15 +887,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         from vllm.model_executor.layers.fused_moe import (
-            BatchedTritonOrDeepGemmExperts, TritonOrDeepGemmExperts)
-
-        assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
-            "Marlin and ROCm AITER are not supported with all2all yet.")
+            AiterExperts, BatchedTritonOrDeepGemmExperts,
+            TritonOrDeepGemmExperts)
+        assert not self.use_marlin, (
+            "Marlin is not supported with all2all yet.")
 
         assert self.moe_quant_config is not None
-
-        if (prepare_finalize.activation_format ==
-                FusedMoEActivationFormat.BatchedExperts):
+        if self.moe.use_mori_kernels and is_rocm_aiter_moe_enabled():
+            logger.debug("AiterExperts for Mori integration %s", self.moe)
+            return AiterExperts(
+                max_num_tokens=self.moe.max_num_tokens,
+                quant_config=self.moe_quant_config,
+            )
+        elif (prepare_finalize.activation_format ==
+              FusedMoEActivationFormat.BatchedExperts):
             max_num_tokens_per_rank = (
                 prepare_finalize.max_num_tokens_per_rank())
             assert max_num_tokens_per_rank is not None
@@ -1045,8 +1051,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # can override fused_experts or cutlass but not rocm or marlin.
         #
         topk_weights, topk_ids, zero_expert_result = select_result
-
-        if self.rocm_aiter_moe_enabled:
+        if self.moe.use_mori_kernels and self.fused_experts:
+            common_kwargs = dict(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=False,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+            return self.fused_experts(**common_kwargs)
+        elif self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
                 rocm_aiter_fused_experts)
             assert self.fused_experts is None
