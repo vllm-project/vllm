@@ -43,9 +43,11 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
     smart_resize as video_smart_resize)
 from transformers.video_utils import VideoMetadata
 
+from vllm.attention.backends.registry import _Backend
 from vllm.attention.layer import check_upstream_fa_availability
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
@@ -66,7 +68,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
@@ -323,6 +324,7 @@ class Qwen3_VisionTransformer(nn.Module):
             head_size=head_dim, dtype=torch.get_default_dtype())
         use_upstream_fa = False
         if self.attn_backend != _Backend.FLASH_ATTN and \
+            self.attn_backend != _Backend.ROCM_AITER_FA and \
             check_upstream_fa_availability(
                 torch.get_default_dtype()):
             self.attn_backend = _Backend.FLASH_ATTN
@@ -476,7 +478,8 @@ class Qwen3_VisionTransformer(nn.Module):
         cu_seqlens: torch.Tensor,
     ) -> tuple[Optional[int], Optional[list[int]]]:
         max_seqlen, seqlens = None, None
-        if self.attn_backend == _Backend.FLASH_ATTN:
+        if (self.attn_backend == _Backend.FLASH_ATTN
+                or self.attn_backend == _Backend.ROCM_AITER_FA):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
@@ -734,29 +737,72 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
+        image_overrides = mm_options.get("image") if mm_options else None
+        video_overrides = mm_options.get("video") if mm_options else None
 
         target_width, target_height = (
             self.info.get_image_size_with_most_features())
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts)
+
+        if video_overrides:
+            assert isinstance(video_overrides, VideoDummyOptions)
+            num_frames_override = video_overrides.num_frames
+            if num_frames_override:
+                if num_frames_override > target_num_frames:
+                    logger.warning(
+                        "video.num_frames override (%d) exceeds model's "
+                        "maximum number of frames (%d), will be ignored",
+                        num_frames_override, target_num_frames)
+                if num_frames_override < 2:
+                    logger.warning(
+                        "video.num_frames override (%d) cannot be less "
+                        "than 2, will be ignored", num_frames_override)
+                target_num_frames = min(target_num_frames, num_frames_override)
+        target_num_frames = max(target_num_frames, 2)
+
         target_video_size, _ = self.info._get_vision_info(
             image_width=target_width,
             image_height=target_height,
             num_frames=target_num_frames,
             image_processor=self.info.get_video_processor(),
         )
+        # NOTE: we need to do this check here since Qwen3-VL resizes video
+        # frames depending on how many frames there are.
+        width, height = target_video_size.width, target_video_size.height
+        if video_overrides:
+            assert isinstance(video_overrides, VideoDummyOptions)
+            width_override = video_overrides.width
+            if width_override:
+                if width_override > width:
+                    logger.warning(
+                        "video.width override (%d) exceeds model's "
+                        "maximum width (%d), will be ignored", width_override,
+                        width)
+                width = min(width, width_override)
+            height_override = video_overrides.height
+            if height_override:
+                if height_override > height:
+                    logger.warning(
+                        "video.height override (%d) exceeds model's "
+                        "maximum height (%d), will be ignored",
+                        height_override, height)
+                height = min(height, height_override)
+
         return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images),
+                                   num_images=num_images,
+                                   overrides=image_overrides),
             "video":
             self._get_dummy_videos(
-                width=target_video_size.width,
-                height=target_video_size.height,
+                width=width,
+                height=height,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
             ),
@@ -770,7 +816,6 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         num_frames: int,
         num_videos: int,
     ) -> list[VideoItem]:
-        num_frames = max(num_frames, 2)
         video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
         video_items = []
         for i in range(num_videos):
@@ -785,18 +830,6 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             video_item = (video.copy(), video_metadata)
             video_items.append(video_item)
         return video_items
-
-    def get_dummy_processor_inputs(self, seq_len, mm_counts):
-        processor_inputs = super().get_dummy_processor_inputs(
-            seq_len, mm_counts)
-        # HACK(Isotr0py): We set do_resize to False here to reuse Qwen2-VL's
-        # profiling logic, which will be problematic for configurable mm
-        # profiling.
-        # TODO(Isotr0py): Switch to the implementation in
-        # https://github.com/vllm-project/vllm/pull/25557
-        # after supporting configurable mm profiling.
-        processor_inputs.hf_processor_mm_kwargs = {"do_resize": False}
-        return processor_inputs
 
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
@@ -1125,14 +1158,17 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-
-        self.visual = Qwen3_VisionTransformer(
-            config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "visual"),
-            use_data_parallel=self.use_data_parallel,
-        )
+        if not multimodal_config.get_limit_per_prompt("image") and \
+            not multimodal_config.get_limit_per_prompt("video"):
+            self.visual = None
+        else:
+            self.visual = Qwen3_VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+                use_data_parallel=self.use_data_parallel,
+            )
 
         self.language_model = Qwen3LLMForCausalLM(vllm_config=vllm_config,
                                                   prefix=maybe_prefix(
@@ -1148,11 +1184,15 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             config.vision_config.deepstack_visual_indexes
         ) if self.use_deepstack else 0
         # register buffer for deepstack
-        self.deepstack_input_embeds = [
-            torch.zeros(vllm_config.scheduler_config.max_num_batched_tokens,
-                        config.text_config.hidden_size)
-            for _ in range(self.deepstack_num_level)
-        ] if self.use_deepstack else None
+        if self.use_deepstack and self.visual is not None:
+            self.deepstack_input_embeds = [
+                torch.zeros(
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    config.text_config.hidden_size)
+                for _ in range(self.deepstack_num_level)
+            ]
+        else:
+            self.deepstack_input_embeds = None
         self.visual_dim = config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
@@ -1526,7 +1566,11 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+
+        skip_prefixes = []
+        if self.visual is None:
+            skip_prefixes.extend(["visual."])
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
