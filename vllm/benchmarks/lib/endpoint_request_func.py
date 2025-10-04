@@ -91,6 +91,7 @@ class RequestFuncOutput:
     prompt_len: int = 0
     error: str = ""
     start_time: float = 0.0
+    http_status: int = 200
 
 
 class RequestFunc(Protocol):
@@ -157,6 +158,7 @@ async def async_request_openai_completions(
     try:
         async with session.post(url=api_url, json=payload,
                                 headers=headers) as response:
+            output.http_status = response.status
             if response.status == 200:
                 first_chunk_received = False
                 handler = StreamedResponseHandler()
@@ -290,6 +292,7 @@ async def async_request_openai_chat_completions(
     try:
         async with session.post(url=api_url, json=payload,
                                 headers=headers) as response:
+            output.http_status = response.status
             if response.status == 200:
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
@@ -416,6 +419,7 @@ async def async_request_openai_audio(
             async with session.post(url=api_url,
                                     data=form,
                                     headers=headers) as response:
+                output.http_status = response.status
                 if response.status == 200:
                     handler = StreamedResponseHandler()
 
@@ -497,6 +501,7 @@ async def async_request_openai_embeddings(
             headers=headers,
             json=payload
         ) as response:
+            output.http_status = response.status
             if response.status == 200:
                 output.latency = time.perf_counter() - st
                 data = await response.json()

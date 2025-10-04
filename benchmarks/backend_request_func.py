@@ -48,6 +48,7 @@ class RequestFuncOutput:
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
+    http_status: int = 200
 
 
 async def async_request_tgi(
@@ -89,6 +90,7 @@ async def async_request_tgi(
             async with session.post(
                 url=api_url, json=payload, headers=headers
             ) as response:
+                output.http_status = response.status
                 if response.status == 200:
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
@@ -164,6 +166,7 @@ async def async_request_trt_llm(
             async with session.post(
                 url=api_url, json=payload, headers=headers
             ) as response:
+                output.http_status = response.status
                 if response.status == 200:
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
@@ -238,6 +241,7 @@ async def async_request_deepspeed_mii(
             async with session.post(
                 url=api_url, json=payload, headers=headers
             ) as response:
+                output.http_status = response.status
                 if response.status == 200:
                     parsed_resp = await response.json()
                     output.latency = time.perf_counter() - st
@@ -309,6 +313,7 @@ async def async_request_openai_completions(
             async with session.post(
                 url=api_url, json=payload, headers=headers
             ) as response:
+                output.http_status = response.status
                 if response.status == 200:
                     first_chunk_received = False
                     async for chunk_bytes in response.content:
@@ -424,6 +429,7 @@ async def async_request_openai_chat_completions(
             async with session.post(
                 url=api_url, json=payload, headers=headers
             ) as response:
+                output.http_status = response.status
                 if response.status == 200:
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
@@ -538,6 +544,7 @@ async def async_request_openai_audio(
                 async with session.post(
                     url=api_url, data=form, headers=headers
                 ) as response:
+                    output.http_status = response.status
                     if response.status == 200:
                         async for chunk_bytes in response.content:
                             chunk_bytes = chunk_bytes.strip()
