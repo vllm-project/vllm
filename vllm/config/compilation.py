@@ -632,17 +632,12 @@ class CompilationConfig:
     def set_splitting_ops_for_inductor_graph_partition(self):
         assert self.use_inductor_graph_partition
 
-        if self.splitting_ops:
+        if self.splitting_ops is not None:
             logger.debug(
                 "Using splitting_ops=%s for inductor partition rules.",
                 self.splitting_ops,
             )
             return
-
-        if self.splitting_ops is not None:
-            logger.debug(
-                "Empty splitting_ops provided with "
-                "use_inductor_graph_partition; defaulting to attention ops.")
         else:
             logger.debug(
                 "No splitting_ops provided; defaulting to attention ops for "
