@@ -33,6 +33,12 @@ logger = init_logger(__name__)
 STR_POOLING_REJECTS_LOGITSPROCS = ("Pooling models do not support custom"
                                    " logits processors.")
 
+# Error message when the user tries to initialize vLLM with a speculative
+# decoding enabled and custom logitsproces
+STR_SPEC_DEC_REJECTS_LOGITSPROCS = (
+    "Custom logits processors are not supported"
+    "when speculative decoding is enabled.")
+
 LOGITSPROCS_GROUP = 'vllm.logits_processors'
 
 BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
@@ -177,6 +183,16 @@ def build_logitsprocs(
         logger.debug("Skipping logits processor loading because pooling models"
                      " do not support logits processors.")
         return LogitsProcessors()
+
+    # Check if speculative decoding is enabled.
+    if vllm_config.speculative_config:
+        if custom_logitsprocs:
+            raise ValueError(STR_SPEC_DEC_REJECTS_LOGITSPROCS)
+        logger.debug(
+            "Skipping logits processor loading because "
+            "they are not supported when speculative decoding is enabled.")
+        return LogitsProcessors()
+
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
     return LogitsProcessors(
         ctor(vllm_config, device, is_pin_memory) for ctor in itertools.chain(

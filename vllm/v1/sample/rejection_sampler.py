@@ -146,7 +146,7 @@ class RejectionSampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         metadata: SpecDecodeMetadata,
-    ):
+    ) -> torch.Tensor:
         any_penalties_or_bad_words = (sampling_metadata.bad_words_token_ids
                                       or not sampling_metadata.no_penalties)
 
@@ -156,27 +156,35 @@ class RejectionSampler(nn.Module):
                 sampling_metadata.output_token_ids,
                 sampling_metadata.spec_token_ids,
             )
-        # Calculate indices of target logits
+
+        # Calculate indices of target logits.
         if sampling_metadata.allowed_token_ids_mask is not None \
             or not sampling_metadata.no_penalties:
             num_requests = len(sampling_metadata.output_token_ids)
             num_draft_tokens = torch.tensor(metadata.num_draft_tokens,
                                             device="cpu")
             original_indices = torch.arange(num_requests, device="cpu")
-            repeat_indices_cpu = torch.repeat_interleave(
-                original_indices, repeats=num_draft_tokens)
+            repeat_indices_cpu = original_indices.repeat_interleave(
+                num_draft_tokens)
             repeat_indices = repeat_indices_cpu.to(device=logits.device,
                                                    non_blocking=True)
-        else:
-            # Not use them for other cases
-            repeat_indices = None
+            logits = self.apply_penalties(logits, sampling_metadata, metadata,
+                                          repeat_indices, output_token_ids)
 
-        logits = self.apply_penalties(logits, sampling_metadata, metadata,
-                                      repeat_indices, output_token_ids)
-        logits = self.apply_bad_words(logits, sampling_metadata, metadata,
-                                      output_token_ids)
-        logits = self.apply_allowed_token_ids(logits, sampling_metadata,
-                                              repeat_indices)
+            # Apply allowed token ids.
+            if sampling_metadata.allowed_token_ids_mask is not None:
+                token_mask = sampling_metadata.allowed_token_ids_mask[
+                    repeat_indices]
+                logits.masked_fill_(token_mask, float("-inf"))
+
+        # Apply bad words exclusion.
+        if sampling_metadata.bad_words_token_ids:
+            apply_bad_words_with_drafts(
+                logits,
+                sampling_metadata.bad_words_token_ids,
+                output_token_ids,
+                metadata.num_draft_tokens,
+            )
 
         return logits
 
@@ -185,7 +193,7 @@ class RejectionSampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         metadata: SpecDecodeMetadata,
-        repeat_indices: Optional[torch.Tensor],
+        repeat_indices: torch.Tensor,
         output_token_ids: list[list[int]],
     ) -> torch.Tensor:
         if sampling_metadata.no_penalties:
@@ -215,7 +223,7 @@ class RejectionSampler(nn.Module):
         self,
         output_token_ids: list[list[int]],
         spec_token_ids: Optional[list[list[int]]] = None,
-    ):
+    ) -> list[list[int]]:
         if spec_token_ids is None:
             return output_token_ids
 
@@ -227,36 +235,6 @@ class RejectionSampler(nn.Module):
             for i in range(len(spec) - 1):
                 result.append([*result[-1], spec[i]])
         return result
-
-    def apply_bad_words(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-        metadata: SpecDecodeMetadata,
-        output_token_ids: list[list[int]],
-    ) -> torch.Tensor:
-        if sampling_metadata.bad_words_token_ids:
-
-            apply_bad_words_with_drafts(
-                logits,
-                sampling_metadata.bad_words_token_ids,
-                output_token_ids,
-                metadata.num_draft_tokens,
-            )
-        return logits
-
-    def apply_allowed_token_ids(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-        repeat_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        if sampling_metadata.allowed_token_ids_mask is not None:
-            allowed_token_ids_mask = sampling_metadata.allowed_token_ids_mask[
-                repeat_indices]
-            logits.masked_fill_(allowed_token_ids_mask, float("-inf"))
-
-        return logits
 
 
 def rejection_sample(
