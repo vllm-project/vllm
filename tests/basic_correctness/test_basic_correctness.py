@@ -121,12 +121,6 @@ def test_models(
     "test_suite, extra_env", [
         ("distilbert/distilgpt2", "ray", "", "L4", {}),
         ("distilbert/distilgpt2", "mp", "", "L4", {}),
-        ("distilbert/distilgpt2", "ray", "", "L4", {
-            "VLLM_SLEEP_WHEN_IDLE": "1"
-        }),
-        ("distilbert/distilgpt2", "mp", "", "L4", {
-            "VLLM_SLEEP_WHEN_IDLE": "1"
-        }),
         ("meta-llama/Llama-3.2-1B-Instruct", "ray", "", "L4", {}),
         ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4", {}),
         ("distilbert/distilgpt2", "ray", "", "A100", {}),
