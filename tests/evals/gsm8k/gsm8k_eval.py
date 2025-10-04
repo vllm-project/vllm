@@ -117,6 +117,11 @@ def evaluate_gsm8k(num_questions: int = 1319,
     Returns dict with accuracy, invalid_rate, latency, etc.
     """
     base_url = f"{host}:{port}"
+    # api_server is created with 0.0.0.0 which means it binds to all IPv4
+    # localhost can resolve to ::1 only on IPv6 capable systems
+    # Use 127.0.0.1 instead to avoid potential IPv6 resolution issues
+    # so aiohttp can connect to the api_server correctly
+    base_url = base_url.replace("localhost", "127.0.0.1")
 
     # Load GSM8K train and test data
     train_data, test_data = load_gsm8k_data()
