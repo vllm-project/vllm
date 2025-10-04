@@ -852,7 +852,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
 
-        if envs.VLLM_USE_TRTLLM_FP4_GEMM:
+        if envs.VLLM_USE_CUDNN_FP4_GEMM:
+            self.backend = "flashinfer-cudnn"
+        elif envs.VLLM_USE_TRTLLM_FP4_GEMM:
             assert has_flashinfer(), "TRTLLM FP4 GEMM requires FlashInfer"
             self.backend = "flashinfer-trtllm"
         elif has_flashinfer():
@@ -1019,7 +1021,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.alpha,
             output_dtype,
         )
-        if self.backend == "flashinfer-trtllm":
+        if self.backend == "flashinfer-cudnn":
+            out = flashinfer_scaled_fp4_mm(*mm_args, backend="cudnn")
+        elif self.backend == "flashinfer-trtllm":
             out = flashinfer_scaled_fp4_mm(*mm_args, backend="trtllm")
         elif self.backend == "flashinfer-cutlass":
             out = flashinfer_scaled_fp4_mm(*mm_args, backend="cutlass")
