@@ -134,7 +134,7 @@ if TYPE_CHECKING:
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
-    VLLM_USE_STANDALONE_COMPILE: bool = False
+    VLLM_USE_STANDALONE_COMPILE: bool = True
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
@@ -500,9 +500,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
     # disabled by default.
     "VLLM_USE_STANDALONE_COMPILE": lambda: os.environ.get(
-        "VLLM_USE_STANDALONE_COMPILE", "0"
-    )
-    == "1",
+        "VLLM_USE_STANDALONE_COMPILE", "1"
+    ).lower()
+    in ["true", "1"],
     # Debug pattern matching inside custom passes.
     # Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').
     "VLLM_PATTERN_MATCH_DEBUG": lambda: os.environ.get(
