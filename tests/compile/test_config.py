@@ -152,9 +152,11 @@ def test_splitting_ops_dynamic():
             level=CompilationLevel.PIECEWISE,
             use_inductor_graph_partition=True,
             splitting_ops=["vllm.unified_attention"]))
-        # with inductor partition we disregard user-specified splitting_ops
-        assert config.compilation_config.splitting_ops == []
-        assert config.compilation_config.partition_rule_ops == [
+        # with inductor partition we preserve user-specified splitting_ops
+        assert config.compilation_config.splitting_ops == [
+            "vllm.unified_attention"
+        ]
+        assert config.compilation_config.get_inductor_partition_ops() == [
             "vllm.unified_attention"
         ]
 
@@ -198,7 +200,9 @@ def test_splitting_ops_dynamic():
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         ))
-        assert config.compilation_config.splitting_ops == []
+        default_ops = config.compilation_config.get_inductor_partition_ops()
+        assert config.compilation_config.splitting_ops == default_ops
+        assert default_ops == CompilationConfig()._attention_ops
         # enable_attn_fusion is directly supported under
         # use_inductor_graph_partition=True, and cudagraph_mode
         # is unchanged.
@@ -209,8 +213,8 @@ def test_splitting_ops_dynamic():
 def test_resolve_operator_overload():
     import torch
 
-    from vllm.config.compilation import (_parse_operator_name,
-                                         _resolve_operator_overload)
+    from vllm.compilation.partition_rules import (_parse_operator_name,
+                                                  _resolve_operator_overload)
 
     assert (_resolve_operator_overload("aten.mm.default")
             is torch.ops.aten.mm.default)

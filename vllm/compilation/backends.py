@@ -7,7 +7,7 @@ import os
 import pprint
 import time
 from collections.abc import Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager
 from typing import Any, Callable, Optional
 
 import torch
@@ -15,8 +15,8 @@ import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
+from vllm.compilation.partition_rules import _inductor_partition_rule_context
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
-from vllm.config.compilation import _inductor_partition_rule_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
@@ -67,6 +67,16 @@ class CompilerManager:
         self.is_cache_updated = False
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
+
+    @contextmanager
+    def compile_context(self):
+        with ExitStack() as stack:
+            if self.compilation_config.use_inductor_graph_partition:
+                partition_ops = (
+                    self.compilation_config.get_inductor_partition_ops())
+                stack.enter_context(
+                    _inductor_partition_rule_context(partition_ops))
+            yield
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
@@ -180,13 +190,7 @@ class CompilerManager:
         else:
             maybe_key = \
                 f"artifact_shape_{runtime_shape}_subgraph_{graph_index}"
-        if self.compilation_config.use_inductor_graph_partition:
-            partition_ops = self.compilation_config.partition_rule_ops or []
-            context = _inductor_partition_rule_context(partition_ops)
-        else:
-            context = nullcontext()
-
-        with context:
+        with self.compile_context():
             compiled_graph, handle = self.compiler.compile(
                 graph,
                 example_inputs,

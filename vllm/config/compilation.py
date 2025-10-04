@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import contextlib
 import enum
 import hashlib
 from collections import Counter
@@ -23,9 +22,6 @@ else:
     VllmConfig = object
 
 logger = init_logger(__name__)
-
-# Track which OpOverload objects already have partition rules registered so we
-# do not re-register them on every configuration update.
 
 
 class CompilationLevel:
@@ -209,12 +205,11 @@ class CompilationConfig:
     disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: Optional[list[str]] = None
-    """A list of ops to split the full graph into subgraphs, used in piecewise
-    compilation."""
-    partition_rule_ops: list[str] = field(default_factory=list)
-    """Ops to register as Inductor partition rules
-    when use_inductor_graph_partition is enabled."""
+    """Ops that control graph partitioning.
 
+    When `use_inductor_graph_partition` is False they are passed to Dynamo to
+    split the FX graph. Otherwise they are registered as Inductor partition
+    rules while the FX graph remains whole."""
     # Inductor capture
     use_inductor: bool = True
     """Whether to use inductor compilation:
@@ -401,7 +396,6 @@ class CompilationConfig:
         factors.append(self.backend)
         factors.append(self.custom_ops)
         factors.append(self.splitting_ops)
-        factors.append(self.partition_rule_ops)
         factors.append(self.use_inductor)
         factors.append(self.inductor_compile_config)
         factors.append(self.inductor_passes)
@@ -637,17 +631,38 @@ class CompilationConfig:
 
     def set_splitting_ops_for_inductor_graph_partition(self):
         assert self.use_inductor_graph_partition
-        use_inductor_graph_partition_msg = (
-            "When use_inductor_graph_partition=True, splitting_ops "
-            "are ignored and set to an empty list. Instead, "
-            "\"tags=(torch._C.Tag.cudagraph_unsafe, ),\" is "
-            "used to annotate custom ops for graph partition.")
+
         if self.splitting_ops:
-            logger.warning_once(use_inductor_graph_partition_msg)
-            self.partition_rule_ops = list(self.splitting_ops)
-        elif not self.partition_rule_ops:
-            self.partition_rule_ops = list(self._attention_ops)
-        self.splitting_ops = []
+            logger.debug(
+                "Using splitting_ops=%s for inductor partition rules.",
+                self.splitting_ops,
+            )
+            return
+
+        if self.splitting_ops == []:
+            logger.warning_once(
+                "Empty splitting_ops provided with "
+                "use_inductor_graph_partition; defaulting to attention ops.")
+        else:
+            logger.debug(
+                "No splitting_ops provided; defaulting to attention ops for "
+                "inductor partition rules.", )
+
+        self.splitting_ops = list(self._attention_ops)
+
+    def get_inductor_partition_ops(self) -> list[str]:
+        if not self.use_inductor_graph_partition:
+            return []
+
+        ops = (list(self.splitting_ops)
+               if self.splitting_ops else list(self._attention_ops))
+        seen: set[str] = set()
+        unique_ops: list[str] = []
+        for name in ops:
+            if name not in seen:
+                seen.add(name)
+                unique_ops.append(name)
+        return unique_ops
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.enable_attn_fusion
@@ -725,69 +740,3 @@ class CompilationConfig:
                 enable_str = "enabling" if op[0] == '+' else "disabling"
                 logger.warning_once("Op '%s' %s, %s with '%s' has no effect",
                                     op_name, missing_str, enable_str, op)
-
-
-def _parse_operator_name(op_name: str) -> tuple[str, str, str]:
-    if not op_name:
-        raise ValueError("Operator name must be non-empty")
-
-    parts = op_name.split(".")
-    if len(parts) < 2:
-        raise ValueError(
-            f"Operator name '{op_name}' must include a namespace and operator")
-
-    namespace, remainder = parts[0], ".".join(parts[1:])
-    if not remainder:
-        raise ValueError(
-            f"Operator name '{op_name}' must include an operator identifier")
-
-    if "." in remainder:
-        operator, overload = remainder.split(".", 1)
-    else:
-        operator, overload = remainder, "default"
-    overload = overload or "default"
-    return namespace, operator, overload
-
-
-def _resolve_operator_overload(op_name: str):
-    import torch
-
-    namespace, operator, overload = _parse_operator_name(op_name)
-    target_overload = overload or "default"
-
-    try:
-        return getattr(getattr(getattr(torch.ops, namespace), operator),
-                       target_overload)
-    except AttributeError as exc:
-        raise ValueError(f"Cannot resolve operator '{op_name}': "
-                         f"namespace='{namespace}', operator='{operator}', "
-                         f"overload='{target_overload}'") from exc
-
-
-@contextlib.contextmanager
-def _inductor_partition_rule_context(op_names: list[str]):
-    if not op_names:
-        logger.info("No partition ops provided; skipping rule registration.")
-        yield
-        return
-
-    from torch._inductor import scheduler as inductor_scheduler  # type: ignore
-
-    unique_names = list(dict.fromkeys(op_names))
-    overloads = [_resolve_operator_overload(name) for name in unique_names]
-
-    def _always_partition(*_args, **_kwargs):
-        return True
-
-    for overload in overloads:
-        inductor_scheduler.register_should_partition_rule(
-            overload, _always_partition)
-
-    logger.info("Registered inductor partition rules for ops: %s",
-                unique_names)
-
-    try:
-        yield
-    finally:
-        logger.info("Partition rules remain registered; "
-                    "PyTorch does not expose a clear API.")
