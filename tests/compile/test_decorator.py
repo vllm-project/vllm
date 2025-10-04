@@ -57,7 +57,7 @@ def test_ignore_torch_compile_decorator():
         use_cudagraph=True,
         splitting_ops=["silly.attention"],
         cudagraph_capture_sizes=[1, 2],
-        use_inductor_graph_partition=False,  # TODO test both
+        use_inductor_graph_partition=False,  # TODO test both?
     ))
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
 
@@ -206,14 +206,15 @@ def test_conditional_compile_enable_if():
 
     # Set kv_sharing_fast_prefill=False
     # which will cause A to be compiled and B to not be compiled
-    vllm_config = VllmConfig(cache_config=CacheConfig(
-        kv_sharing_fast_prefill=False, ),
-                             compilation_config=CompilationConfig(
-                                 level=CompilationLevel.PIECEWISE,
-                                 use_cudagraph=True,
-                                 splitting_ops=["silly.attention"],
-                                 cudagraph_capture_sizes=[1, 2],
-                             ))
+    vllm_config = VllmConfig(
+        cache_config=CacheConfig(kv_sharing_fast_prefill=False, ),
+        compilation_config=CompilationConfig(
+            level=CompilationLevel.PIECEWISE,
+            use_cudagraph=True,
+            splitting_ops=["silly.attention"],
+            cudagraph_capture_sizes=[1, 2],
+            use_inductor_graph_partition=False,  # TODO test both?
+        ))
 
     with set_current_vllm_config(vllm_config):
         mod_A = A(vllm_config=vllm_config, prefix='').eval().cuda()
