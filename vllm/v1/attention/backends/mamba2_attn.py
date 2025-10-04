@@ -209,9 +209,7 @@ class Mamba2AttentionMetadataBuilder(
             current_first_idx = cdiv(context_lens + 1, mamba_block_size) - 1
             last_state_idx = cdiv(context_lens, mamba_block_size) - 1
             # -1 in case it's non-computed and causes later issues with indexing
-            last_state_idx = \
-                last_state_idx.clamp(min=0)
-
+            last_state_idx = last_state_idx.clamp(min=0)
         else:
             # Always return just a single block per each request:
             state_indices_tensor = common_attn_metadata.block_table_tensor[:,
