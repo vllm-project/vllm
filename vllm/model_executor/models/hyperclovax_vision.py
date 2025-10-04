@@ -242,16 +242,16 @@ class HCXVisionMultiModalProcessor(
                         for video in videos)
                 ]
                 _processed_outputs["pixel_values_videos"] = [
-                    torch.stack(_processed_outputs["pixel_values_videos"]
-                                [_idx_per_video[i]:_idx_per_video[i + 1]])
+                    _processed_outputs["pixel_values_videos"]
+                    [_idx_per_video[i]:_idx_per_video[i + 1]]
                     for i in range(len(videos))
                 ]
-                _processed_outputs[
-                    "vision_query_lengths_videos"] = torch.tensor([
+                _processed_outputs["vision_query_lengths_videos"] = [
+                    torch.tensor(
                         _processed_outputs["vision_query_lengths_videos"]
-                        [_idx_per_video[i]:_idx_per_video[i + 1]]
-                        for i in range(len(videos))
-                    ])
+                        [_idx_per_video[i]:_idx_per_video[i + 1]])
+                    for i in range(len(videos))
+                ]
 
             processed_outputs.update(_processed_outputs)
 
