@@ -9,6 +9,7 @@ import torch
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
                                               is_quantized_kv_cache)
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.utils.fa_utils import (flash_attn_supports_mla,
                                            get_flash_attn_version)
 from vllm.config import VllmConfig
@@ -26,6 +27,7 @@ from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
 logger = init_logger(__name__)
 
 
+@register_attn_backend(_Backend.FLASH_ATTN_MLA)
 class FlashAttnMLABackend(MLACommonBackend):
 
     @staticmethod
@@ -43,6 +45,35 @@ class FlashAttnMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["FlashAttnMLAImpl"]:
         return FlashAttnMLAImpl
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "fp16", "bf16"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return []
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return 90
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return 90
+
+    @classmethod
+    def supports_combination(cls, head_size: int, dtype: torch.dtype,
+                             kv_cache_dtype: Optional[str], block_size: int,
+                             use_v1: bool, use_mla: bool, has_sink: bool,
+                             device_capability: int) -> Optional[str]:
+        if not flash_attn_supports_mla():
+            return "FlashAttention MLA not supported on this device"
+        return None
 
 
 @dataclass

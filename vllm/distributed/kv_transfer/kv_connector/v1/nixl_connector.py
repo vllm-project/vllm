@@ -22,7 +22,7 @@ import zmq
 
 from vllm import envs
 from vllm.attention.backends.registry import _Backend
-from vllm.attention.selector import backend_name_to_enum, get_attn_backend
+from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
@@ -610,7 +610,7 @@ class NixlConnectorWorker:
                                    self.block_size,
                                    use_mla=self.use_mla)
         self.backend_name = backend.get_name()
-        attn_backend = backend_name_to_enum(self.backend_name)
+        attn_backend = _Backend[self.backend_name]
         self._use_flashinfer = attn_backend == _Backend.FLASHINFER
         self._use_pallas = attn_backend == _Backend.PALLAS
         self.kv_cache_layout = get_kv_cache_layout()

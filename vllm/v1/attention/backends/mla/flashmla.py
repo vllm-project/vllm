@@ -7,6 +7,7 @@ from typing import ClassVar, Optional, Union
 import torch
 
 from vllm.attention.backends.abstract import AttentionLayer, AttentionType
+from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
@@ -23,6 +24,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 logger = init_logger(__name__)
 
 
+@register_attn_backend(_Backend.FLASHMLA)
 class FlashMLABackend(MLACommonBackend):
 
     @staticmethod
@@ -40,6 +42,26 @@ class FlashMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["FlashMLAImpl"]:
         return FlashMLAImpl
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "fp16", "bf16", "fp8", "fp8_e4m3"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return [64]
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return 90
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return 109
 
 
 @dataclass
