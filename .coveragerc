@@ -12,6 +12,7 @@ omit =
     */benchmarks/*
     */docs/*
 
+
 [report]
 exclude_lines =
     pragma: no cover
@@ -30,3 +31,6 @@ directory = htmlcov
 
 [xml]
 output = coverage.xml
+
+
+
