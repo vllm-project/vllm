@@ -580,10 +580,12 @@ class MambaMixer2(MambaBase, CustomOp):
             # If prefix caching is enabled, retrieve the relevant variables
             # for prefill and decode
             last_state_idx_d, last_state_idx_p = torch.split(
-                attn_metadata.last_state_idx, [num_decodes, num_prefills],
+                attn_metadata.last_state_idx[:num_actual_tokens],
+                [num_decodes, num_prefills],
                 dim=0)
             current_last_idx_d, current_last_idx_p = torch.split(
-                attn_metadata.current_last_idx, [num_decodes, num_prefills],
+                attn_metadata.current_last_idx[:num_actual_tokens],
+                [num_decodes, num_prefills],
                 dim=0)
             # Prefill-only variables:
             current_first_idx_p = attn_metadata.current_first_idx_p
@@ -697,8 +699,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 # Save state for sequences with more than just final state
                 for seq_idx in range(num_prefills):
 
-                    # Number of chunks for this sequence
-                    this_num_chunks = last_chunk_indices_p[seq_idx]
                     # Block index for the first scheduled token
                     block_idx_first_scheduled_token = current_first_idx_p[
                         seq_idx]
@@ -741,8 +741,8 @@ class MambaMixer2(MambaBase, CustomOp):
                     # Write the states
                     ssm_state[cache_blocks_to_fill] = from_where
 
-                    # Increment the chunk_pos
-                    chunk_pos += this_num_chunks
+                    # Move the chunk pos to the start of the next seq
+                    chunk_pos = 1 + last_chunk_indices_p[seq_idx]
 
                 #For all seqs, store the last state (Note: might be partial):
                 ssm_state[state_indices_tensor_p.gather(1,
