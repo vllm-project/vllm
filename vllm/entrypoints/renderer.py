@@ -42,6 +42,27 @@ class RenderConfig:
     needs_detokenization: Optional[bool] = False
     """If True, detokenize IDs back to text for inclusion in outputs."""
 
+    def verify_truncate_prompt_tokens(
+            self, model_config: ModelConfig) -> Optional[int]:
+        """Validate and normalize `truncate_prompt_tokens` parameter."""
+        truncate_prompt_tokens = self.truncate_prompt_tokens
+        if truncate_prompt_tokens is None:
+            return None
+
+        if truncate_prompt_tokens == 0:
+            return 0
+
+        if truncate_prompt_tokens < 0:
+            truncate_prompt_tokens = model_config.max_model_len
+
+        max_length = self.max_length
+        if max_length is not None and truncate_prompt_tokens > max_length:  # type: ignore[operator]
+            raise ValueError(
+                f"{truncate_prompt_tokens=} cannot be greater than "
+                f"{max_length=}. Please select a smaller truncation size.")
+
+        return truncate_prompt_tokens
+
 
 class BaseRenderer(ABC):
     """
@@ -75,7 +96,7 @@ class BaseRenderer(ABC):
         self,
         *,
         prompt_or_prompts: Union[str, list[str], list[int], list[list[int]]],
-        config: "RenderConfig",
+        config: RenderConfig,
     ) -> list[EngineTokensPrompt]:
         """
         Convert text or token inputs into engine-ready TokensPrompt objects.
@@ -108,7 +129,7 @@ class BaseRenderer(ABC):
         prompt_or_prompts: Optional[Union[str, list[str], list[int],
                                           list[list[int]]]] = None,
         prompt_embeds: Optional[Union[bytes, list[bytes]]] = None,
-        config: "RenderConfig",
+        config: RenderConfig,
     ) -> list[Union[EngineTokensPrompt, EngineEmbedsPrompt]]:
         """
         Convert text/token and/or base64-encoded embeddings inputs into
@@ -190,15 +211,15 @@ class CompletionRenderer(BaseRenderer):
         self,
         *,
         prompt_or_prompts: Union[str, list[str], list[int], list[list[int]]],
-        config: "RenderConfig",
+        config: RenderConfig,
     ) -> list[EngineTokensPrompt]:
         """Implementation of prompt rendering for completion-style requests.
         
         Uses async tokenizer pooling for improved performance. See base class
         for detailed parameter documentation.
         """
-        truncate_prompt_tokens = self._validate_and_normalize_truncate_tokens(
-            config.truncate_prompt_tokens, config.max_length)
+        truncate_prompt_tokens = config.verify_truncate_prompt_tokens(
+            self.model_config)
         if truncate_prompt_tokens == 0:
             return []
 
@@ -216,14 +237,14 @@ class CompletionRenderer(BaseRenderer):
         prompt_or_prompts: Optional[Union[str, list[str], list[int],
                                           list[list[int]]]] = None,
         prompt_embeds: Optional[Union[bytes, list[bytes]]] = None,
-        config: "RenderConfig",
+        config: RenderConfig,
     ) -> list[Union[EngineTokensPrompt, EngineEmbedsPrompt]]:
         """
         Render text/token prompts and/or precomputed embedding prompts. At
         least one of `prompt_or_prompts` or `prompt_embeds` must be provided.
         """
-        truncate_prompt_tokens = self._validate_and_normalize_truncate_tokens(
-            config.truncate_prompt_tokens, config.max_length)
+        truncate_prompt_tokens = config.verify_truncate_prompt_tokens(
+            self.model_config)
         if truncate_prompt_tokens == 0:
             return []
 
@@ -244,29 +265,6 @@ class CompletionRenderer(BaseRenderer):
 
         return rendered
 
-    def _validate_and_normalize_truncate_tokens(
-        self,
-        truncate_prompt_tokens: Optional[int],
-        max_length: Optional[int],
-    ) -> Optional[int]:
-        """Validate and normalize truncate_prompt_tokens parameter."""
-        if truncate_prompt_tokens is None:
-            return None
-
-        if truncate_prompt_tokens == 0:
-            return 0
-
-        if truncate_prompt_tokens < 0:
-            truncate_prompt_tokens = self.model_config.max_model_len
-
-        if max_length is not None and truncate_prompt_tokens > max_length:  # type: ignore[operator]
-            raise ValueError(
-                f"truncate_prompt_tokens ({truncate_prompt_tokens}) "
-                f"cannot be greater than max_length ({max_length}). "
-                f"Please select a smaller truncation size.")
-
-        return truncate_prompt_tokens
-
     def _maybe_apply_truncation(
             self, token_ids: list[int],
             truncate_prompt_tokens: Optional[int]) -> list[int]:
@@ -281,7 +279,7 @@ class CompletionRenderer(BaseRenderer):
     async def _create_prompt(
         self,
         prompt_input: Union[EngineTextPrompt, EngineTokensPrompt],
-        config: "RenderConfig",
+        config: RenderConfig,
         truncate_prompt_tokens: Optional[int],
     ) -> EngineTokensPrompt:
         prompt, prompt_token_ids, _ = get_prompt_components(prompt_input)
