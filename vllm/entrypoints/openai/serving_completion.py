@@ -691,6 +691,5 @@ class OpenAIServingCompletion(OpenAIServing):
             truncate_prompt_tokens=request.truncate_prompt_tokens,
             add_special_tokens=request.add_special_tokens,
             cache_salt=request.cache_salt,
-            needs_detokenization=bool(request.echo
-                                      and not request.return_token_ids),
+            needs_detokenization=bool(request.echo),
         )

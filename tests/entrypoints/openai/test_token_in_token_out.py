@@ -54,7 +54,7 @@ async def test_token_in_token_out_and_logprobs(server):
             prompt=token_ids,
             max_tokens=20,
             temperature=0,
-            echo=True,
+            echo=False,
             extra_body={
                 "return_token_ids": True,
             },

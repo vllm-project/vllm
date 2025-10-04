@@ -4,7 +4,7 @@
 import pytest
 
 from vllm.inputs import zip_enc_dec_prompts
-from vllm.inputs.parse import parse_and_batch_prompt
+from vllm.inputs.parse import parse_raw_prompts
 
 pytestmark = pytest.mark.cpu_test
 
@@ -31,30 +31,30 @@ INPUTS_SLICES = [
 ]
 
 
-def test_parse_single_batch_empty():
+def test_parse_raw_single_batch_empty():
     with pytest.raises(ValueError, match="at least one prompt"):
-        parse_and_batch_prompt([])
+        parse_raw_prompts([])
 
     with pytest.raises(ValueError, match="at least one prompt"):
-        parse_and_batch_prompt([[]])
+        parse_raw_prompts([[]])
 
 
 @pytest.mark.parametrize('string_input', STRING_INPUTS)
-def test_parse_single_batch_string_consistent(string_input: str):
-    assert parse_and_batch_prompt(string_input) \
-        == parse_and_batch_prompt([string_input])
+def test_parse_raw_single_batch_string_consistent(string_input: str):
+    assert parse_raw_prompts(string_input) \
+        == parse_raw_prompts([string_input])
 
 
 @pytest.mark.parametrize('token_input', TOKEN_INPUTS)
-def test_parse_single_batch_token_consistent(token_input: list[int]):
-    assert parse_and_batch_prompt(token_input) \
-        == parse_and_batch_prompt([token_input])
+def test_parse_raw_single_batch_token_consistent(token_input: list[int]):
+    assert parse_raw_prompts(token_input) \
+        == parse_raw_prompts([token_input])
 
 
 @pytest.mark.parametrize('inputs_slice', INPUTS_SLICES)
-def test_parse_single_batch_string_slice(inputs_slice: slice):
-    assert parse_and_batch_prompt(STRING_INPUTS)[inputs_slice] \
-        == parse_and_batch_prompt(STRING_INPUTS[inputs_slice])
+def test_parse_raw_single_batch_string_slice(inputs_slice: slice):
+    assert parse_raw_prompts(STRING_INPUTS)[inputs_slice] \
+        == parse_raw_prompts(STRING_INPUTS[inputs_slice])
 
 
 # yapf: disable
