@@ -77,7 +77,8 @@ class FlashAttnMLAMetadataBuilder(
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
 
         if self.use_full_cuda_graph and self.fa_aot_schedule:
-            self.max_cudagraph_size = self.compilation_config.max_capture_size
+            self.max_cudagraph_size = self.compilation_config.\
+                max_cudagraph_capture_size
 
             if self.max_cudagraph_size > 992:
                 # This condition derives from FA3's internal heuristic.
