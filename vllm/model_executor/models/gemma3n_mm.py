@@ -17,6 +17,7 @@ from transformers.models.siglip import SiglipImageProcessorFast
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.lora import LoRAConfig
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -44,8 +45,8 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
-                         SupportsTranscription)
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsTranscription)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix)
 
@@ -372,6 +373,7 @@ class Gemma3nMultimodalEmbedder(nn.Module):
         self,
         multimodal_config: Union[Gemma3nAudioConfig, Gemma3nVisionConfig],
         text_config: Gemma3nTextConfig,
+        lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
 
@@ -381,9 +383,14 @@ class Gemma3nMultimodalEmbedder(nn.Module):
         self.vocab_size = multimodal_config.vocab_size
         self.text_hidden_size = text_config.hidden_size
 
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                      (lora_config.max_loras or 1)) if lora_config else 0
+        self.vocab_size = self.vocab_size + lora_vocab
+
         self.embedding = VocabParallelEmbedding(
             self.vocab_size,
             self.multimodal_hidden_size,
+            org_num_embeddings=multimodal_config.vocab_size,
         )
 
         self.hard_embedding_norm = RMSNorm(
@@ -426,7 +433,6 @@ class Gemma3nMultimodalEmbedder(nn.Module):
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
                 "You must specify exactly one of input_ids or inputs_embeds")
-
         if inputs_embeds is not None:
             emb_norm = self.soft_embedding_norm(inputs_embeds)
         else:
@@ -441,7 +447,7 @@ class Gemma3nMultimodalEmbedder(nn.Module):
                                         info=Gemma3nProcessingInfo,
                                         dummy_inputs=Gemma3nDummyInputsBuilder)
 class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                      SupportsTranscription):
+                                      SupportsTranscription, SupportsLoRA):
     merge_by_field_config = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
@@ -479,13 +485,16 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
         self.vocab_size = config.text_config.vocab_size
+        self.lora_config = vllm_config.lora_config
 
         self.vision_tower = AutoModel.from_config(config=config.vision_config)
         self.audio_tower = AutoModel.from_config(config=config.audio_config)
         self.embed_vision = Gemma3nMultimodalEmbedder(config.vision_config,
-                                                      config.text_config)
+                                                      config.text_config,
+                                                      self.lora_config)
         self.embed_audio = Gemma3nMultimodalEmbedder(config.audio_config,
-                                                     config.text_config)
+                                                     config.text_config,
+                                                     self.lora_config)
 
         self.language_model: nn.Module = init_vllm_registered_model(
             vllm_config=vllm_config,
@@ -702,7 +711,7 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="multi_modal_projector",
-            tower_model="vision_tower")
+            tower_model=["vision_tower", "audio_tower"])
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
