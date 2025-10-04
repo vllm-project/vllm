@@ -1806,6 +1806,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
         """
+        logger.warning(f"MM_HASH_KWARGS={hf_processor_mm_kwargs}, cache={self.cache}")
         cache = self.cache
 
         _, passthrough_data = self._get_hf_mm_data(mm_data_items)
@@ -2037,11 +2038,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         3. Extract information about the placeholder tokens from the
            processed token IDs.
         """
-        # split static and dynamic kwargs
-        full_mm_processor_kwargs = dict(hf_processor_mm_kwargs)
-
-        static_mm_processor_kwargs, dynamic_mm_processor_kwargs = self._split_static_dynamic_mm_kwargs(hf_processor_mm_kwargs)
-
         mm_items = self._to_mm_items(mm_data)
 
         if tokenization_kwargs is None:
@@ -2054,7 +2050,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         ) = self._cached_apply_hf_processor(
             prompt,
             mm_items,
-            hf_processor_mm_kwargs=static_mm_processor_kwargs,
+            hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
         )

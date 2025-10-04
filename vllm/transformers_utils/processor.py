@@ -70,26 +70,6 @@ def split_and_quantize(allowed_kwargs: dict[str, Any]):
     return static_kwargs, dynamic_kwargs
 
 
-def _prepare_static_kwargs_for_cache(
-    model_config: "ModelConfig",
-    processor_cls: Union[type, tuple[type, ...]],
-    /,
-    **kwargs,
-):
-    mm_config = model_config.get_multimodal_config()
-    merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
-    factory = _get_processor_factory_fn(processor_cls)
-    allowed_kwargs = get_allowed_kwarg_only_overrides(
-        factory,
-        merged_kwargs,
-        requires_kw_only=False,
-        allow_var_kwargs=True,
-    )
-    # quantize and split allowed_kwargs into static and dynamic parts
-    static_kwargs, dynamic_kwargs = split_and_quantize(allowed_kwargs)
-    return static_kwargs, dynamic_kwargs
-
-
 def _merge_mm_kwargs(
     model_config: "ModelConfig",
     processor_cls: Union[type, tuple[type, ...]],
@@ -184,7 +164,7 @@ def cached_static_processor(
     revision: Optional[str] = None,
     trust_remote_code: bool = False,
     processor_cls: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
-    **static_kwargs: Any,
+    **kwargs: Any,
 ):
     return get_processor(
         processor_name,
@@ -192,7 +172,7 @@ def cached_static_processor(
         revision=revision,
         trust_remote_code=trust_remote_code,
         processor_cls=processor_cls,
-        **static_kwargs,
+        **kwargs,
     )
 
 
@@ -202,16 +182,14 @@ def cached_processor_from_config(
     **kwargs: Any,
 ) -> _P:
 
-    static_kwargs, _ = _prepare_static_kwargs_for_cache(
-        model_config, processor_cls, **kwargs)
-
     return cached_static_processor(
         model_config.model,
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
-        **static_kwargs,
+        **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
     )
+
 
 def get_feature_extractor(
     processor_name: str,
