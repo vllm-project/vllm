@@ -3830,18 +3830,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             attn_metadata_builder_i = group.get_metadata_builder()
 
             # check that if any backends reorder batches; that the reordering
-            # is compatible (e.g., decode threshold is the same)
+            # is compatible (take the min since something less than reoroder
+            # threshold could always be run as a prefill)
             reorder_batch_threshold_i = (
                 attn_metadata_builder_i.reorder_batch_threshold)
             if reorder_batch_threshold_i is not None:
                 if self.reorder_batch_threshold is not None:
-                    if reorder_batch_threshold_i != \
-                        self.reorder_batch_threshold:
-                        raise ValueError(
-                            f"Attention backend reorders decodes with "
-                            f"threshold {reorder_batch_threshold_i} but other "
-                            f"backend uses threshold "
-                            f"{self.reorder_batch_threshold}")
+                    self.reorder_batch_threshold = min(
+                        self.reorder_batch_threshold,
+                        reorder_batch_threshold_i)
                 else:
                     self.reorder_batch_threshold = reorder_batch_threshold_i
 
