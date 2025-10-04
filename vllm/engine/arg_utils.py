@@ -21,7 +21,7 @@ from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
-from vllm.config import (EAGLES, BlockSize, CacheConfig, CacheDType,
+from vllm.config import (EAGLE_MODEL_TYPES, BlockSize, CacheConfig, CacheDType,
                          CompilationConfig, ConfigType, ConvertOption,
                          DetailedTraceModules, Device, DeviceConfig,
                          DistributedExecutorBackend, EPLBConfig, HfOverrides,
@@ -1304,7 +1304,8 @@ class EngineArgs:
             # decoding.
             # TODO(woosuk): Support other kinds of speculative decoding.
             if (self.speculative_config is not None
-                    and self.speculative_config.get("method") not in EAGLES):
+                    and self.speculative_config.get("method")
+                    not in EAGLE_MODEL_TYPES):
                 raise ValueError("Currently, async scheduling is only support "
                                  "with eagle kind of speculative decodeing.")
 
