@@ -340,7 +340,7 @@ def batched_fused_marlin_moe(
         matmul, via sorted_ids output.
         - What expert_id to use for each block matmul, via expert_ids ouptut. 
 
-    In the batched version, the tokens are already sorted by the experts
+    In the batched version, the tokens are already grouped/batched by experts
     they subscribe to. Due to this, we can represent the batched hidden_states
     tensor of shape [B, MAX_TOKENS_PER_BATCH, K] as a 2D tensor of shape,
     [B * MAX_TOKENS_PER_BATCH, K]. We may treat this a 2D contiguous tensor
