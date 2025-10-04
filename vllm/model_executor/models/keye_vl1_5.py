@@ -18,7 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalFieldConfig,
                                     MultiModalKwargsItems, VideoItem)
@@ -100,8 +100,7 @@ def get_num_patches(grid_thw: torch.Tensor,
 class KeyeVL1_5ImagePixelInputs(TensorSchema):
     """
     Dimensions:
-        - b: Batch size
-        - np: Number of patches
+        - bnp: Batch size * Number of patches
         - c: Number of channels
         - ps: Patch size
         - ni: Number of images
@@ -111,7 +110,7 @@ class KeyeVL1_5ImagePixelInputs(TensorSchema):
 
     pixel_values: Annotated[
         torch.Tensor,
-        TensorShape("np", 3, "ps", "ps", dynamic_dims={"np"})]
+        TensorShape("bnp", 3, "ps", "ps", dynamic_dims={"bnp"})]
 
     image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
@@ -137,8 +136,7 @@ KeyeVL1_5ImageInputs = Union[KeyeVL1_5ImagePixelInputs,
 class KeyeVL1_5VideoPixelInputs(TensorSchema):
     """
     Dimensions:
-        - b: Batch size
-        - np: Number of patches
+        - bnp: Batch size * Number of patches
         - c: Number of channels
         - ps: Patch size
         - ni: Number of images
@@ -147,7 +145,7 @@ class KeyeVL1_5VideoPixelInputs(TensorSchema):
     type: Literal["pixel_values_videos"]
     pixel_values_videos: Annotated[
         torch.Tensor,
-        TensorShape("np", 3, "ps", "ps", dynamic_dims={"np"})]
+        TensorShape("bnp", 3, "ps", "ps", dynamic_dims={"bnp"})]
     video_grid_thw: Annotated[torch.Tensor, TensorShape("nv", 3)]
 
     num_frames: torch.Tensor
@@ -483,24 +481,6 @@ class KeyeVL1_5ForConditionalGeneration(BaseKeyeModule, SupportsMultiModal,
         self.merge_size = config.vision_config.spatial_merge_size
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-    def _validate_and_reshape_mm_tensor(self, mm_input: NestedTensors,
-                                        expected_dim: int, name: str):
-        if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(f"Incorrect type of {name}. "
-                             f"Got type: {type(mm_input)}")
-        if isinstance(mm_input, torch.Tensor):
-            if mm_input.ndim == expected_dim:
-                return mm_input
-            elif mm_input.ndim == expected_dim + 1:
-                return mm_input.reshape(-1, *mm_input.shape[2:])
-            else:
-                raise ValueError(
-                    f"{name} should be {expected_dim}D or "
-                    f"batched {expected_dim}D tensor."
-                    f"Got ndim: {mm_input.ndim} (shape={mm_input.shape})")
-        else:
-            return torch.concat(mm_input)
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[KeyeVL1_5ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -511,11 +491,6 @@ class KeyeVL1_5ForConditionalGeneration(BaseKeyeModule, SupportsMultiModal,
             return None
 
         if pixel_values is not None:
-            pixel_values = self._validate_and_reshape_mm_tensor(
-                pixel_values, expected_dim=4, name="image pixel values")
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, expected_dim=2, name="image grid_thw")
-
             return KeyeVL1_5ImagePixelInputs(
                 type="pixel_values",
                 pixel_values=pixel_values,
@@ -523,11 +498,6 @@ class KeyeVL1_5ForConditionalGeneration(BaseKeyeModule, SupportsMultiModal,
             )
 
         if image_embeds is not None:
-            image_embeds = self._validate_and_reshape_mm_tensor(
-                image_embeds, expected_dim=2, name="image embeds")
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, expected_dim=2, name="image grid_thw")
-
             return KeyeVL1_5ImageEmbeddingInputs(
                 type="image_embeds",
                 image_embeds=image_embeds,
@@ -545,17 +515,6 @@ class KeyeVL1_5ForConditionalGeneration(BaseKeyeModule, SupportsMultiModal,
             return None
 
         if pixel_values_videos is not None:
-            pixel_values_videos = self._validate_and_reshape_mm_tensor(
-                pixel_values_videos,
-                expected_dim=4,
-                name="video pixel values",
-            )
-            video_grid_thw = self._validate_and_reshape_mm_tensor(
-                video_grid_thw, expected_dim=2, name="video grid_thw")
-
-            num_frames = self._validate_and_reshape_mm_tensor(
-                num_frames, expected_dim=1, name="video num frames")
-
             return KeyeVL1_5VideoPixelInputs(
                 type="pixel_values_videos",
                 pixel_values_videos=pixel_values_videos,
@@ -563,11 +522,6 @@ class KeyeVL1_5ForConditionalGeneration(BaseKeyeModule, SupportsMultiModal,
                 num_frames=num_frames)
 
         if video_embeds is not None:
-            video_embeds = self._validate_and_reshape_mm_tensor(
-                video_embeds, expected_dim=2, name="video embeds")
-            video_grid_thw = self._validate_and_reshape_mm_tensor(
-                video_grid_thw, expected_dim=2, name="video grid_thw")
-
             return KeyeVL1_5VideoEmbeddingInputs(type="video_embeds",
                                                  video_embeds=video_embeds,
                                                  video_grid_thw=video_grid_thw,
