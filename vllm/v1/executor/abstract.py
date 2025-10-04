@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.uniproc_executor import (  # noqa
     ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0)
@@ -18,6 +19,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
+logger = init_logger(__name__)
 FailureCallback = Callable[[], None]
 
 
@@ -106,7 +108,10 @@ class Executor(ExecutorBase):
         return output[0]
 
     def execute_dummy_batch(self) -> None:
-        self.collective_rpc("execute_dummy_batch")
+        if self.is_sleeping:
+            logger.debug("Engine is currently sleeping, skipping dummy batch execution.")
+        else:
+            self.collective_rpc("execute_dummy_batch")
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         output = self.collective_rpc("take_draft_token_ids")
