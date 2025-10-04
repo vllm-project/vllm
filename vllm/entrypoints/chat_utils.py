@@ -1572,6 +1572,22 @@ class AssistantTracker(jinja2.ext.Extension):
         return call_block.set_lineno(lineno)
 
 
+def _resolve_chat_template_kwargs(
+    chat_template: str,
+):
+    env = jinja2.sandbox.ImmutableSandboxedEnvironment(
+        trim_blocks=True,
+        lstrip_blocks=True,
+        extensions=[AssistantTracker, jinja2.ext.loopcontrols],
+    )
+    parsed_content = env.parse(chat_template)
+    template_vars = jinja2.meta.find_undeclared_variables(parsed_content)
+    return template_vars
+
+
+_cached_resolve_chat_template_kwargs = lru_cache(_resolve_chat_template_kwargs)
+
+
 def resolve_chat_template_kwargs(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     chat_template: str,
@@ -1582,13 +1598,7 @@ def resolve_chat_template_kwargs(
         if supports_kw(tokenizer.apply_chat_template, k, allow_var_kwargs=False)
     }
 
-    env = jinja2.sandbox.ImmutableSandboxedEnvironment(
-        trim_blocks=True,
-        lstrip_blocks=True,
-        extensions=[AssistantTracker, jinja2.ext.loopcontrols],
-    )
-    parsed_content = env.parse(chat_template)
-    template_vars = jinja2.meta.find_undeclared_variables(parsed_content)
+    template_vars = _cached_resolve_chat_template_kwargs(chat_template)
 
     # We exclude chat_template from kwargs here, because
     # chat template has been already resolved at this stage
