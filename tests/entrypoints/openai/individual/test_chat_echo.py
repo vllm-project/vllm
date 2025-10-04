@@ -10,7 +10,7 @@ import pytest_asyncio
 from ....utils import RemoteOpenAIServer
 
 # # any model with a chat template should work here
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
 
 
 @pytest.fixture(scope="module")
