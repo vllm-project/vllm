@@ -1142,6 +1142,8 @@ class EngineArgs:
              revision=self.revision,
              trust_remote_code=self.trust_remote_code,
              vllm_speculative_config=self.speculative_config,
+             load_format=self.load_format,
+             download_dir=self.download_dir,
          )
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
