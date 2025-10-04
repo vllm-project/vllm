@@ -868,11 +868,8 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 (not supported by Mamba)
         """
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
         scheduler_config = vllm_config.scheduler_config
-        assert not cache_config.enable_prefix_caching, \
-            "Mamba does not support prefix caching"
 
         super().__init__()
         self.config = config

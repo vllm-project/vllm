@@ -396,10 +396,17 @@ class VllmConfig:
                         "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
                         "to 'spawn'.")
 
-        # Disable prefix caching only if chunked prefill is explicitly disabled
-        # (and not merely unset)
-        if (self.scheduler_config.chunked_prefill_enabled is False
-                or disable_chunked_prefill_reasons):
+        # Final off-switch for CP/APC:
+        # Disable for (a) collected blockers, (b) encoder–decoder, or
+        # (c) explicit CP=False when APC wasn't requested.
+        # Do NOT disable merely because the resolved CP flag is False.
+        apc_requested = (self.cache_config is not None
+                         and self.cache_config.enable_prefix_caching)
+        if (disable_chunked_prefill_reasons
+                or (self.model_config is not None
+                    and self.model_config.is_encoder_decoder)
+                or (self.scheduler_config.enable_chunked_prefill is False
+                    and not apc_requested)):
             for reason in disable_chunked_prefill_reasons:
                 logger.info(reason)
             self.scheduler_config.chunked_prefill_enabled = False
@@ -668,7 +675,7 @@ class VllmConfig:
                                  f"Model: {self.model_config.model}")
 
     def compile_debug_dump_path(self) -> Optional[Path]:
-        """Returns a rank-aware path for dumping 
+        """Returns a rank-aware path for dumping
         torch.compile debug information.
         """
         if self.compilation_config.debug_dump_path is None:

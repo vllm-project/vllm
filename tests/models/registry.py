@@ -389,6 +389,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1"),  # noqa: E501
     "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small"),  # noqa: E501
     # [Multimodal]
+    "CLIPModel": _HfExamplesInfo("openai/clip-vit-base-patch32"),
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
     "Phi3VForCausalLM": _HfExamplesInfo("TIGER-Lab/VLM2Vec-Full",
                                          trust_remote_code=True),
@@ -687,7 +688,11 @@ class HfExampleModels:
         return self.hf_models.keys()
 
     def get_hf_info(self, model_arch: str) -> _HfExamplesInfo:
-        return self.hf_models[model_arch]
+        try:
+            return self.hf_models[model_arch]
+        except KeyError:
+            raise ValueError(f"No example model defined for {model_arch}; "
+                             f"please update this file.") from None
 
     def find_hf_info(self, model_id: str) -> _HfExamplesInfo:
         for info in self.hf_models.values():
@@ -699,7 +704,8 @@ class HfExampleModels:
             if any(extra == model_id for extra in info.extras.values()):
                 return info
 
-        raise ValueError(f"No example model defined for {model_id}")
+        raise ValueError(f"No example model defined for {model_id}; "
+                         f"please update this file.")
 
 
 HF_EXAMPLE_MODELS = HfExampleModels(_EXAMPLE_MODELS)

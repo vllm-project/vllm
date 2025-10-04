@@ -546,20 +546,38 @@ class MambaManager(SingleTypeKVCacheManager):
             kv_cache_spec,
             MambaSpec), ("MambaManager can only be used for mamba groups")
         assert dcp_world_size == 1, "DCP not support mamba now."
-        # Prefix caching is not supported for mamba now. Always return empty
-        # list.
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids)))
+
+        max_num_blocks = max_length // kv_cache_spec.block_size
+        # Search from right to left and early stop when a match is found.
+        for i in range(max_num_blocks - 1, -1, -1):
+            if cached_block := block_pool.get_cached_block(
+                    block_hashes[i], kv_cache_group_ids):
+                for computed, cached in zip(computed_blocks, cached_block):
+                    # the hit length logic later assumes:
+                    #  hit_length = len(hit_blocks_other_attn[0])
+                    #               * self.other_block_size
+                    # so we insert dummy blocks at the beginning:
+                    if i > 0:
+                        computed.extend([block_pool.null_block] * i)
+                    computed.append(cached)
+                break  # we just need the last match - early stopping
+
         return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
-        # Each request will always have 1 block at this moment, so no need to
-        # remove blocks.
+        # Here unused blocks may be freed up for running requests.
+        # TODO(@s3woz) Free up all blocks that aren't needed by Mamba2
+        #  (for which find_longest_cache_hit returns block_pool.null_block)
         pass
 
     def get_num_common_prefix_blocks(self, request_id: str,
                                      num_running_requests: int) -> int:
+        """
+        cascade attention is not supported by mamba
+        """
         return 0
 
     def get_num_blocks_to_allocate(

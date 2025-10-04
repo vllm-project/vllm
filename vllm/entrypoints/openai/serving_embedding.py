@@ -576,6 +576,7 @@ class OpenAIServingEmbedding(EmbeddingMixin):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
+        trust_request_chat_template: bool = False,
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(engine_client=engine_client,
@@ -586,6 +587,7 @@ class OpenAIServingEmbedding(EmbeddingMixin):
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.trust_request_chat_template = trust_request_chat_template
 
     async def create_embedding(
         self,
@@ -629,3 +631,17 @@ class OpenAIServingEmbedding(EmbeddingMixin):
             return self.create_error_response(str(e))
 
         return pooling_params
+
+    async def _preprocess(
+        self,
+        ctx: ServeContext,
+    ) -> Optional[ErrorResponse]:
+        if isinstance(ctx.request, EmbeddingChatRequest):
+            error_check_ret = self._validate_chat_template(
+                request_chat_template=ctx.request.chat_template,
+                chat_template_kwargs=ctx.request.chat_template_kwargs,
+                trust_request_chat_template=self.trust_request_chat_template,
+            )
+            if error_check_ret is not None:
+                return error_check_ret
+        return await super()._preprocess(ctx)

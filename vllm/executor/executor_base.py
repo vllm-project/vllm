@@ -7,8 +7,7 @@ from abc import ABC, abstractmethod
 from functools import cached_property
 from typing import Any, Awaitable, Callable, List, Optional, Set, Union
 
-import torch.nn as nn
-from typing_extensions import TypeVar, deprecated
+from typing_extensions import TypeVar
 
 import vllm.platforms
 from vllm.config import VllmConfig
@@ -126,16 +125,6 @@ class ExecutorBase(ABC):
 
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
-
-    @deprecated("`llm_engine.model_executor.apply_model` will no longer work "
-                "in V1 Engine. Please replace with `llm_engine.apply_model` "
-                "and set `VLLM_ALLOW_INSECURE_SERIALIZATION=1`.")
-    def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
-        """
-        Run a function directly on the model inside each worker,
-        returning the result for each of them.
-        """
-        return self.collective_rpc("apply_model", args=(func, ))
 
     @cached_property  # Avoid unnecessary RPC calls
     def supported_tasks(self) -> tuple[SupportedTask, ...]:

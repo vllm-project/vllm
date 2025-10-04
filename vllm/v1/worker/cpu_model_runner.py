@@ -9,7 +9,6 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.v1.attention.backends.cpu_attn import TorchSDPAMetadataBuilderV1
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -33,50 +32,12 @@ class CPUModelRunner(GPUModelRunner):
 
         self._postprocess_tensors()
 
+    # Note: Remove the override after new attention backend finished
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
-        """
-        Update the order of requests in the batch based on the attention
-        backend's needs. For example, some attention backends (namely MLA) may
-        want to separate requests based on if the attention computation will be
-        compute-bound or memory-bound.
-
-        Args:
-            scheduler_output: The scheduler output.
-        """
-        # Attention free models have zero kv_cache_groups, however models
-        # like Mamba are also attention free but use the kv_cache for
-        # keeping its internal state. This is why we check the number
-        # of kv_cache groups instead of solely checking
-        # for self.model_config.is_attention_free.
-        if len(self.kv_cache_config.kv_cache_groups) == 0:
-            return
-
         if len(self.kv_cache_config.kv_cache_groups) > 1:
             raise ValueError("Multiple KVCacheGroups is not"
                              "currently supported with CPU model runner.")
-
-        # Guard against encoder-only / pooling models where `attn_groups`
-        # may be empty or lack the expected metadata_builder.
-        # Without this check, accessing `attn_groups[0][0]` would trigger
-        # an AssertionError on CPU backend.
-        if not hasattr(self, "attn_groups") or not self.attn_groups:
-            return
-        if not self.attn_groups[0]:
-            return
-
-        mb = getattr(self.attn_groups[0][0], "metadata_builders", None)
-        if isinstance(mb, list):
-            if not isinstance(mb[0], TorchSDPAMetadataBuilderV1):
-                return
-            mb[0].reorder_batch(self.input_batch, scheduler_output)
-            return
-        elif not isinstance(mb, TorchSDPAMetadataBuilderV1):
-            # Encoder-only / rerank models do not benefit from reordering,
-            # so we safely skip here.
-            return
-
-        # Safe path for decoder/attention-heavy models
-        mb.reorder_batch(self.input_batch, scheduler_output)
+        super()._may_reorder_batch(scheduler_output)
 
     def _postprocess_tensors(self) -> None:
         # Note: replace device tensors with cpu tensors

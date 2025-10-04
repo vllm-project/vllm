@@ -58,6 +58,30 @@ class ModelRequestData(NamedTuple):
     documents: Optional[ScoreMultiModalParam] = None
 
 
+def run_clip(query: Query) -> ModelRequestData:
+    if query["modality"] == "text":
+        prompt = query["text"]
+        image = None
+    elif query["modality"] == "image":
+        prompt = ""  # For image input, make sure that the prompt text is empty
+        image = query["image"]
+    else:
+        modality = query["modality"]
+        raise ValueError(f"Unsupported query modality: '{modality}'")
+
+    engine_args = EngineArgs(
+        model="openai/clip-vit-base-patch32",
+        runner="pooling",
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image=image,
+    )
+
+
 def run_e5_v(query: Query) -> ModelRequestData:
     llama3_template = "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n \n"  # noqa: E501
 
@@ -146,7 +170,8 @@ def run_vlm2vec_qwen2vl(query: Query) -> ModelRequestData:
 
     processor = AutoProcessor.from_pretrained(
         model_id,
-        # `min_pixels` and `max_pixels` are deprecated
+        # `min_pixels` and `max_pixels` are deprecated for
+        # transformers `preprocessor_config.json`
         size={"shortest_edge": 3136, "longest_edge": 12845056},
     )
     processor.chat_template = load_chat_template(
@@ -172,8 +197,10 @@ def run_vlm2vec_qwen2vl(query: Query) -> ModelRequestData:
         model=merged_path,
         runner="pooling",
         max_model_len=4096,
-        trust_remote_code=True,
-        mm_processor_kwargs={"num_crops": 4},
+        mm_processor_kwargs={
+            "min_pixels": 3136,
+            "max_pixels": 12845056,
+        },
         limit_mm_per_prompt={"image": 1},
     )
 
@@ -299,6 +326,7 @@ def run_score(model: str, modality: QueryModality, seed: Optional[int]):
 
 
 model_example_map = {
+    "clip": run_clip,
     "e5_v": run_e5_v,
     "vlm2vec_phi3v": run_vlm2vec_phi3v,
     "vlm2vec_qwen2vl": run_vlm2vec_qwen2vl,
