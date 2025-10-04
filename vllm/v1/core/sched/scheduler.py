@@ -316,7 +316,7 @@ class Scheduler(SchedulerInterface):
                     # Trim spec_token_ids list to num_scheduled_spec_tokens.
                     del request.spec_token_ids[num_scheduled_spec_tokens:]
                     scheduled_spec_decode_tokens[request.request_id] = (
-                        request.spec_token_ids[:])
+                        request.spec_token_ids.copy())
 
             # Encoder-related.
             if encoder_inputs_to_schedule:

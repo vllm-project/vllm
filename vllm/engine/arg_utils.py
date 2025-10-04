@@ -31,7 +31,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
                          StructuredOutputsConfig, TaskOption, TokenizerMode,
-                         VllmConfig, get_attr_docs)
+                         VllmConfig, get_attr_docs, EAGLES)
 from vllm.config.multimodal import MMCacheType, MultiModalConfig
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.config.utils import get_field
@@ -1289,13 +1289,7 @@ class EngineArgs:
         data_parallel_rpc_port = self.data_parallel_rpc_port if (
             self.data_parallel_rpc_port
             is not None) else ParallelConfig.data_parallel_rpc_port
-        eagles = (
-            "eagle",
-            "eagle3",
-            "deepseek_mtp",
-            "ernie_mtp",
-            "qwen3_next_mtp",
-        )
+        
         if self.async_scheduling:
             # Async scheduling does not work with the uniprocess backend.
             if self.distributed_executor_backend is None:
@@ -1310,7 +1304,7 @@ class EngineArgs:
             # decoding.
             # TODO(woosuk): Support other kinds of speculative decoding.
             if (self.speculative_config is not None
-                    and self.speculative_config.get("method") not in eagles):
+                    and self.speculative_config.get("method") not in EAGLES):
                 raise ValueError("Currently, async scheduling is only support "
                                  "with eagle kind of speculative decodeing.")
 

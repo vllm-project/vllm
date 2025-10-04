@@ -35,6 +35,8 @@ SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "longcat_flash_mtp", "mtp"]
 MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
                    "qwen3_next_mtp", "longcat_flash_mtp")
+EAGLES = Literal["eagle", "eagle3", "deepseek_mtp", "ernie_mtp", 
+                 "qwen3_next_mtp"]
 
 
 @config

@@ -450,8 +450,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens  # noqa
         self.valid_sampled_token_count_event: Optional[torch.cuda.Event] = None
+        self.device_valid_sampled_token_count_event: Optional[torch.cuda.Event] = None
+        self.valid_sampled_token_count_copy_stream: Optional[torch.cuda.Stream] = None
         if self.use_async_scheduling and self.num_spec_tokens:
             self.valid_sampled_token_count_event = torch.cuda.Event()
+            self.device_valid_sampled_token_count_event = torch.cuda.Event()
+            self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
         self.transfer_event = torch.cuda.Event()
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_model_len, 1),
@@ -921,19 +925,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return cu_num_tokens, arange
 
-    def _get_total_without_spec(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> int:
-        total = scheduler_output.total_num_scheduled_tokens
-        if not self.use_async_scheduling or self.num_spec_tokens <= 0:
-            return total
-
-        num_draft_tokens = sum(
-            len(spec_tokens) for spec_tokens in
-            scheduler_output.scheduled_spec_decode_tokens.values())
-        return total - num_draft_tokens
-
     def _prepare_input_ids(
         self,
         scheduler_output: "SchedulerOutput",
@@ -973,39 +964,37 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
         num_commmon_tokens = 0
 
-        def handle_prev_common_reqs(prev_index, req_id):
-            nonlocal indices_match, max_flattened_index, num_commmon_tokens
-            prev_common_req_indices.append(prev_index)
-            # We need to compute the flattened input_ids index of the
-            # last token in each common request.
-            draft_len = len(spec_tokens.get(req_id, []))
-            flattened_index = cu_num_tokens[cur_index].item() - 1
-            # example: cu_num_tokens = [2, 5, 8], draft_tokens = [1, 2, 2]
-            # sample_flattened_indices = [0, 2, 5]
-            # spec_flattened_indices = [1,   3, 4,    6, 7]
-            sample_flattened_indices.append(flattened_index - draft_len)
-            spec_flattened_indices.extend(
-                range(flattened_index - draft_len + 1, flattened_index + 1))
-            start = prev_index * self.num_spec_tokens
-            # prev_draft_token_indices is used to find which draft_tokens_id
-            # should be copied to input_ids
-            # example: prev draft_tokens_id [[1,2], [3,4], [5, 6]]
-            # flatten draft_tokens_id [1,2,3,4,5,6]
-            # draft_len of each request [1, 2, 1]
-            # then prev_draft_token_indices is [0,   2, 3,   4]
-            prev_draft_token_indices.extend(range(start, start + draft_len))
-            indices_match &= (prev_index == flattened_index)
-            max_flattened_index = max(max_flattened_index, flattened_index)
-            num_commmon_tokens += 1
-
         for req_id, cur_index in self.input_batch.req_id_to_index.items():
-            if (prev_index := prev_req_id_to_index.get(req_id)) is not None:
-                handle_prev_common_reqs(prev_index, req_id)
-            # this happens when a requst is resumed from preemption.
-            elif ((req_state := self.requests.get(req_id, None)) is not None
-                  and req_state.prev_sampled_tokens is not None):
+            prev_index = prev_req_id_to_index.get(req_id)
+            if prev_index is None:
                 prev_index = prev_sampled_len
-                handle_prev_common_reqs(prev_index, req_id)
+            req_state = self.requests.get(req_id, None)
+            prev_sampled_tokens = req_state.prev_sampled_tokens if req_state is not None else None  # noqa
+            request_is_resumed = prev_sampled_tokens is not None
+            if prev_index is not None or request_is_resumed:
+                prev_common_req_indices.append(prev_index)
+                # We need to compute the flattened input_ids index of the
+                # last token in each common request.
+                draft_len = len(spec_tokens.get(req_id, []))
+                flattened_index = cu_num_tokens[cur_index].item() - 1
+                # example: cu_num_tokens = [2, 5, 8], draft_tokens = [1, 2, 2]
+                # sample_flattened_indices = [0, 2, 5]
+                # spec_flattened_indices = [1,   3, 4,    6, 7]
+                sample_flattened_indices.append(flattened_index - draft_len)
+                spec_flattened_indices.extend(
+                    range(flattened_index - draft_len + 1, flattened_index + 1))
+                start = prev_index * self.num_spec_tokens
+                # prev_draft_token_indices is used to find which draft_tokens_id
+                # should be copied to input_ids
+                # example: prev draft_tokens_id [[1,2], [3,4], [5, 6]]
+                # flatten draft_tokens_id [1,2,3,4,5,6]
+                # draft_len of each request [1, 2, 1]
+                # then prev_draft_token_indices is [0,   2, 3,   4]
+                prev_draft_token_indices.extend(range(start, start + draft_len))
+                indices_match &= (prev_index == flattened_index)
+                max_flattened_index = max(max_flattened_index, flattened_index)
+                num_commmon_tokens += 1
+            if request_is_resumed:
                 cache_sampled_tokens.append(req_state.prev_sampled_tokens)
                 # resumed because num_new_tokens=0 in schedule
                 #  but in next step num_new_tokens>0 which in
@@ -2408,36 +2397,36 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if not sampled_ids:
                     continue
 
-            start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-            end_idx = start_idx + len(sampled_ids)
-            assert end_idx <= self.max_model_len + 1, (
-                "Sampled token IDs exceed the max model length + 1. "
-                f"Total number of tokens: {end_idx} > max_model_len + 1: "
-                f"{self.max_model_len + 1}")
+                start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+                end_idx = start_idx + len(sampled_ids)
+                assert end_idx <= self.max_model_len + 1, (
+                    "Sampled token IDs exceed the max model length + 1. "
+                    f"Total number of tokens: {end_idx} > max_model_len + 1: "
+                    f"{self.max_model_len + 1}")
 
-            n_tokens_cache = len(sampled_ids)
+                n_tokens_cache = len(sampled_ids)
 
-            # Sampled token IDs exceed the max model length by 1. This is
-            # legitimate as we can still sample 1 last token when the context
-            # length equals the max model length. Note that we do not need to
-            # cache this token ID as the sequence finishes after this step.
-            # Additionally, the buffers token_ids_cpu and is_token_ids are of
-            # size max model length only.
-            if end_idx == self.max_model_len + 1:
-                n_tokens_cache -= 1
+                # Sampled token IDs exceed the max model length by 1. This is
+                # legitimate as we can still sample 1 last token when the context
+                # length equals the max model length. Note that we do not need to
+                # cache this token ID as the sequence finishes after this step.
+                # Additionally, the buffers token_ids_cpu and is_token_ids are of
+                # size max model length only.
+                if end_idx == self.max_model_len + 1:
+                    n_tokens_cache -= 1
 
-            self.input_batch.token_ids_cpu[req_idx, start_idx:(
-                start_idx + n_tokens_cache)] = sampled_ids[:n_tokens_cache]
-            self.input_batch.is_token_ids[req_idx,
-                                          start_idx:(start_idx +
-                                                     n_tokens_cache)] = True
+                self.input_batch.token_ids_cpu[req_idx, start_idx:(
+                    start_idx + n_tokens_cache)] = sampled_ids[:n_tokens_cache]
+                self.input_batch.is_token_ids[req_idx,
+                                            start_idx:(start_idx +
+                                                        n_tokens_cache)] = True
 
-            self.input_batch.num_tokens_no_spec[req_idx] = end_idx
-            self.input_batch.num_tokens[req_idx] = end_idx
+                self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+                self.input_batch.num_tokens[req_idx] = end_idx
 
-            req_id = req_ids[req_idx]
-            req_state = self.requests[req_id]
-            req_state.output_token_ids.extend(sampled_ids)
+                req_id = req_ids[req_idx]
+                req_state = self.requests[req_id]
+                req_state.output_token_ids.extend(sampled_ids)
 
         return (
             num_nans_in_logits,
@@ -2807,15 +2796,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         self.discard_request_indices.gpu,
                         self.num_discarded_requests
                     )
-                self.valid_sampled_token_count_cpu[:valid_sampled_tokens_count.
-                                                   shape[0]].copy_(
-                                                       valid_sampled_tokens_count,
-                                                       non_blocking=True,
-                                                   )
                 if self.valid_sampled_token_count_event is not None:
-                    self.valid_sampled_token_count_event.record()
+                    self.device_valid_sampled_token_count_event.record()
                     self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(  # noqa
-                        1)
+                            1)
+                    with torch.cuda.stream(self.valid_sampled_token_count_copy_stream):
+                        self.valid_sampled_token_count_copy_stream.wait_event(
+                            self.device_valid_sampled_token_count_event)
+                        self.valid_sampled_token_count_cpu[:valid_sampled_tokens_count.
+                                                        shape[0]].copy_(
+                                                            valid_sampled_tokens_count,
+                                                            non_blocking=True,
+                                                        )
+                    
+                        self.valid_sampled_token_count_event.record()
+                        
 
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
