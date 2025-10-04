@@ -653,7 +653,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # wait until valid_sampled_tokens_count is copied to cpu,
         # then use it to update actual num_computed_tokens of each request.
         if self.valid_sampled_token_count_event is not None:
-            self.valid_sampled_token_count_event.synchronize()
+            default_stream = torch.cuda.current_stream()
+            default_stream.wait_event(self.valid_sampled_token_count_event)
         valid_sampled_token_count = self.valid_sampled_token_count_cpu.tolist()
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
@@ -2797,9 +2798,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         self.num_discarded_requests
                     )
                 if self.valid_sampled_token_count_event is not None:
-                    self.device_valid_sampled_token_count_event.record()
+                    default_stream = torch.cuda.current_stream()
+                    self.device_valid_sampled_token_count_event.record(default_stream)
                     self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(  # noqa
                             1)
+                    # initialize a new stream to overlap the copy operation with
+                    # prepare_input of draft model.
                     with torch.cuda.stream(self.valid_sampled_token_count_copy_stream):
                         self.valid_sampled_token_count_copy_stream.wait_event(
                             self.device_valid_sampled_token_count_event)
@@ -2809,7 +2813,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                             non_blocking=True,
                                                         )
                     
-                        self.valid_sampled_token_count_event.record()
+                        self.valid_sampled_token_count_event.record(
+                            self.valid_sampled_token_count_copy_stream
+                        )
                         
 
             if spec_decode_metadata is None:

@@ -86,6 +86,7 @@ __all__ = [
     "SchedulerPolicy",
     # From vllm.config.speculative
     "SpeculativeConfig",
+    "EAGLES",
     # From vllm.config.speech_to_text
     "SpeechToTextConfig",
     # From vllm.config.structured_outputs
