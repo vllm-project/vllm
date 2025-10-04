@@ -94,7 +94,7 @@ def inductor_partition_rule_context(op_names: list[str]):
             _always_partition,
         )
 
-    logger.debug(
+    logger.info(
         "Registered inductor partition rules for ops: %s",
         unique_names,
     )
