@@ -195,8 +195,7 @@ class Mamba2AttentionMetadataBuilder(
                 common_attn_metadata.query_start_loc[:-1]
             context_lens = common_attn_metadata.seq_lens - \
                                  query_lens
-            last_computed_offset = \
-                context_lens % mamba_block_size
+            last_computed_offset = context_lens % mamba_block_size
             # Indices: last_computed <= current_first <= current_last
             # Cases:
             #  last_computed == current_first  if last state was partially
