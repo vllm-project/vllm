@@ -62,7 +62,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PlaceholderFeaturesInfo,
                                         PromptReplacement, PromptUpdate)
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import decode_tokens
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .qwen2_5_omni_thinker import Qwen2_5OmniConditionalGenerationMixin
@@ -674,7 +673,6 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
 
         (
             prompt_ids,
-            prompt,
             mm_placeholders,
         ) = self._apply_prompt_updates(
             prompt_ids,
@@ -682,10 +680,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         )
         self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
-        tokenizer = self.info.get_tokenizer()
-        prompt = decode_tokens(tokenizer, prompt_ids)
-
-        return prompt_ids, prompt, mm_placeholders
+        return prompt_ids, mm_placeholders
 
     def get_updates_use_audio_in_video(
         self,
