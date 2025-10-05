@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import (
-    List,  # noqa: UP035
-    Optional,
-)
+from typing import Optional
 
 import torch
 
@@ -32,7 +29,7 @@ def flashinfer_fused_moe_blockscale_fp8(
     intermediate_size: int,
     expert_offset: int,
     local_num_experts: int,
-    block_shape: List[int],  # noqa: UP006
+    block_shape: list[int],
     routed_scaling: float = 1.0,
 ) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
