@@ -39,14 +39,22 @@ class XPUPlatform(Platform):
         pass
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
-                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool, use_sparse) -> str:
+    def get_attn_backend_cls(
+        cls,
+        selected_backend: "_Backend",
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: Optional[str],
+        block_size: int,
+        use_v1: bool,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse,
+    ) -> str:
         from vllm.attention.backends.registry import _Backend
+
         if use_sparse:
-            raise NotImplementedError(
-                "Sparse Attention is not supported on XPU.")
+            raise NotImplementedError("Sparse Attention is not supported on XPU.")
         use_v1 = envs.VLLM_USE_V1
         if not use_v1:
             raise ValueError("XPU backend only supports V1.")
@@ -61,20 +69,24 @@ class XPUPlatform(Platform):
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "
-                f"with use_v1: {use_v1} use_mla: {use_mla}")
+                f"with use_v1: {use_v1} use_mla: {use_mla}"
+            )
 
         logger.info("Using Flash Attention backend on V1 engine.")
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
-                                    model_config: "ModelConfig") -> bool:
+    def is_kv_cache_dtype_supported(
+        cls, kv_cache_dtype: str, model_config: "ModelConfig"
+    ) -> bool:
         """
         Check if the kv_cache_dtype is supported.
         XPU only support fp8 kv cache with triton backend.
         """
-        if envs.is_set("VLLM_ATTENTION_BACKEND") and \
-            envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN":
+        if (
+            envs.is_set("VLLM_ATTENTION_BACKEND")
+            and envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN"
+        ):
             return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
 
         return False
@@ -122,12 +134,14 @@ class XPUPlatform(Platform):
 
         # lazy import to avoid circular import
         from vllm.config import CompilationLevel, CUDAGraphMode
+
         compilation_config = vllm_config.compilation_config
         if compilation_config.compile_sizes is None:
             compilation_config.compile_sizes = []
 
-        assert compilation_config.cudagraph_mode == CUDAGraphMode.NONE, \
+        assert compilation_config.cudagraph_mode == CUDAGraphMode.NONE, (
             "CUDA graph mode should be NONE on XPU"
+        )
 
         if vllm_config.lora_config is not None:
             compilation_config.level = CompilationLevel.NO_COMPILATION
@@ -148,31 +162,38 @@ class XPUPlatform(Platform):
             if envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn":
                 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
                 logger.warning(
-                    "Please use spawn as start method if you want to use mp.")
-        elif (parallel_config.distributed_executor_backend != "ray"
-              and parallel_config.distributed_executor_backend != "uni"
-              and parallel_config.distributed_executor_backend
-              != "external_launcher"):
+                    "Please use spawn as start method if you want to use mp."
+                )
+        elif (
+            parallel_config.distributed_executor_backend != "ray"
+            and parallel_config.distributed_executor_backend != "uni"
+            and parallel_config.distributed_executor_backend != "external_launcher"
+        ):
             logger.warning(
                 "%s is not supported on XPU, fallback to ray distributed"
                 " executor backend.",
-                parallel_config.distributed_executor_backend)
+                parallel_config.distributed_executor_backend,
+            )
             parallel_config.distributed_executor_backend = "ray"
 
         if model_config and model_config.use_mla:
             logger.info(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
-                "prefill and prefix caching to be disabled.")
+                "prefill and prefix caching to be disabled."
+            )
             vllm_config.scheduler_config.enable_chunked_prefill = False
             vllm_config.scheduler_config.chunked_prefill_enabled = False
             vllm_config.scheduler_config.max_num_batched_tokens = max(
                 vllm_config.scheduler_config.max_model_len,
-                DEFAULT_MAX_NUM_BATCHED_TOKENS)
+                DEFAULT_MAX_NUM_BATCHED_TOKENS,
+            )
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
         set_kv_cache_layout("NHD")
-        logger.info("Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
-                    "only NHD layout is supported by XPU attention kernels.")
+        logger.info(
+            "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
+            "only NHD layout is supported by XPU attention kernels."
+        )
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
@@ -187,9 +208,9 @@ class XPUPlatform(Platform):
         return True
 
     @classmethod
-    def get_current_memory_usage(cls,
-                                 device: Optional[torch.types.Device] = None
-                                 ) -> float:
+    def get_current_memory_usage(
+        cls, device: Optional[torch.types.Device] = None
+    ) -> float:
         torch.xpu.reset_peak_memory_stats(device)
         return torch.xpu.max_memory_allocated(device)
 
@@ -219,7 +240,8 @@ class XPUPlatform(Platform):
                 raise ValueError(
                     "Intel Arc A770 have bfloat16 accuracy known issue. "
                     "You can use float16 instead by explicitly setting the "
-                    "`dtype` flag in CLI, for example: --dtype=half.")
+                    "`dtype` flag in CLI, for example: --dtype=half."
+                )
 
     @classmethod
     def opaque_attention_op(cls) -> bool:
