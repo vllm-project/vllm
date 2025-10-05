@@ -10,7 +10,7 @@ from __future__ import annotations
 import functools
 import importlib
 import os
-from typing import Any, Callable, NoReturn, Optional
+from typing import Any, Callable, NoReturn
 
 import torch
 
@@ -325,7 +325,7 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
 def should_use_deepgemm_for_fp8_linear(
     output_dtype: torch.dtype,
     weight: torch.Tensor,
-    supports_deep_gemm: Optional[bool] = None,
+    supports_deep_gemm: bool | None = None,
 ):
     if supports_deep_gemm is None:
         supports_deep_gemm = is_deep_gemm_supported()

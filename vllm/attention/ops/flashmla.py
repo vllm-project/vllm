@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # adapted from: https://github.com/deepseek-ai/FlashMLA/blob/main/flash_mla/flash_mla_interface.py
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -31,7 +31,7 @@ else:
     _flashmla_extension_C_AVAILABLE = False
 
 
-def is_flashmla_supported() -> Tuple[bool, Optional[str]]:
+def is_flashmla_supported() -> tuple[bool, Optional[str]]:
     """
     Return: is_supported_flag, unsupported_reason (optional).
     """
@@ -57,7 +57,7 @@ def get_mla_metadata(
     num_heads_q: Optional[int] = None,
     is_fp8_kvcache: bool = False,
     topk: Optional[int] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Arguments:
     - cache_seqlens: (batch_size), dtype torch.int32.
@@ -101,7 +101,7 @@ def flash_mla_with_kvcache(
     descale_k: Optional[torch.Tensor] = None,
     is_fp8_kvcache: bool = False,
     indices: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Arguments:
     - q: (batch_size, seq_len_q, num_heads_q, head_dim).
@@ -183,7 +183,7 @@ def flash_mla_sparse_prefill(
     indices: torch.Tensor,
     sm_scale: float,
     d_v: int = 512,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Sparse attention prefill kernel
 

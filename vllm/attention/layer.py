@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -126,7 +126,7 @@ class Attention(nn.Module, AttentionLayerBase):
         head_size: int,
         scale: float,
         num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
+        alibi_slopes: Optional[list[float]] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         logits_soft_cap: Optional[float] = None,
@@ -586,7 +586,7 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 
 def maybe_save_kv_layer_to_connector(
     layer_name: str,
-    kv_cache_layer: List[torch.Tensor],
+    kv_cache_layer: list[torch.Tensor],
 ):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return

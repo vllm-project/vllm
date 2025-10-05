@@ -20,10 +20,10 @@ from vllm.v1.structured_output.backend_types import (
 @dataclasses.dataclass
 class StructuredOutputRequest:
     sampling_params: SamplingParams
-    _grammar: Optional[
-        Union[Future[StructuredOutputGrammar], StructuredOutputGrammar]
-    ] = None
-    reasoning_ended: Optional[bool] = None
+    _grammar: Union[Future[StructuredOutputGrammar], StructuredOutputGrammar] | None = (
+        None
+    )
+    reasoning_ended: bool | None = None
 
     def _check_grammar_completion(self) -> bool:
         # NOTE: We have to lazy import to gate circular imports
@@ -43,7 +43,7 @@ class StructuredOutputRequest:
         return self._check_grammar_completion()
 
     @property
-    def grammar(self) -> Optional[StructuredOutputGrammar]:
+    def grammar(self) -> StructuredOutputGrammar | None:
         completed = self._check_grammar_completion()
         return (
             cast(Optional[StructuredOutputGrammar], self._grammar)

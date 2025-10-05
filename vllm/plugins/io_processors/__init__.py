@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from vllm.config import VllmConfig
 from vllm.plugins import load_plugins_by_group
@@ -15,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_io_processor(
-    vllm_config: VllmConfig, plugin_from_init: Optional[str] = None
+    vllm_config: VllmConfig, plugin_from_init: str | None = None
 ) -> IOProcessor | None:
     # Input.Output processors are loaded as plugins under the
     # 'vllm.io_processor_plugins' group. Similar to platform
