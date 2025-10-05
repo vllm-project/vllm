@@ -163,9 +163,12 @@ class ScaledMMReduceScatterPattern(BasePattern):
             )
             return reduce_scatter
 
-        def replacement(input: torch.Tensor, mat2: torch.Tensor,
-                        scale_a: torch.Tensor,
-                        scale_b: torch.Tensor) -> torch.Tensor:
+        def replacement(
+            input: torch.Tensor,
+            mat2: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
             # Calculate output shape: input @ mat2 with scatter_dim reduced
             output_shape = [*input.shape[:-1], mat2.shape[1]]
             scatter_dim = 0
@@ -294,9 +297,13 @@ class CutlassScaledMMReduceScatterPattern(BasePattern):
             )
             return reduce_scatter
 
-        def replacement(input: torch.Tensor, mat2: torch.Tensor,
-                        scale_a: torch.Tensor, scale_b: torch.Tensor,
-                        cutlass_mm_output: torch.Tensor) -> torch.Tensor:
+        def replacement(
+            input: torch.Tensor,
+            mat2: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+            cutlass_mm_output: torch.Tensor,
+        ) -> torch.Tensor:
             # Calculate output shape: input @ mat2 with scatter_dim reduced
             output_shape = [*input.shape[:-1], mat2.shape[1]]
             scatter_dim = 0
