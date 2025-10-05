@@ -671,10 +671,13 @@ def init_test_distributed_environment(
     tp_size: int,
     pp_size: int,
     rank: int,
-    distributed_init_port: str,
+    distributed_init_port: Optional[str] = None,
     local_rank: int = -1,
 ) -> None:
-    distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+    if distributed_init_port:
+        distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+    else:
+        distributed_init_method = "env://"
     init_distributed_environment(
         world_size=pp_size * tp_size,
         rank=rank,
