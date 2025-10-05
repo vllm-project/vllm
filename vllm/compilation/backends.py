@@ -7,7 +7,7 @@ import os
 import pprint
 import time
 from collections.abc import Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
 import torch
@@ -76,11 +76,9 @@ class CompilerManager:
         """Provide compilation context (e.g. partition rules)."""
         if self.compilation_config.use_inductor_graph_partition:
             partition_ops = self.compilation_config.splitting_ops or []
-            context = inductor_partition_rule_context(partition_ops)
+            with inductor_partition_rule_context(partition_ops):
+                yield
         else:
-            context = nullcontext()
-
-        with context:
             yield
 
     def initialize_cache(self,
