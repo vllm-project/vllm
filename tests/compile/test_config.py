@@ -192,6 +192,7 @@ def test_splitting_ops_dynamic():
     # When both use_inductor_graph_partition and attn_fusion pass enabled.
     if _is_torch_equal_or_newer(torch_version, '2.9.0.dev'):
         config = VllmConfig(compilation_config=CompilationConfig(
+            level=CompilationLevel.PIECEWISE,
             use_inductor_graph_partition=True,
             pass_config={
                 "enable_attn_fusion": True,
