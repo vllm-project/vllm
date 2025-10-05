@@ -9,6 +9,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Callable, NewType, Optional, Union
 
+import torch
+
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -20,6 +22,7 @@ from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         UniformTypeKVCacheSpecs)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
+from vllm.v1.utils import tensor_data
 
 # BlockHash represents the hash of a single KV-cache block used for
 # prefix caching.  Treating it as a distinct type from ``bytes`` helps
@@ -545,10 +548,12 @@ def generate_block_hash_extra_keys(
 
 
 def hash_block_tokens(
-        hash_function: Callable[[Any], bytes],
-        parent_block_hash: Optional[BlockHash],
-        curr_block_token_ids: Sequence[int],
-        extra_keys: Optional[tuple[Any, ...]] = None) -> BlockHash:
+    hash_function: Callable[[Any], bytes],
+    parent_block_hash: Optional[BlockHash],
+    curr_block_token_ids: Sequence[int],
+    extra_keys: Optional[tuple[Any, ...]] = None,
+    curr_block_prompt_embeds: Optional[torch.Tensor] = None,
+) -> BlockHash:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
     prefix caching. We use LRU cache for this function to avoid recomputing
@@ -560,6 +565,7 @@ def hash_block_tokens(
         curr_block_token_ids: A list of token ids in the current
             block. The current block is assumed to be full.
         extra_keys: Extra keys for the block.
+        curr_block_prompt_embeds: The prompt embeddings of the current block.
     Returns:
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
@@ -568,9 +574,12 @@ def hash_block_tokens(
         parent_block_hash = NONE_HASH
 
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
+    curr_block_prompt_embeds_bytes = (
+        None if curr_block_prompt_embeds is None else
+        tensor_data(curr_block_prompt_embeds).tobytes())
     return BlockHash(
-        hash_function(
-            (parent_block_hash, curr_block_token_ids_tuple, extra_keys)))
+        hash_function((parent_block_hash, curr_block_token_ids_tuple,
+                       curr_block_prompt_embeds_bytes, extra_keys)))
 
 
 def get_request_block_hasher(
@@ -612,9 +621,12 @@ def get_request_block_hasher(
 
             # Compute the hash of the current block
             block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
+            block_prompt_embeds = (
+                None if request.prompt_embeds is None else
+                request.prompt_embeds[start_token_idx:end_token_idx])
             block_hash = hash_block_tokens(caching_hash_fn,
                                            prev_block_hash_value, block_tokens,
-                                           extra_keys)
+                                           extra_keys, block_prompt_embeds)
 
             new_block_hashes.append(block_hash)
             start_token_idx += block_size
