@@ -588,6 +588,10 @@ def get_request_block_hasher(
         start_token_idx = len(request.block_hashes) * block_size
         num_tokens = request.num_tokens
 
+        if start_token_idx + block_size > num_tokens:
+            # Early stop when there no new full blocks created.
+            return []
+
         curr_mm_idx = 0
         if start_token_idx > 0:
             # Set curr_mm_idx = -1 to indicate the last mm input.
