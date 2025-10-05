@@ -15,6 +15,7 @@ from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     _try_extract_ast,
+    apply_mistral_chat_template,
     load_chat_template,
     parse_chat_messages,
     parse_chat_messages_futures,
@@ -1855,17 +1856,17 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
 
 # NOTE: Qwen2-Audio default chat template is specially defined inside
 # processor class instead of using `tokenizer_config.json`
-# yapf: disable
 @pytest.mark.parametrize(
     ("model", "expected_format"),
-    [(PHI3V_MODEL_ID, "string"),
-     (QWEN2VL_MODEL_ID, "openai"),
-     (QWEN25VL_MODEL_ID, "openai"),
-     (ULTRAVOX_MODEL_ID, "string"),
-     (QWEN2AUDIO_MODEL_ID, "openai"),
-     (LLAMA_GUARD_MODEL_ID, "openai")],
+    [
+        (PHI3V_MODEL_ID, "string"),
+        (QWEN2VL_MODEL_ID, "openai"),
+        (QWEN25VL_MODEL_ID, "openai"),
+        (ULTRAVOX_MODEL_ID, "string"),
+        (QWEN2AUDIO_MODEL_ID, "openai"),
+        (LLAMA_GUARD_MODEL_ID, "openai"),
+    ],
 )
-# yapf: enable
 def test_resolve_content_format_hf_defined(model, expected_format):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
@@ -1879,7 +1880,8 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         hf_overrides=model_info.hf_overrides,
         skip_tokenizer_init=model_info.skip_tokenizer_init,
         enforce_eager=model_info.enforce_eager,
-        dtype=model_info.dtype)
+        dtype=model_info.dtype,
+    )
 
     tokenizer = get_tokenizer(
         model,
@@ -1911,18 +1913,18 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     assert resolved_format == expected_format
 
 
-# yapf: disable
 @pytest.mark.parametrize(
     ("model", "expected_format"),
-    [("Salesforce/blip2-opt-2.7b", "string"),
-     ("facebook/chameleon-7b", "string"),
-     ("deepseek-ai/deepseek-vl2-tiny", "string"),
-     ("adept/fuyu-8b", "string"),
-     ("google/paligemma-3b-mix-224", "string"),
-     ("Qwen/Qwen-VL", "string"),
-     ("Qwen/Qwen-VL-Chat", "string")],
+    [
+        ("Salesforce/blip2-opt-2.7b", "string"),
+        ("facebook/chameleon-7b", "string"),
+        ("deepseek-ai/deepseek-vl2-tiny", "string"),
+        ("adept/fuyu-8b", "string"),
+        ("google/paligemma-3b-mix-224", "string"),
+        ("Qwen/Qwen-VL", "string"),
+        ("Qwen/Qwen-VL-Chat", "string"),
+    ],
 )
-# yapf: enable
 def test_resolve_content_format_fallbacks(model, expected_format):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
@@ -1936,7 +1938,8 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         hf_overrides=model_info.hf_overrides,
         skip_tokenizer_init=model_info.skip_tokenizer_init,
         enforce_eager=model_info.enforce_eager,
-        dtype=model_info.dtype)
+        dtype=model_info.dtype,
+    )
 
     tokenizer = get_tokenizer(
         model_config.tokenizer,
@@ -1968,30 +1971,30 @@ def test_resolve_content_format_fallbacks(model, expected_format):
     assert resolved_format == expected_format
 
 
-# yapf: disable
 @pytest.mark.parametrize(
     ("template_path", "expected_format"),
-    [("template_alpaca.jinja", "string"),
-     ("template_baichuan.jinja", "string"),
-     ("template_chatglm.jinja", "string"),
-     ("template_chatglm2.jinja", "string"),
-     ("template_chatml.jinja", "string"),
-     ("template_dse_qwen2_vl.jinja", "openai"),
-     ("template_falcon_180b.jinja", "string"),
-     ("template_falcon.jinja", "string"),
-     ("template_inkbot.jinja", "string"),
-     ("template_teleflm.jinja", "string"),
-     ("template_vlm2vec_phi3v.jinja", "openai"),
-     ("template_vlm2vec_qwen2vl.jinja", "openai"),
-     ("tool_chat_template_granite_20b_fc.jinja", "string"),
-     ("tool_chat_template_hermes.jinja", "string"),
-     ("tool_chat_template_internlm2_tool.jinja", "string"),
-     ("tool_chat_template_llama3.1_json.jinja", "openai"),
-     ("tool_chat_template_llama3.2_json.jinja", "openai"),
-     ("tool_chat_template_mistral_parallel.jinja", "string"),
-     ("tool_chat_template_mistral.jinja", "string")],
+    [
+        ("template_alpaca.jinja", "string"),
+        ("template_baichuan.jinja", "string"),
+        ("template_chatglm.jinja", "string"),
+        ("template_chatglm2.jinja", "string"),
+        ("template_chatml.jinja", "string"),
+        ("template_dse_qwen2_vl.jinja", "openai"),
+        ("template_falcon_180b.jinja", "string"),
+        ("template_falcon.jinja", "string"),
+        ("template_inkbot.jinja", "string"),
+        ("template_teleflm.jinja", "string"),
+        ("template_vlm2vec_phi3v.jinja", "openai"),
+        ("template_vlm2vec_qwen2vl.jinja", "openai"),
+        ("tool_chat_template_granite_20b_fc.jinja", "string"),
+        ("tool_chat_template_hermes.jinja", "string"),
+        ("tool_chat_template_internlm2_tool.jinja", "string"),
+        ("tool_chat_template_llama3.1_json.jinja", "openai"),
+        ("tool_chat_template_llama3.2_json.jinja", "openai"),
+        ("tool_chat_template_mistral_parallel.jinja", "string"),
+        ("tool_chat_template_mistral.jinja", "string"),
+    ],
 )
-# yapf: enable
 def test_resolve_content_format_examples(template_path, expected_format):
     model_config = ModelConfig(
         PHI3V_MODEL_ID,  # Dummy
@@ -2024,40 +2027,34 @@ def test_resolve_content_format_examples(template_path, expected_format):
     assert resolved_format == expected_format
 
 
-def test_parse_chat_messages_include_thinking_chunk(mistral_model_config,
-                                                    mistral_tokenizer):
-    messages = [{
-        "role":
-        "system",
-        "content": [{
-            "type": "text",
-            "text": "You are a helpful assistant."
-        }, {
-            "type":
-            "thinking",
-            "closed":
-            True,
-            "thinking":
-            "Only return the answer when you are confident."
-        }]
-    }, {
-        "role": "user",
-        "content": "What is 2+2?"
-    }, {
-        "role":
-        "assistant",
-        "content": [{
-            "type": "text",
-            "text": "Let me think about it."
-        }, {
-            "type": "thinking",
-            "closed": True,
-            "thinking": "2+2 = 4"
-        }, {
-            "type": "text",
-            "text": "The answer is 4.",
-        }],
-    }]
+def test_parse_chat_messages_include_thinking_chunk(
+    mistral_model_config, mistral_tokenizer
+):
+    messages = [
+        {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": "You are a helpful assistant."},
+                {
+                    "type": "thinking",
+                    "closed": True,
+                    "thinking": "Only return the answer when you are confident.",
+                },
+            ],
+        },
+        {"role": "user", "content": "What is 2+2?"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me think about it."},
+                {"type": "thinking", "closed": True, "thinking": "2+2 = 4"},
+                {
+                    "type": "text",
+                    "text": "The answer is 4.",
+                },
+            ],
+        },
+    ]
 
     conversation_with_thinking, _, _ = parse_chat_messages(
         messages,
@@ -2066,122 +2063,105 @@ def test_parse_chat_messages_include_thinking_chunk(mistral_model_config,
         content_format="openai",
     )
 
-    expected_conversation = [{
-        "role":
-        "system",
-        "content": [{
-            "type": "text",
-            "text": "You are a helpful assistant."
-        }, {
-            "type": "text",
-            "text": "Only return the answer when you are confident."
-        }],
-    }, {
-        "role":
-        "user",
-        "content": [{
-            "type": "text",
-            "text": "What is 2+2?"
-        }],
-    }, {
-        "role":
-        "assistant",
-        "content": [
-            {
-                "type": "text",
-                "text": "Let me think about it."
-            },
-            {
-                "type": "text",
-                "text": "2+2 = 4"
-            },
-            {
-                "type": "text",
-                "text": "The answer is 4."
-            },
-        ]
-    }]
+    expected_conversation = [
+        {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": "You are a helpful assistant."},
+                {
+                    "type": "text",
+                    "text": "Only return the answer when you are confident.",
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "What is 2+2?"}],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me think about it."},
+                {"type": "text", "text": "2+2 = 4"},
+                {"type": "text", "text": "The answer is 4."},
+            ],
+        },
+    ]
 
     assert conversation_with_thinking == expected_conversation
 
 
 def test_apply_mistral_chat_template_thinking_chunk():
-    # Moved import here to avoid yapf and isort conflicts
-    from vllm.entrypoints.chat_utils import apply_mistral_chat_template
-    messages = [{
-        "role":
-        "system",
-        "content": [{
-            "type": "text",
-            "text": "You are a helpful assistant."
-        }, {
-            "type":
-            "thinking",
-            "closed":
-            True,
-            "thinking":
-            "Only return the answer when you are confident."
-        }]
-    }, {
-        "role": "user",
-        "content": "What is 2+2?"
-    }, {
-        "role":
-        "assistant",
-        "content": [{
-            "type": "text",
-            "text": "Let me think about it."
-        }, {
-            "type": "thinking",
-            "closed": True,
-            "thinking": "2+2 = 4"
-        }, {
-            "type": "text",
-            "text": "The answer is 4.",
-        }],
-    }, {
-        "role": "user",
-        "content": "Thanks, what is 3+3?"
-    }]
+    messages = [
+        {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": "You are a helpful assistant."},
+                {
+                    "type": "thinking",
+                    "closed": True,
+                    "thinking": "Only return the answer when you are confident.",
+                },
+            ],
+        },
+        {"role": "user", "content": "What is 2+2?"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me think about it."},
+                {"type": "thinking", "closed": True, "thinking": "2+2 = 4"},
+                {
+                    "type": "text",
+                    "text": "The answer is 4.",
+                },
+            ],
+        },
+        {"role": "user", "content": "Thanks, what is 3+3?"},
+    ]
 
     # TODO(Julien): upon model release change to a tokenizer already configured.
     # =================================================================
     mistral_tokenizer = MistralTokenizer.from_pretrained(
-        "mistralai/Devstral-Small-2507")
+        "mistralai/Devstral-Small-2507"
+    )
     assert isinstance(mistral_tokenizer.tokenizer, Tekkenizer)
     # Add think special tokens to the tokenizer
     mistral_tokenizer.tokenizer._all_special_tokens[35] = SpecialTokenInfo(
-        rank=35, is_control=True, token_str=SpecialTokens.begin_think.value)
+        rank=35, is_control=True, token_str=SpecialTokens.begin_think.value
+    )
     mistral_tokenizer.tokenizer._all_special_tokens[36] = SpecialTokenInfo(
-        rank=36, is_control=True, token_str=SpecialTokens.end_think.value)
+        rank=36, is_control=True, token_str=SpecialTokens.end_think.value
+    )
     mistral_tokenizer.tokenizer._special_tokens_reverse_vocab = {
         k: v
-        for k, v in
-        mistral_tokenizer.tokenizer._special_tokens_reverse_vocab.items()
+        for k, v in mistral_tokenizer.tokenizer._special_tokens_reverse_vocab.items()
         if v not in {35, 36}
     }
     mistral_tokenizer.tokenizer._special_tokens_reverse_vocab[
-        SpecialTokens.begin_think.value] = 35
+        SpecialTokens.begin_think.value
+    ] = 35
     mistral_tokenizer.tokenizer._special_tokens_reverse_vocab[
-        SpecialTokens.end_think.value] = 36
+        SpecialTokens.end_think.value
+    ] = 36
     mistral_tokenizer.instruct.BEGIN_THINK = 35
     mistral_tokenizer.instruct.END_THINK = 36
     # =================================================================
 
-    tokens_ids = apply_mistral_chat_template(mistral_tokenizer,
-                                             messages,
-                                             chat_template=None,
-                                             tools=None)
+    tokens_ids = apply_mistral_chat_template(
+        mistral_tokenizer, messages, chat_template=None, tools=None
+    )
 
     string_tokens = mistral_tokenizer.mistral.decode(
-        tokens_ids, special_token_policy=SpecialTokenPolicy.KEEP)
+        tokens_ids, special_token_policy=SpecialTokenPolicy.KEEP
+    )
 
     expected_tokens = (
         r"<s>[SYSTEM_PROMPT]You are a helpful assistant.[THINK]Only return the"
         r" answer when you are confident.[/THINK][/SYSTEM_PROMPT]"
         r"[INST]What is 2+2?[/INST]"
         r"Let me think about it.[THINK]2+2 = 4[/THINK]The answer is 4.</s>"
-        r"[INST]Thanks, what is 3+3?[/INST]")
+        r"[INST]Thanks, what is 3+3?[/INST]"
+    )
 
     assert string_tokens == expected_tokens
 
@@ -2192,37 +2172,32 @@ def test_parse_chat_messages_single_empty_audio_with_uuid(
 ):
     audio_uuid = "abcd"
     conversation, mm_data, mm_uuids = parse_chat_messages(
-        [{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "input_audio",
-                    "input_audio": {},
-                    "uuid": audio_uuid,
-                },
-                {
-                    "type": "text",
-                    "text": "What does the audio say?"
-                },
-            ],
-        }],
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {},
+                        "uuid": audio_uuid,
+                    },
+                    {"type": "text", "text": "What does the audio say?"},
+                ],
+            }
+        ],
         qwen2_audio_model_config,
         qwen2_audio_tokenizer,
         content_format="string",
     )
 
-    assert conversation == [{
-        "role":
-        "user",
-        "content":
-        "Audio 1: <|audio_bos|><|AUDIO|><|audio_eos|>\nWhat does the audio say?"
-    }]
+    assert conversation == [
+        {
+            "role": "user",
+            "content": "Audio 1: <|audio_bos|><|AUDIO|><|audio_eos|>\nWhat does the audio say?",
+        }
+    ]
     _assert_mm_data_inputs(mm_data, {"audio": 1})
-    _assert_mm_uuids(mm_uuids,
-                     1,
-                     modality="audio",
-                     expected_uuids=[audio_uuid])
+    _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[audio_uuid])
 
 
 @pytest.mark.asyncio
@@ -2232,34 +2207,29 @@ async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
 ):
     audio_uuid = "abcd"
     conversation, mm_future, mm_uuids = parse_chat_messages_futures(
-        [{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "input_audio",
-                    "input_audio": {},
-                    "uuid": audio_uuid,
-                },
-                {
-                    "type": "text",
-                    "text": "What does the audio say?"
-                },
-            ],
-        }],
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {},
+                        "uuid": audio_uuid,
+                    },
+                    {"type": "text", "text": "What does the audio say?"},
+                ],
+            }
+        ],
         qwen2_audio_model_config,
         qwen2_audio_tokenizer,
         content_format="string",
     )
 
-    assert conversation == [{
-        "role":
-        "user",
-        "content":
-        "Audio 1: <|audio_bos|><|AUDIO|><|audio_eos|>\nWhat does the audio say?"
-    }]
+    assert conversation == [
+        {
+            "role": "user",
+            "content": "Audio 1: <|audio_bos|><|AUDIO|><|audio_eos|>\nWhat does the audio say?",
+        }
+    ]
     _assert_mm_data_inputs(await mm_future, {"audio": 1})
-    _assert_mm_uuids(mm_uuids,
-                     1,
-                     modality="audio",
-                     expected_uuids=[audio_uuid])
+    _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[audio_uuid])
