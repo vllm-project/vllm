@@ -22,6 +22,8 @@ def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
         from importlib.metadata import entry_points
 
     allowed_plugins = envs.VLLM_PLUGINS
+    if not allowed_plugins:
+        return {}
 
     discovered_plugins = entry_points(group=group)
     if len(discovered_plugins) == 0:
@@ -37,16 +39,10 @@ def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
     for plugin in discovered_plugins:
         log_level("- %s -> %s", plugin.name, plugin.value)
 
-    if allowed_plugins is None:
-        log_level("All plugins in this group will be loaded. "
-                  "Set `VLLM_PLUGINS` to control which plugins to load.")
-
     plugins = dict[str, Callable[[], Any]]()
     for plugin in discovered_plugins:
-        if allowed_plugins is None or plugin.name in allowed_plugins:
-            if allowed_plugins is not None:
-                log_level("Loading plugin %s", plugin.name)
-
+        if plugin.name in allowed_plugins:
+            log_level("Loading plugin %s", plugin.name)
             try:
                 func = plugin.load()
                 plugins[plugin.name] = func
