@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from math import prod
-from typing import Optional, Union
+from typing import Optional, Union, get_args
 
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.config import get_current_vllm_config
+from vllm.config.parallel import ExpertPlacementStrategy
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
@@ -18,6 +21,8 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
 from vllm.utils.flashinfer import fp4_quantize
+
+logger = init_logger(__name__)
 
 
 @triton.jit
@@ -272,3 +277,36 @@ def _validate_scale_shape(
 
 def activation_without_mul(activation: str) -> str:
     return activation + "_no_mul"
+
+
+def determine_expert_placement_strategy(
+    num_expert_group: Optional[int] = None,
+    num_redundant_experts: Optional[int] = None,
+) -> ExpertPlacementStrategy:
+    vllm_config = get_current_vllm_config()
+    expert_placement_strategy = \
+        vllm_config.parallel_config.expert_placement_strategy
+    if expert_placement_strategy == "linear":
+        return "linear"
+    elif expert_placement_strategy == "round_robin":
+        if num_redundant_experts is None:
+            num_redundant_experts = \
+                vllm_config.parallel_config.eplb_config.num_redundant_experts
+        if num_expert_group is None:
+            model_hf_config = vllm_config.model_config.hf_config
+            if hasattr(model_hf_config, "n_group"):
+                num_expert_group = model_hf_config.n_group
+        if num_expert_group is not None and num_expert_group > 1 \
+            and num_redundant_experts == 0:
+            return "round_robin"
+        else:
+            logger.warning(
+                "Round-robin expert placement is only supported for "
+                "models with multiple expert groups and no redundant "
+                "experts. Falling back to linear expert placement.")
+            return "linear"
+
+    else:
+        raise ValueError("Unsupported expert placement strategy "
+                         f"'{expert_placement_strategy}', expected one of "
+                         f"{get_args(ExpertPlacementStrategy)}")

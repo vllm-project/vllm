@@ -35,6 +35,8 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.fused_moe.routing_simulator import (
     RoutingSimulator)
+from vllm.model_executor.layers.fused_moe.utils import (
+    determine_expert_placement_strategy)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -1027,22 +1029,15 @@ class FusedMoE(CustomOp):
                 assert num_redundant_experts == 0, \
                     "Redundant experts are only supported with EPLB."
 
-            expert_placement_strategy = (
-                vllm_config.parallel_config.expert_placement_strategy)
-            if expert_placement_strategy == "round_robin":
-                # TODO(Bruce): will support round robin expert placement with
-                # EPLB enabled in the future.
-                round_robin_supported = ((num_expert_group is not None
-                                          and num_expert_group > 1)
-                                         and num_redundant_experts == 0
-                                         and not self.enable_eplb)
-
-                if not round_robin_supported:
-                    logger.warning(
-                        "Round-robin expert placement is only supported for "
-                        "models with multiple expert groups and no redundant "
-                        "experts. Falling back to linear expert placement.")
-                    expert_placement_strategy = "linear"
+            expert_placement_strategy = determine_expert_placement_strategy(
+                num_expert_group=num_expert_group,
+                num_redundant_experts=num_redundant_experts,
+            )
+            if expert_placement_strategy == "round_robin" and self.enable_eplb:
+                # When eplb is enabled, it assumes that the expert_map is
+                # linear, so we keep it unchanged and apply the
+                # round_robin logic elsewhere.
+                expert_placement_strategy = "linear"
 
             self.expert_map: Optional[torch.Tensor]
             local_num_experts, expert_map = determine_expert_map(
@@ -2127,14 +2122,19 @@ class FusedMoE(CustomOp):
 
     @classmethod
     def make_expert_params_mapping(
-            cls,
-            ckpt_gate_proj_name: str,
-            ckpt_down_proj_name: str,
-            ckpt_up_proj_name: str,
-            num_experts: int,
-            num_redundant_experts: int = 0) -> list[tuple[str, str, int, str]]:
+        cls,
+        ckpt_gate_proj_name: str,
+        ckpt_down_proj_name: str,
+        ckpt_up_proj_name: str,
+        num_experts: int,
+        num_redundant_experts: int = 0,
+        expert_placement_strategy: ExpertPlacementStrategy = None,
+    ) -> list[tuple[str, str, int, str]]:
 
         num_physical_experts = num_experts + num_redundant_experts
+        if expert_placement_strategy is None:
+            expert_placement_strategy = determine_expert_placement_strategy(
+                num_redundant_experts=num_redundant_experts)
 
         # In the returned mapping:
         # - `expert_id` is the physical expert id
@@ -2142,7 +2142,7 @@ class FusedMoE(CustomOp):
         # So that we should map the expert id to logical in `weight_name`
         physical_to_logical_map = \
             EplbState.build_initial_global_physical_to_logical_map(
-            num_experts, num_redundant_experts)
+            num_experts, num_redundant_experts, expert_placement_strategy)
 
         return [
             # (param_name, weight_name, expert_id, shard_id)

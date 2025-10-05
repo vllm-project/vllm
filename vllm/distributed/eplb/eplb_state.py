@@ -29,12 +29,13 @@ physical experts.
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional, Union, get_args
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ParallelConfig
+from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed.parallel_state import (get_ep_group, get_node_count,
                                              in_the_same_node_as)
 from vllm.distributed.utils import StatelessProcessGroup
@@ -161,6 +162,7 @@ class EplbState:
     def build_initial_global_physical_to_logical_map(
         num_routed_experts: int,
         num_redundant_experts: int,
+        expert_placement_strategy: ExpertPlacementStrategy = "linear",
     ) -> Sequence[int]:
         """
         Build an initial expert arrangement using the following structure:
@@ -171,11 +173,36 @@ class EplbState:
                 where each integer is the index of the logical expert
                 that the corresponding physical expert maps to.
         """
-        global_physical_to_logical_map = list(range(num_routed_experts))
-        global_physical_to_logical_map += [
-            i % num_routed_experts for i in range(num_redundant_experts)
-        ]
-        return global_physical_to_logical_map
+        if expert_placement_strategy == "linear":
+            global_physical_to_logical_map = list(range(num_routed_experts))
+            global_physical_to_logical_map += [
+                i % num_routed_experts for i in range(num_redundant_experts)
+            ]
+            return global_physical_to_logical_map
+
+        elif expert_placement_strategy == "round_robin":
+            assert num_redundant_experts == 0, (
+                "Round-robin expert placement is not supported with "
+                "redundant experts.")
+
+            ep_group = get_ep_group().device_group
+            ep_size = ep_group.size()
+
+            base = num_routed_experts // ep_size
+            remainder = num_routed_experts % ep_size
+            global_physical_to_logical_map = []
+            for i in range(ep_size):
+                cnt = base + (1 if i < remainder else 0)
+                for k in range(cnt):
+                    gid = i + k * ep_size
+                    if gid < num_routed_experts:
+                        global_physical_to_logical_map.append(gid)
+
+            return global_physical_to_logical_map
+        else:
+            raise ValueError("Unsupported expert placement strategy "
+                             f"'{expert_placement_strategy}', expected one of "
+                             f"{get_args(ExpertPlacementStrategy)}")
 
     @classmethod
     def build(
@@ -190,10 +217,13 @@ class EplbState:
         """
         Build the initial EPLB state.
         """
+        expert_placement_strategy = parallel_config.expert_placement_strategy
+
         physical_to_logical_map_list = (
             cls.build_initial_global_physical_to_logical_map(
                 model.num_routed_experts,
                 model.num_redundant_experts,
+                expert_placement_strategy,
             ))
         physical_to_logical_map = torch.tensor(
             physical_to_logical_map_list,

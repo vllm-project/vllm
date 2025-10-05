@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.utils import (
@@ -40,10 +40,14 @@ class BaseModelLoader(ABC):
         load_device = device_config.device if load_config.device is None else \
                       load_config.device
         target_device = torch.device(load_device)
-        with set_default_torch_dtype(model_config.dtype):
-            with target_device:
-                model = initialize_model(vllm_config=vllm_config,
-                                         model_config=model_config)
+
+        # Ensure the current vLLM config is available during model
+        # initialization, weight loading, and post-processing.
+        with set_current_vllm_config(vllm_config), \
+                set_default_torch_dtype(model_config.dtype), \
+                target_device:
+            model = initialize_model(vllm_config=vllm_config,
+                                     model_config=model_config)
 
             logger.debug("Loading weights on %s ...", load_device)
             # Quantization does not happen in `load_weights` but after it
