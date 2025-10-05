@@ -15,11 +15,8 @@ from typing import (
     Annotated,
     Any,
     Callable,
-    Dict,
-    List,
     Literal,
     Optional,
-    Type,
     TypeVar,
     Union,
     cast,
@@ -328,7 +325,7 @@ class EngineArgs:
     """Arguments for vLLM engine."""
 
     model: str = ModelConfig.model
-    served_model_name: Optional[Union[str, List[str]]] = ModelConfig.served_model_name
+    served_model_name: Optional[Union[str, list[str]]] = ModelConfig.served_model_name
     tokenizer: Optional[str] = ModelConfig.tokenizer
     hf_config_path: Optional[str] = ModelConfig.hf_config_path
     runner: RunnerOption = ModelConfig.runner
@@ -353,7 +350,7 @@ class EngineArgs:
     # is intended for expert use only. The API may change without
     # notice.
     distributed_executor_backend: Optional[
-        Union[str, DistributedExecutorBackend, Type[ExecutorBase]]
+        Union[str, DistributedExecutorBackend, type[ExecutorBase]]
     ] = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
@@ -421,7 +418,7 @@ class EngineArgs:
     media_io_kwargs: dict[str, dict[str, Any]] = get_field(
         MultiModalConfig, "media_io_kwargs"
     )
-    mm_processor_kwargs: Optional[Dict[str, Any]] = MultiModalConfig.mm_processor_kwargs
+    mm_processor_kwargs: Optional[dict[str, Any]] = MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
     mm_processor_cache_type: Optional[MMCacheType] = (
@@ -439,7 +436,7 @@ class EngineArgs:
     enable_lora_bias: bool = LoRAConfig.bias_enabled
     max_loras: int = LoRAConfig.max_loras
     max_lora_rank: int = LoRAConfig.max_lora_rank
-    default_mm_loras: Optional[Dict[str, str]] = LoRAConfig.default_mm_loras
+    default_mm_loras: Optional[dict[str, str]] = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
@@ -449,7 +446,7 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[int] = CacheConfig.num_gpu_blocks_override
     num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
-    ignore_patterns: Optional[Union[str, List[str]]] = LoadConfig.ignore_patterns
+    ignore_patterns: Optional[Union[str, list[str]]] = LoadConfig.ignore_patterns
 
     enable_chunked_prefill: Optional[bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
@@ -470,7 +467,7 @@ class EngineArgs:
 
     logits_processor_pattern: Optional[str] = ModelConfig.logits_processor_pattern
 
-    speculative_config: Optional[Dict[str, Any]] = None
+    speculative_config: Optional[dict[str, Any]] = None
 
     show_hidden_metrics_for_version: Optional[str] = (
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -480,7 +477,7 @@ class EngineArgs:
         ObservabilityConfig.collect_detailed_traces
     )
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
-    scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
+    scheduler_cls: Union[str, type[object]] = SchedulerConfig.scheduler_cls
 
     pooler_config: Optional[PoolerConfig] = ModelConfig.pooler_config
     override_pooler_config: Optional[Union[dict, PoolerConfig]] = (
