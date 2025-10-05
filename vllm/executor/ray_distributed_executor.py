@@ -567,8 +567,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
         from ray.dag import InputNode, MultiOutputNode
 
         logger.info(
-            "RAY_CGRAPH_get_timeout is set to %s", os.environ["RAY_CGRAPH_GET_TIMEOUT"]
-        )  # noqa: SIM112
+            "RAY_CGRAPH_get_timeout is set to %s", os.environ["RAY_CGRAPH_get_timeout"]  # noqa: SIM112
+        )
         logger.info(
             "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE = %s",
             envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE,
