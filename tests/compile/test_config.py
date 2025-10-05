@@ -177,6 +177,7 @@ def test_splitting_ops_dynamic():
     # pass enabled.
     with pytest.raises(AssertionError):
         config = VllmConfig(compilation_config=CompilationConfig(
+            level=CompilationLevel.PIECEWISE,
             pass_config={
                 "enable_attn_fusion": True,
                 "enable_noop": True
