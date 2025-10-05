@@ -67,8 +67,7 @@ def _resolve_operator_overload(op_name: str):
     try:
         return getattr(operator_obj, target_overload)
     except (AttributeError, TypeError) as exc:
-        raise ValueError(
-            f"Unsupported operator type for '{op_name}'") from exc
+        raise ValueError(f"Unsupported operator type for '{op_name}'") from exc
 
 
 @contextlib.contextmanager

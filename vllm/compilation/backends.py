@@ -71,6 +71,18 @@ class CompilerManager:
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
 
+    @contextmanager
+    def compile_context(self):
+        """Provide compilation context (e.g. partition rules)."""
+        if self.compilation_config.use_inductor_graph_partition:
+            partition_ops = self.compilation_config.partition_rule_ops or []
+            context = inductor_partition_rule_context(partition_ops)
+        else:
+            context = nullcontext()
+
+        with context:
+            yield
+
     def initialize_cache(self,
                          cache_dir: str,
                          disable_cache: bool = False,
@@ -180,13 +192,8 @@ class CompilerManager:
         else:
             maybe_key = \
                 f"artifact_shape_{runtime_shape}_subgraph_{graph_index}"
-        if self.compilation_config.use_inductor_graph_partition:
-            partition_ops = self.compilation_config.partition_rule_ops or []
-            context = inductor_partition_rule_context(partition_ops)
-        else:
-            context = nullcontext()
 
-        with context:
+        with self.compile_context():
             compiled_graph, handle = self.compiler.compile(
                 graph,
                 example_inputs,
