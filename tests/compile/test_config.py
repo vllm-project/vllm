@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import torch
+from pydantic_core import ValidationError
 
 import vllm
 from vllm.compilation.counter import compilation_counter
@@ -175,7 +176,7 @@ def test_splitting_ops_dynamic():
 
     # splitting_ops can not contain attention ops when attn_fusion
     # pass enabled.
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValidationError):
         config = VllmConfig(compilation_config=CompilationConfig(
             level=CompilationLevel.PIECEWISE,
             pass_config={
