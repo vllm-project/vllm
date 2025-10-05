@@ -30,6 +30,7 @@ PREFILL_GPUS=${PREFILL_GPUS:-0}
 DECODE_GPUS=${DECODE_GPUS:-1,2,3}
 PREFILL_PORTS=${PREFILL_PORTS:-20003}
 DECODE_PORTS=${DECODE_PORTS:-20005,20007,20009}
+ASYNC_TRANSFER=${ASYNC_TRANSFER:-false}
 
 echo "Warning: P2P NCCL disaggregated prefill XpYd support for vLLM v1 is experimental and subject to change."
 echo ""
@@ -39,6 +40,7 @@ echo "  Prefill GPUs: $PREFILL_GPUS, Ports: $PREFILL_PORTS"
 echo "  Decode GPUs: $DECODE_GPUS, Ports: $DECODE_PORTS"
 echo "  Proxy Port: $PROXY_PORT"
 echo "  Timeout: ${TIMEOUT_SECONDS}s"
+echo "  Async Transfer: $ASYNC_TRANSFER"
 echo ""
 
 PIDS=()
@@ -124,7 +126,7 @@ wait_for_server() {
 
 main() {
     check_required_files
-    check_hf_token
+    # check_hf_token
     check_num_gpus
     ensure_python_library_installed pandas
     ensure_python_library_installed datasets
@@ -179,7 +181,7 @@ main() {
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
         --kv-transfer-config \
-        "{\"kv_connector\":\"P2pNcclConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_size\":\"1e1\",\"kv_port\":\"$kv_port\",\"kv_connector_extra_config\":{\"proxy_ip\":\"0.0.0.0\",\"proxy_port\":\"$PROXY_PORT\",\"http_port\":\"$port\",\"send_type\":\"PUT_ASYNC\",\"nccl_num_channels\":\"16\"}}" > prefill$((i+1)).log 2>&1 &
+        "{\"kv_connector\":\"P2pNcclConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_size\":\"1e1\",\"kv_port\":\"$kv_port\",\"kv_connector_extra_config\":{\"proxy_ip\":\"0.0.0.0\",\"proxy_port\":\"$PROXY_PORT\",\"http_port\":\"$port\",\"send_type\":\"PUT_ASYNC\",\"enable_async_transfer\":$ASYNC_TRANSFER,\"nccl_num_channels\":\"16\"}}" > prefill$((i+1)).log 2>&1 &
         PIDS+=($!)
     done
 
@@ -207,7 +209,7 @@ main() {
         --trust-remote-code \
         --gpu-memory-utilization 0.7 \
         --kv-transfer-config \
-        "{\"kv_connector\":\"P2pNcclConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_size\":\"8e9\",\"kv_port\":\"$kv_port\",\"kv_connector_extra_config\":{\"proxy_ip\":\"0.0.0.0\",\"proxy_port\":\"$PROXY_PORT\",\"http_port\":\"$port\",\"send_type\":\"PUT_ASYNC\",\"nccl_num_channels\":\"16\"}}" > decode$((i+1)).log 2>&1 &
+        "{\"kv_connector\":\"P2pNcclConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_size\":\"8e9\",\"kv_port\":\"$kv_port\",\"kv_connector_extra_config\":{\"proxy_ip\":\"0.0.0.0\",\"proxy_port\":\"$PROXY_PORT\",\"http_port\":\"$port\",\"send_type\":\"PUT_ASYNC\",\"enable_async_transfer\":$ASYNC_TRANSFER,\"nccl_num_channels\":\"16\"}}" > decode$((i+1)).log 2>&1 &
         PIDS+=($!)
     done
 
@@ -231,10 +233,10 @@ main() {
     # Run Benchmark
     # =============================================================================
     cd ../../../benchmarks/
-    vllm bench serve --port 10001 --seed $(date +%s) \
+    vllm bench serve --port 8000 --seed $(date +%s) \
         --model $MODEL \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
-        --num-prompts 200 --burstiness 100 --request-rate 2 | tee benchmark.log
+        --num-prompts 200 --burstiness 100 --request-rate 5 | tee benchmark.log
 
     echo "Benchmarking done. Cleaning up..."
 
