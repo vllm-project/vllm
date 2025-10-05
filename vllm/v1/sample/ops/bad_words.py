@@ -17,10 +17,7 @@ def _apply_bad_words_single_batch(
 
         prefix_length = len(bad_word_ids) - 1
         last_token_id = bad_word_ids[-1]
-        if prefix_length > 0:
-            actual_prefix = past_tokens_ids[-prefix_length:]
-        else:
-            actual_prefix = []
+        actual_prefix = past_tokens_ids[-prefix_length:] if prefix_length > 0 else []
         expected_prefix = bad_word_ids[:prefix_length]
 
         assert len(actual_prefix) == len(expected_prefix)

@@ -1018,10 +1018,7 @@ class LLM:
             pooling_task = "encode"
 
         if pooling_task is None:
-            if "embed" in self.supported_tasks:
-                pooling_task = "embed"
-            else:
-                pooling_task = "encode"
+            pooling_task = "embed" if "embed" in self.supported_tasks else "encode"
 
             logger.warning_once(
                 "`LLM.encode` is currently using `pooling_task = %s`.\n"
