@@ -169,9 +169,9 @@ class BitBLASLinearKernel(MPLinearKernel):
         # Default names since bitblas requires empty parameters for these,
         # TODO: remove this requirement from bitblas (allow optional tensors)
         if getattr(self, "w_gidx_name", None) is None:
-            self.w_gidx_name = "g_idx"
+            self.w_gidx_name: str = "g_idx"
         if getattr(self, "w_zp_name", None) is None:
-            self.w_zp_name = "qzeros"
+            self.w_zp_name: str = "qzeros"
 
         if c.has_g_idx:
             g_idx, g_idx_sort_indices = bitblas_sort_g_idx(
