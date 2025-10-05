@@ -418,7 +418,6 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             self.image_size = self.vision_config.image_size
 
         def __call__(self, text: str, images: Union[Image, list[Image]], **kwargs):
-            # yapf: disable
             from vllm.model_executor.models.h2ovl import (
                 IMG_CONTEXT,
                 IMG_END,
@@ -426,7 +425,6 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                 image_to_pixel_values_h2ovl,
             )
 
-            # yapf: enable
             images = [images] if isinstance(images, Image) else images
             pixel_values = [
                 image_to_pixel_values_h2ovl(

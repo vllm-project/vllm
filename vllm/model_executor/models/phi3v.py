@@ -45,9 +45,6 @@ from vllm.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
 )
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -57,8 +54,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     ResolvedPromptUpdate,
 )
-
-# yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of

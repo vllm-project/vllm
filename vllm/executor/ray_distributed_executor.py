@@ -11,7 +11,7 @@ import cloudpickle
 import msgspec
 
 import vllm.envs as envs
-from vllm.executor.executor_base import DistributedExecutorBase  # yapf: disable
+from vllm.executor.executor_base import DistributedExecutorBase
 from vllm.executor.msgspec_utils import encode_hook
 from vllm.executor.ray_utils import RayWorkerWrapper, initialize_ray_cluster, ray
 from vllm.logger import init_logger

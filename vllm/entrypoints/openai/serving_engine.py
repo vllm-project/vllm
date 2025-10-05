@@ -28,9 +28,6 @@ else:
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -72,8 +69,6 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
-
-# yapf: enable
 from vllm.inputs.data import PromptType
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import PromptComponents, get_prompt_components

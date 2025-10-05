@@ -100,7 +100,6 @@ class PPTestSettings:
 # NOTE: You can adjust tp_base and/or pp_base locally to fit the model in GPU
 # The values displayed here are only a rough indicator of the size of the model
 
-# yapf: disable
 TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     # Uses Llama
@@ -150,7 +149,9 @@ TEXT_GENERATION_MODELS = {
     "adept/persimmon-8b-chat": PPTestSettings.fast(),
     "microsoft/phi-2": PPTestSettings.fast(),
     "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(),
-    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(multi_node_only=True, load_format="dummy"),  # noqa: E501
+    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(
+        multi_node_only=True, load_format="dummy"
+    ),  # noqa: E501
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2.5-0.5B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
@@ -196,7 +197,6 @@ MULTIMODAL_MODELS = {
     "Qwen/Qwen2-VL-2B-Instruct": PPTestSettings.fast(),
     "fixie-ai/ultravox-v0_5-llama-3_2-1b": PPTestSettings.fast(),
 }
-# yapf: enable
 
 # NOTE: You can update this on your local machine to run specific tests
 TEST_MODELS = [

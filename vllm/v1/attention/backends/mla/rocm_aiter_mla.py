@@ -11,9 +11,6 @@ from vllm.attention.backends.abstract import AttentionLayer
 from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
 from vllm.config import VllmConfig
 from vllm.utils import cdiv
-
-# yapf conflicts with isort for this docstring
-# yapf: disable
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -23,8 +20,6 @@ from vllm.v1.attention.backends.mla.common import (
 )
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
-
-# yapf: enable
 
 
 def is_aiter_mla_enabled() -> bool:

@@ -8,16 +8,11 @@ import torch
 import vllm.envs as envs
 from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.compilation.activation_quant_fusion import (
     FUSED_OPS,
     SILU_MUL_OP,
     ActivationQuantFusionPass,
 )
-
-# yapf: enable
 from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass

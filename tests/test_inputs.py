@@ -59,48 +59,52 @@ def test_parse_raw_single_batch_string_slice(inputs_slice: slice):
     )
 
 
-# yapf: disable
-@pytest.mark.parametrize('mm_processor_kwargs,expected_mm_kwargs', [
-    (None, [{}, {}]),
-    ({}, [{}, {}]),
-    ({"foo": 100}, [{"foo": 100}, {"foo": 100}]),
-    ([{"foo": 100}, {"bar": 200}], [{"foo": 100}, {"bar": 200}]),
-])
-# yapf: enable
+@pytest.mark.parametrize(
+    "mm_processor_kwargs,expected_mm_kwargs",
+    [
+        (None, [{}, {}]),
+        ({}, [{}, {}]),
+        ({"foo": 100}, [{"foo": 100}, {"foo": 100}]),
+        ([{"foo": 100}, {"bar": 200}], [{"foo": 100}, {"bar": 200}]),
+    ],
+)
 def test_zip_enc_dec_prompts(mm_processor_kwargs, expected_mm_kwargs):
     """Test mm_processor_kwargs init for zipping enc/dec prompts."""
-    encoder_prompts = ['An encoder prompt', 'Another encoder prompt']
-    decoder_prompts = ['A decoder prompt', 'Another decoder prompt']
-    zipped_prompts = zip_enc_dec_prompts(encoder_prompts, decoder_prompts,
-                                         mm_processor_kwargs)
+    encoder_prompts = ["An encoder prompt", "Another encoder prompt"]
+    decoder_prompts = ["A decoder prompt", "Another decoder prompt"]
+    zipped_prompts = zip_enc_dec_prompts(
+        encoder_prompts, decoder_prompts, mm_processor_kwargs
+    )
     assert len(zipped_prompts) == len(encoder_prompts) == len(decoder_prompts)
-    for enc, dec, exp_kwargs, zipped in zip(encoder_prompts, decoder_prompts,
-                                            expected_mm_kwargs,
-                                            zipped_prompts):
+    for enc, dec, exp_kwargs, zipped in zip(
+        encoder_prompts, decoder_prompts, expected_mm_kwargs, zipped_prompts
+    ):
         assert isinstance(zipped, dict)
         assert len(zipped.keys()) == 3
-        assert zipped['encoder_prompt'] == enc
-        assert zipped['decoder_prompt'] == dec
-        assert zipped['mm_processor_kwargs'] == exp_kwargs
+        assert zipped["encoder_prompt"] == enc
+        assert zipped["decoder_prompt"] == dec
+        assert zipped["mm_processor_kwargs"] == exp_kwargs
 
 
-@pytest.mark.parametrize("model_id", [
-    "facebook/opt-125m",
-])
-@pytest.mark.parametrize("prompt", [
-    {
-        "prompt": "",
-        "multi_modal_data": {
-            "dummy": []
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "facebook/opt-125m",
+    ],
+)
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        {
+            "prompt": "",
+            "multi_modal_data": {"dummy": []},
         },
-    },
-    {
-        "prompt_token_ids": [],
-        "multi_modal_data": {
-            "dummy": []
+        {
+            "prompt_token_ids": [],
+            "multi_modal_data": {"dummy": []},
         },
-    },
-])
+    ],
+)
 def test_preprocessor_text_no_mm_inputs(model_id, prompt):
     model_config = ModelConfig(model=model_id)
     tokenizer = init_tokenizer_from_configs(model_config)
@@ -110,15 +114,19 @@ def test_preprocessor_text_no_mm_inputs(model_id, prompt):
         input_preprocessor.preprocess(prompt)
 
 
-@pytest.mark.parametrize("model_id", [
-    "facebook/chameleon-7b",
-])
-@pytest.mark.parametrize("prompt", [
-    "",
-    {
-        "prompt_token_ids": []
-    },
-])
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "facebook/chameleon-7b",
+    ],
+)
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "",
+        {"prompt_token_ids": []},
+    ],
+)
 def test_preprocessor_always_mm_code_path(model_id, prompt):
     model_config = ModelConfig(model=model_id)
     tokenizer = init_tokenizer_from_configs(model_config)

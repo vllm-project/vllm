@@ -6,14 +6,16 @@ from typing import Annotated, Any, Literal, Optional, Union, cast
 import numpy as np
 import torch
 
-# yapf: disable
 from torch import nn
 from transformers import AutoModel, BatchFeature
-from transformers.models.gemma3n import (Gemma3nAudioConfig,
-                                         Gemma3nAudioFeatureExtractor,
-                                         Gemma3nConfig, Gemma3nProcessor,
-                                         Gemma3nTextConfig,
-                                         Gemma3nVisionConfig)
+from transformers.models.gemma3n import (
+    Gemma3nAudioConfig,
+    Gemma3nAudioFeatureExtractor,
+    Gemma3nConfig,
+    Gemma3nProcessor,
+    Gemma3nTextConfig,
+    Gemma3nVisionConfig,
+)
 from transformers.models.siglip import SiglipImageProcessorFast
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
@@ -22,25 +24,32 @@ from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.gemma3n import Gemma3nForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargsItems)
-from vllm.multimodal.parse import (ImageProcessorItems, MultiModalDataItems,
-                                   MultiModalDataParser)
-from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo,
-                                        MultiModalPromptUpdates,
-                                        MultiModalPromptUpdatesApplyResult,
-                                        PlaceholderFeaturesInfo,
-                                        PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails,
-                                        replace_token_matches)
-# yapf: enable
+from vllm.multimodal.inputs import (
+    MultiModalDataDict,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
+from vllm.multimodal.processing import (
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    MultiModalPromptUpdates,
+    MultiModalPromptUpdatesApplyResult,
+    PlaceholderFeaturesInfo,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+    replace_token_matches,
+)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape

@@ -39,13 +39,10 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-# yapf: disable
 from .idefics2_vision_model import Idefics2VisionConfig
 from .idefics2_vision_model import (
     Idefics2VisionTransformer as Idefics3VisionTransformer,
 )
-
-# yapf: enable
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
 from .llama import LlamaDecoderLayer, LlamaMLP, LlamaModel
 from .utils import (

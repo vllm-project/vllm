@@ -12,9 +12,6 @@ import torch
 import torch.nn.functional as F
 
 from vllm.config.lora import LoRAConfig
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
     ColumnParallelLinearWithLoRA,
@@ -32,8 +29,6 @@ from vllm.lora.layers import (
     RowParallelLinearWithShardedLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
-
-# yapf: enable
 from vllm.lora.models import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.model_executor.layers.linear import (

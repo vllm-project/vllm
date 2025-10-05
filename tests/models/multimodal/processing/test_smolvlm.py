@@ -12,7 +12,6 @@ from ...utils import build_model_context
 
 
 @pytest.mark.parametrize("model_id", ["HuggingFaceTB/SmolVLM2-2.2B-Instruct"])
-# yapf: disable
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "expected_toks_per_img"),
     [
@@ -20,7 +19,6 @@ from ...utils import build_model_context
         ({"max_image_size": {"longest_edge": 768}}, 405),
     ],
 )
-# yapf: enable
 @pytest.mark.parametrize("num_imgs", [1, 2])
 @pytest.mark.parametrize("kwargs_on_init", [True, False])
 def test_processor_override(

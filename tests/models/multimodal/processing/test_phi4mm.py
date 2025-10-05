@@ -11,7 +11,6 @@ from ...utils import build_model_context
 
 
 @pytest.mark.parametrize("model_id", ["microsoft/Phi-4-multimodal-instruct"])
-# yapf: disable
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "expected_toks_per_img"),
     [
@@ -21,7 +20,6 @@ from ...utils import build_model_context
         ({}, 9585),
     ],
 )
-# yapf: enable
 @pytest.mark.parametrize("num_imgs", [1, 2])
 @pytest.mark.parametrize("kwargs_on_init", [True, False])
 def test_processor_override(
