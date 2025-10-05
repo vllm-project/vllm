@@ -182,8 +182,9 @@ def test_fast_inc_detok_invalid_utf8_err_case():
         finished = i == len(test_tokens) - 1
         output += detokenizer.get_next_output_text(finished, delta=True)
 
-    # fmt: off
-    assert output == r'''[
+    assert (
+        output
+        == r"""[
   {
     "source": "Résultats",
     "source_type": "CONCEPT",
@@ -191,4 +192,5 @@ def test_fast_inc_detok_invalid_utf8_err_case():
     "target": "Israël",
     "target_type": "ORGANIZATION",
     "target_description": "Pays qui a obtenu à sa frontière libanaise « un niveau de calme inédit depuis les années 1960 »",
-    "relationship": "Obtention d'un niveau de'''
+    "relationship": "Obtention d'un niveau de"""
+    )
