@@ -3,8 +3,7 @@
 
 from typing import Optional, Union
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              ResponsesRequest)
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest, ResponsesRequest
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
@@ -32,12 +31,11 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         return "</think>"
 
     def extract_reasoning_content(
-        self, model_output: str, request: Union[ChatCompletionRequest,
-                                                ResponsesRequest]
+        self, model_output: str, request: Union[ChatCompletionRequest, ResponsesRequest]
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from the model output.
-        
+
         Qwen3 has stricter requirements - it needs both start and end tokens
         to be present, unlike other models that work with just the end token.
 
@@ -50,15 +48,15 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         """
 
         # Check if the model output contains both <think> and </think> tokens.
-        if (self.start_token not in model_output
-                or self.end_token not in model_output):
+        if self.start_token not in model_output or self.end_token not in model_output:
             return None, model_output
 
         # Check if the <think> is present in the model output, remove it
         # if it is present.
         model_output_parts = model_output.partition(self.start_token)
-        model_output = model_output_parts[2] if model_output_parts[
-            1] else model_output_parts[0]
+        model_output = (
+            model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
+        )
 
         # Check if the model output contains the </think> tokens.
         # If the end token is not found, return the model output as is.

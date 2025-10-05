@@ -12,10 +12,12 @@ HF_TEXT_PROMPTS = [
     "a photo of a cherry blossom",
 ]
 
-HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign": "",
-    "cherry_blossom": "",
-})
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
+    {
+        "stop_sign": "",
+        "cherry_blossom": "",
+    }
+)
 
 MODELS = ["openai/clip-vit-base-patch32"]
 
@@ -33,11 +35,9 @@ def _run_test(
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-    with vllm_runner(model,
-                     runner="pooling",
-                     dtype=dtype,
-                     enforce_eager=True,
-                     max_model_len=77) as vllm_model:
+    with vllm_runner(
+        model, runner="pooling", dtype=dtype, enforce_eager=True, max_model_len=77
+    ) as vllm_model:
         vllm_outputs = vllm_model.embed(input_texts, images=input_images)
 
     with hf_runner(model, dtype=dtype, auto_cls=CLIPModel) as hf_model:
@@ -48,10 +48,12 @@ def _run_test(
             if "pixel_values" in inputs:
                 inputs.pop("input_ids")
                 pooled_output = hf_model.model.get_image_features(
-                    **hf_model.wrap_device(inputs)).squeeze(0)
+                    **hf_model.wrap_device(inputs)
+                ).squeeze(0)
             else:
                 pooled_output = hf_model.model.get_text_features(
-                    **hf_model.wrap_device(inputs)).squeeze(0)
+                    **hf_model.wrap_device(inputs)
+                ).squeeze(0)
 
             all_outputs.append(pooled_output.tolist())
 
@@ -98,8 +100,7 @@ def test_models_image(
     dtype: str,
 ) -> None:
     input_texts_images = [
-        (text, asset.pil_image)
-        for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
+        (text, asset.pil_image) for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
     ]
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]
@@ -125,11 +126,9 @@ def test_models_text_image_no_crash(
     texts = [HF_TEXT_PROMPTS[0]]
     images = [image_assets[0].pil_image]
 
-    with vllm_runner(model,
-                     runner="pooling",
-                     dtype=dtype,
-                     enforce_eager=True,
-                     max_model_len=77) as vllm_model:
+    with vllm_runner(
+        model, runner="pooling", dtype=dtype, enforce_eager=True, max_model_len=77
+    ) as vllm_model:
         with pytest.raises(ValueError, match="not both"):
             vllm_model.embed(texts, images=images)
 

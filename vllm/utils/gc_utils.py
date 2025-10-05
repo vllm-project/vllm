@@ -36,8 +36,7 @@ class GCDebugConfig:
                 self.top_objects = json_conf.get("top_objects", -1)
             except Exception:
                 self.enabled = False
-                logger.error("Failed to parse VLLM_GC_DEBUG(%s)",
-                             VLLM_GC_DEBUG)
+                logger.error("Failed to parse VLLM_GC_DEBUG(%s)", VLLM_GC_DEBUG)
         logger.info("GC Debug Config. %s", str(self))
 
     def __repr__(self) -> str:
@@ -70,7 +69,8 @@ class GCDebugger:
             # and top collected objects
             self.start_time_ns = time.monotonic_ns()
             self.gc_top_collected_objects = _compute_top_gc_collected_objects(
-                gc.get_objects(generation), self.config.top_objects)
+                gc.get_objects(generation), self.config.top_objects
+            )
         elif phase == "stop":
             # After GC finished, Record GC elapsed time and
             # optionally top collected objects
@@ -81,8 +81,11 @@ class GCDebugger:
                 elpased_ms,
                 str(info.get("collected", "?")),
                 generation,
-                (f" Top collected objects: \n{self.gc_top_collected_objects}"
-                 if self.gc_top_collected_objects else ""),
+                (
+                    f" Top collected objects: \n{self.gc_top_collected_objects}"
+                    if self.gc_top_collected_objects
+                    else ""
+                ),
             )
 
 
@@ -125,4 +128,5 @@ def _compute_top_gc_collected_objects(objects: list[Any], top: int) -> str:
     object_types = [_compute_detailed_type(o) for o in objects]
     return "\n".join(
         f"{count:>5}:{object_type}"
-        for object_type, count in Counter(object_types).most_common(top))
+        for object_type, count in Counter(object_types).most_common(top)
+    )

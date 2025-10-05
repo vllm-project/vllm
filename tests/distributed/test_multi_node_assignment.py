@@ -24,14 +24,13 @@ from vllm.utils import get_ip
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
 
-@pytest.mark.skipif(not VLLM_MULTI_NODE,
-                    reason="Need at least 2 nodes to run the test.")
+@pytest.mark.skipif(
+    not VLLM_MULTI_NODE, reason="Need at least 2 nodes to run the test."
+)
 def test_multi_node_assignment() -> None:
-
     # NOTE: important to keep this class definition here
     # to let ray use cloudpickle to serialize it.
     class Actor:
-
         def get_ip(self):
             return get_ip()
 
@@ -41,8 +40,7 @@ def test_multi_node_assignment() -> None:
 
         current_ip = get_ip()
         workers = []
-        for bundle_id, bundle in enumerate(
-                config.placement_group.bundle_specs):
+        for bundle_id, bundle in enumerate(config.placement_group.bundle_specs):
             if not bundle.get("GPU", 0):
                 continue
             scheduling_strategy = PlacementGroupSchedulingStrategy(

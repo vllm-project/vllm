@@ -8,9 +8,11 @@ from vllm.config import ModelConfig
 
 EMBEDDING_MODELS = [
     EmbedModelInfo("intfloat/multilingual-e5-small", is_matryoshka=False),
-    EmbedModelInfo("Snowflake/snowflake-arctic-embed-m-v1.5",
-                   is_matryoshka=True,
-                   matryoshka_dimensions=[256]),
+    EmbedModelInfo(
+        "Snowflake/snowflake-arctic-embed-m-v1.5",
+        is_matryoshka=True,
+        matryoshka_dimensions=[256],
+    ),
 ]
 
 
@@ -65,8 +67,7 @@ def test_embed_dimensions(model_info: EmbedModelInfo):
 
     if model_info.is_matryoshka:
         assert model_info.matryoshka_dimensions is not None
-        pooling_params = PoolingParams(
-            dimensions=model_info.matryoshka_dimensions[0])
+        pooling_params = PoolingParams(dimensions=model_info.matryoshka_dimensions[0])
         pooling_params.verify(task=task, model_config=model_config)
 
 

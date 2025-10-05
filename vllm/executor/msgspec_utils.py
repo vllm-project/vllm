@@ -16,7 +16,8 @@ def encode_hook(obj: Any) -> Any:
     if isinstance(obj, array):
         assert obj.typecode == VLLM_TOKEN_ID_ARRAY_TYPE, (
             f"vLLM array type should use '{VLLM_TOKEN_ID_ARRAY_TYPE}' type. "
-            f"Given array has a type code of {obj.typecode}.")
+            f"Given array has a type code of {obj.typecode}."
+        )
         return obj.tobytes()
     if isinstance(obj, MultiModalKwargs):
         return dict(obj)

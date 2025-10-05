@@ -16,7 +16,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" PyTorch Ovis model."""
+"""PyTorch Ovis model."""
+
 import math
 from collections.abc import Iterable, Mapping
 from typing import Annotated, Literal, Optional, Union
@@ -33,15 +34,24 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.aimv2 import AIMv2Model
 from vllm.model_executor.models.siglip import SiglipVisionModel
-from vllm.model_executor.models.utils import (AutoWeightsLoader, flatten_bn,
-                                              init_vllm_registered_model,
-                                              maybe_prefix)
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    flatten_bn,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargsItems)
+from vllm.multimodal.inputs import (
+    MultiModalDataDict,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
-from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement)
+from vllm.multimodal.processing import (
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis import OvisProcessor
@@ -74,7 +84,6 @@ def st_argmax(y_soft: torch.Tensor, dim: int):  # straight-through softmax
 
 
 class VisualTokenizer(torch.nn.Module):
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -92,12 +101,15 @@ class VisualTokenizer(torch.nn.Module):
         head_dim = config.vocab_size - len(IMAGE_INDICATOR_IDS)
         self.head = torch.nn.Sequential(
             ReplicatedLinear(
-                config.backbone_config.hidden_size * config.hidden_stride *
-                config.hidden_stride,
+                config.backbone_config.hidden_size
+                * config.hidden_stride
+                * config.hidden_stride,
                 head_dim,
                 bias=False,
                 return_bias=False,
-            ), torch.nn.LayerNorm(head_dim))
+            ),
+            torch.nn.LayerNorm(head_dim),
+        )
 
     def _init_backbone(
         self,
@@ -120,8 +132,7 @@ class VisualTokenizer(torch.nn.Module):
                 quant_config=quant_config,
                 prefix=prefix,
             )
-        raise ValueError(
-            f"Unsupported visual tokenizer model_type: {model_type}")
+        raise ValueError(f"Unsupported visual tokenizer model_type: {model_type}")
 
     @property
     def dtype(self) -> torch.dtype:
@@ -132,16 +143,17 @@ class VisualTokenizer(torch.nn.Module):
         return next(self.head.parameters()).device
 
     def tokenize(self, logits: torch.Tensor) -> torch.Tensor:
-        if self.config.tokenize_function == 'softmax':
+        if self.config.tokenize_function == "softmax":
             tokens = softmax(logits, dim=-1)
-        elif self.config.tokenize_function == 'gumbel_argmax':
+        elif self.config.tokenize_function == "gumbel_argmax":
             tokens = gumbel_softmax(logits, tau=self.config.tau, hard=True)
-        elif self.config.tokenize_function == 'st_argmax':
+        elif self.config.tokenize_function == "st_argmax":
             tokens = st_argmax(logits, dim=-1)
         else:
             raise ValueError(
-                'Invalid `max_type`, expected softmax or gumbel_argmax '
-                f'or st_argmax, but got {self.config.tokenize_function}')
+                "Invalid `max_type`, expected softmax or gumbel_argmax "
+                f"or st_argmax, but got {self.config.tokenize_function}"
+            )
         return tokens
 
     def encode(self, pixel_values: torch.Tensor) -> torch.Tensor:
@@ -158,25 +170,30 @@ class VisualTokenizer(torch.nn.Module):
             n, L, d = features.shape
             sqrt_l = int(L**0.5)
             assert sqrt_l**2 == L, (
-                "The token sequence length should be a perfect square.")
+                "The token sequence length should be a perfect square."
+            )
             features = features.reshape(n, sqrt_l, sqrt_l, d)
-            pl = (self.config.hidden_stride -
-                  (sqrt_l %
-                   self.config.hidden_stride)) % self.config.hidden_stride
+            pl = (
+                self.config.hidden_stride - (sqrt_l % self.config.hidden_stride)
+            ) % self.config.hidden_stride
             features = pad(features, (0, 0, 0, pl, 0, pl), "constant", 0)
             sqrt_l += pl
-            features = features.reshape(n, sqrt_l // self.config.hidden_stride,
-                                        self.config.hidden_stride,
-                                        sqrt_l // self.config.hidden_stride,
-                                        self.config.hidden_stride, d)
+            features = features.reshape(
+                n,
+                sqrt_l // self.config.hidden_stride,
+                self.config.hidden_stride,
+                sqrt_l // self.config.hidden_stride,
+                self.config.hidden_stride,
+                d,
+            )
             # [n, sqrt_l/hs, sqrt_l/hs, hs, hs, d]
             features = features.permute(0, 1, 3, 2, 4, 5)
             # [n, sqrt_l/hs, sqrt_l/hs, hs*hs*d]
             features = features.flatten(3)
             # [n, sqrt_l/hs*sqrt_l/hs, hs*hs*d]
             features = features.reshape(
-                n, -1,
-                self.config.hidden_stride * self.config.hidden_stride * d)
+                n, -1, self.config.hidden_stride * self.config.hidden_stride * d
+            )
 
         return features
 
@@ -206,23 +223,25 @@ class OvisImagePatchInputs(TensorSchema):
         - patches_per_image: List of number of total patches for each image
           in the batch.
     """
+
     type: Literal["image_patches"]
-    flat_data: Annotated[torch.Tensor,
-                         TensorShape("batch_patches", "patch_size")]
+    flat_data: Annotated[torch.Tensor, TensorShape("batch_patches", "patch_size")]
     indicator_tokens: Annotated[torch.Tensor, TensorShape("patch_indicators")]
-    patches_per_image: Annotated[list[int],
-                                 TensorShape("num_patches_per_image")]
+    patches_per_image: Annotated[list[int], TensorShape("num_patches_per_image")]
     # This is used to restore the first two dimensions of `flat_data`.
 
 
 class VisualEmbedding(torch.nn.Embedding):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
     def forward(self, visual_tokens: Tensor) -> Tensor:
         if visual_tokens.dtype in [
-                torch.int8, torch.int16, torch.int32, torch.int64, torch.long
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+            torch.long,
         ]:
             return super().forward(visual_tokens)
         return torch.matmul(visual_tokens, self.weight)
@@ -237,7 +256,6 @@ class VisualEmbedding(torch.nn.Embedding):
 
 
 class OvisProcessingInfo(BaseProcessingInfo):
-
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(
             OvisProcessor,
@@ -254,9 +272,10 @@ class OvisProcessingInfo(BaseProcessingInfo):
         patch_grid_length = math.ceil(image_size / patch_size)
         assert patch_grid_length % hidden_stride == 0, (
             f"patch_grid_length {patch_grid_length} is not divisible by "
-            f"hidden_stride {hidden_stride}")
+            f"hidden_stride {hidden_stride}"
+        )
         # minus 1 for presented image token
-        return (patch_grid_length // hidden_stride)**2 - 1
+        return (patch_grid_length // hidden_stride) ** 2 - 1
 
     def get_image_pad_token(self) -> str:
         hf_text_config = self.get_hf_config().get_text_config()
@@ -275,7 +294,6 @@ class OvisProcessingInfo(BaseProcessingInfo):
 
 
 class OvisDummyInputsBuilder(BaseDummyInputsBuilder[OvisProcessingInfo]):
-
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         return IMAGE_TOKEN * num_images
@@ -288,29 +306,28 @@ class OvisDummyInputsBuilder(BaseDummyInputsBuilder[OvisProcessingInfo]):
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        target_width, target_height = \
-            self.info.get_image_size_with_most_features()
+        target_width, target_height = self.info.get_image_size_with_most_features()
 
         image_overrides = mm_options.get("image") if mm_options else None
 
         mm_data = {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images,
-                                   overrides=image_overrides),
+            "image": self._get_dummy_images(
+                width=target_width,
+                height=target_height,
+                num_images=num_images,
+                overrides=image_overrides,
+            ),
         }
         return mm_data
 
 
 class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
-
     def image_indicators_to_visual_tokens(
         self,
         image_indicators: list[int],
     ) -> list[int]:
         """
-        Filter image indicators placeholders and convert them to corresponding 
+        Filter image indicators placeholders and convert them to corresponding
         tokens in visual tokenizer.
         For example, [-301, -300, -302, -300, -303, -300, -304, -300, -305]
         should return [vocab_size-1, vocab_size-2, ..., vocab_size-5]
@@ -356,7 +373,6 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         self,
         prompt_tokens: list[int],
     ) -> list[int]:
-
         return prompt_tokens
 
     def _get_mm_fields_config(
@@ -364,9 +380,11 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(pixel_values=MultiModalFieldConfig.batched("image"),
-                    grids=MultiModalFieldConfig.batched("image"),
-                    indicator_tokens=MultiModalFieldConfig.batched("image"))
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            grids=MultiModalFieldConfig.batched("image"),
+            indicator_tokens=MultiModalFieldConfig.batched("image"),
+        )
 
     def _get_prompt_updates(
         self,
@@ -374,7 +392,6 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptReplacement]:
-
         def get_replacement_ovis(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
             grid = out_item["grids"].data
@@ -391,11 +408,12 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(OvisMultiModalProcessor,
-                                        info=OvisProcessingInfo,
-                                        dummy_inputs=OvisDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(
+    OvisMultiModalProcessor,
+    info=OvisProcessingInfo,
+    dummy_inputs=OvisDummyInputsBuilder,
+)
 class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
-
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
@@ -421,17 +439,19 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         )
 
         self.vte = VisualEmbedding(
-            self.config.visual_tokenizer_config.vocab_size,
-            self.config.hidden_size)
+            self.config.visual_tokenizer_config.vocab_size, self.config.hidden_size
+        )
 
         text_model_type = self.config.get_text_config().model_type
         self.image_pad_token_id = IMAGE_PAD_TOKEN_ID_MAP[text_model_type]
 
         self.make_empty_intermediate_tensors = (
-            self.get_language_model().make_empty_intermediate_tensors)
+            self.get_language_model().make_empty_intermediate_tensors
+        )
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[OvisImagePatchInputs]:
+        self, **kwargs: object
+    ) -> Optional[OvisImagePatchInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         indicator_tokens = kwargs.pop("indicator_tokens", None)
 
@@ -440,12 +460,15 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
 
         if pixel_values is not None and indicator_tokens is not None:
             if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
+                raise ValueError(
+                    f"Incorrect type of pixel values. Got type: {type(pixel_values)}"
+                )
 
             if not isinstance(indicator_tokens, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of indicator_tokens. "
-                                 f"Got type: {type(pixel_values)}")
+                raise ValueError(
+                    "Incorrect type of indicator_tokens. "
+                    f"Got type: {type(pixel_values)}"
+                )
 
             flat_data = flatten_bn(pixel_values, concat=True)
             if flat_data.ndim >= 3:
@@ -453,49 +476,46 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
             return OvisImagePatchInputs(
                 type="image_patches",
                 flat_data=flat_data,
-                patches_per_image=[
-                    x.shape[0] for x in flatten_bn(pixel_values)
-                ],
-                indicator_tokens=flatten_bn(flatten_bn(indicator_tokens),
-                                            concat=True),
+                patches_per_image=[x.shape[0] for x in flatten_bn(pixel_values)],
+                indicator_tokens=flatten_bn(flatten_bn(indicator_tokens), concat=True),
             )
 
         raise AssertionError("This line should be unreachable.")
 
     def _process_image_input(
-            self, image_input: OvisImagePatchInputs) -> MultiModalEmbeddings:
+        self, image_input: OvisImagePatchInputs
+    ) -> MultiModalEmbeddings:
         image_patches_flat = image_input["flat_data"]
         patches_per_image = image_input["patches_per_image"]
         indicator_tokens = image_input["indicator_tokens"]
 
         indicator_per_image = list(
-            map(lambda x: x + 1 if x > 1 else x + 2, patches_per_image))
+            map(lambda x: x + 1 if x > 1 else x + 2, patches_per_image)
+        )
 
         target_dtype = self.visual_tokenizer.dtype
-        visual_tokens = self.visual_tokenizer(
-            image_patches_flat.to(target_dtype))
+        visual_tokens = self.visual_tokenizer(image_patches_flat.to(target_dtype))
         visual_embeds = self.vte(visual_tokens)  # 1:1 numeric eq.
 
         indicator_embeds = self.vte(indicator_tokens)
-        indicator_embeds_per_image = indicator_embeds.split(
-            indicator_per_image)
+        indicator_embeds_per_image = indicator_embeds.split(indicator_per_image)
 
         visual_embeds_per_image = visual_embeds.split(patches_per_image, dim=0)
         vision_embeddings = []
-        for indicator, visual in zip(indicator_embeds_per_image,
-                                     visual_embeds_per_image):
+        for indicator, visual in zip(
+            indicator_embeds_per_image, visual_embeds_per_image
+        ):
             vision_embeddings_per_image = []
             for i in range(visual.shape[0]):
                 vision_embeddings_per_image.append(
-                    torch.cat([indicator[i:i + 1], visual[i]], dim=0))
-            vision_embeddings_per_image.append(indicator[i + 1:])
-            vision_embeddings.append(
-                torch.cat(vision_embeddings_per_image, dim=0))
+                    torch.cat([indicator[i : i + 1], visual[i]], dim=0)
+                )
+            vision_embeddings_per_image.append(indicator[i + 1 :])
+            vision_embeddings.append(torch.cat(vision_embeddings_per_image, dim=0))
 
         return tuple(vision_embeddings)
 
-    def get_multimodal_embeddings(self,
-                                  **kwargs: object) -> MultiModalEmbeddings:
+    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -532,8 +552,7 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         logits = self.llm.compute_logits(hidden_states)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3Next MTP model."""
+
 from collections.abc import Iterable
 from typing import Optional
 
@@ -15,16 +16,25 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+    DEFAULT_VOCAB_PADDING_SIZE,
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.qwen3_next import (Qwen3NextDecoderLayer,
-                                                   Qwen3NextRMSNorm)
+from vllm.model_executor.models.qwen3_next import (
+    Qwen3NextDecoderLayer,
+    Qwen3NextRMSNorm,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Qwen3NextConfig
 
 from .interfaces import SupportsPP
-from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, maybe_prefix)
+from .utils import (
+    AutoWeightsLoader,
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -33,7 +43,6 @@ KVCache = tuple[torch.Tensor, torch.Tensor]
 
 @support_torch_compile
 class Qwen3NextMultiTokenPredictor(nn.Module):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -43,8 +52,11 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
         config: Qwen3NextConfig = model_config.hf_config
 
         self.config = config
-        lora_vocab = ((lora_config.lora_extra_vocab_size *
-                       (lora_config.max_loras or 1)) if lora_config else 0)
+        lora_vocab = (
+            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
+            if lora_config
+            else 0
+        )
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
 
@@ -57,31 +69,36 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
 
-        self.fc = ColumnParallelLinear(self.config.hidden_size * 2,
-                                       self.config.hidden_size,
-                                       gather_output=True,
-                                       bias=False,
-                                       return_bias=False,
-                                       quant_config=quant_config,
-                                       prefix=f'{prefix}.fc')
+        self.fc = ColumnParallelLinear(
+            self.config.hidden_size * 2,
+            self.config.hidden_size,
+            gather_output=True,
+            bias=False,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.fc",
+        )
 
         self.layers = torch.nn.ModuleList(
             Qwen3NextDecoderLayer(
                 vllm_config,
                 layer_type="full_attention",
-                prefix=f'{prefix}.layers.{idx}',
-            ) for idx in range(self.num_mtp_layers))
+                prefix=f"{prefix}.layers.{idx}",
+            )
+            for idx in range(self.num_mtp_layers)
+        )
 
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size
+        )
 
-        self.norm = Qwen3NextRMSNorm(config.hidden_size,
-                                     eps=config.rms_norm_eps)
-        self.pre_fc_norm_hidden = Qwen3NextRMSNorm(config.hidden_size,
-                                                   eps=config.rms_norm_eps)
-        self.pre_fc_norm_embedding = Qwen3NextRMSNorm(config.hidden_size,
-                                                      eps=config.rms_norm_eps)
+        self.norm = Qwen3NextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_fc_norm_hidden = Qwen3NextRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.pre_fc_norm_embedding = Qwen3NextRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -109,7 +126,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        current_step_idx = (spec_step_idx % self.num_mtp_layers)
+        current_step_idx = spec_step_idx % self.num_mtp_layers
         hidden_states, residual = self.layers[current_step_idx](
             positions=positions,
             hidden_states=hidden_states,
@@ -117,16 +134,14 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
         )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-                "residual": residual
-            })
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -142,7 +157,8 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts)
+            num_experts=self.config.num_experts,
+        )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -180,16 +196,19 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
                     if is_pp_missing_parameter(name, self):
                         continue
                     # Skip loading extra bias for GPTQ models.
-                    if ((name.endswith(".bias") or name.endswith("_bias"))
-                            and name not in params_dict):
+                    if (
+                        name.endswith(".bias") or name.endswith("_bias")
+                    ) and name not in params_dict:
                         continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    weight_loader(param,
-                                  loaded_weight,
-                                  name,
-                                  shard_id=shard_id,
-                                  expert_id=expert_id)
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                    )
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
@@ -199,8 +218,9 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
                         continue
 
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -214,33 +234,38 @@ class Qwen3NextMTP(nn.Module, SupportsPP):
             "k_proj",
             "v_proj",
         ],
-        "gate_up_proj": ["up_proj", "down_proj"]
+        "gate_up_proj": ["up_proj", "down_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         cache_config = vllm_config.cache_config
-        assert not cache_config.enable_prefix_caching, \
+        assert not cache_config.enable_prefix_caching, (
             "Qwen3NextMTP currently does not support prefix caching"
+        )
 
         self.quant_config = vllm_config.quant_config
 
         super().__init__()
         self.config = config
-        self.model = Qwen3NextMultiTokenPredictor(vllm_config=vllm_config,
-                                                  prefix=maybe_prefix(
-                                                      prefix, "mtp"))
+        self.model = Qwen3NextMultiTokenPredictor(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
+        )
         self.unpadded_vocab_size = config.vocab_size
-        self.lm_head = ParallelLMHead(self.unpadded_vocab_size,
-                                      config.hidden_size,
-                                      org_num_embeddings=config.vocab_size,
-                                      padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-                                      prefix=maybe_prefix(prefix, "lm_head"))
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size)
+        self.lm_head = ParallelLMHead(
+            self.unpadded_vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
+        self.logits_processor = LogitsProcessor(
+            self.unpadded_vocab_size, config.vocab_size
+        )
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
+            self.model.make_empty_intermediate_tensors
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -254,8 +279,9 @@ class Qwen3NextMTP(nn.Module, SupportsPP):
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ):
-        hidden_states = self.model(input_ids, positions, hidden_states,
-                                   intermediate_tensors, inputs_embeds)
+        hidden_states = self.model(
+            input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds
+        )
         return hidden_states
 
     def compute_logits(
@@ -265,8 +291,7 @@ class Qwen3NextMTP(nn.Module, SupportsPP):
     ) -> Optional[torch.Tensor]:
         return self.logits_processor(self.lm_head, hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         shared_weight_names = ["embed_tokens", "lm_head"]
 
         def remap_weight_names(weights):

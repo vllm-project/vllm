@@ -7,7 +7,6 @@ logger = logging.get_logger(__name__)
 
 
 class DeepseekV3Config(PretrainedConfig):
-
     model_type = "deepseek_v3"
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -30,14 +29,14 @@ class DeepseekV3Config(PretrainedConfig):
         qk_rope_head_dim=64,
         v_head_dim=128,
         qk_nope_head_dim=128,
-        topk_method='noaux_tc',
+        topk_method="noaux_tc",
         n_group=8,
         topk_group=4,
         num_experts_per_tok=8,
         moe_layer_freq=1,
         first_k_dense_replace=3,
         norm_topk_prob=True,
-        scoring_func='sigmoid',
+        scoring_func="sigmoid",
         hidden_act="silu",
         max_position_embeddings=4096,
         initializer_range=0.02,

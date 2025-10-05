@@ -12,13 +12,15 @@ from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 class DummyLoRAResolver(LoRAResolver):
     """A dummy LoRA resolver for testing."""
 
-    async def resolve_lora(self, base_model_name: str,
-                           lora_name: str) -> Optional[LoRARequest]:
+    async def resolve_lora(
+        self, base_model_name: str, lora_name: str
+    ) -> Optional[LoRARequest]:
         if lora_name == "test_lora":
             return LoRARequest(
                 lora_name=lora_name,
                 lora_path=f"/dummy/path/{base_model_name}/{lora_name}",
-                lora_int_id=abs(hash(lora_name)))
+                lora_int_id=abs(hash(lora_name)),
+            )
         return None
 
 
@@ -70,6 +72,5 @@ async def test_dummy_resolver_resolve():
     assert result.lora_path == f"/dummy/path/{base_model_name}/{lora_name}"
 
     # Test failed resolution
-    result = await dummy_resolver.resolve_lora(base_model_name,
-                                               "nonexistent_lora")
+    result = await dummy_resolver.resolve_lora(base_model_name, "nonexistent_lora")
     assert result is None

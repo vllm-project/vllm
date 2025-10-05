@@ -21,9 +21,9 @@ def test_models(
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
 
-    with hf_runner(model,
-                   dtype=dtype,
-                   auto_cls=AutoModelForTokenClassification) as hf_model:
+    with hf_runner(
+        model, dtype=dtype, auto_cls=AutoModelForTokenClassification
+    ) as hf_model:
         tokenizer = hf_model.tokenizer
         hf_outputs = []
         for prompt in example_prompts:

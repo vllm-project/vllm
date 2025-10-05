@@ -41,8 +41,9 @@ class HTTPConnection:
         parsed_url = urlparse(url)
 
         if parsed_url.scheme not in ("http", "https"):
-            raise ValueError("Invalid HTTP URL: A valid HTTP URL "
-                             "must have scheme 'http' or 'https'.")
+            raise ValueError(
+                "Invalid HTTP URL: A valid HTTP URL must have scheme 'http' or 'https'."
+            )
 
     def _headers(self, **extras: str) -> MutableMapping[str, str]:
         return {"User-Agent": f"vLLM/{VLLM_VERSION}", **extras}
@@ -61,11 +62,13 @@ class HTTPConnection:
         client = self.get_sync_client()
         extra_headers = extra_headers or {}
 
-        return client.get(url,
-                          headers=self._headers(**extra_headers),
-                          stream=stream,
-                          timeout=timeout,
-                          allow_redirects=allow_redirects)
+        return client.get(
+            url,
+            headers=self._headers(**extra_headers),
+            stream=stream,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+        )
 
     async def get_async_response(
         self,
@@ -80,19 +83,19 @@ class HTTPConnection:
         client = await self.get_async_client()
         extra_headers = extra_headers or {}
 
-        return client.get(url,
-                          headers=self._headers(**extra_headers),
-                          timeout=timeout,
-                          allow_redirects=allow_redirects)
+        return client.get(
+            url,
+            headers=self._headers(**extra_headers),
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+        )
 
-    def get_bytes(self,
-                  url: str,
-                  *,
-                  timeout: Optional[float] = None,
-                  allow_redirects: bool = True) -> bytes:
-        with self.get_response(url,
-                               timeout=timeout,
-                               allow_redirects=allow_redirects) as r:
+    def get_bytes(
+        self, url: str, *, timeout: Optional[float] = None, allow_redirects: bool = True
+    ) -> bytes:
+        with self.get_response(
+            url, timeout=timeout, allow_redirects=allow_redirects
+        ) as r:
             r.raise_for_status()
 
             return r.content
@@ -105,7 +108,8 @@ class HTTPConnection:
         allow_redirects: bool = True,
     ) -> bytes:
         async with await self.get_async_response(
-                url, timeout=timeout, allow_redirects=allow_redirects) as r:
+            url, timeout=timeout, allow_redirects=allow_redirects
+        ) as r:
             r.raise_for_status()
 
             return await r.read()

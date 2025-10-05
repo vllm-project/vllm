@@ -40,8 +40,11 @@ class SharedFusedMoE(FusedMoE):
 
             # Reduce outputs if necessary, since the MLP should
             # have been created with reduce_results=False.
-            if (self.reduce_results and self.tp_size > 1
-                    and self.must_reduce_shared_expert_outputs()):
+            if (
+                self.reduce_results
+                and self.tp_size > 1
+                and self.must_reduce_shared_expert_outputs()
+            ):
                 shared_out = tensor_model_parallel_all_reduce(shared_out)
 
             fused_out = super().forward(

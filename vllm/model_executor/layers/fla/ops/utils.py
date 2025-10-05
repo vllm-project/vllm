@@ -27,8 +27,7 @@ FLA_GDN_FIX_BT = os.getenv("FLA_GDN_FIX_BT", "0") == "1"
 SUPPRESS_LEVEL = int(os.getenv("GDN_RECOMPUTE_SUPPRESS_LEVEL", "0"))
 
 
-def tensor_cache(
-        fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
+def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
     """
     A decorator that caches the most recent results of a function with tensor inputs.
 
@@ -52,12 +51,19 @@ def tensor_cache(
         nonlocal cache_entries, cache_size
         for i, entry in enumerate(cache_entries):
             last_args, last_kwargs, last_result = entry
-            if len(args) == len(last_args) and len(kwargs) == len(last_kwargs) \
-                and all(a is b for a, b in zip(args, last_args)) \
-                and all(k in last_kwargs and v is last_kwargs[k] for k, v in kwargs.items()):
-                cache_entries = cache_entries[:i] + cache_entries[i + 1:] + [
-                    (args, kwargs, last_result)
-                ]
+            if (
+                len(args) == len(last_args)
+                and len(kwargs) == len(last_kwargs)
+                and all(a is b for a, b in zip(args, last_args))
+                and all(
+                    k in last_kwargs and v is last_kwargs[k] for k, v in kwargs.items()
+                )
+            ):
+                cache_entries = (
+                    cache_entries[:i]
+                    + cache_entries[i + 1 :]
+                    + [(args, kwargs, last_result)]
+                )
                 return last_result
 
         result = fn(*args, **kwargs)
@@ -70,16 +76,16 @@ def tensor_cache(
     return wrapper
 
 
-def input_guard(
-        fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
+def input_guard(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
     """
     A decorator to make sure all input tensors are contiguous and set the device based on input tensors.
     """
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        contiguous_args = (i if not isinstance(i, torch.Tensor) else
-                           i.contiguous() for i in args)
+        contiguous_args = (
+            i if not isinstance(i, torch.Tensor) else i.contiguous() for i in args
+        )
         contiguous_kwargs = {
             k: (v if not isinstance(v, torch.Tensor) else v.contiguous())
             for k, v in kwargs.items()
@@ -112,11 +118,11 @@ def get_available_device() -> str:
     try:
         return triton.runtime.driver.active.get_current_target().backend
     except BaseException:
-        return 'cpu'
+        return "cpu"
 
 
 @functools.cache
-def _check_platform() -> Literal['nvidia', 'amd', 'intel', 'musa']:
+def _check_platform() -> Literal["nvidia", "amd", "intel", "musa"]:
     device = get_available_device()
     mapping = {
         "cuda": "nvidia",
@@ -130,27 +136,28 @@ def _check_platform() -> Literal['nvidia', 'amd', 'intel', 'musa']:
 # For AMD GPUs, the triton backend is 'hip', while for Nvidia GPUs, the triton backend is 'cuda'.
 # However, the torch backend is 'cuda' for both Nvidia and AMD GPUs.
 # Therefore, we need to check the triton backend to determine the actual GPU vendor.
-device = get_available_device() if get_available_device() != 'hip' else 'cuda'
+device = get_available_device() if get_available_device() != "hip" else "cuda"
 device_torch_lib = getattr(torch, device)
 device_platform = _check_platform()
 
-is_amd = (device_platform == 'amd')
-is_intel = (device_platform == 'intel')
-is_nvidia = (device_platform == 'nvidia')
-is_intel_alchemist = (is_intel
-                      and 'Intel(R) Arc(TM) A' in torch.xpu.get_device_name(0))
-is_nvidia_hopper = (is_nvidia
-                    and ('NVIDIA H' in torch.cuda.get_device_name(0)
-                         or torch.cuda.get_device_capability()[0] >= 9))
-use_cuda_graph = (is_nvidia
-                  and os.environ.get('FLA_USE_CUDA_GRAPH', '0') == '1')
+is_amd = device_platform == "amd"
+is_intel = device_platform == "intel"
+is_nvidia = device_platform == "nvidia"
+is_intel_alchemist = is_intel and "Intel(R) Arc(TM) A" in torch.xpu.get_device_name(0)
+is_nvidia_hopper = is_nvidia and (
+    "NVIDIA H" in torch.cuda.get_device_name(0)
+    or torch.cuda.get_device_capability()[0] >= 9
+)
+use_cuda_graph = is_nvidia and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
 
 
 def get_all_max_shared_mem():
     try:
         return [
-            triton.runtime.driver.active.utils.get_device_properties(i)
-            ['max_shared_mem'] for i in range(device_torch_lib.device_count())
+            triton.runtime.driver.active.utils.get_device_properties(i)[
+                "max_shared_mem"
+            ]
+            for i in range(device_torch_lib.device_count())
         ]
     except BaseException:
         return [-1]

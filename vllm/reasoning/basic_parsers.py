@@ -5,8 +5,11 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from typing import Optional, Union
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage, ResponsesRequest)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    DeltaMessage,
+    ResponsesRequest,
+)
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
@@ -14,11 +17,11 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 class BaseThinkingReasoningParser(ReasoningParser):
     """
     Base class for reasoning parsers that use thinking tokens.
-    
+
     This class provides common functionality for parsers that use start and end
     tokens to delimit reasoning content (
         e.g., <think>...</think>, <seed:think>...</seed:think>).
-    
+
     Subclasses must implement the start and end tokens via abstract
     properties.
     """
@@ -41,18 +44,19 @@ class BaseThinkingReasoningParser(ReasoningParser):
         if not self.model_tokenizer:
             raise ValueError(
                 "The model tokenizer must be passed to the ReasoningParser "
-                "constructor during construction.")
+                "constructor during construction."
+            )
 
         if not self.start_token or not self.end_token:
-            raise ValueError(
-                "start_token and end_token must be defined in subclasses")
+            raise ValueError("start_token and end_token must be defined in subclasses")
 
         self.start_token_id = self.vocab.get(self.start_token)
         self.end_token_id = self.vocab.get(self.end_token)
         if self.start_token_id is None or self.end_token_id is None:
             raise RuntimeError(
                 f"{self.__class__.__name__} reasoning parser could not locate "
-                "think start/end tokens in the tokenizer!")
+                "think start/end tokens in the tokenizer!"
+            )
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return self.end_token_id in input_ids
@@ -64,7 +68,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         if self.end_token_id not in input_ids[:-1]:
             return []
         else:
-            return input_ids[input_ids.index(self.end_token_id) + 1:]
+            return input_ids[input_ids.index(self.end_token_id) + 1 :]
 
     def extract_reasoning_content_streaming(
         self,
@@ -81,9 +85,9 @@ class BaseThinkingReasoningParser(ReasoningParser):
         Uses token IDs for faster processing.
         """
         # Skip single special tokens
-        if len(delta_token_ids) == 1 and (delta_token_ids[0] in [
-                self.start_token_id, self.end_token_id
-        ]):
+        if len(delta_token_ids) == 1 and (
+            delta_token_ids[0] in [self.start_token_id, self.end_token_id]
+        ):
             return None
 
         # Check if start token is present in previous or delta.
@@ -94,7 +98,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 # extract reasoning content
                 end_index = delta_text.find(self.end_token)
                 reasoning_content = delta_text[:end_index]
-                content = delta_text[end_index + len(self.end_token):]
+                content = delta_text[end_index + len(self.end_token) :]
                 return DeltaMessage(
                     reasoning_content=reasoning_content,
                     content=content if content else None,
@@ -113,9 +117,10 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 # extract reasoning content
                 start_index = delta_text.find(self.start_token)
                 end_index = delta_text.find(self.end_token)
-                reasoning_content = delta_text[start_index +
-                                               len(self.start_token):end_index]
-                content = delta_text[end_index + len(self.end_token):]
+                reasoning_content = delta_text[
+                    start_index + len(self.start_token) : end_index
+                ]
+                content = delta_text[end_index + len(self.end_token) :]
                 return DeltaMessage(
                     reasoning_content=reasoning_content,
                     content=content if content else None,
@@ -129,28 +134,27 @@ class BaseThinkingReasoningParser(ReasoningParser):
             return DeltaMessage(content=delta_text)
 
     def extract_reasoning_content(
-        self, model_output: str, request: Union[ChatCompletionRequest,
-                                                ResponsesRequest]
+        self, model_output: str, request: Union[ChatCompletionRequest, ResponsesRequest]
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from the model output.
-        
+
         This is the base implementation that works for most models.
         Subclasses can override this method for specific behavior.
         """
         # Check if the start token is present in the model output, remove it
         # if it is present.
         model_output_parts = model_output.partition(self.start_token)
-        model_output = model_output_parts[2] if model_output_parts[
-            1] else model_output_parts[0]
+        model_output = (
+            model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
+        )
 
         # For models that may not generate start token,
         # assume the reasoning content is always at the start.
         if self.end_token not in model_output:
             return model_output, None
         else:
-            reasoning_content, _, content = model_output.partition(
-                self.end_token)
+            reasoning_content, _, content = model_output.partition(self.end_token)
             # If generation stops right after end-of-think, return null content
             final_content = content or None
             return reasoning_content, final_content

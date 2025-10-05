@@ -22,34 +22,45 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.models.internvl import (
-    BaseInternVLDummyInputsBuilder, BaseInternVLMultiModalProcessor,
-    BaseInternVLProcessingInfo, InternVLImageEmbeddingInputs,
-    InternVLImageInputs, InternVLImagePixelInputs, InternVLProcessor)
+    BaseInternVLDummyInputsBuilder,
+    BaseInternVLMultiModalProcessor,
+    BaseInternVLProcessingInfo,
+    InternVLImageEmbeddingInputs,
+    InternVLImageInputs,
+    InternVLImagePixelInputs,
+    InternVLProcessor,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.processing import PromptUpdateDetails
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import (
-    cached_image_processor_from_config)
+from vllm.transformers_utils.processor import cached_image_processor_from_config
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
-                         SupportsMultiModal, SupportsPP)
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
-IMG_START = '<img>'
-IMG_END = '</img>'
-IMG_CONTEXT = '<image>'
+IMG_START = "<img>"
+IMG_END = "</img>"
+IMG_CONTEXT = "<image>"
 
 
 def build_transform(input_size: int):
-    return T.Compose([
-        T.Lambda(lambda img: convert_image_mode(img, 'RGB')),
-        T.Resize((input_size, input_size),
-                 interpolation=T.InterpolationMode.BICUBIC),
-        T.ToTensor(),
-    ])
+    return T.Compose(
+        [
+            T.Lambda(lambda img: convert_image_mode(img, "RGB")),
+            T.Resize(
+                (input_size, input_size), interpolation=T.InterpolationMode.BICUBIC
+            ),
+            T.ToTensor(),
+        ]
+    )
 
 
 # adapted from https://huggingface.co/nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1
@@ -61,15 +72,16 @@ def find_closest_aspect_ratio(
     height: int,
     image_size: int,
 ) -> tuple[int, int]:
-    best_factor = float('-inf')
+    best_factor = float("-inf")
     best_ratio = (1, 1)
     area = width * height
 
     for rw, rh in target_ratios:
         target_aspect_ratio = rw / rh
         size_factor = min((rw * rh * image_size * image_size) / area, 0.6)
-        ratio_closeness = min(target_aspect_ratio / aspect_ratio,
-                              aspect_ratio / target_aspect_ratio)
+        ratio_closeness = min(
+            target_aspect_ratio / aspect_ratio, aspect_ratio / target_aspect_ratio
+        )
         factor = size_factor * ratio_closeness
 
         if factor > best_factor:
@@ -132,10 +144,12 @@ def dynamic_preprocess_nemotron_vl(
     resized_img = image.resize((target_width, target_height))
     processed_images = []
     for i in range(blocks):
-        box = ((i % (target_width // image_size)) * image_size,
-               (i // (target_width // image_size)) * image_size,
-               ((i % (target_width // image_size)) + 1) * image_size,
-               ((i // (target_width // image_size)) + 1) * image_size)
+        box = (
+            (i % (target_width // image_size)) * image_size,
+            (i // (target_width // image_size)) * image_size,
+            ((i % (target_width // image_size)) + 1) * image_size,
+            ((i // (target_width // image_size)) + 1) * image_size,
+        )
         # split the image
         split_img = resized_img.crop(box)
         processed_images.append(split_img)
@@ -153,10 +167,13 @@ def get_nemotron_vl_target_ratios(
     min_num: int,
     max_num: int,
 ) -> list[tuple[int, int]]:
-    target_ratios = {(i, j)
-                     for n in range(min_num, max_num + 1)
-                     for i in range(1, n + 1)
-                     for j in range(1, n + 1) if min_num <= i * j <= max_num}
+    target_ratios = {
+        (i, j)
+        for n in range(min_num, max_num + 1)
+        for i in range(1, n + 1)
+        for j in range(1, n + 1)
+        if min_num <= i * j <= max_num
+    }
     return sorted(target_ratios, key=lambda x: x[0] * x[1])
 
 
@@ -184,7 +201,6 @@ def image_to_pixel_values_nemotron_vl(
 
 
 class NemotronVLProcessor(InternVLProcessor):
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -215,7 +231,8 @@ class NemotronVLProcessor(InternVLProcessor):
         assert isinstance(dynamic_image_size, bool)
 
         self.num_image_token = int(
-            (image_size // patch_size)**2 * (config.downsample_ratio**2))
+            (image_size // patch_size) ** 2 * (config.downsample_ratio**2)
+        )
         self.image_size = image_size
         self.min_dynamic_patch = min_dynamic_patch
         self.max_dynamic_patch = max_dynamic_patch
@@ -267,7 +284,8 @@ class NemotronVLProcessor(InternVLProcessor):
                 min_num=min_num,
                 max_num=max_num,
                 use_thumbnail=self.use_thumbnail,
-            ) for image in images
+            )
+            for image in images
         ]
 
     def _preprocess_image(
@@ -288,10 +306,10 @@ class NemotronVLProcessor(InternVLProcessor):
                 dynamic_image_size=dynamic_image_size,
             )
             image_inputs = {
-                "pixel_values_flat":
-                torch.cat(pixel_values_lst),
-                "image_num_patches":
-                torch.tensor([len(item) for item in pixel_values_lst]),
+                "pixel_values_flat": torch.cat(pixel_values_lst),
+                "image_num_patches": torch.tensor(
+                    [len(item) for item in pixel_values_lst]
+                ),
             }
 
             for pixel_values in pixel_values_lst:
@@ -299,10 +317,9 @@ class NemotronVLProcessor(InternVLProcessor):
                 feature_size = num_patches * self.num_image_token
                 image_repl = self.get_image_repl(feature_size, num_patches)
                 NVL_IMAGE_CONTEXT = image_repl.full.replace(
-                    "<image>", "<NVL_IMG_CONTEXT>")
-                text = [
-                    t.replace('<image>', NVL_IMAGE_CONTEXT, 1) for t in text
-                ]
+                    "<image>", "<NVL_IMG_CONTEXT>"
+                )
+                text = [t.replace("<image>", NVL_IMAGE_CONTEXT, 1) for t in text]
             text = [t.replace("<NVL_IMG_CONTEXT>", IMG_CONTEXT) for t in text]
         return text, image_inputs
 
@@ -339,9 +356,9 @@ class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
 @MULTIMODAL_REGISTRY.register_processor(
     BaseInternVLMultiModalProcessor[NemotronVLProcessingInfo],
     info=NemotronVLProcessingInfo,
-    dummy_inputs=BaseInternVLDummyInputsBuilder[NemotronVLProcessingInfo])
-class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
-                               SupportsLoRA):
+    dummy_inputs=BaseInternVLDummyInputsBuilder[NemotronVLProcessingInfo],
+)
+class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     merge_by_field_config = True
 
     @classmethod
@@ -366,7 +383,8 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         patch_size = config.vision_config.patch_size
         self.patch_size = patch_size
         self.num_image_token = int(
-            (image_size // patch_size)**2 * (config.downsample_ratio**2))
+            (image_size // patch_size) ** 2 * (config.downsample_ratio**2)
+        )
         self.downsample_ratio = config.downsample_ratio
         self.ps_version = config.ps_version
 
@@ -389,18 +407,20 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
 
         self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors)
+            self.language_model.make_empty_intermediate_tensors
+        )
 
-    def _patch_quant_config(self, config: PretrainedConfig,
-                            quant_config: QuantizationConfig):
+    def _patch_quant_config(
+        self, config: PretrainedConfig, quant_config: QuantizationConfig
+    ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
         if isinstance(quant_config, AWQConfig):
             text_config = config.text_config
-            llm_quant_config = getattr(text_config, "quantization_config",
-                                       None)
-            if (not quant_config.modules_to_not_convert) and \
-                (llm_quant_config is not None):
+            llm_quant_config = getattr(text_config, "quantization_config", None)
+            if (not quant_config.modules_to_not_convert) and (
+                llm_quant_config is not None
+            ):
                 quant_config.modules_to_not_convert.append("vision_model")
 
     def _init_vision_model(
@@ -410,8 +430,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         *,
         prefix: str,
     ):
-        return AutoModel.from_config(config.vision_config,
-                                     trust_remote_code=True)
+        return AutoModel.from_config(config.vision_config, trust_remote_code=True)
 
     def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
         vit_hidden_size = config.vit_hidden_size
@@ -419,11 +438,14 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         llm_hidden_size = config.text_config.hidden_size
 
         return nn.Sequential(
-            nn.LayerNorm(vit_hidden_size * int(1 / self.downsample_ratio)**2,
-                         bias=True),
-            nn.Linear(vit_hidden_size * int(1 / self.downsample_ratio)**2,
-                      vision_projection_hidden_size,
-                      bias=True),
+            nn.LayerNorm(
+                vit_hidden_size * int(1 / self.downsample_ratio) ** 2, bias=True
+            ),
+            nn.Linear(
+                vit_hidden_size * int(1 / self.downsample_ratio) ** 2,
+                vision_projection_hidden_size,
+                bias=True,
+            ),
             nn.GELU(),
             nn.Linear(vision_projection_hidden_size, llm_hidden_size),
         )
@@ -434,9 +456,13 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         x = x.view(n, w, int(h * scale_factor), int(c / scale_factor))
         # N, W, H * scale, C // scale --> N, H * scale, W, C // scale
         x = x.permute(0, 2, 1, 3).contiguous()
-        x = x.view(n, int(h * scale_factor), int(w * scale_factor),
-                   int(c / (scale_factor * scale_factor)))
-        if self.ps_version == 'v1':
+        x = x.view(
+            n,
+            int(h * scale_factor),
+            int(w * scale_factor),
+            int(c / (scale_factor * scale_factor)),
+        )
+        if self.ps_version == "v1":
             pass
         else:
             x = x.permute(0, 2, 1, 3).contiguous()
@@ -447,17 +473,16 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         vit_embeds = self.vision_model(x=pixel_values).features
         vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
 
-        h = w = int(vit_embeds.shape[1]**0.5)
+        h = w = int(vit_embeds.shape[1] ** 0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
-        vit_embeds = self.pixel_shuffle(vit_embeds,
-                                        scale_factor=self.downsample_ratio)
-        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1,
-                                        vit_embeds.shape[-1])
+        vit_embeds = self.pixel_shuffle(vit_embeds, scale_factor=self.downsample_ratio)
+        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
         vit_embeds = self.mlp1(vit_embeds)
         return vit_embeds
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[InternVLImageInputs]:
+        self, **kwargs: object
+    ) -> Optional[InternVLImageInputs]:
         pixel_values_flat = kwargs.pop("pixel_values_flat", None)
         image_num_patches = kwargs.pop("image_num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -482,7 +507,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                 num_patches=image_num_patches,
                 resolve_bindings={
                     "h": self.config.force_image_size,
-                    "w": self.config.force_image_size
+                    "w": self.config.force_image_size,
                 },
             )
 
@@ -503,14 +528,12 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
 
         # Only one image in the current batch
         if len(num_patches) == 1:
-            return (image_embeds.view(-1,
-                                      self.config.text_config.hidden_size), )
+            return (image_embeds.view(-1, self.config.text_config.hidden_size),)
 
         # NOTE: Image embeddings are split into separate tensors for each image
         # by the size of each embedding.
         feature_size = image_embeds.shape[1]
-        image_embeds = image_embeds.view(-1,
-                                         self.config.text_config.hidden_size)
+        image_embeds = image_embeds.view(-1, self.config.text_config.hidden_size)
         image_feature_sizes = [
             num_patches * feature_size for num_patches in num_patches
         ]
@@ -522,10 +545,11 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         # Preserve the order of modalities if there are multiple of them
         # from the order of kwargs.
         for input_key in kwargs:
-            if input_key in ("pixel_values_flat",
-                             "image_embeds") and "images" not in modalities:
-                modalities["images"] = self._parse_and_validate_image_input(
-                    **kwargs)
+            if (
+                input_key in ("pixel_values_flat", "image_embeds")
+                and "images" not in modalities
+            ):
+                modalities["images"] = self._parse_and_validate_image_input(**kwargs)
 
         return modalities
 
@@ -535,9 +559,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self,
-                                  **kwargs: object) -> MultiModalEmbeddings:
-
+    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []
@@ -564,8 +586,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         is_multimodal: Optional[torch.Tensor] = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        if multimodal_embeddings is not None and len(
-                multimodal_embeddings) > 0:
+        if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
             self._set_visual_token_mask(input_ids)
 
         # This is to satisfy the type checker for each overload
@@ -587,7 +608,6 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> IntermediateTensors:
-
         if intermediate_tensors is not None:
             input_ids = None
             inputs_embeds = None
@@ -601,8 +621,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
 
         # Only required if the model is mono-architecture
         if self.visual_token_mask is not None:
-            forward_kwargs.update(
-                {"visual_token_mask": self.visual_token_mask})
+            forward_kwargs.update({"visual_token_mask": self.visual_token_mask})
             self.visual_token_mask = None
 
         hidden_states = self.language_model.model(**forward_kwargs)
@@ -614,8 +633,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         ## Ignore registered_buffers
         ## see https://huggingface.co/nvidia/C-RADIOv2-H/blob/main/input_conditioner.py#L28 # noqa: E501
         skip_substrs = ["norm_mean", "norm_std"]
@@ -629,4 +647,5 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="mlp1",
-            tower_model="vision_model")
+            tower_model="vision_model",
+        )

@@ -13,8 +13,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 
 @dataclass
 class MLAModules:
-    """Modules used in MLA.
-    """
+    """Modules used in MLA."""
+
     kv_a_layernorm: torch.nn.Module
     kv_b_proj: torch.nn.Module
     rotary_emb: torch.nn.Module
@@ -36,7 +36,7 @@ class MultiHeadLatentAttention(CustomOp):
     because there is only one in-tree implementation in forward_native.
     TODO: implement this with a new PluggableLayer mechanism.
 
-    This class takes positions and hidden_states as input. 
+    This class takes positions and hidden_states as input.
     The input tensors can either contain prefill tokens or decode tokens.
     The class does the following:
 
@@ -125,12 +125,15 @@ class MultiHeadLatentAttention(CustomOp):
         kv_lora = None
 
         if self.q_lora_rank is not None:
-            assert self.fused_qkv_a_proj is not None, \
+            assert self.fused_qkv_a_proj is not None, (
                 "fused_qkv_a_proj is required when q_lora_rank is not None"
-            assert self.q_a_layernorm is not None, \
+            )
+            assert self.q_a_layernorm is not None, (
                 "q_a_layernorm is required when q_lora_rank is not None"
-            assert self.q_b_proj is not None, \
+            )
+            assert self.q_b_proj is not None, (
                 "q_b_proj is required when q_lora_rank is not None"
+            )
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_lora = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -139,34 +142,35 @@ class MultiHeadLatentAttention(CustomOp):
             q_c = self.q_a_layernorm(q_c)
             q = self.q_b_proj(q_c)[0]
         else:
-            assert self.kv_a_proj_with_mqa is not None, \
+            assert self.kv_a_proj_with_mqa is not None, (
                 "kv_a_proj_with_mqa is required when q_lora_rank is None"
-            assert self.q_proj is not None, \
+            )
+            assert self.q_proj is not None, (
                 "q_proj is required when q_lora_rank is None"
+            )
             kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
             q = self.q_proj(hidden_states)[0]
 
-        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim],
-                                   dim=-1)
+        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c)
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim:], k_pe)
+        q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+            positions, q[..., self.qk_nope_head_dim :], k_pe
+        )
 
         if self.indexer and self.is_sparse:
-            _topk_indices = self.indexer(hidden_states, q_c, positions,
-                                         self.rotary_emb)
+            _topk_indices = self.indexer(hidden_states, q_c, positions, self.rotary_emb)
 
         attn_out = self.mla_attn(
             q,
             kv_c_normed,
             k_pe,
-            output_shape=(hidden_states.shape[0],
-                          self.num_heads * self.v_head_dim))
+            output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+        )
         return self.o_proj(attn_out)[0]
 
     def forward_cuda(self, *args, **kwargs):

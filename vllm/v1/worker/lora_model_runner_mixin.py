@@ -28,19 +28,19 @@ logger = init_logger(__name__)
 
 # Defined as a mixin for GPUModelRunner
 class LoRAModelRunnerMixin:
-
     LORA_WARMUP_RANK = 8
 
-    def load_lora_model(self, model: nn.Module, vllm_config: VllmConfig,
-                        device: torch.device) -> nn.Module:
-
+    def load_lora_model(
+        self, model: nn.Module, vllm_config: VllmConfig, device: torch.device
+    ) -> nn.Module:
         if not supports_lora(model):
-            raise ValueError(
-                f"{model.__class__.__name__} does not support LoRA yet.")
+            raise ValueError(f"{model.__class__.__name__} does not support LoRA yet.")
 
         if supports_multimodal(model):
-            logger.warning("Regarding multimodal models, vLLM currently "
-                           "only supports adding LoRA to language model.")
+            logger.warning(
+                "Regarding multimodal models, vLLM currently "
+                "only supports adding LoRA to language model."
+            )
 
         # Add LoRA Manager to the Model Runner
         self.lora_manager = LRUCacheWorkerLoRAManager(
@@ -51,41 +51,44 @@ class LoRAModelRunnerMixin:
         )
         return self.lora_manager.create_lora_manager(model)
 
-    def _set_active_loras(self, prompt_lora_mapping: tuple[int, ...],
-                          token_lora_mapping: tuple[int, ...],
-                          lora_requests: set[LoRARequest]) -> None:
+    def _set_active_loras(
+        self,
+        prompt_lora_mapping: tuple[int, ...],
+        token_lora_mapping: tuple[int, ...],
+        lora_requests: set[LoRARequest],
+    ) -> None:
         self._ensure_lora_enabled()
 
         # Set is_prefill to True, so we always use the SGMV kernels on
         # non-cuda platforms.
         # On cuda platforms we use the same kernels for prefill and
         # decode and this flag is generally ignored.
-        lora_mapping = LoRAMapping(token_lora_mapping,
-                                   prompt_lora_mapping,
-                                   is_prefill=True)
+        lora_mapping = LoRAMapping(
+            token_lora_mapping, prompt_lora_mapping, is_prefill=True
+        )
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
     def _ensure_lora_enabled(self) -> None:
         if not hasattr(self, "lora_manager"):
-            raise RuntimeError(
-                "LoRA is not enabled. Use --enable-lora to enable LoRA.")
+            raise RuntimeError("LoRA is not enabled. Use --enable-lora to enable LoRA.")
 
-    def set_active_loras(self, input_batch: InputBatch,
-                         num_scheduled_tokens: np.ndarray) -> None:
-
+    def set_active_loras(
+        self, input_batch: InputBatch, num_scheduled_tokens: np.ndarray
+    ) -> None:
         prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
-        token_lora_mapping: tuple[int,
-                                  ...]  # of size np.sum(num_scheduled_tokens)
+        token_lora_mapping: tuple[int, ...]  # of size np.sum(num_scheduled_tokens)
         lora_requests: set[LoRARequest]
-        prompt_lora_mapping, token_lora_mapping, lora_requests = \
-                            input_batch.make_lora_inputs(num_scheduled_tokens)
-        return self._set_active_loras(prompt_lora_mapping, token_lora_mapping,
-                                      lora_requests)
+        prompt_lora_mapping, token_lora_mapping, lora_requests = (
+            input_batch.make_lora_inputs(num_scheduled_tokens)
+        )
+        return self._set_active_loras(
+            prompt_lora_mapping, token_lora_mapping, lora_requests
+        )
 
     @contextmanager
-    def maybe_setup_dummy_loras(self,
-                                lora_config: Optional[LoRAConfig],
-                                remove_lora: bool = True):
+    def maybe_setup_dummy_loras(
+        self, lora_config: Optional[LoRAConfig], remove_lora: bool = True
+    ):
         if lora_config is None:
             yield
         else:
@@ -96,9 +99,11 @@ class LoRAModelRunnerMixin:
 
             # Make dummy lora requests
             lora_requests: set[LoRARequest] = {
-                LoRARequest(lora_name=f"warmup_{lora_id}",
-                            lora_int_id=lora_id,
-                            lora_path="/not/a/real/path")
+                LoRARequest(
+                    lora_name=f"warmup_{lora_id}",
+                    lora_int_id=lora_id,
+                    lora_path="/not/a/real/path",
+                )
                 for lora_id in range(1, num_loras + 1)
             }
 
@@ -106,8 +111,7 @@ class LoRAModelRunnerMixin:
                 # Add the dummy LoRAs here so _set_active_loras doesn't try to
                 # load from disk.
                 for lr in lora_requests:
-                    self.lora_manager.add_dummy_lora(
-                        lr, rank=self.LORA_WARMUP_RANK)
+                    self.lora_manager.add_dummy_lora(lr, rank=self.LORA_WARMUP_RANK)
 
                 yield
 
@@ -116,8 +120,9 @@ class LoRAModelRunnerMixin:
                 self.lora_manager.remove_all_adapters()
 
     @contextmanager
-    def maybe_select_dummy_loras(self, lora_config: Optional[LoRAConfig],
-                                 num_scheduled_tokens: np.ndarray):
+    def maybe_select_dummy_loras(
+        self, lora_config: Optional[LoRAConfig], num_scheduled_tokens: np.ndarray
+    ):
         if lora_config is None:
             yield
         else:
@@ -129,35 +134,37 @@ class LoRAModelRunnerMixin:
 
             # Make prompt lora mapping
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
-            prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) %
-                                   num_loras) + 1
+            prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) % num_loras) + 1
 
             # Make token lora mapping
-            token_lora_mapping = np.repeat(prompt_lora_mapping,
-                                           num_scheduled_tokens)
+            token_lora_mapping = np.repeat(prompt_lora_mapping, num_scheduled_tokens)
 
             # Make dummy lora requests
             lora_requests: set[LoRARequest] = {
-                LoRARequest(lora_name=f"warmup_{lora_id}",
-                            lora_int_id=lora_id,
-                            lora_path="/not/a/real/path")
+                LoRARequest(
+                    lora_name=f"warmup_{lora_id}",
+                    lora_int_id=lora_id,
+                    lora_path="/not/a/real/path",
+                )
                 for lora_id in range(1, num_loras + 1)
             }
 
-            self._set_active_loras(tuple(prompt_lora_mapping),
-                                   tuple(token_lora_mapping), lora_requests)
+            self._set_active_loras(
+                tuple(prompt_lora_mapping), tuple(token_lora_mapping), lora_requests
+            )
 
             yield
 
     @contextmanager
-    def maybe_dummy_run_with_lora(self,
-                                  lora_config: Optional[LoRAConfig],
-                                  num_scheduled_tokens: np.ndarray,
-                                  remove_lora: bool = True):
+    def maybe_dummy_run_with_lora(
+        self,
+        lora_config: Optional[LoRAConfig],
+        num_scheduled_tokens: np.ndarray,
+        remove_lora: bool = True,
+    ):
         with (
-                self.maybe_setup_dummy_loras(lora_config, remove_lora),
-                self.maybe_select_dummy_loras(lora_config,
-                                              num_scheduled_tokens),
+            self.maybe_setup_dummy_loras(lora_config, remove_lora),
+            self.maybe_select_dummy_loras(lora_config, num_scheduled_tokens),
         ):
             yield
 

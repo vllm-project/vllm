@@ -55,16 +55,16 @@ def dropout_offsets(philox_seed, philox_offset, dropout_p, m, n, stride):
 
 @triton.jit
 def dropout_rng(philox_seed, philox_offset, dropout_p, m, n, stride):
-    rng_offsets = dropout_offsets(philox_seed, philox_offset, dropout_p, m, n,
-                                  stride).to(tl.uint32)
+    rng_offsets = dropout_offsets(
+        philox_seed, philox_offset, dropout_p, m, n, stride
+    ).to(tl.uint32)
     # TODO: use tl.randint for better performance
     return tl.rand(philox_seed, rng_offsets)
 
 
 @triton.jit
 def dropout_mask(philox_seed, philox_offset, dropout_p, m, n, stride):
-    rng_output = dropout_rng(philox_seed, philox_offset, dropout_p, m, n,
-                             stride)
+    rng_output = dropout_rng(philox_seed, philox_offset, dropout_p, m, n, stride)
     rng_keep = rng_output > dropout_p
     return rng_keep
 
@@ -74,9 +74,9 @@ def load_fn(block_ptr, first, second, pad):
     if first and second:
         tensor = tl.load(block_ptr, boundary_check=(0, 1), padding_option=pad)
     elif first:
-        tensor = tl.load(block_ptr, boundary_check=(0, ), padding_option=pad)
+        tensor = tl.load(block_ptr, boundary_check=(0,), padding_option=pad)
     elif second:
-        tensor = tl.load(block_ptr, boundary_check=(1, ), padding_option=pad)
+        tensor = tl.load(block_ptr, boundary_check=(1,), padding_option=pad)
     else:
         tensor = tl.load(block_ptr)
     return tensor
@@ -145,9 +145,7 @@ def _attn_fwd_inner(
             # if not is_modulo_mn. last step might get wasted but that is okay.
             # check if this masking works for that case.
             if (start_n + BLOCK_N == block_max) and (n_extra_tokens != 0):
-                boundary_m = tl.full([BLOCK_M],
-                                     actual_seqlen_k,
-                                     dtype=tl.int32)
+                boundary_m = tl.full([BLOCK_M], actual_seqlen_k, dtype=tl.int32)
                 size_n = start_n + OFFS_N[None, :]
                 mask = size_n < boundary_m[:, None]
                 qk = tl.where(mask, qk, float("-inf"))
@@ -160,8 +158,9 @@ def _attn_fwd_inner(
         if USE_FP8:
             qk *= qk_scale
         if bias_ptr is not None:
-            bias = load_fn(bias_ptr, False, MASK_STEPS
-                           and (n_extra_tokens != 0), "zero")
+            bias = load_fn(
+                bias_ptr, False, MASK_STEPS and (n_extra_tokens != 0), "zero"
+            )
             # While bias is added after multiplying qk with sm_scale, our
             # optimization to use 2^x instead of e^x results in an additional
             # scale factor of log2(e) which we must also multiply the bias with.
@@ -173,9 +172,12 @@ def _attn_fwd_inner(
         # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
         if ENABLE_DROPOUT:
-            philox_offset = (batch_philox_offset +
-                             start_m * BLOCK_M * actual_seqlen_k + start_n -
-                             BLOCK_N)
+            philox_offset = (
+                batch_philox_offset
+                + start_m * BLOCK_M * actual_seqlen_k
+                + start_n
+                - BLOCK_N
+            )
             keep = dropout_mask(
                 philox_seed,
                 philox_offset,
@@ -187,8 +189,7 @@ def _attn_fwd_inner(
             if RETURN_ENCODED_SOFTMAX:
                 tl.store(
                     encoded_softmax_block_ptr,
-                    tl.where(keep, p,
-                             -p).to(encoded_softmax_block_ptr.type.element_ty),
+                    tl.where(keep, p, -p).to(encoded_softmax_block_ptr.type.element_ty),
                 )
             p = tl.where(keep, p, 0.0)
         elif RETURN_ENCODED_SOFTMAX:
@@ -221,89 +222,57 @@ def _attn_fwd_inner(
         if bias_ptr is not None:
             bias_ptr = tl.advance(bias_ptr, (0, BLOCK_N))
         if RETURN_ENCODED_SOFTMAX:
-            encoded_softmax_block_ptr = tl.advance(encoded_softmax_block_ptr,
-                                                   (0, BLOCK_N))
+            encoded_softmax_block_ptr = tl.advance(
+                encoded_softmax_block_ptr, (0, BLOCK_N)
+            )
     return acc, l_i, m_i
 
 
 def get_cdna_autotune_configs():
     return [
         triton.Config(
-            {
-                'BLOCK_M': 256,
-                'BLOCK_N': 64,
-                'waves_per_eu': 2,
-                'PRE_LOAD_V': False
-            },
+            {"BLOCK_M": 256, "BLOCK_N": 64, "waves_per_eu": 2, "PRE_LOAD_V": False},
             num_stages=1,
-            num_warps=8),
+            num_warps=8,
+        ),
         triton.Config(
-            {
-                'BLOCK_M': 128,
-                'BLOCK_N': 128,
-                'waves_per_eu': 2,
-                'PRE_LOAD_V': False
-            },
+            {"BLOCK_M": 128, "BLOCK_N": 128, "waves_per_eu": 2, "PRE_LOAD_V": False},
             num_stages=1,
-            num_warps=4),
+            num_warps=4,
+        ),
         triton.Config(
-            {
-                'BLOCK_M': 256,
-                'BLOCK_N': 128,
-                'waves_per_eu': 2,
-                'PRE_LOAD_V': False
-            },
+            {"BLOCK_M": 256, "BLOCK_N": 128, "waves_per_eu": 2, "PRE_LOAD_V": False},
             num_stages=1,
-            num_warps=8),
+            num_warps=8,
+        ),
         triton.Config(
-            {
-                'BLOCK_M': 128,
-                'BLOCK_N': 64,
-                'waves_per_eu': 1,
-                'PRE_LOAD_V': False
-            },
+            {"BLOCK_M": 128, "BLOCK_N": 64, "waves_per_eu": 1, "PRE_LOAD_V": False},
             num_stages=1,
-            num_warps=4),
+            num_warps=4,
+        ),
         triton.Config(
-            {
-                'BLOCK_M': 128,
-                'BLOCK_N': 64,
-                'waves_per_eu': 3,
-                'PRE_LOAD_V': True
-            },
+            {"BLOCK_M": 128, "BLOCK_N": 64, "waves_per_eu": 3, "PRE_LOAD_V": True},
             num_stages=1,
-            num_warps=4),
+            num_warps=4,
+        ),
         triton.Config(
-            {
-                'BLOCK_M': 128,
-                'BLOCK_N': 64,
-                'waves_per_eu': 3,
-                'PRE_LOAD_V': False
-            },
+            {"BLOCK_M": 128, "BLOCK_N": 64, "waves_per_eu": 3, "PRE_LOAD_V": False},
             num_stages=1,
-            num_warps=4),
+            num_warps=4,
+        ),
         triton.Config(
-            {
-                'BLOCK_M': 64,
-                'BLOCK_N': 64,
-                'waves_per_eu': 4,
-                'PRE_LOAD_V': False
-            },
+            {"BLOCK_M": 64, "BLOCK_N": 64, "waves_per_eu": 4, "PRE_LOAD_V": False},
             num_stages=1,
-            num_warps=8),
+            num_warps=8,
+        ),
         triton.Config(
-            {
-                'BLOCK_M': 32,
-                'BLOCK_N': 32,
-                'waves_per_eu': 4,
-                'PRE_LOAD_V': False
-            },
+            {"BLOCK_M": 32, "BLOCK_N": 32, "waves_per_eu": 4, "PRE_LOAD_V": False},
             num_stages=1,
-            num_warps=8),
+            num_warps=8,
+        ),
         # TODO: This config fails with head_size not pow2 with data mismatches.
         #    triton.Config({'BLOCK_M': 32, 'BLOCK_N': 16, 'waves_per_eu': 1,
         #                   'PRE_LOAD_V': False}, num_stages=1, num_warps=4),
-
         # Fails in AccelerateAMDMatmul (Triton) assert when using FP8:
         # triton.Config(
         #     {
@@ -315,47 +284,31 @@ def get_cdna_autotune_configs():
         #     num_stages=1,
         #     num_warps=4,
         # ),
-    ], ['IS_CAUSAL', 'dropout_p', 'BLOCK_DMODEL', 'USE_FP8']
+    ], ["IS_CAUSAL", "dropout_p", "BLOCK_DMODEL", "USE_FP8"]
 
 
 def get_rdna_autotune_configs():
     return [
         triton.Config(
-            {
-                'BLOCK_M': 32,
-                'BLOCK_N': 32,
-                'waves_per_eu': 4,
-                'PRE_LOAD_V': False
-            },
+            {"BLOCK_M": 32, "BLOCK_N": 32, "waves_per_eu": 4, "PRE_LOAD_V": False},
             num_stages=1,
-            num_warps=2),
+            num_warps=2,
+        ),
         triton.Config(
-            {
-                'BLOCK_M': 32,
-                'BLOCK_N': 32,
-                'waves_per_eu': 2,
-                'PRE_LOAD_V': False
-            },
+            {"BLOCK_M": 32, "BLOCK_N": 32, "waves_per_eu": 2, "PRE_LOAD_V": False},
             num_stages=1,
-            num_warps=2),
+            num_warps=2,
+        ),
         triton.Config(
-            {
-                'BLOCK_M': 32,
-                'BLOCK_N': 16,
-                'waves_per_eu': 4,
-                'PRE_LOAD_V': False
-            },
+            {"BLOCK_M": 32, "BLOCK_N": 16, "waves_per_eu": 4, "PRE_LOAD_V": False},
             num_stages=1,
-            num_warps=2),
+            num_warps=2,
+        ),
         triton.Config(
-            {
-                'BLOCK_M': 32,
-                'BLOCK_N': 16,
-                'waves_per_eu': 2,
-                'PRE_LOAD_V': False
-            },
+            {"BLOCK_M": 32, "BLOCK_N": 16, "waves_per_eu": 2, "PRE_LOAD_V": False},
             num_stages=1,
-            num_warps=2),
+            num_warps=2,
+        ),
         # Fails in AccelerateAMDMatmul (Triton) assert when using FP8:
         # triton.Config(
         #     {
@@ -385,7 +338,7 @@ def get_rdna_autotune_configs():
         #     },
         #     num_stages=1,
         #     num_warps=2),
-    ], ['IS_CAUSAL', 'dropout_p', 'BLOCK_DMODEL', 'USE_FP8']
+    ], ["IS_CAUSAL", "dropout_p", "BLOCK_DMODEL", "USE_FP8"]
 
 
 def get_autotune_configs():
@@ -501,15 +454,17 @@ def attn_fwd(
         # This captures the decrease in n_blocks if we have a rectangular attn
         # matrix
         n_blocks_seqlen = cdiv_fn(
-            (start_m + 1) * BLOCK_M + seqlen_k - seqlen_q, BLOCK_N)
+            (start_m + 1) * BLOCK_M + seqlen_k - seqlen_q, BLOCK_N
+        )
         # This is what adjusts the block_max for the current WG, only
         # if IS_CAUSAL. Otherwise we want to always iterate through all n_blocks
         n_blocks = min(n_blocks, n_blocks_seqlen)
         # If we have no blocks after adjusting for seqlen deltas, this WG is
         # part of the blocks that are all 0. We exit early.
         if n_blocks <= 0:
-            o_offset = (off_z * stride_oz + cu_seqlens_q_start * stride_om +
-                        off_h_q * stride_oh)
+            o_offset = (
+                off_z * stride_oz + cu_seqlens_q_start * stride_om + off_h_q * stride_oh
+            )
             O_block_ptr = tl.make_block_ptr(
                 base=Out + o_offset,
                 shape=(seqlen_q, BLOCK_DMODEL),
@@ -545,8 +500,7 @@ def attn_fwd(
     padded_head = ACTUAL_BLOCK_DMODEL != BLOCK_DMODEL
 
     # Compute pointers for all the tensors used in this kernel.
-    q_offset = (off_z * stride_qz + off_h_q * stride_qh +
-                cu_seqlens_q_start * stride_qm)
+    q_offset = off_z * stride_qz + off_h_q * stride_qh + cu_seqlens_q_start * stride_qm
     Q_block_ptr = tl.make_block_ptr(
         base=Q + q_offset,
         shape=(seqlen_q, ACTUAL_BLOCK_DMODEL),
@@ -555,8 +509,7 @@ def attn_fwd(
         block_shape=(BLOCK_M, BLOCK_DMODEL),
         order=(1, 0),
     )
-    k_offset = (off_z * stride_kz + off_h_k * stride_kh +
-                cu_seqlens_k_start * stride_kn)
+    k_offset = off_z * stride_kz + off_h_k * stride_kh + cu_seqlens_k_start * stride_kn
     K_block_ptr = tl.make_block_ptr(
         base=K + k_offset,
         shape=(ACTUAL_BLOCK_DMODEL, seqlen_k),
@@ -565,8 +518,7 @@ def attn_fwd(
         block_shape=(BLOCK_DMODEL, BLOCK_N),
         order=(0, 1),
     )
-    v_offset = (off_z * stride_vz + off_h_k * stride_vh +
-                cu_seqlens_k_start * stride_vk)
+    v_offset = off_z * stride_vz + off_h_k * stride_vh + cu_seqlens_k_start * stride_vk
     V_block_ptr = tl.make_block_ptr(
         base=V + v_offset,
         shape=(seqlen_k, ACTUAL_BLOCK_DMODEL),
@@ -587,9 +539,9 @@ def attn_fwd(
     else:
         bias_ptr = None
     if ENABLE_DROPOUT:
-        batch_philox_offset = philox_offset_base \
-                              + (off_z * HQ + off_h_q) \
-                              * seqlen_q * seqlen_k
+        batch_philox_offset = (
+            philox_offset_base + (off_z * HQ + off_h_q) * seqlen_q * seqlen_k
+        )
     else:
         batch_philox_offset = 0
     # We can ask to return the dropout mask without actually doing any dropout.
@@ -692,8 +644,9 @@ def attn_fwd(
         if bias_ptr is not None:
             bias_ptr = tl.advance(bias_ptr, (0, n_full_blocks * BLOCK_N))
         if RETURN_ENCODED_SOFTMAX:
-            encoded_softmax_block_ptr = tl.advance(encoded_softmax_block_ptr,
-                                                   (0, n_full_blocks))
+            encoded_softmax_block_ptr = tl.advance(
+                encoded_softmax_block_ptr, (0, n_full_blocks)
+            )
         acc, l_i, m_i = _attn_fwd_inner(
             acc,
             l_i,
@@ -749,13 +702,12 @@ def attn_fwd(
     acc = acc.to(Out.type.element_ty)
     if IS_CAUSAL:  # noqa: SIM102
         if causal_start_idx > start_m_idx and causal_start_idx < end_m_idx:
-            out_mask_boundary = tl.full((BLOCK_DMODEL, ),
-                                        causal_start_idx,
-                                        dtype=tl.int32)
+            out_mask_boundary = tl.full(
+                (BLOCK_DMODEL,), causal_start_idx, dtype=tl.int32
+            )
             mask_m_offsets = start_m_idx + tl.arange(0, BLOCK_M)
-            out_ptrs_mask = (mask_m_offsets[:, None]
-                             >= out_mask_boundary[None, :])
-            z = tl.zeros((1, ), tl.float32)
+            out_ptrs_mask = mask_m_offsets[:, None] >= out_mask_boundary[None, :]
+            z = tl.zeros((1,), tl.float32)
             acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
     # write back LSE
     # l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
@@ -772,8 +724,7 @@ def attn_fwd(
     #    tl.store(l_ptrs, m_i + tl.math.log2(l_i))
 
     # write back O
-    o_offset = (off_z * stride_oz + cu_seqlens_q_start * stride_om +
-                off_h_q * stride_oh)
+    o_offset = off_z * stride_oz + cu_seqlens_q_start * stride_om + off_h_q * stride_oh
     O_block_ptr = tl.make_block_ptr(
         base=Out + o_offset,
         shape=(seqlen_q, ACTUAL_BLOCK_DMODEL),
@@ -821,7 +772,6 @@ def check_args(
 
 
 class _attention(torch.autograd.Function):
-
     @staticmethod
     def forward(
         ctx,
@@ -847,8 +797,7 @@ class _attention(torch.autograd.Function):
             def check_and_convert(t, scale):
                 if t.dtype != float8:
                     descale = 1.0 / scale
-                    ts = (t * descale).clamp(min=float8_info.min,
-                                             max=float8_info.max)
+                    ts = (t * descale).clamp(min=float8_info.min, max=float8_info.max)
                     return ts.to(float8)
                 else:
                     return t
@@ -923,8 +872,7 @@ class _attention(torch.autograd.Function):
             bias_strides = (0, 0, 0, 0)
 
         p_descale = 1.0 / p_scale
-        o_descale = 1.0 / fp8_out_scale.item(
-        ) if fp8_out_scale is not None else 1.0
+        o_descale = 1.0 / fp8_out_scale.item() if fp8_out_scale is not None else 1.0
 
         arg_max_seqlens_q = 0 if on_gfx1x() else max_seqlens_q
         arg_max_seqlens_k = 0 if on_gfx1x() else max_seqlens_k

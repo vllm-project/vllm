@@ -20,14 +20,12 @@ def test_sleep_mode():
         "--enable-sleep-mode",
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME,
-                            args,
-                            env_dict={
-                                "VLLM_SERVER_DEV_MODE": "1",
-                                "CUDA_VISIBLE_DEVICES": "0"
-                            }) as remote_server:
-        response = requests.post(remote_server.url_for("sleep"),
-                                 params={"level": "1"})
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        args,
+        env_dict={"VLLM_SERVER_DEV_MODE": "1", "CUDA_VISIBLE_DEVICES": "0"},
+    ) as remote_server:
+        response = requests.post(remote_server.url_for("sleep"), params={"level": "1"})
         assert response.status_code == 200
         response = requests.get(remote_server.url_for("is_sleeping"))
         assert response.status_code == 200
@@ -40,12 +38,12 @@ def test_sleep_mode():
         assert response.json().get("is_sleeping") is False
 
         # test wake up with tags
-        response = requests.post(remote_server.url_for("sleep"),
-                                 params={"level": "1"})
+        response = requests.post(remote_server.url_for("sleep"), params={"level": "1"})
         assert response.status_code == 200
 
-        response = requests.post(remote_server.url_for("wake_up"),
-                                 params={"tags": ["weights"]})
+        response = requests.post(
+            remote_server.url_for("wake_up"), params={"tags": ["weights"]}
+        )
         assert response.status_code == 200
 
         # is sleeping should be false after waking up any part of the engine
@@ -53,8 +51,9 @@ def test_sleep_mode():
         assert response.status_code == 200
         assert response.json().get("is_sleeping") is True
 
-        response = requests.post(remote_server.url_for("wake_up"),
-                                 params={"tags": ["kv_cache"]})
+        response = requests.post(
+            remote_server.url_for("wake_up"), params={"tags": ["kv_cache"]}
+        )
         assert response.status_code == 200
 
         response = requests.get(remote_server.url_for("is_sleeping"))

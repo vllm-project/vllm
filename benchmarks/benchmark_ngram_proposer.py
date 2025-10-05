@@ -5,9 +5,9 @@ import time
 from unittest import mock
 
 import numpy as np
+from benchmark_utils import TimeCollector
 from tabulate import tabulate
 
-from benchmark_utils import TimeCollector
 from vllm.config import (
     CacheConfig,
     DeviceConfig,

@@ -17,7 +17,6 @@ def test_reject_bad_config(monkeypatch):
 
 
 def test_unsupported_configs(monkeypatch):
-
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 

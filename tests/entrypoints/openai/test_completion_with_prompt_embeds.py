@@ -9,6 +9,7 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import torch
+
 # downloading lora to test lora requests
 from openai import BadRequestError
 from transformers import AutoConfig
@@ -23,8 +24,9 @@ CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
 
 
 @pytest.fixture(scope="module", params=["use-lora"])
-def default_server_args(request: pytest.FixtureRequest,
-                        opt125_lora_files: str) -> list[str]:
+def default_server_args(
+    request: pytest.FixtureRequest, opt125_lora_files: str
+) -> list[str]:
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -42,18 +44,20 @@ def default_server_args(request: pytest.FixtureRequest,
         lora_module_1 = {
             "name": LORA_SERVING_MODEL_NAME,
             "path": opt125_lora_files,
-            "base_model_name": MODEL_NAME
+            "base_model_name": MODEL_NAME,
         }
 
-        args.extend([
-            "--enable-lora",
-            "--lora-module",
-            json.dumps(lora_module_1),
-            "--max-lora-rank",
-            "64",
-            "--max-cpu-loras",
-            "2",
-        ])
+        args.extend(
+            [
+                "--enable-lora",
+                "--lora-module",
+                json.dumps(lora_module_1),
+                "--max-lora-rank",
+                "64",
+                "--max-cpu-loras",
+                "2",
+            ]
+        )
 
     return args
 
@@ -67,7 +71,7 @@ EXAMPLE_PROMPTS = [
 def _encode_embeds(embeds: torch.Tensor):
     buffer = io.BytesIO()
     torch.save(embeds, buffer)
-    return base64.b64encode(buffer.getvalue()).decode('utf-8')
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
 @pytest.fixture(scope="module")
@@ -79,8 +83,7 @@ def example_prompt_embeds(hf_runner):
     return [_encode_embeds(item) for item in example_embeddings]
 
 
-@pytest.fixture(scope="module",
-                params=["", "--disable-frontend-multiprocessing"])
+@pytest.fixture(scope="module", params=["", "--disable-frontend-multiprocessing"])
 def server_with_prompt_embeds(default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
@@ -110,7 +113,8 @@ async def test_completions_with_prompt_embeds(
         prompt="",  # Add empty prompt as required parameter
         max_tokens=5,
         temperature=0.0,
-        extra_body={"prompt_embeds": encoded_embeds})
+        extra_body={"prompt_embeds": encoded_embeds},
+    )
     assert len(completion.choices[0].text) >= 1
     assert completion.choices[0].prompt_logprobs is None
 
@@ -120,7 +124,8 @@ async def test_completions_with_prompt_embeds(
         prompt="",  # Add empty prompt as required parameter
         max_tokens=5,
         temperature=0.0,
-        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]})
+        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]},
+    )
     assert len(completion.choices) == 2
     assert len(completion.choices[0].text) >= 1
     assert len(completion.choices[1].text) >= 1
@@ -131,7 +136,8 @@ async def test_completions_with_prompt_embeds(
         prompt="",  # Add empty prompt as required parameter
         max_tokens=5,
         temperature=0.0,
-        extra_body={"prompt_embeds": encoded_embeds})
+        extra_body={"prompt_embeds": encoded_embeds},
+    )
     single_output = single_completion.choices[0].text
 
     stream = await client_with_prompt_embeds.completions.create(
@@ -140,7 +146,8 @@ async def test_completions_with_prompt_embeds(
         max_tokens=5,
         temperature=0.0,
         stream=True,
-        extra_body={"prompt_embeds": encoded_embeds})
+        extra_body={"prompt_embeds": encoded_embeds},
+    )
     chunks = []
     finish_reason_count = 0
     async for chunk in stream:
@@ -159,12 +166,12 @@ async def test_completions_with_prompt_embeds(
         max_tokens=5,
         temperature=0.0,
         stream=True,
-        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]})
+        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]},
+    )
     chunks_stream_embeds: list[list[str]] = [[], []]
     finish_reason_count = 0
     async for chunk in stream:
-        chunks_stream_embeds[chunk.choices[0].index].append(
-            chunk.choices[0].text)
+        chunks_stream_embeds[chunk.choices[0].index].append(chunk.choices[0].text)
         if chunk.choices[0].finish_reason is not None:
             finish_reason_count += 1
     assert finish_reason_count == 2
@@ -179,7 +186,8 @@ async def test_completions_with_prompt_embeds(
         prompt="This is a prompt",
         max_tokens=5,
         temperature=0.0,
-        extra_body={"prompt_embeds": encoded_embeds})
+        extra_body={"prompt_embeds": encoded_embeds},
+    )
     assert len(completion.choices) == 2
     completion_text_only = await client_with_prompt_embeds.completions.create(
         model=model_name,
@@ -192,18 +200,18 @@ async def test_completions_with_prompt_embeds(
         prompt="",
         max_tokens=5,
         temperature=0.0,
-        extra_body={"prompt_embeds": encoded_embeds})
+        extra_body={"prompt_embeds": encoded_embeds},
+    )
     # Embeddings responses should be handled first
-    assert completion_mixed.choices[0].text == completion_embeds_only.choices[
-        0].text
-    assert completion_mixed.choices[1].text == completion_text_only.choices[
-        0].text
+    assert completion_mixed.choices[0].text == completion_embeds_only.choices[0].text
+    assert completion_mixed.choices[1].text == completion_text_only.choices[0].text
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME, LORA_SERVING_MODEL_NAME])
 async def test_completions_errors_with_prompt_embeds(
-        client_with_prompt_embeds: openai.AsyncOpenAI, model_name: str):
+    client_with_prompt_embeds: openai.AsyncOpenAI, model_name: str
+):
     # Test error case: invalid prompt_embeds
     with pytest.raises(BadRequestError):
         await client_with_prompt_embeds.completions.create(
@@ -211,7 +219,8 @@ async def test_completions_errors_with_prompt_embeds(
             model=model_name,
             max_tokens=5,
             temperature=0.0,
-            extra_body={"prompt_embeds": "invalid_base64"})
+            extra_body={"prompt_embeds": "invalid_base64"},
+        )
 
 
 @pytest.mark.asyncio
@@ -233,7 +242,8 @@ async def test_completions_with_logprobs_and_prompt_embeds(
         temperature=0.0,
         echo=False,
         logprobs=logprobs_arg,
-        extra_body={"prompt_embeds": encoded_embeds})
+        extra_body={"prompt_embeds": encoded_embeds},
+    )
 
     logprobs = completion.choices[0].logprobs
     assert logprobs is not None
@@ -252,7 +262,8 @@ async def test_completions_with_logprobs_and_prompt_embeds(
         temperature=0.0,
         echo=False,
         logprobs=logprobs_arg,
-        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]})
+        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]},
+    )
 
     assert len(completion.choices) == 2
     for choice in completion.choices:
@@ -262,8 +273,7 @@ async def test_completions_with_logprobs_and_prompt_embeds(
         assert len(logprobs.token_logprobs) == 5
         assert len(logprobs.top_logprobs) == 5
         for top_logprobs in logprobs.top_logprobs[1:]:
-            assert max(logprobs_arg,
-                       1) <= len(top_logprobs) <= logprobs_arg + 1
+            assert max(logprobs_arg, 1) <= len(top_logprobs) <= logprobs_arg + 1
         assert len(logprobs.tokens) == 5
 
 
@@ -280,8 +290,5 @@ async def test_prompt_logprobs_raises_error(
             prompt="",
             max_tokens=5,
             temperature=0.0,
-            extra_body={
-                "prompt_embeds": encoded_embeds,
-                "prompt_logprobs": True
-            },
+            extra_body={"prompt_embeds": encoded_embeds, "prompt_logprobs": True},
         )

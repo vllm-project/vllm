@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for vLLM config dataclasses."""
+
 import ast
 import inspect
 import textwrap
@@ -50,7 +51,8 @@ def get_field(cls: ConfigType, name: str) -> Field:
     if (default := named_field.default) is not MISSING:
         return field(default=default)
     raise ValueError(
-        f"{cls.__name__}.{name} must have a default value or default factory.")
+        f"{cls.__name__}.{name} must have a default value or default factory."
+    )
 
 
 def getattr_iter(object: object, names: Iterable[str], default: Any) -> Any:
@@ -78,7 +80,7 @@ def contains_object_print(text: str) -> bool:
     Returns:
         result (bool): `True` if a match is found, `False` otherwise.
     """
-    pattern = r'at 0x[a-fA-F0-9]{2,16}>'
+    pattern = r"at 0x[a-fA-F0-9]{2,16}>"
     match = re.search(pattern, text)
     return match is not None
 
@@ -89,7 +91,8 @@ def assert_hashable(text: str) -> bool:
     raise AssertionError(
         f"vLLM tried to hash some configs that may have Python objects ids "
         f"in them. This is a bug, please file an issue. "
-        f"Text being hashed: {text}")
+        f"Text being hashed: {text}"
+    )
 
 
 def get_attr_docs(cls: type[Any]) -> dict[str, str]:
@@ -132,10 +135,12 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     # Consider each pair of nodes.
     for a, b in pairwise(cls_node.body):
         # Must be an assignment then a constant string.
-        if (not isinstance(a, (ast.Assign, ast.AnnAssign))
-                or not isinstance(b, ast.Expr)
-                or not isinstance(b.value, ast.Constant)
-                or not isinstance(b.value.value, str)):
+        if (
+            not isinstance(a, (ast.Assign, ast.AnnAssign))
+            or not isinstance(b, ast.Expr)
+            or not isinstance(b.value, ast.Constant)
+            or not isinstance(b.value.value, str)
+        ):
             continue
 
         doc = inspect.cleandoc(b.value.value)
@@ -160,29 +165,28 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 @runtime_checkable
 class SupportsHash(Protocol):
-
-    def compute_hash(self) -> str:
-        ...
+    def compute_hash(self) -> str: ...
 
 
 class SupportsMetricsInfo(Protocol):
-
-    def metrics_info(self) -> dict[str, str]:
-        ...
+    def metrics_info(self) -> dict[str, str]: ...
 
 
 def update_config(config: ConfigT, overrides: dict[str, Any]) -> ConfigT:
     processed_overrides = {}
     for field_name, value in overrides.items():
-        assert hasattr(
-            config, field_name), f"{type(config)} has no field `{field_name}`"
+        assert hasattr(config, field_name), (
+            f"{type(config)} has no field `{field_name}`"
+        )
         current_value = getattr(config, field_name)
         if is_dataclass(current_value) and not is_dataclass(value):
             assert isinstance(value, dict), (
                 f"Overrides to {type(config)}.{field_name} must be a dict"
-                f"  or {type(current_value)}, but got {type(value)}")
+                f"  or {type(current_value)}, but got {type(value)}"
+            )
             value = update_config(
                 current_value,  # type: ignore[type-var]
-                value)
+                value,
+            )
         processed_overrides[field_name] = value
     return replace(config, **processed_overrides)

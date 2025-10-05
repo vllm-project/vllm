@@ -37,16 +37,22 @@ def _list_path(path):
     return list(path.iterdir())
 
 
-def run_test(tmp_path, processor, llm: LLM, question: str,
-             image_urls: list[Image], expected_len: int, info: str):
+def run_test(
+    tmp_path,
+    processor,
+    llm: LLM,
+    question: str,
+    image_urls: list[Image],
+    expected_len: int,
+    info: str,
+):
     """
     One individual test to process the prompt and output base on 1 set of input
     Then check if the length in the storage path matches the expected length
     `info` introduces details or purpose of the individual test
     """
     print(f"***info: {info}***")
-    print(
-        f"**Expected storage path length after llm generate: {expected_len}**")
+    print(f"**Expected storage path length after llm generate: {expected_len}**")
     process_prompt(processor, llm, question, image_urls)
 
     print(f"Path matched expected length: {_check_path_len(tmp_path)}")
@@ -54,51 +60,42 @@ def run_test(tmp_path, processor, llm: LLM, question: str,
 
     assert _check_path_len(tmp_path) == expected_len, (
         f"Expect storage path length {expected_len} ;",
-        f"but end up {_check_path_len(tmp_path)} instead. ", f"Info: {info}")
+        f"but end up {_check_path_len(tmp_path)} instead. ",
+        f"Info: {info}",
+    )
 
 
-def process_prompt(processor, llm: LLM, question: str,
-                   image_urls: list[Image]):
+def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
     """
     Form the prompt based on the text and image input, then llm generate output
     """
-    placeholders = [{
-        "type": "image_url",
-        "image_url": {
-            "url": f"data:image;base64,{encode_image_base64(image_pil)}"
+    placeholders = [
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:image;base64,{encode_image_base64(image_pil)}"},
         }
-    } for image_pil in image_urls]
+        for image_pil in image_urls
+    ]
 
     messages = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant."
-        },
+        {"role": "system", "content": "You are a helpful assistant."},
         {
             "role": "user",
             "content": [
                 *placeholders,
-                {
-                    "type": "text",
-                    "text": question
-                },
+                {"type": "text", "text": question},
             ],
         },
     ]
 
-    prompt = processor.apply_chat_template(messages,
-                                           tokenize=False,
-                                           add_generation_prompt=True)
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
 
     outputs = llm.generate(
         {
-            "prompt":
-            prompt,
-            **({
-                "multi_modal_data": {
-                    "image": [*image_urls]
-                }
-            } if image_urls else {})
+            "prompt": prompt,
+            **({"multi_modal_data": {"image": [*image_urls]}} if image_urls else {}),
         },
         sampling_params=SAMPLING_PARAMS,
     )
@@ -114,7 +111,7 @@ def process_prompt(processor, llm: LLM, question: str,
 def test_shared_storage_connector_hashes(tmp_path):
     """
     Tests that SharedStorageConnector saves KV to the storage locations
-    with proper hashes; that are unique for inputs with identical text but 
+    with proper hashes; that are unique for inputs with identical text but
     different images (same size), or same multiple images but different orders.
     """
     # Using tmp_path as the storage path to store KV
@@ -124,7 +121,8 @@ def test_shared_storage_connector_hashes(tmp_path):
     kv_transfer_config = KVTransferConfig(
         kv_connector="SharedStorageConnector",
         kv_role="kv_both",
-        kv_connector_extra_config={"shared_storage_path": str(tmp_path)})
+        kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+    )
 
     engine_args = EngineArgs(
         model=MODEL_NAME,
@@ -157,56 +155,88 @@ def test_shared_storage_connector_hashes(tmp_path):
 
     # Prepare the input cases
     input_cases = [
-        InputCase(text=TEXT_PROMPTS[0],
-                  img=[image_1],
-                  expected_len=1,
-                  info="image_1 single input the first time."),
-        InputCase(text=TEXT_PROMPTS[0],
-                  img=[image_2],
-                  expected_len=2,
-                  info=("image_2 single input the first time. "
-                        "It is in same pixel size with image_1, yet it "
-                        "should be able to form a new unique hash.")),
-        InputCase(text=TEXT_PROMPTS[0],
-                  img=[image_1],
-                  expected_len=2,
-                  info=("image_1 single input the 2nd time. "
-                        "It should not form another new hash.")),
-        InputCase(text=TEXT_PROMPTS[0],
-                  img=[image_2],
-                  expected_len=2,
-                  info=("image_2 single input the 2nd time. "
-                        "It should not form another new hash.")),
-        InputCase(text=TEXT_PROMPTS[0],
-                  img=[image_1, image_2],
-                  expected_len=3,
-                  info="image_1 with image_2 input the first time."),
-        InputCase(text=TEXT_PROMPTS[0],
-                  img=[image_2, image_1],
-                  expected_len=4,
-                  info="The image order is swapped. Should form new hash."),
-        InputCase(text=TEXT_PROMPTS[0],
-                  img=[image_1, image_2],
-                  expected_len=4,
-                  info=("[image_1, image_2] input the 2nd time. "
-                        "It should not form another new hash.")),
-        InputCase(text=TEXT_PROMPTS[0],
-                  img=[image_2, image_1],
-                  expected_len=4,
-                  info=("[image_2, image_1] input the 2nd time. "
-                        "It should not form another new hash.")),
-        InputCase(text=TEXT_PROMPTS[0],
-                  img=[],
-                  expected_len=5,
-                  info="Pure text input test as a case-control"),
-        InputCase(text=TEXT_PROMPTS[0],
-                  img=[],
-                  expected_len=5,
-                  info="Identical pure text input as a case-control"),
-        InputCase(text=TEXT_PROMPTS[1],
-                  img=[],
-                  expected_len=6,
-                  info="Another pure text input as a case-control"),
+        InputCase(
+            text=TEXT_PROMPTS[0],
+            img=[image_1],
+            expected_len=1,
+            info="image_1 single input the first time.",
+        ),
+        InputCase(
+            text=TEXT_PROMPTS[0],
+            img=[image_2],
+            expected_len=2,
+            info=(
+                "image_2 single input the first time. "
+                "It is in same pixel size with image_1, yet it "
+                "should be able to form a new unique hash."
+            ),
+        ),
+        InputCase(
+            text=TEXT_PROMPTS[0],
+            img=[image_1],
+            expected_len=2,
+            info=(
+                "image_1 single input the 2nd time. "
+                "It should not form another new hash."
+            ),
+        ),
+        InputCase(
+            text=TEXT_PROMPTS[0],
+            img=[image_2],
+            expected_len=2,
+            info=(
+                "image_2 single input the 2nd time. "
+                "It should not form another new hash."
+            ),
+        ),
+        InputCase(
+            text=TEXT_PROMPTS[0],
+            img=[image_1, image_2],
+            expected_len=3,
+            info="image_1 with image_2 input the first time.",
+        ),
+        InputCase(
+            text=TEXT_PROMPTS[0],
+            img=[image_2, image_1],
+            expected_len=4,
+            info="The image order is swapped. Should form new hash.",
+        ),
+        InputCase(
+            text=TEXT_PROMPTS[0],
+            img=[image_1, image_2],
+            expected_len=4,
+            info=(
+                "[image_1, image_2] input the 2nd time. "
+                "It should not form another new hash."
+            ),
+        ),
+        InputCase(
+            text=TEXT_PROMPTS[0],
+            img=[image_2, image_1],
+            expected_len=4,
+            info=(
+                "[image_2, image_1] input the 2nd time. "
+                "It should not form another new hash."
+            ),
+        ),
+        InputCase(
+            text=TEXT_PROMPTS[0],
+            img=[],
+            expected_len=5,
+            info="Pure text input test as a case-control",
+        ),
+        InputCase(
+            text=TEXT_PROMPTS[0],
+            img=[],
+            expected_len=5,
+            info="Identical pure text input as a case-control",
+        ),
+        InputCase(
+            text=TEXT_PROMPTS[1],
+            img=[],
+            expected_len=6,
+            info="Another pure text input as a case-control",
+        ),
     ]
 
     # Run tests

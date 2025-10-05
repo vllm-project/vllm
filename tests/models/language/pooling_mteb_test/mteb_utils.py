@@ -12,8 +12,7 @@ import requests
 import torch
 
 import tests.ci_envs as ci_envs
-from tests.models.utils import (EmbedModelInfo, RerankModelInfo,
-                                check_embeddings_close)
+from tests.models.utils import EmbedModelInfo, RerankModelInfo, check_embeddings_close
 
 # Most embedding models on the STS12 task (See #17175):
 # - Model implementation and minor changes in tensor dtype
@@ -30,7 +29,6 @@ MTEB_RERANK_TOL = 2e-3
 
 
 class VllmMtebEncoder(mteb.Encoder):
-
     def __init__(self, vllm_model):
         super().__init__()
         self.llm = vllm_model
@@ -53,8 +51,7 @@ class VllmMtebEncoder(mteb.Encoder):
 
     def predict(
         self,
-        sentences: list[tuple[str, str,
-                              Optional[str]]],  # query, corpus, prompt
+        sentences: list[tuple[str, str, Optional[str]]],  # query, corpus, prompt
         *args,
         **kwargs,
     ) -> np.ndarray:
@@ -64,17 +61,15 @@ class VllmMtebEncoder(mteb.Encoder):
         queries = [s[0] for s in sentences]
         corpus = [s[1] for s in sentences]
 
-        outputs = self.llm.score(queries,
-                                 corpus,
-                                 truncate_prompt_tokens=-1,
-                                 use_tqdm=False)
+        outputs = self.llm.score(
+            queries, corpus, truncate_prompt_tokens=-1, use_tqdm=False
+        )
         scores = np.array(outputs)
         scores = scores[np.argsort(r)]
         return scores
 
 
 class OpenAIClientMtebEncoder(mteb.Encoder):
-
     def __init__(self, model_name: str, client):
         super().__init__()
         self.model_name = model_name
@@ -87,8 +82,9 @@ class OpenAIClientMtebEncoder(mteb.Encoder):
         r = self.rng.permutation(len(sentences))
         sentences = [sentences[i] for i in r]
 
-        embeddings = self.client.embeddings.create(model=self.model_name,
-                                                   input=sentences)
+        embeddings = self.client.embeddings.create(
+            model=self.model_name, input=sentences
+        )
         outputs = [d.embedding for d in embeddings.data]
         embeds = np.array(outputs)
         embeds = embeds[np.argsort(r)]
@@ -96,7 +92,6 @@ class OpenAIClientMtebEncoder(mteb.Encoder):
 
 
 class ScoreClientMtebEncoder(mteb.Encoder):
-
     def __init__(self, model_name: str, url):
         super().__init__()
         self.model_name = model_name
@@ -105,8 +100,7 @@ class ScoreClientMtebEncoder(mteb.Encoder):
 
     def predict(
         self,
-        sentences: list[tuple[str, str,
-                              Optional[str]]],  # query, corpus, prompt
+        sentences: list[tuple[str, str, Optional[str]]],  # query, corpus, prompt
         *args,
         **kwargs,
     ) -> np.ndarray:
@@ -122,27 +116,30 @@ class ScoreClientMtebEncoder(mteb.Encoder):
         return scores
 
     def get_score(self, query, corpus):
-        response = requests.post(self.url,
-                                 json={
-                                     "model": self.model_name,
-                                     "text_1": query,
-                                     "text_2": corpus,
-                                     "truncate_prompt_tokens": -1,
-                                 }).json()
-        return response['data'][0]["score"]
+        response = requests.post(
+            self.url,
+            json={
+                "model": self.model_name,
+                "text_1": query,
+                "text_2": corpus,
+                "truncate_prompt_tokens": -1,
+            },
+        ).json()
+        return response["data"][0]["score"]
 
 
 class RerankClientMtebEncoder(ScoreClientMtebEncoder):
-
     def get_score(self, query, corpus):
-        response = requests.post(self.url,
-                                 json={
-                                     "model": self.model_name,
-                                     "query": query,
-                                     "documents": [corpus],
-                                     "truncate_prompt_tokens": -1,
-                                 }).json()
-        return response['results'][0]["relevance_score"]
+        response = requests.post(
+            self.url,
+            json={
+                "model": self.model_name,
+                "query": query,
+                "documents": [corpus],
+                "truncate_prompt_tokens": -1,
+            },
+        ).json()
+        return response["results"][0]["relevance_score"]
 
 
 def run_mteb_embed_task(encoder, tasks):
@@ -161,12 +158,14 @@ def run_mteb_embed_task(encoder, tasks):
     return main_score
 
 
-def mteb_test_embed_models(hf_runner,
-                           vllm_runner,
-                           model_info: EmbedModelInfo,
-                           vllm_extra_kwargs=None,
-                           hf_model_callback=None,
-                           atol=MTEB_EMBED_TOL):
+def mteb_test_embed_models(
+    hf_runner,
+    vllm_runner,
+    model_info: EmbedModelInfo,
+    vllm_extra_kwargs=None,
+    hf_model_callback=None,
+    atol=MTEB_EMBED_TOL,
+):
     # A model family has many models with the same architecture,
     # and we don't need to test each one.
     if not ci_envs.VLLM_CI_NO_SKIP and not model_info.enable_test:
@@ -187,15 +186,15 @@ def mteb_test_embed_models(hf_runner,
     if ci_envs.VLLM_CI_HEAD_DTYPE is not None:
         if "hf_overrides" not in vllm_extra_kwargs:
             vllm_extra_kwargs["hf_overrides"] = {}
-        vllm_extra_kwargs["hf_overrides"][
-            "head_dtype"] = ci_envs.VLLM_CI_HEAD_DTYPE
+        vllm_extra_kwargs["hf_overrides"]["head_dtype"] = ci_envs.VLLM_CI_HEAD_DTYPE
 
-    with vllm_runner(model_info.name,
-                     runner="pooling",
-                     max_model_len=None,
-                     enforce_eager=True,
-                     **vllm_extra_kwargs) as vllm_model:
-
+    with vllm_runner(
+        model_info.name,
+        runner="pooling",
+        max_model_len=None,
+        enforce_eager=True,
+        **vllm_extra_kwargs,
+    ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
 
         # Confirm whether vllm is using the correct architecture
@@ -204,28 +203,29 @@ def mteb_test_embed_models(hf_runner,
 
         # Confirm whether vllm uses the correct default_pooling_type, which
         # relates to whether chunked prefill and prefix caching are enabled
-        assert (model_config._model_info.default_pooling_type ==
-                model_info.default_pooling_type)
+        assert (
+            model_config._model_info.default_pooling_type
+            == model_info.default_pooling_type
+        )
 
-        vllm_main_score = run_mteb_embed_task(VllmMtebEncoder(vllm_model),
-                                              MTEB_EMBED_TASKS)
+        vllm_main_score = run_mteb_embed_task(
+            VllmMtebEncoder(vllm_model), MTEB_EMBED_TASKS
+        )
         vllm_dtype = vllm_model.llm.llm_engine.model_config.dtype
         head_dtype = model_config.head_dtype
 
         # Test embed_dims, isnan and whether to use normalize
-        vllm_outputs = vllm_model.embed(example_prompts,
-                                        truncate_prompt_tokens=-1)
+        vllm_outputs = vllm_model.embed(example_prompts, truncate_prompt_tokens=-1)
         assert not torch.any(torch.isnan(torch.tensor(vllm_outputs)))
 
     # Accelerate mteb test by setting
     # SentenceTransformers mteb score to a constant
     if model_info.mteb_score is None:
         with hf_runner(
-                model_info.name,
-                is_sentence_transformer=True,
-                dtype=ci_envs.VLLM_CI_HF_DTYPE or model_info.hf_dtype,
+            model_info.name,
+            is_sentence_transformer=True,
+            dtype=ci_envs.VLLM_CI_HF_DTYPE or model_info.hf_dtype,
         ) as hf_model:
-
             # e.g. setting default parameters for the encode method of hf_runner
             if hf_model_callback is not None:
                 hf_model_callback(hf_model)
@@ -247,8 +247,7 @@ def mteb_test_embed_models(hf_runner,
         st_dtype = "Constant"
 
     print("Model:", model_info.name)
-    print("VLLM:", f"dtype:{vllm_dtype}", f"head_dtype:{head_dtype}",
-          vllm_main_score)
+    print("VLLM:", f"dtype:{vllm_dtype}", f"head_dtype:{head_dtype}", vllm_main_score)
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
@@ -282,26 +281,21 @@ def run_mteb_rerank(cross_encoder, tasks, languages):
             top_k=10,
             save_predictions=True,
             output_folder=f"{results_folder}/stage2",
-            previous_results=
-            f"{results_folder}/stage1/NFCorpus_{subset}_predictions.json",
+            previous_results=f"{results_folder}/stage1/NFCorpus_{subset}_predictions.json",
             encode_kwargs={"show_progress_bar": False},
         )
         main_score = results[0].scores["test"][0]["main_score"]
     return main_score
 
 
-def mteb_test_rerank_models_hf(hf_runner,
-                               model_name,
-                               hf_dtype="float32",
-                               hf_model_callback=None):
-    with hf_runner(model_name, is_cross_encoder=True,
-                   dtype=hf_dtype) as hf_model:
-
+def mteb_test_rerank_models_hf(
+    hf_runner, model_name, hf_dtype="float32", hf_model_callback=None
+):
+    with hf_runner(model_name, is_cross_encoder=True, dtype=hf_dtype) as hf_model:
         original_predict = hf_model.predict
 
         def _predict(
-            sentences: list[tuple[str, str,
-                                  Optional[str]]],  # query, corpus, prompt
+            sentences: list[tuple[str, str, Optional[str]]],  # query, corpus, prompt
             *args,
             **kwargs,
         ):
@@ -315,20 +309,22 @@ def mteb_test_rerank_models_hf(hf_runner,
         if hf_model_callback is not None:
             hf_model_callback(hf_model)
 
-        st_main_score = run_mteb_rerank(hf_model,
-                                        tasks=MTEB_RERANK_TASKS,
-                                        languages=MTEB_RERANK_LANGS)
+        st_main_score = run_mteb_rerank(
+            hf_model, tasks=MTEB_RERANK_TASKS, languages=MTEB_RERANK_LANGS
+        )
         st_dtype = next(hf_model.model.model.parameters()).dtype
     return st_main_score, st_dtype
 
 
-def mteb_test_rerank_models(hf_runner,
-                            vllm_runner,
-                            model_info: RerankModelInfo,
-                            vllm_extra_kwargs=None,
-                            hf_model_callback=None,
-                            vllm_mteb_encoder=VllmMtebEncoder,
-                            atol=MTEB_RERANK_TOL):
+def mteb_test_rerank_models(
+    hf_runner,
+    vllm_runner,
+    model_info: RerankModelInfo,
+    vllm_extra_kwargs=None,
+    hf_model_callback=None,
+    vllm_mteb_encoder=VllmMtebEncoder,
+    atol=MTEB_RERANK_TOL,
+):
     # A model family has many models with the same architecture,
     # and we don't need to test each one.
     if not ci_envs.VLLM_CI_NO_SKIP and not model_info.enable_test:
@@ -346,33 +342,37 @@ def mteb_test_rerank_models(hf_runner,
     if ci_envs.VLLM_CI_HEAD_DTYPE is not None:
         if "hf_overrides" not in vllm_extra_kwargs:
             vllm_extra_kwargs["hf_overrides"] = {}
-        vllm_extra_kwargs["hf_overrides"][
-            "head_dtype"] = ci_envs.VLLM_CI_HEAD_DTYPE
+        vllm_extra_kwargs["hf_overrides"]["head_dtype"] = ci_envs.VLLM_CI_HEAD_DTYPE
 
-    with vllm_runner(model_info.name,
-                     runner="pooling",
-                     max_model_len=None,
-                     max_num_seqs=8,
-                     enforce_eager=True,
-                     **vllm_extra_kwargs) as vllm_model:
-
+    with vllm_runner(
+        model_info.name,
+        runner="pooling",
+        max_model_len=None,
+        max_num_seqs=8,
+        enforce_eager=True,
+        **vllm_extra_kwargs,
+    ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
 
         # Confirm whether vllm is using the correct architecture
         if model_info.architecture:
-            assert (model_info.architecture in model_config.architectures)
+            assert model_info.architecture in model_config.architectures
 
         # Score API is only enabled for num_labels == 1
         assert model_config.hf_config.num_labels == 1
 
         # Confirm whether vllm uses the correct default_pooling_type, which
         # relates to whether chunked prefill and prefix caching are enabled
-        assert (model_config._model_info.default_pooling_type ==
-                model_info.default_pooling_type)
+        assert (
+            model_config._model_info.default_pooling_type
+            == model_info.default_pooling_type
+        )
 
-        vllm_main_score = run_mteb_rerank(vllm_mteb_encoder(vllm_model),
-                                          tasks=MTEB_RERANK_TASKS,
-                                          languages=MTEB_RERANK_LANGS)
+        vllm_main_score = run_mteb_rerank(
+            vllm_mteb_encoder(vllm_model),
+            tasks=MTEB_RERANK_TASKS,
+            languages=MTEB_RERANK_LANGS,
+        )
         vllm_dtype = model_config.dtype
         head_dtype = model_config.head_dtype
 
@@ -380,14 +380,14 @@ def mteb_test_rerank_models(hf_runner,
     # SentenceTransformers mteb score to a constant
     if model_info.mteb_score is None:
         st_main_score, st_dtype = mteb_test_rerank_models_hf(
-            hf_runner, model_info.name, model_info.hf_dtype, hf_model_callback)
+            hf_runner, model_info.name, model_info.hf_dtype, hf_model_callback
+        )
     else:
         st_main_score = model_info.mteb_score
         st_dtype = "Constant"
 
     print("Model:", model_info.name)
-    print("VLLM:", f"dtype:{vllm_dtype}", f"head_dtype:{head_dtype}",
-          vllm_main_score)
+    print("VLLM:", f"dtype:{vllm_dtype}", f"head_dtype:{head_dtype}", vllm_main_score)
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 

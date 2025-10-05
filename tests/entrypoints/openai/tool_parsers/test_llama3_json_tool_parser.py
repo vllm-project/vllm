@@ -5,8 +5,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.entrypoints.openai.protocol import ExtractedToolCallInformation
-from vllm.entrypoints.openai.tool_parsers.llama_tool_parser import (
-    Llama3JsonToolParser)
+from vllm.entrypoints.openai.tool_parsers.llama_tool_parser import Llama3JsonToolParser
 
 
 @pytest.fixture
@@ -18,8 +17,10 @@ def parser():
 
 def test_extract_tool_calls_simple(parser):
     # Test with a simple tool call
-    model_output = ('Here is the result: {"name": "getOpenIncidentsTool", '
-                    '"parameters": {}} Would you like to know more?')
+    model_output = (
+        'Here is the result: {"name": "getOpenIncidentsTool", '
+        '"parameters": {}} Would you like to know more?'
+    )
     result = parser.extract_tool_calls(model_output, None)
 
     assert isinstance(result, ExtractedToolCallInformation)
@@ -34,8 +35,8 @@ def test_extract_tool_calls_simple(parser):
 def test_extract_tool_calls_with_arguments(parser):
     # Test with a tool call that has arguments
     model_output = (
-        '{"name": "searchTool", "parameters": {"query": "test query", '
-        '"limit": 10}}')
+        '{"name": "searchTool", "parameters": {"query": "test query", "limit": 10}}'
+    )
     result = parser.extract_tool_calls(model_output, None)
 
     assert result.tools_called is True
@@ -81,7 +82,8 @@ def test_extract_tool_calls_multiple_json(parser):
     model_output = (
         '{"name": "searchTool", "parameters": {"query": "test1"}}; '
         '{"name": "getOpenIncidentsTool", "parameters": {}}; '
-        '{"name": "searchTool", "parameters": {"query": "test2"}}')
+        '{"name": "searchTool", "parameters": {"query": "test2"}}'
+    )
     result = parser.extract_tool_calls(model_output, None)
 
     assert result.tools_called is True
@@ -105,7 +107,8 @@ def test_extract_tool_calls_multiple_json_with_whitespace(parser):
     model_output = (
         '{"name": "searchTool", "parameters": {"query": "test1"}} ; '
         '{"name": "getOpenIncidentsTool", "parameters": {}} ; '
-        '{"name": "searchTool", "parameters": {"query": "test2"}}')
+        '{"name": "searchTool", "parameters": {"query": "test2"}}'
+    )
     result = parser.extract_tool_calls(model_output, None)
 
     assert result.tools_called is True
@@ -118,11 +121,12 @@ def test_extract_tool_calls_multiple_json_with_whitespace(parser):
 def test_extract_tool_calls_multiple_json_with_surrounding_text(parser):
     # Test with multiple JSONs and surrounding text
     model_output = (
-        'Here are the results: '
+        "Here are the results: "
         '{"name": "searchTool", "parameters": {"query": "test1"}}; '
         '{"name": "getOpenIncidentsTool", "parameters": {}}; '
         '{"name": "searchTool", "parameters": {"query": "test2"}} '
-        'Would you like to know more?')
+        "Would you like to know more?"
+    )
     result = parser.extract_tool_calls(model_output, None)
 
     assert result.tools_called is True

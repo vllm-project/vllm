@@ -32,7 +32,6 @@ def cleanup():
 
 @pytest.fixture()
 def just_serialize_model_tensors(model_ref, monkeypatch, tmp_path):
-
     def noop(*args, **kwargs):
         return None
 
@@ -56,8 +55,7 @@ def model_path(model_ref, tmp_path):
     yield tmp_path / model_ref / "model.tensors"
 
 
-def assert_from_collective_rpc(engine: LLM, closure: Callable,
-                               closure_kwargs: dict):
+def assert_from_collective_rpc(engine: LLM, closure: Callable, closure_kwargs: dict):
     res = engine.collective_rpc(method=closure, kwargs=closure_kwargs)
     return all(res)
 
@@ -67,18 +65,13 @@ def assert_from_collective_rpc(engine: LLM, closure: Callable,
 # method. It's purely used as a dummy utility to run methods that test
 # Tensorizer functionality
 class DummyExecutor(UniProcExecutor):
-
     def _init_executor(self) -> None:
-        """Initialize the worker and load the model.
-        """
-        self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
-                                               rpc_rank=0)
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
+        """Initialize the worker and load the model."""
+        self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config, rpc_rank=0)
+        distributed_init_method = get_distributed_init_method(get_ip(), get_open_port())
         local_rank = 0
         # set local rank as the device index if specified
-        device_info = self.vllm_config.device_config.device.__str__().split(
-            ":")
+        device_info = self.vllm_config.device_config.device.__str__().split(":")
         if len(device_info) > 1:
             local_rank = int(device_info[1])
         rank = 0
@@ -91,7 +84,7 @@ class DummyExecutor(UniProcExecutor):
             is_driver_worker=is_driver_worker,
         )
         self.mm_receiver_cache = None
-        self.collective_rpc("init_worker", args=([kwargs], ))
+        self.collective_rpc("init_worker", args=([kwargs],))
         self.collective_rpc("init_device")
 
     @property
@@ -99,5 +92,5 @@ class DummyExecutor(UniProcExecutor):
         return 2
 
     def shutdown(self):
-        if hasattr(self, 'thread_pool'):
+        if hasattr(self, "thread_pool"):
             self.thread_pool.shutdown(wait=False)

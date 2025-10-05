@@ -5,8 +5,12 @@ from collections.abc import Iterable
 from typing import Optional
 
 from vllm.v1.core.kv_cache_utils import BlockHash
-from vllm.v1.kv_offload.abstract import (LoadStoreSpec, OffloadingEvent,
-                                         OffloadingManager, PrepareStoreOutput)
+from vllm.v1.kv_offload.abstract import (
+    LoadStoreSpec,
+    OffloadingEvent,
+    OffloadingManager,
+    PrepareStoreOutput,
+)
 from vllm.v1.kv_offload.backend import Backend, BlockStatus
 
 
@@ -19,8 +23,7 @@ class LRUOffloadingManager(OffloadingManager):
         self.backend: Backend = backend
         # block_hash -> BlockStatus
         self.blocks: OrderedDict[BlockHash, BlockStatus] = OrderedDict()
-        self.events: Optional[list[OffloadingEvent]] = \
-            [] if enable_events else None
+        self.events: Optional[list[OffloadingEvent]] = [] if enable_events else None
 
     def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
         hit_count = 0
@@ -53,16 +56,16 @@ class LRUOffloadingManager(OffloadingManager):
             block.ref_cnt -= 1
 
     def prepare_store(
-            self,
-            block_hashes: Iterable[BlockHash]) -> Optional[PrepareStoreOutput]:
+        self, block_hashes: Iterable[BlockHash]
+    ) -> Optional[PrepareStoreOutput]:
         # filter out blocks that are already stored
         block_hashes_to_store = [
-            block_hash for block_hash in block_hashes
-            if block_hash not in self.blocks
+            block_hash for block_hash in block_hashes if block_hash not in self.blocks
         ]
 
-        num_blocks_to_evict = (len(block_hashes_to_store) -
-                               self.backend.get_num_free_blocks())
+        num_blocks_to_evict = (
+            len(block_hashes_to_store) - self.backend.get_num_free_blocks()
+        )
 
         # build list of blocks to evict
         to_evict = []
@@ -83,10 +86,13 @@ class LRUOffloadingManager(OffloadingManager):
 
         if to_evict and self.events is not None:
             self.events.append(
-                OffloadingEvent(block_hashes=to_evict,
-                                block_size=self.backend.block_size,
-                                medium=self.backend.medium,
-                                removed=True))
+                OffloadingEvent(
+                    block_hashes=to_evict,
+                    block_size=self.backend.block_size,
+                    medium=self.backend.medium,
+                    removed=True,
+                )
+            )
 
         blocks = self.backend.allocate_blocks(block_hashes_to_store)
         assert len(blocks) == len(block_hashes_to_store)
@@ -95,16 +101,15 @@ class LRUOffloadingManager(OffloadingManager):
             self.blocks[block_hash] = block
 
         # build store specs for allocated blocks
-        store_spec = self.backend.get_load_store_spec(block_hashes_to_store,
-                                                      blocks)
+        store_spec = self.backend.get_load_store_spec(block_hashes_to_store, blocks)
 
-        return PrepareStoreOutput(block_hashes_to_store=block_hashes_to_store,
-                                  store_spec=store_spec,
-                                  block_hashes_evicted=to_evict)
+        return PrepareStoreOutput(
+            block_hashes_to_store=block_hashes_to_store,
+            store_spec=store_spec,
+            block_hashes_evicted=to_evict,
+        )
 
-    def complete_store(self,
-                       block_hashes: Iterable[BlockHash],
-                       success: bool = True):
+    def complete_store(self, block_hashes: Iterable[BlockHash], success: bool = True):
         stored_block_hashes: list[BlockHash] = []
         if success:
             for block_hash in block_hashes:
@@ -121,10 +126,13 @@ class LRUOffloadingManager(OffloadingManager):
 
         if stored_block_hashes and self.events is not None:
             self.events.append(
-                OffloadingEvent(block_hashes=stored_block_hashes,
-                                block_size=self.backend.block_size,
-                                medium=self.backend.medium,
-                                removed=False))
+                OffloadingEvent(
+                    block_hashes=stored_block_hashes,
+                    block_size=self.backend.block_size,
+                    medium=self.backend.medium,
+                    removed=False,
+                )
+            )
 
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is not None:

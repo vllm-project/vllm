@@ -33,8 +33,7 @@ def bgmv_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
 
 
 @impl(XLA_LIB, "bgmv", "CompositeExplicitAutograd")
-def bgmv_non_xla(inputs: torch.Tensor, loras: torch.Tensor,
-                 idxs: torch.IntTensor):
+def bgmv_non_xla(inputs: torch.Tensor, loras: torch.Tensor, idxs: torch.IntTensor):
     T, _ = inputs.shape
     if len(loras.shape) == 4:
         loras = loras.squeeze(axis=1)
@@ -73,13 +72,12 @@ def bgmv_expand(
         limit = 1
 
     if output_tensor.shape[1] > outputs.shape[1]:
-        outputs = F.pad(outputs,
-                        (0, output_tensor.shape[1] - outputs.shape[1], 0, 0))
+        outputs = F.pad(outputs, (0, output_tensor.shape[1] - outputs.shape[1], 0, 0))
 
     if add_inputs:
-        return output_tensor + outputs[:limit, :output_tensor.shape[1]]
+        return output_tensor + outputs[:limit, : output_tensor.shape[1]]
     else:
-        return outputs[:limit, :output_tensor.shape[1]]
+        return outputs[:limit, : output_tensor.shape[1]]
 
 
 def bgmv_shrink(
@@ -98,8 +96,7 @@ def bgmv_shrink(
         scaling (float, optional): Scalar multiplier applied to the output.
     """
 
-    return scaling * torch.ops.xla.bgmv(inputs, lora_b_weights,
-                                        lora_indices_tensor)
+    return scaling * torch.ops.xla.bgmv(inputs, lora_b_weights, lora_indices_tensor)
 
 
 def bgmv_expand_slice(
