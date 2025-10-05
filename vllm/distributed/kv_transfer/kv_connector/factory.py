@@ -4,14 +4,14 @@
 import importlib
 from typing import TYPE_CHECKING, Callable
 
-# yapf: disable
 import vllm.envs as envs
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBase, KVConnectorBaseType)
+# yapf: enable
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.logger import init_logger
-
-# yapf: enable
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -111,3 +111,8 @@ KVConnectorFactory.register_connector(
     "OffloadingConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector",
     "OffloadingConnector")
+
+KVConnectorFactory.register_connector(
+    "DecodeBenchConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector",
+    "DecodeBenchConnector")
