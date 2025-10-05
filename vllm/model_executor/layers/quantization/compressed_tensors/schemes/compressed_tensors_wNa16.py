@@ -17,9 +17,6 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_repeat_scales_on_all_ranks,
 )
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     ChannelQuantScaleParameter,
@@ -28,8 +25,6 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
-
-# yapf: enable
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
