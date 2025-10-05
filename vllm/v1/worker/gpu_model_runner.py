@@ -31,8 +31,8 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
-    get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
-    prepare_communication_buffer_for_model)
+    get_context_parallel_world_size, get_pp_group, get_tp_group, graph_capture,
+    is_global_first_rank, prepare_communication_buffer_for_model)
 from vllm.forward_context import (BatchDescriptor, DPMetadata,
                                   set_forward_context)
 from vllm.logger import init_logger
@@ -408,6 +408,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                        self.max_num_tokens),
                                    dtype=np.int64)
 
+        # Pre-allocated array for computed token positions for CP
+        if get_context_parallel_world_size() > 1:
+            self.computed_positions_np = np.zeros(self.max_num_tokens,
+                                                  dtype=np.int64)
+
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
         # means this layer will perform attention using the keys and values
@@ -614,7 +619,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 pooling_params=pooling_params,
                 generator=generator,
                 block_ids=new_req_data.block_ids,
-                num_computed_tokens=new_req_data.num_computed_tokens,
+                num_computed_tokens=[new_req_data.num_computed_tokens],
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
             )
