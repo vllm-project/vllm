@@ -19,12 +19,14 @@ prompts = ["The chef prepared a delicious meal."]
 def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(model=MODEL_NAME,
-              max_num_batched_tokens=32768,
-              tensor_parallel_size=1,
-              gpu_memory_utilization=0.75,
-              enforce_eager=True,
-              seed=0)
+    llm = LLM(
+        model=MODEL_NAME,
+        max_num_batched_tokens=32768,
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.75,
+        enforce_eager=True,
+        seed=0,
+    )
 
     yield weakref.proxy(llm)
 
@@ -35,26 +37,25 @@ def llm():
 
 @pytest.mark.skip_global_cleanup
 def test_pooling_params(llm: LLM):
-
     def get_outputs(activation):
         outputs = llm.classify(
-            prompts,
-            pooling_params=PoolingParams(activation=activation),
-            use_tqdm=False)
+            prompts, pooling_params=PoolingParams(activation=activation), use_tqdm=False
+        )
         return torch.tensor([x.outputs.probs for x in outputs])
 
     default = get_outputs(activation=None)
     w_activation = get_outputs(activation=True)
     wo_activation = get_outputs(activation=False)
 
-    assert torch.allclose(default, w_activation,
-                          atol=1e-2), "Default should use activation."
-    assert not torch.allclose(
-        w_activation, wo_activation,
-        atol=1e-2), "wo_activation should not use activation."
-    assert torch.allclose(
-        softmax(wo_activation), w_activation, atol=1e-2
-    ), "w_activation should be close to activation(wo_activation)."
+    assert torch.allclose(default, w_activation, atol=1e-2), (
+        "Default should use activation."
+    )
+    assert not torch.allclose(w_activation, wo_activation, atol=1e-2), (
+        "wo_activation should not use activation."
+    )
+    assert torch.allclose(softmax(wo_activation), w_activation, atol=1e-2), (
+        "w_activation should be close to activation(wo_activation)."
+    )
 
 
 def test_encode_api(llm: LLM):

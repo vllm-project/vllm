@@ -12,8 +12,7 @@ try:
     # most reliable source of truth for vLLM's build.
     from torch.utils.cpp_extension import CUDA_HOME
 except ImportError:
-    print("Warning: PyTorch not found. "
-          "Falling back to CUDA_HOME environment variable.")
+    print("Warning: PyTorch not found. Falling back to CUDA_HOME environment variable.")
     CUDA_HOME = os.environ.get("CUDA_HOME")
 
 
@@ -27,8 +26,7 @@ def get_cpu_cores():
     return multiprocessing.cpu_count()
 
 
-def generate_presets(output_path="CMakeUserPresets.json",
-                     force_overwrite=False):
+def generate_presets(output_path="CMakeUserPresets.json", force_overwrite=False):
     """Generates the CMakeUserPresets.json file."""
 
     print("Attempting to detect your system configuration...")
@@ -39,8 +37,7 @@ def generate_presets(output_path="CMakeUserPresets.json",
         prospective_path = os.path.join(CUDA_HOME, "bin", "nvcc")
         if os.path.exists(prospective_path):
             nvcc_path = prospective_path
-            print("Found nvcc via torch.utils.cpp_extension.CUDA_HOME: "
-                  f"{nvcc_path}")
+            print(f"Found nvcc via torch.utils.cpp_extension.CUDA_HOME: {nvcc_path}")
 
     if not nvcc_path:
         nvcc_path = which("nvcc")
@@ -50,7 +47,8 @@ def generate_presets(output_path="CMakeUserPresets.json",
     if not nvcc_path:
         nvcc_path_input = input(
             "Could not automatically find 'nvcc'. Please provide the full "
-            "path to nvcc (e.g., /usr/local/cuda/bin/nvcc): ")
+            "path to nvcc (e.g., /usr/local/cuda/bin/nvcc): "
+        )
         nvcc_path = nvcc_path_input.strip()
     print(f"Using NVCC path: {nvcc_path}")
 
@@ -63,12 +61,13 @@ def generate_presets(output_path="CMakeUserPresets.json",
             "Could not automatically find Python executable. Please provide "
             "the full path to your Python executable for vLLM development "
             "(typically from your virtual environment, e.g., "
-            "/home/user/venvs/vllm/bin/python): ")
+            "/home/user/venvs/vllm/bin/python): "
+        )
         python_executable = input(python_executable_prompt).strip()
         if not python_executable:
             raise ValueError(
-                "Could not determine Python executable. Please provide it "
-                "manually.")
+                "Could not determine Python executable. Please provide it manually."
+            )
 
     print(f"Using Python executable: {python_executable}")
 
@@ -76,20 +75,23 @@ def generate_presets(output_path="CMakeUserPresets.json",
     cpu_cores = get_cpu_cores()
     nvcc_threads = min(4, cpu_cores)
     cmake_jobs = max(1, cpu_cores // nvcc_threads)
-    print(f"Detected {cpu_cores} CPU cores. "
-          f"Setting NVCC_THREADS={nvcc_threads} and CMake jobs={cmake_jobs}.")
+    print(
+        f"Detected {cpu_cores} CPU cores. "
+        f"Setting NVCC_THREADS={nvcc_threads} and CMake jobs={cmake_jobs}."
+    )
 
     # Get vLLM project root (assuming this script is in vllm/tools/)
-    project_root = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), ".."))
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     print(f"VLLM project root detected as: {project_root}")
 
     # Ensure python_executable path is absolute or resolvable
     if not os.path.isabs(python_executable) and which(python_executable):
         python_executable = os.path.abspath(which(python_executable))
     elif not os.path.isabs(python_executable):
-        print(f"Warning: Python executable '{python_executable}' is not an "
-              "absolute path and not found in PATH. CMake might not find it.")
+        print(
+            f"Warning: Python executable '{python_executable}' is not an "
+            "absolute path and not found in PATH. CMake might not find it."
+        )
 
     cache_variables = {
         "CMAKE_CUDA_COMPILER": nvcc_path,
@@ -122,24 +124,20 @@ def generate_presets(output_path="CMakeUserPresets.json",
         configure_preset["generator"] = "Ninja"
         cache_variables["CMAKE_JOB_POOLS"] = f"compile={cmake_jobs}"
     else:
-        print("Ninja not found, using default generator. "
-              "Build may be slower.")
+        print("Ninja not found, using default generator. Build may be slower.")
 
     presets = {
-        "version":
-        6,
+        "version": 6,
         # Keep in sync with CMakeLists.txt and requirements/build.txt
-        "cmakeMinimumRequired": {
-            "major": 3,
-            "minor": 26,
-            "patch": 1
-        },
+        "cmakeMinimumRequired": {"major": 3, "minor": 26, "patch": 1},
         "configurePresets": [configure_preset],
-        "buildPresets": [{
-            "name": "release",
-            "configurePreset": "release",
-            "jobs": cmake_jobs,
-        }],
+        "buildPresets": [
+            {
+                "name": "release",
+                "configurePreset": "release",
+                "jobs": cmake_jobs,
+            }
+        ],
     }
 
     output_file_path = os.path.join(project_root, output_path)
@@ -148,10 +146,12 @@ def generate_presets(output_path="CMakeUserPresets.json",
         if force_overwrite:
             print(f"Overwriting existing file '{output_file_path}'")
         else:
-            overwrite = input(
-                f"'{output_file_path}' already exists. Overwrite? (y/N): "
-            ).strip().lower()
-            if overwrite != 'y':
+            overwrite = (
+                input(f"'{output_file_path}' already exists. Overwrite? (y/N): ")
+                .strip()
+                .lower()
+            )
+            if overwrite != "y":
                 print("Generation cancelled.")
                 return
 
@@ -160,11 +160,9 @@ def generate_presets(output_path="CMakeUserPresets.json",
             json.dump(presets, f, indent=4)
         print(f"Successfully generated '{output_file_path}'")
         print("\nTo use this preset:")
-        print(
-            f"1. Ensure you are in the vLLM root directory: cd {project_root}")
+        print(f"1. Ensure you are in the vLLM root directory: cd {project_root}")
         print("2. Initialize CMake: cmake --preset release")
-        print("3. Build+install: cmake --build --preset release "
-              "--target install")
+        print("3. Build+install: cmake --build --preset release --target install")
 
     except OSError as e:
         print(f"Error writing file: {e}")
@@ -175,7 +173,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--force-overwrite",
         action="store_true",
-        help="Force overwrite existing CMakeUserPresets.json without prompting"
+        help="Force overwrite existing CMakeUserPresets.json without prompting",
     )
 
     args = parser.parse_args()
