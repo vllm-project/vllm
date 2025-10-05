@@ -10,7 +10,7 @@ import vllm.v1.attention.backends.rocm_aiter_fa  # noqa: F401
 from vllm.platforms import current_platform
 
 NUM_HEADS = [(4, 4), (8, 2)]
-HEAD_SIZES = [128, 256]
+HEAD_SIZES = [96, 128, 256]
 BLOCK_SIZES = [16]
 DTYPES = [torch.bfloat16]
 QDTYPES = [None]
@@ -104,6 +104,7 @@ def test_varlen_with_paged_kv(
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
+    total_tokens = sum(kv_lens)
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
     assert num_query_heads % num_kv_heads == 0
@@ -170,6 +171,7 @@ def test_varlen_with_paged_kv(
         cu_seqlens_k=cu_seq_lens,
         k_scale=k_descale,
         v_scale=v_descale,
+        total_tokens=total_tokens,
     )
 
     ref_output = ref_paged_attn(
