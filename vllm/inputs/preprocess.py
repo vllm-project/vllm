@@ -322,6 +322,10 @@ class InputPreprocessor:
                 mm_uuids=mm_uuids,
             )
         else:
+            if "multi_modal_data" in parsed_content:
+                raise ValueError(
+                    "This model does not support multimodal inputs")
+
             inputs = token_inputs(prompt_token_ids)
 
         if cache_salt := parsed_content.get("cache_salt"):
@@ -348,6 +352,10 @@ class InputPreprocessor:
                 mm_uuids=mm_uuids,
             )
         else:
+            if "multi_modal_data" in parsed_content:
+                raise ValueError(
+                    "This model does not support multimodal inputs")
+
             prompt_token_ids = self._tokenize_prompt(
                 prompt_text,
                 tokenization_kwargs=tokenization_kwargs,
