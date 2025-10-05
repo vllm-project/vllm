@@ -130,10 +130,8 @@ class HarmonyPythonTool(Tool):
         from vllm.entrypoints.context import HarmonyContext
         assert isinstance(context, HarmonyContext)
         last_msg = context.messages[-1]
-        logger.info("*=*=*=*=*=*=Tool input: %s", last_msg)
         tool_output_msgs = []
         async for msg in self.python_tool.process(last_msg):
-            logger.info("*=*=*=*=*=*=Tool output: %s", msg)
             tool_output_msgs.append(msg)
         return tool_output_msgs
 
