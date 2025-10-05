@@ -91,7 +91,7 @@ if(FLASH_MLA_ARCHS)
         SRCS "${FlashMLA_Extension_SOURCES}"
         CUDA_ARCHS "${FLASH_MLA_ARCHS}")
 
-    define_gpu_extension_target(
+    define_extension_target(
         _flashmla_C
         DESTINATION vllm
         LANGUAGE ${VLLM_GPU_LANG}
