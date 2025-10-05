@@ -29,10 +29,10 @@ else:
 
 logger = init_logger(__name__)
 
-SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
-                            "mlp_speculator", "draft_model", "deepseek_mtp",
-                            "ernie_mtp", "qwen3_next_mtp", "mimo_mtp",
-                            "longcat_flash_mtp", "mtp"]
+SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "ngram-eagle",
+                            "medusa", "mlp_speculator", "draft_model",
+                            "deepseek_mtp", "ernie_mtp", "qwen3_next_mtp",
+                            "mimo_mtp", "longcat_flash_mtp", "mtp"]
 MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
                    "qwen3_next_mtp", "longcat_flash_mtp")
 
@@ -47,6 +47,9 @@ class SpeculativeConfig:
     num_speculative_tokens: SkipValidation[int] = None  # type: ignore
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
+    num_speculative_tokens_per_method: Optional[dict[str, int]] = None
+    """The number of speculative tokens for each method, if provided. Max of
+    the values will be used if `num_speculative_tokens` is not provided."""
     model: Optional[str] = None
     """The name of the draft model, eagle head, or additional weights, if
     provided."""
@@ -238,6 +241,25 @@ class SpeculativeConfig:
                     "num_speculative_tokens was provided but without "
                     "speculative model.")
 
+        # set num_speculative_tokens from num_speculative_tokens_per_method
+        # for methods like ngram-eagle
+        if self.num_speculative_tokens_per_method is not None:
+            assert all(
+                isinstance(v, int) and v > 0
+                for v in self.num_speculative_tokens_per_method.values()), (
+                    "All values in num_speculative_tokens_per_method must be "
+                    "positive integers.")
+            max_num_speculative_tokens = max(
+                self.num_speculative_tokens_per_method.values())
+            if self.num_speculative_tokens is None:
+                self.num_speculative_tokens = max_num_speculative_tokens
+            else:
+                assert self.num_speculative_tokens <= \
+                    max_num_speculative_tokens, (
+                    "num_speculative_tokens should be None or must be"
+                    " less than or equal to the "
+                    "max value in num_speculative_tokens_per_method.")
+
         # Automatically configure the method for ngram when "model" is used
         # instead of "method"
         if self.method is None and (self.model is not None
@@ -247,6 +269,8 @@ class SpeculativeConfig:
         if self.method in ("ngram", "[ngram]"):
             # Unified to "ngram" internally
             self.method = "ngram"
+
+        if self.method in ("ngram", "ngram-eagle"):
             # Set default values if not provided
             if (self.prompt_lookup_min is None
                     and self.prompt_lookup_max is None):
@@ -277,9 +301,13 @@ class SpeculativeConfig:
             # draft related config as None here.
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
-        else:
-            self.prompt_lookup_max = 0
-            self.prompt_lookup_min = 0
+
+        # allow ngram-eagle to use this code block similar to eagle
+        if self.method not in ("ngram"):
+
+            if self.method != "ngram-eagle":
+                self.prompt_lookup_max = 0
+                self.prompt_lookup_min = 0
 
             if self.model is not None:
                 # TODO: Move this import to the top once `ModelConfig`
@@ -311,7 +339,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ('eagle', 'eagle3'):
+                if self.method in ('eagle', 'eagle3', 'ngram-eagle'):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -353,7 +381,7 @@ class SpeculativeConfig:
                         "eagle, or mtp.")
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "ngram-eagle"):
                     if self.enable_chunked_prefill and not envs.VLLM_USE_V1:
                         raise ValueError(
                             "Chunked prefill and EAGLE are not compatible "
@@ -424,6 +452,12 @@ class SpeculativeConfig:
                     SpeculativeConfig.create_draft_parallel_config(
                         self.target_parallel_config,
                         self.draft_tensor_parallel_size))
+
+        if self.use_ngram() and not self.disable_padded_drafter_batch:
+            logger.warning(
+                "padded_drafter_batch has to be disabled with ngram. "
+                "Setting it disable_padded_drafter_batch to True.")
+            self.disable_padded_drafter_batch = True
 
     @staticmethod
     def _maybe_override_draft_max_model_len(
@@ -523,6 +557,27 @@ class SpeculativeConfig:
                 "speculative model unless the draft model config contains an "
                 "n_predict parameter.")
 
+        if self.method == "ngram-eagle":
+            assert self.num_speculative_tokens_per_method is not None, (
+                "num_speculative_tokens_per_method must be provided for "
+                "ngram-eagle method.")
+            assert "ngram" in self.num_speculative_tokens_per_method, (
+                "num_speculative_tokens_per_method must contain ngram key for "
+                "ngram-eagle method.")
+            assert "eagle" in self.num_speculative_tokens_per_method, (
+                "num_speculative_tokens_per_method must contain eagle key for "
+                "ngram-eagle method.")
+            ngram_speculative_tokens = \
+                self.num_speculative_tokens_per_method["ngram"]
+            eagle_speculative_tokens = \
+                self.num_speculative_tokens_per_method["eagle"]
+            if self.num_speculative_tokens != \
+                    max(ngram_speculative_tokens, eagle_speculative_tokens):
+                raise ValueError(
+                    "num_speculative_tokens must be the max value in "
+                    "num_speculative_tokens_per_method for ngram-eagle method."
+                )
+
         if self.num_speculative_tokens <= 0:
             raise ValueError("Expected num_speculative_tokens to be greater "
                              f"than zero ({self.num_speculative_tokens}).")
@@ -559,7 +614,10 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp")
+        return self.method in ("eagle", "eagle3", "ngram-eagle", "mtp")
+
+    def use_ngram(self) -> bool:
+        return self.method == "ngram" or self.method == "ngram-eagle"
 
     def __repr__(self) -> str:
         method = self.method
