@@ -7,7 +7,9 @@ import os
 from collections import defaultdict, deque
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, NewType, Optional, TypeAlias, Union
+from typing import Any, Callable, NewType, Optional, Union
+
+from typing_extensions import TypeAlias
 
 from vllm import envs
 from vllm.config import VllmConfig
