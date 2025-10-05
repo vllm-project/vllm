@@ -132,7 +132,7 @@ class FP8AllGatherOptPass(VllmPatternMatcherPass):
         self.tp_size = get_tensor_model_parallel_world_size()
         if self.tp_size <= 1:
             self.disabled = True
-            logger.info(
+            logger.debug(
                 "FP8 AllGather optimization disabled: TP size = %d "
                 "(no communication needed)", self.tp_size)
             return
@@ -150,12 +150,12 @@ class FP8AllGatherOptPass(VllmPatternMatcherPass):
                 self.tp_size,
                 self.tp_group_name,
             ).register(self.patterns)
-            logger.info(
+            logger.debug(
                 "FP8 AllGather optimization enabled: "
                 "TP size = %d, dtype = %s", self.tp_size, self.model_dtype)
         else:
             self.disabled = True
-            logger.info(
+            logger.debug(
                 "FP8 AllGather optimization disabled: "
                 "model dtype = %s (requires BF16)", self.model_dtype)
 
@@ -169,7 +169,7 @@ class FP8AllGatherOptPass(VllmPatternMatcherPass):
 
         self.matched_count = self.patterns.apply(graph)
         if self.matched_count > 0:
-            logger.info(
+            logger.debug(
                 "FP8 AllGather optimization: replaced %d AllGather "
                 "operation(s) with FP8 quantized versions", self.matched_count)
         else:

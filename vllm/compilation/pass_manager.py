@@ -92,8 +92,6 @@ class PostGradPassManager(CustomGraphPass):
 
         if self.pass_config.enable_sequence_parallelism:
             self.passes += [SequenceParallelismPass(config)]
-            # FP8AllGatherOptPass must run BEFORE AsyncTPPass so that
-            # AsyncTPPass can fuse vllm_all_gather_fp8 + ScaledMM
             if self.pass_config.enable_fp8_allgather_opt:
                 self.passes += [FP8AllGatherOptPass(config)]
             if self.pass_config.enable_async_tp:
