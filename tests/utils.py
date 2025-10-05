@@ -408,17 +408,18 @@ def _test_completion(
 
     # Extract logprobs for each token
     logprobs_per_token = []
-    if completion.choices[0].logprobs and completion.choices[
-            0].logprobs.top_logprobs:
+    if completion.choices[0].logprobs and completion.choices[0].logprobs.top_logprobs:
         for token_logprobs in completion.choices[0].logprobs.top_logprobs:
             if token_logprobs:
                 logprobs_per_token.append(dict(token_logprobs))
 
-    results.append({
-        "test": "logprobs_check",
-        "text": completion.choices[0].text,
-        "logprobs": logprobs_per_token,
-    })
+    results.append(
+        {
+            "test": "logprobs_check",
+            "text": completion.choices[0].text,
+            "logprobs": logprobs_per_token,
+        }
+    )
 
     return results
 
@@ -711,15 +712,18 @@ def compare_all_settings(
                         del compare_result["embedding"]
 
                     # Compare logprobs with tolerance for numerical precision
-                    if "logprobs" in ref_result and ref_result.get(
-                            "test") == "logprobs_check":
+                    if (
+                        "logprobs" in ref_result
+                        and ref_result.get("test") == "logprobs_check"
+                    ):
                         ref_logprobs = ref_result["logprobs"]
                         compare_logprobs = compare_result["logprobs"]
 
                         assert len(ref_logprobs) == len(compare_logprobs), (
                             f"Logprobs length mismatch: "
                             f"{len(ref_logprobs)} vs "
-                            f"{len(compare_logprobs)}")
+                            f"{len(compare_logprobs)}"
+                        )
 
                         # Track statistics for logging
                         max_diff = 0.0
@@ -728,10 +732,10 @@ def compare_all_settings(
                         total_comparisons = 0
 
                         # Compare logprobs for each token position
-                        for token_idx, (ref_token_logprobs,
-                                        compare_token_logprobs) in enumerate(
-                                            zip(ref_logprobs,
-                                                compare_logprobs)):
+                        for token_idx, (
+                            ref_token_logprobs,
+                            compare_token_logprobs,
+                        ) in enumerate(zip(ref_logprobs, compare_logprobs)):
                             # Check that the same tokens appear in top-k
                             ref_tokens = set(ref_token_logprobs.keys())
                             compare_tokens = set(compare_token_logprobs.keys())
@@ -739,18 +743,18 @@ def compare_all_settings(
                             # Allow for minor differences in top-k tokens
                             # due to numerical precision. Require at least
                             # 95% overlap (at most 1 token differs in top-5)
-                            overlap = len(ref_tokens
-                                          & compare_tokens) / len(ref_tokens)
+                            overlap = len(ref_tokens & compare_tokens) / len(ref_tokens)
                             min_overlap = min(min_overlap, overlap)
 
                             assert overlap >= 0.95, (
                                 f"Token {token_idx}: Top-k tokens differ "
-                                f"too much. Only {overlap*100:.1f}% overlap.\n"
+                                f"too much. Only {overlap * 100:.1f}% overlap.\n"
                                 f"Ref tokens: {ref_tokens}\n"
-                                f"Compare tokens: {compare_tokens}")
+                                f"Compare tokens: {compare_tokens}"
+                            )
 
                             # Compare logprob values for common tokens
-                            for token in (ref_tokens & compare_tokens):
+                            for token in ref_tokens & compare_tokens:
                                 ref_logprob = ref_token_logprobs[token]
                                 compare_logprob = compare_token_logprobs[token]
                                 diff = abs(ref_logprob - compare_logprob)
@@ -768,7 +772,8 @@ def compare_all_settings(
                                     f"Logprob difference too large: "
                                     f"{diff:.4f}\n"
                                     f"Ref: {ref_logprob:.4f}, "
-                                    f"Compare: {compare_logprob:.4f}")
+                                    f"Compare: {compare_logprob:.4f}"
+                                )
 
                         # Remove logprobs from comparison dict so they
                         # don't fail exact equality check

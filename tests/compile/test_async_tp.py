@@ -416,9 +416,12 @@ def test_async_tp_pass_correctness(
 
 
 @create_new_process_for_each_test()
-@pytest.mark.parametrize("model_id", [
-    "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
-])
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
+    ],
+)
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("fp8_allgather_enabled", [True])
 @pytest.mark.parametrize("distributed_backend", ["mp"])
@@ -453,24 +456,21 @@ def test_fp8_allgather_pass_correctness(
 
     # Configuration WITH FP8 AllGather optimization
     fp8_allgather_compilation_config = {
-        'level': 3,
-        'compile_sizes': [2, 4, 8],
-        'splitting_ops': [],
-        'pass_config': {
-            'enable_async_tp': True,
-            'enable_fp8_allgather_opt': fp8_allgather_enabled
+        "level": 3,
+        "compile_sizes": [2, 4, 8],
+        "splitting_ops": [],
+        "pass_config": {
+            "enable_async_tp": True,
+            "enable_fp8_allgather_opt": fp8_allgather_enabled,
         },
     }
 
     # Configuration WITHOUT FP8 AllGather optimization (baseline)
     baseline_compilation_config = {
-        'level': 3,
-        'compile_sizes': [2, 4, 8],
-        'splitting_ops': [],
-        'pass_config': {
-            'enable_async_tp': False,
-            'enable_fp8_allgather_opt': False
-        },
+        "level": 3,
+        "compile_sizes": [2, 4, 8],
+        "splitting_ops": [],
+        "pass_config": {"enable_async_tp": False, "enable_fp8_allgather_opt": False},
     }
 
     fp8_allgather_env = baseline_env = {

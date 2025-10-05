@@ -40,8 +40,9 @@ class AllGatherFP8Pattern:
       gathered tensor), ensuring the transformation is valid
     """
 
-    def __init__(self, device: str, dtype: torch.dtype, tp_size: int,
-                 tp_group_name: str):
+    def __init__(
+        self, device: str, dtype: torch.dtype, tp_size: int, tp_group_name: str
+    ):
         self.device = device
         self.dtype = dtype
         self.tp_size = tp_size
@@ -56,7 +57,6 @@ class AllGatherFP8Pattern:
         return [x, scale]
 
     def register(self, pm_pass: PatternMatcherPass):
-
         def pattern(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
             # Match: AllGather(BF16) -> modelopt FP8 quantization
             # This matches what's in the FX graph from modelopt quant
@@ -100,8 +100,9 @@ class AllGatherFP8Pattern:
 
             return gathered_fp8
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
 
 
 class FP8AllGatherOptPass(VllmPatternMatcherPass):
@@ -134,10 +135,13 @@ class FP8AllGatherOptPass(VllmPatternMatcherPass):
             self.disabled = True
             logger.debug(
                 "FP8 AllGather optimization disabled: TP size = %d "
-                "(no communication needed)", self.tp_size)
+                "(no communication needed)",
+                self.tp_size,
+            )
             return
 
         from vllm.distributed import get_tp_group
+
         self.tp_group_name = get_tp_group().unique_name
 
         self.patterns = PatternMatcherPass(pass_name="fp8_allgather_opt_pass")
@@ -151,27 +155,33 @@ class FP8AllGatherOptPass(VllmPatternMatcherPass):
                 self.tp_group_name,
             ).register(self.patterns)
             logger.debug(
-                "FP8 AllGather optimization enabled: "
-                "TP size = %d, dtype = %s", self.tp_size, self.model_dtype)
+                "FP8 AllGather optimization enabled: TP size = %d, dtype = %s",
+                self.tp_size,
+                self.model_dtype,
+            )
         else:
             self.disabled = True
             logger.debug(
-                "FP8 AllGather optimization disabled: "
-                "model dtype = %s (requires BF16)", self.model_dtype)
+                "FP8 AllGather optimization disabled: model dtype = %s (requires BF16)",
+                self.model_dtype,
+            )
 
         if not self.disabled:
             self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
-        if getattr(self, 'disabled', False):
+        if getattr(self, "disabled", False):
             return
 
         self.matched_count = self.patterns.apply(graph)
         if self.matched_count > 0:
             logger.debug(
                 "FP8 AllGather optimization: replaced %d AllGather "
-                "operation(s) with FP8 quantized versions", self.matched_count)
+                "operation(s) with FP8 quantized versions",
+                self.matched_count,
+            )
         else:
-            logger.debug("FP8 AllGather optimization: "
-                         "no matching patterns found in graph")
+            logger.debug(
+                "FP8 AllGather optimization: no matching patterns found in graph"
+            )
