@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Wrapper around `transformers` MoE models."""
+
 from typing import Any
 
 import torch
@@ -22,15 +23,20 @@ import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config.utils import getattr_iter
+from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
-from .transformers import (TransformersBase, TransformersForCausalLM,
-                           TransformersForMultimodalLM,
-                           can_enable_torch_compile, log_replacement)
+from .transformers import (
+    TransformersBase,
+    TransformersForCausalLM,
+    TransformersForMultimodalLM,
+    can_enable_torch_compile,
+    log_replacement,
+)
 from .utils import maybe_prefix
 
 
@@ -40,43 +46,63 @@ class TransformersFusedMoE(FusedMoE):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._top_k_index: torch.Tensor = None
+        self._topk_ids: torch.Tensor = None
 
-        def custom_routing_function(hidden_states, gating_output, topk,
-                                    renormalize):
-            """Return `top_k_weights` from `gating_output` and the
-            `top_k_index` we stored in the layer earlier."""
-            return gating_output, self._top_k_index
+        def custom_routing_function(hidden_states, gating_output, topk, renormalize):
+            """Return `topk_weights` from `gating_output` and the
+            `topk_ids` we stored in the layer earlier."""
+            topk_weights = gating_output
+            topk_ids = self._topk_ids
+            # Handle all gather in expert parallel
+            if topk_ids.size(0) != hidden_states.size(0):
+                dp_metadata = get_forward_context().dp_metadata
+                sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+                is_sp = self.is_sequence_parallel
+                dist_group = get_ep_group() if is_sp else get_dp_group()
+                assert sizes[dist_group.rank_in_group] == topk_ids.shape[0]
+                (topk_ids,) = dist_group.all_gatherv([topk_ids], 0, sizes)
+            return topk_weights, topk_ids
 
         self.custom_routing_function = custom_routing_function
 
-    def forward(self, hidden_states: torch.Tensor, top_k_index: torch.Tensor,
-                top_k_weights: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
         """In Transformers `experts.forward` will have this signature.
 
         We discard any extra kwargs because we cannot use them here."""
-        return torch.ops.vllm.transformers_moe_forward(hidden_states,
-                                                       top_k_index,
-                                                       top_k_weights,
-                                                       self.layer_name)
+        return torch.ops.vllm.transformers_moe_forward(
+            hidden_states,
+            topk_ids.to(torch.int32),
+            topk_weights.to(torch.float32),
+            self.layer_name,
+        )
 
 
-def transformers_moe_forward(hidden_states: torch.Tensor,
-                             top_k_index: torch.Tensor,
-                             top_k_weights: torch.Tensor,
-                             layer_name: str) -> torch.Tensor:
-    """Store the `top_k_index` in the layer and call the actual forward."""
+def transformers_moe_forward(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    """Store the `topk_ids` in the layer and call the actual forward."""
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self._top_k_index = top_k_index
+    self._topk_ids = topk_ids
     # Clone hidden_states because it will be mutated in-place in FusedMoE
-    return self.forward_impl(hidden_states.clone(), top_k_weights)
+    return self.forward_impl(hidden_states.clone(), topk_weights)
 
 
-def transformers_moe_forward_fake(hidden_states: torch.Tensor,
-                                  top_k_index: torch.Tensor,
-                                  top_k_weights: torch.Tensor,
-                                  layer_name: str) -> torch.Tensor:
+def transformers_moe_forward_fake(
+    hidden_states: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
 
@@ -86,23 +112,20 @@ direct_register_custom_op(
     mutates_args=["hidden_states"],
     fake_impl=transformers_moe_forward_fake,
     dispatch_key=current_platform.dispatch_key,
-    tags=(torch.Tag.needs_fixed_stride_order, ),
+    tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
 
 class TransformersMoEBase(TransformersBase):
-
     def __init__(self, *, vllm_config, prefix=""):
         self.check_version("4.57.0.dev0", "MoE models support")
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-        if self.parallel_config.enable_expert_parallel:
-            raise NotImplementedError(
-                "Transformers backend does not support expert parallel yet.")
         if self.parallel_config.enable_eplb:
             raise NotImplementedError(
                 "Transformers backend does not support expert parallel load "
-                "balancing yet.")
+                "balancing yet."
+            )
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         """
@@ -124,7 +147,8 @@ class TransformersMoEBase(TransformersBase):
                     ckpt_up_proj_name=up_proj,
                     num_experts=self.model_config.get_num_experts(),
                     num_redundant_experts=0,  # TODO: enable EPLB
-                ))
+                )
+            )
         return expert_mapping
 
     def recursive_replace(self):
@@ -133,30 +157,30 @@ class TransformersMoEBase(TransformersBase):
 
         # Positional arguments
         num_experts = self.model_config.get_num_experts()
-        top_k = getattr_iter(text_config, ["num_experts_per_tok", "top_k"],
-                             None)
+        top_k = getattr_iter(text_config, ["num_experts_per_tok", "top_k"], None)
         assert top_k is not None
         hidden_size = text_config.hidden_size
         intermediate_size = getattr_iter(
-            text_config, ["moe_intermediate_size", "intermediate_size"], None)
+            text_config, ["moe_intermediate_size", "intermediate_size"], None
+        )
         assert intermediate_size is not None
 
         # If there are shared experts, the results are
         # reduced after mlp.forward() not inside FusedMoE
-        num_experts_shared = getattr_iter(text_config, [
-            "num_experts_shared", "n_shared_experts", "moe_num_shared_experts"
-        ], 0)
+        num_experts_shared = getattr_iter(
+            text_config,
+            ["num_experts_shared", "n_shared_experts", "moe_num_shared_experts"],
+            0,
+        )
         reduce_results = num_experts_shared == 0
 
         def add_all_reduce(mlp: nn.Module):
             """Adds an all-reduce to the output of `mlp.forward()`."""
 
             class MLPWithAllReduce(mlp.__class__):
-
                 def forward(self, *args, **kwargs):
                     output = super().forward(*args, **kwargs)
-                    return self.experts.maybe_all_reduce_tensor_model_parallel(
-                        output)
+                    return self.experts.maybe_all_reduce_tensor_model_parallel(output)
 
             mlp.__class__ = MLPWithAllReduce
 
@@ -195,8 +219,7 @@ class TransformersMoEBase(TransformersBase):
         def _recursive_replace(module: nn.Module, prefix: str):
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
-                if (child_name == "experts"
-                        and isinstance(child_module, nn.ModuleList)):
+                if child_name == "experts" and isinstance(child_module, nn.ModuleList):
                     # Alias for readability
                     mlp = module
                     experts = child_module
@@ -238,8 +261,9 @@ class TransformersMoEBase(TransformersBase):
                     # If results are not all-reduced in FusedMoE, ensure they
                     # are all-reduced at the end of mlp.forward() if tensor
                     # parallel or expert parallel is enabled
-                    if not reduce_results and (fused_experts.tp_size > 1
-                                               or fused_experts.ep_size > 1):
+                    if not reduce_results and (
+                        fused_experts.tp_size > 1 or fused_experts.ep_size > 1
+                    ):
                         add_all_reduce(mlp)
                 else:
                     _recursive_replace(child_module, prefix=qual_name)
@@ -262,7 +286,9 @@ class TransformersMoEForCausalLM(TransformersMoEBase, TransformersForCausalLM):
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
     },
-    enable_if=can_enable_torch_compile)
-class TransformersMoEForMultimodalLM(TransformersMoEForCausalLM,
-                                     TransformersForMultimodalLM):
+    enable_if=can_enable_torch_compile,
+)
+class TransformersMoEForMultimodalLM(
+    TransformersMoEForCausalLM, TransformersForMultimodalLM
+):
     pass

@@ -32,8 +32,7 @@ def validate_gpt_oss_install():
     except PackageNotFoundError:
         raise ImportError("Package 'gpt_oss' is not installed.") from None
     except InvalidVersion as e:
-        raise ImportError(
-            f"Invalid version string for 'gpt_oss': {e}") from None
+        raise ImportError(f"Invalid version string for 'gpt_oss': {e}") from None
 
     if pkg_version < Version(MIN_GPT_OSS_VERSION):
         raise ImportError(f"gpt_oss >= {MIN_GPT_OSS_VERSION} is required, "
@@ -41,14 +40,12 @@ def validate_gpt_oss_install():
 
 
 class Tool(ABC):
-
     @abstractmethod
     async def get_result(self, context: "ConversationContext") -> Any:
         pass
 
 
 class HarmonyBrowserTool(Tool):
-
     def __init__(self):
         self.enabled = True
         exa_api_key = os.getenv("EXA_API_KEY")
@@ -64,8 +61,8 @@ class HarmonyBrowserTool(Tool):
         except ImportError as e:
             self.enabled = False
             logger.warning_once(
-                "gpt_oss is not installed properly (%s), browsing is disabled",
-                e)
+                "gpt_oss is not installed properly (%s), browsing is disabled", e
+            )
             return
 
         browser_backend = ExaBackend(source="web", api_key=exa_api_key)
@@ -74,6 +71,7 @@ class HarmonyBrowserTool(Tool):
 
     async def get_result(self, context: "ConversationContext") -> Any:
         from vllm.entrypoints.context import HarmonyContext
+
         assert isinstance(context, HarmonyContext)
         last_msg = context.messages[-1]
         tool_output_msgs = []
@@ -87,7 +85,6 @@ class HarmonyBrowserTool(Tool):
 
 
 class HarmonyPythonTool(Tool):
-
     def __init__(self):
         self.enabled = True
 
@@ -97,8 +94,9 @@ class HarmonyPythonTool(Tool):
         except ImportError as e:
             self.enabled = False
             logger.warning_once(
-                "gpt_oss is not installed properly (%s), code interpreter is "
-                "disabled", e)
+                "gpt_oss is not installed properly (%s), code interpreter is disabled",
+                e,
+            )
             return
 
         self.python_tool = PythonTool()
@@ -122,12 +120,15 @@ class HarmonyPythonTool(Tool):
             self.enabled = False
             logger.warning_once(
                 "Code interpreter tool failed to initialize (%s), code "
-                "interpreter is disabled", e)
+                "interpreter is disabled",
+                e,
+            )
             return
         logger.info_once("Code interpreter tool initialized")
 
     async def get_result(self, context: "ConversationContext") -> Any:
         from vllm.entrypoints.context import HarmonyContext
+
         assert isinstance(context, HarmonyContext)
         last_msg = context.messages[-1]
         tool_output_msgs = []
