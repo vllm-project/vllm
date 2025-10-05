@@ -477,16 +477,17 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                         num_frames=num_frames,
                         q=self.video_pruning_rate,
                     )
-                    video_repl = self.get_dummy_video_repl_for_evs(
-                        num_frames=num_frames,  # number of frames
-                        num_video_tokens=num_tokens,
-                        video_context_token=self.video_token,
-                    )
+
+                    # Here we just need placeholders that won't actually be replaced -
+                    # we just need to make sure the total number of tokens is correct
+                    # assign all tokens to the first frame
+                    tokens_per_frame = [num_tokens] + [0] * (num_frames - 1)
+
                     # End of EVS-specific code
                 else:
-                    video_repl = self.get_video_repl(
-                        tokens_per_frame, num_frames, self.video_token
-                    )
+                    tokens_per_frame = [tokens_per_frame] * num_frames
+
+                video_repl = self.get_video_repl(tokens_per_frame, self.video_token)
 
                 text = [t.replace('<video>', video_repl.full, 1) for t in text]
         return text, video_inputs
@@ -540,71 +541,36 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
     @classmethod
     def get_video_repl(
         cls,
-        tokens_per_frame: int,
-        num_frames: int,
+        tokens_per_frame: list[int],
         video_context_token: str = IMG_CONTEXT,
     ) -> PromptUpdateDetails[str]:
-        repl_features = video_context_token * tokens_per_frame
-        repl_features_with_sep = IMG_START + repl_features + IMG_END
-        # num_patches is equal to num_frames
+        """
+        Build prompt replacement for a video.
+        The replacement returned is not actually used to replace the placeholder
+        tokens - it's just used to make sure we allocate the correct number
+        of tokens.
+        Actual replacement is done in get_multimodal_embeddings of
+        NemotronH_Nano_VL_V2
+        (specifically in _process_video_input -> _create_final_video_embeddings).
+        There, we create the final embeddings with text embeddings for indicator tokens
+        and video embeddings for video tokens.
+        This is a single function that handles all cases - non EVS, EVS dummy, EVS real.
+        The differentiation is done via tokens_per_frame parameter.
+        - non EVS case - constant value same value across all frames
+        - EVS dummy - Doesn't matter how tokens are distributed between frames - just
+                        make sure the total number of tokens is correct.
+        - EVS real (called from get_real_video_repl_for_evs) - different value per frame
+        Args:
+            tokens_per_frame (list[int]): number of tokens per frame
+            video_context_token (str): the token to use for the video context
+        """
         repl_full = "".join(
-            [f"Frame{i + 1}: {repl_features_with_sep}" for i in range(num_frames)]
+            [
+                f"Frame{i + 1}: {IMG_START}{video_context_token * num_tokens}{IMG_END}"
+                for i, num_tokens in enumerate(tokens_per_frame)
+            ]
         )
 
-        return PromptUpdateDetails.select_text(repl_full, repl_full)
-
-    @classmethod
-    def get_real_video_repl_for_evs(
-        cls,
-        num_video_tokens_per_frame: torch.Tensor,
-        video_context_token: str = IMG_CONTEXT,
-    ) -> PromptUpdateDetails[str]:
-        """
-        Build a real prompt replacement for a video with EVS, after we ran EVS and know the
-        number of vision tokens to retain in each frame
-        Args:
-            num_video_tokens_per_frame (T): total number of video tokens per frame each frame
-        """
-        repl_full = [
-            f'Frame{i + 1}: {IMG_START}{video_context_token * num_tokens}{IMG_END}'
-            for i, num_tokens in enumerate(num_video_tokens_per_frame.tolist())
-        ]
-        repl_full = ''.join(repl_full)
-
-        # In the video postprocessing logic we will build a correct prompt replacement and ensure
-        # video embeddings has correct interleaving of prefix / video embeddings
-        return PromptUpdateDetails.select_text(repl_full, repl_full)
-
-    @classmethod
-    def get_dummy_video_repl_for_evs(
-        cls,
-        num_frames: int,
-        num_video_tokens: int,
-        video_context_token: str = IMG_CONTEXT,
-    ) -> PromptUpdateDetails[str]:
-        """
-        Build dummy prompt replacement for a video with EVS
-        Args:
-            num_frames (int): number of frames in video
-            num_video_tokens (int): total number of video tokens after pruning
-        """
-
-        # (ekhvedchenia) TODO: Not sure whether we should support this or not, but there is more complex prefix
-        # when video metadata is avaialble
-        #  https://gitlab-master.nvidia.com/charlwang/vlm-hf-code/-/blob/main/nano_vl_v2/processing.py?ref_type=heads#L171
-
-        # As we don't know actual pruning mask in this stage, we build dummy prompt replacement which has same
-        # total tokens length, but rearranged order of tokens.
-        # It starts with all the prefixes, then empty {IMG_START}{IMG_END},
-        # followed by video_context_token repeated num_video_tokens times.
-        prefixes = [
-            f'Frame{i + 1}: {IMG_START}{IMG_END}' for i in range(num_frames)
-        ]
-        placeholder_tokens = [video_context_token] * num_video_tokens
-        repl_full = ''.join(prefixes + placeholder_tokens)
-
-        # In the video postprocessing logic we will build a correct prompt replacement and ensure
-        # video embeddings has correct interleaving of prefix / video embeddings
         return PromptUpdateDetails.select_text(repl_full, repl_full)
 
 
@@ -909,17 +875,19 @@ class NanoNemotronVLMultiModalProcessor(
                     num_frames=num_patches,
                     q=video_pruning_rate,
                 )
-                return hf_processor.get_dummy_video_repl_for_evs(
-                    num_frames=num_patches,  # number of frames
-                    num_video_tokens=num_tokens,
-                    video_context_token=hf_processor.video_token)
+                # Here we just need placeholders that won't actually be replaced -
+                # we just need to make sure the total number of tokens is correct
+                # assign all tokens to the first frame
+                tokens_per_frame = [num_tokens] + [0] * (num_patches - 1)
+
                 # End of EVS-specific code
             else:
-                return hf_processor.get_video_repl(
-                    feature_size,
-                    num_patches,
-                    video_context_token=hf_processor.video_token,
-                )
+                tokens_per_frame = [feature_size] * num_patches
+
+            return hf_processor.get_video_repl(
+                tokens_per_frame,
+                video_context_token=hf_processor.video_token,
+            )
 
         if self.info.supports_video:
             prompt_repl = [
@@ -1210,6 +1178,7 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid, SupportsMultiModa
             assert single_video_embeddings.shape[0] % num_frames == 0
 
             if video_pruning_rate is not None and video_pruning_rate > 0.0:
+                # Start of EVS-specific code
                 retention_mask = compute_retention_mask(
                     single_video_embeddings,
                     video_size_thw=torch.tensor([num_frames, rows, cols]),
@@ -1217,36 +1186,33 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid, SupportsMultiModa
                     q=video_pruning_rate,
                 )
 
-                retention_mask_thw = retention_mask.reshape(num_frames, rows, cols)
-                # [T] where each value is number of retained tokens in a given frame
-                num_tokens_per_frame = retention_mask_thw.sum(dim=(1, 2)).long()
+                # apply retention mask
+                single_video_embeddings = single_video_embeddings[retention_mask]
 
-                # Create final embeddings that will replace placeholder embeddings
-                # with video content and indicator tokens
-                final_video_embeddings += (
-                    self._create_final_video_embeddings(
-                        single_video_embeddings[retention_mask],
-                        num_tokens_per_frame,
-                        num_frames,
-                    ),
+                # calculate the actual number of retained tokens per frame
+                retention_mask_thw = retention_mask.reshape(num_frames, rows, cols)
+                num_tokens_per_frame = (
+                    retention_mask_thw.sum(dim=(1, 2)).long().tolist()
                 )
+                # End of EVS-specific code
             else:
-                num_patches = video_input["num_patches"][i].item()
-                assert single_video_embeddings.shape[0] % num_patches == 0
-                feature_size = single_video_embeddings.shape[0] // num_patches
-                final_video_embeddings += (
-                    self._create_final_video_embeddings(
-                        single_video_embeddings,
-                        feature_size,
-                        num_patches,
-                    ),
-                )
+                feature_size = single_video_embeddings.shape[0] // num_frames
+                num_tokens_per_frame = [feature_size] * num_frames
+
+            final_video_embeddings += (
+                self._create_final_video_embeddings(
+                    single_video_embeddings,
+                    num_tokens_per_frame,
+                ),
+            )
 
         return final_video_embeddings
 
-    def _create_final_video_embeddings(self, video_embeddings: torch.Tensor,
-                                       num_tokens_per_frame: torch.Tensor,
-                                       num_frames: int) -> torch.Tensor:
+    def _create_final_video_embeddings(
+        self,
+        video_embeddings: torch.Tensor,
+        num_tokens_per_frame: list[int],
+    ) -> torch.Tensor:
         """Create final embeddings that combine video embeddings with
         text embeddings of indicator tokens.
         
@@ -1261,14 +1227,10 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid, SupportsMultiModa
         device = video_embeddings.device
 
         # Generate video replacement text and convert to token IDs
-        if self.video_pruning_rate is not None and self.video_pruning_rate > 0.0:
-            video_repl_text = NanoNemotronVLProcessor.get_real_video_repl_for_evs(
-                num_tokens_per_frame, IMG_CONTEXT
-            ).full
-        else:
-            video_repl_text = NanoNemotronVLProcessor.get_video_repl(
-                num_tokens_per_frame, num_frames, IMG_CONTEXT
-            ).full
+        video_repl_text = NanoNemotronVLProcessor.get_video_repl(
+            num_tokens_per_frame,
+            IMG_CONTEXT,
+        ).full
 
         tokenizer = cached_tokenizer_from_config(self.model_config)
         repl_token_ids = torch.tensor(_seq2tokens(tokenizer, video_repl_text),
@@ -1281,11 +1243,16 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid, SupportsMultiModa
         # Create mask for video embedding positions
         is_video_embed = torch.isin(repl_token_ids, embed_token_ids)
 
+        num_total_tokens = repl_token_ids.shape[0]  # incl. indicator + video tokens
+        hidden_size = video_embeddings.shape[1]
+
         # Initialize final embeddings tensor
-        final_video_embeddings = torch.empty(repl_token_ids.shape[0],
-                                             video_embeddings.shape[1],
-                                             dtype=video_embeddings.dtype,
-                                             device=device)
+        final_video_embeddings = torch.empty(
+            num_total_tokens,
+            hidden_size,
+            dtype=video_embeddings.dtype,
+            device=device,
+        )
 
         # Replace video embedding positions with actual video embeddings
         final_video_embeddings[is_video_embed] = video_embeddings
