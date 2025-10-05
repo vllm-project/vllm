@@ -1745,6 +1745,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
         log_error_stack=args.log_error_stack,
     ) if "encode" in supported_tasks else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
@@ -1754,6 +1755,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
         log_error_stack=args.log_error_stack,
     ) if "embed" in supported_tasks else None
     state.openai_serving_classification = ServingClassification(
@@ -1777,6 +1779,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
         log_error_stack=args.log_error_stack,
     )
     state.openai_serving_transcription = OpenAIServingTranscription(
