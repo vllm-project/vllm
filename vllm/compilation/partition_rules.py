@@ -20,12 +20,14 @@ def _parse_operator_name(op_name: str) -> tuple[str, str, str]:
     parts = op_name.split(".")
     if len(parts) < 2:
         raise ValueError(
-            f"Operator name '{op_name}' must include a namespace and operator")
+            f"Operator name '{op_name}' must include a namespace and operator"
+        )
 
     namespace, remainder = parts[0], ".".join(parts[1:])
     if not remainder:
         raise ValueError(
-            f"Operator name '{op_name}' must include an operator identifier")
+            f"Operator name '{op_name}' must include an operator identifier"
+        )
 
     if "." in remainder:
         operator, overload = remainder.split(".", 1)
@@ -44,16 +46,14 @@ def _resolve_operator_overload(op_name: str):
         operator_obj = getattr(namespace_obj, operator)
     except AttributeError as exc:
         if not hasattr(torch.ops, namespace):
-            raise ValueError(
-                f"Unknown operator namespace '{namespace}'") from exc
-        raise ValueError(
-            f"Unknown operator '{namespace}::{operator}'") from exc
+            raise ValueError(f"Unknown operator namespace '{namespace}'") from exc
+        raise ValueError(f"Unknown operator '{namespace}::{operator}'") from exc
 
     if isinstance(operator_obj, OpOverload):
         if overload not in ("default", ""):
             raise ValueError(
-                f"Operator '{namespace}::{operator}' has no overload "
-                f"'{overload}'")
+                f"Operator '{namespace}::{operator}' has no overload '{overload}'"
+            )
         return operator_obj
 
     if isinstance(operator_obj, OpOverloadPacket):
@@ -62,7 +62,8 @@ def _resolve_operator_overload(op_name: str):
         except AttributeError as exc:
             raise ValueError(
                 f"Operator '{namespace}::{operator}' has no overload "
-                f"'{target_overload}'") from exc
+                f"'{target_overload}'"
+            ) from exc
 
     try:
         return getattr(operator_obj, target_overload)
@@ -91,11 +92,11 @@ def inductor_partition_rule_context(op_names: list[str]):
             _always_partition,
         )
 
-    logger.debug("Registered inductor partition rules for ops: %s",
-                 unique_names)
+    logger.debug("Registered inductor partition rules for ops: %s", unique_names)
 
     try:
         yield
     finally:
-        logger.debug("Partition rules remain registered; PyTorch does not "
-                     "expose a clear API.")
+        logger.debug(
+            "Partition rules remain registered; PyTorch does not expose a clear API."
+        )

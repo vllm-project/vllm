@@ -8,15 +8,14 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
-    deep_gemm_block_shape)
+from vllm.model_executor.layers.fused_moe.deep_gemm_utils import deep_gemm_block_shape
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceDelegate)
+    TopKWeightAndReduceDelegate,
+)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import (fp8_m_grouped_gemm_nt_masked,
-                                  is_deep_gemm_e8m0_used)
+from vllm.utils.deep_gemm import fp8_m_grouped_gemm_nt_masked, is_deep_gemm_e8m0_used
 
 logger = init_logger(__name__)
 
@@ -73,17 +72,14 @@ def _silu_mul_fp8_quant_deep_gemm(
     base_input_offset = e * stride_i_e + g * GROUP_SIZE * stride_i_h
     base_gate_offset = base_input_offset + cols * stride_i_h
     base_up_offset = base_input_offset + H * stride_i_h + cols * stride_i_h
-    base_yq_offset = (e * stride_yq_e + g * GROUP_SIZE * stride_yq_h +
-                      cols * stride_yq_h)
+    base_yq_offset = e * stride_yq_e + g * GROUP_SIZE * stride_yq_h + cols * stride_yq_h
     base_ys_offset = e * stride_ys_e + g * stride_ys_g
 
     for t in tl.range(0, n_tokens, num_stages=NUM_STAGES):
-        gate = tl.load(input_ptr + base_gate_offset + t * stride_i_t,
-                       mask=mask,
-                       other=0.0).to(tl.float32)
-        up = tl.load(input_ptr + base_up_offset + t * stride_i_t,
-                     mask=mask,
-                     other=0.0)
+        gate = tl.load(
+            input_ptr + base_gate_offset + t * stride_i_t, mask=mask, other=0.0
+        ).to(tl.float32)
+        up = tl.load(input_ptr + base_up_offset + t * stride_i_t, mask=mask, other=0.0)
 
         gate = gate * (1.0 / (1.0 + tl.exp(-gate)))
         y = gate * up
@@ -120,8 +116,7 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
     assert group_size == 128, "H must be divisible by 8"
     assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
 
-    tokens_per_expert = tokens_per_expert.to(device=y.device,
-                                             dtype=torch.int32)
+    tokens_per_expert = tokens_per_expert.to(device=y.device, dtype=torch.int32)
 
     fp8_dtype = torch.float8_e4m3fn
     y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
@@ -129,10 +124,12 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
     stride_ys_e = T * G
     stride_ys_t = 1
     stride_ys_g = T
-    y_s = torch.empty_strided((E, T, G),
-                              (stride_ys_e, stride_ys_t, stride_ys_g),
-                              dtype=torch.float32,
-                              device=y.device)
+    y_s = torch.empty_strided(
+        (E, T, G),
+        (stride_ys_e, stride_ys_t, stride_ys_g),
+        dtype=torch.float32,
+        device=y.device,
+    )
 
     use_ue8m0 = is_deep_gemm_e8m0_used()
 
@@ -146,17 +143,16 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
     # We never want to launch more than Tx number of threads
     # This computes the clip.
     num_parallel_tokens = max(
-        1,
-        min(max_empirical_parallelism, 2**int(log2(min(num_parallel_tokens,
-                                                       T)))))
+        1, min(max_empirical_parallelism, 2 ** int(log2(min(num_parallel_tokens, T))))
+    )
     cuda_arch = current_platform.get_device_capability(
-        device_id=y.device.index).to_int()
+        device_id=y.device.index
+    ).to_int()
 
     if cuda_arch >= 80:
-        torch.ops._C.silu_mul_fp8_quant_deep_gemm_cuda(y, tokens_per_expert,
-                                                       y_q, y_s, group_size,
-                                                       use_ue8m0,
-                                                       num_parallel_tokens)
+        torch.ops._C.silu_mul_fp8_quant_deep_gemm_cuda(
+            y, tokens_per_expert, y_q, y_s, group_size, use_ue8m0, num_parallel_tokens
+        )
     else:
         # Default to triton if not on cuda or if arch is too old
         y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
@@ -165,7 +161,7 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
 
         # Static grid over experts and H-groups.
         # A loop inside the kernel handles the token dim
-        grid = (E * G, )
+        grid = (E * G,)
         # strides (elements)
         stride_i_e, stride_i_t, stride_i_h = y.stride()
         stride_yq_e, stride_yq_t, stride_yq_h = y_q.stride()
@@ -214,7 +210,6 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
 
 
 class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
-
     def __init__(
         self,
         max_num_tokens: int,
@@ -233,10 +228,12 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @property
     def activation_formats(
-        self
+        self,
     ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (mk.FusedMoEActivationFormat.BatchedExperts,
-                mk.FusedMoEActivationFormat.BatchedExperts)
+        return (
+            mk.FusedMoEActivationFormat.BatchedExperts,
+            mk.FusedMoEActivationFormat.BatchedExperts,
+        )
 
     def supports_chunking(self) -> bool:
         return False
@@ -266,10 +263,10 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # end up sending their tokens. This needs to be fixed.
         num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
-        max_num_tokens = a.size(
-            0) if self.max_num_tokens is None else self.max_num_tokens
-        workspace13 = (num_experts, max_num_tokens * num_dispatchers,
-                       max(K, N))
+        max_num_tokens = (
+            a.size(0) if self.max_num_tokens is None else self.max_num_tokens
+        )
+        workspace13 = (num_experts, max_num_tokens * num_dispatchers, max(K, N))
         workspace2 = (num_experts, max_num_tokens * num_dispatchers, (N // 2))
         output = (num_experts, max_num_tokens * num_dispatchers, K)
         return (workspace13, workspace2, output, a.dtype)
@@ -304,7 +301,8 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert w2.size(1) == K
 
         E, max_num_tokens, N, K, top_k_num = self.moe_problem_size(
-            hidden_states, w1, w2, topk_ids)
+            hidden_states, w1, w2, topk_ids
+        )
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
 
@@ -312,11 +310,18 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # for the M expectation of each batch, correctly setting this value
         # may lead to better performance.
         expected_m = max_num_tokens
-        fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, self.w1_scale),
-                                     workspace1, expert_num_tokens, expected_m)
+        fp8_m_grouped_gemm_nt_masked(
+            (a1q, a1q_scale),
+            (w1, self.w1_scale),
+            workspace1,
+            expert_num_tokens,
+            expected_m,
+        )
 
         a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm_cuda(
-            workspace1, expert_num_tokens)
+            workspace1, expert_num_tokens
+        )
 
-        fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, self.w2_scale),
-                                     output, expert_num_tokens, expected_m)
+        fp8_m_grouped_gemm_nt_masked(
+            (a2q, a2q_scale), (w2, self.w2_scale), output, expert_num_tokens, expected_m
+        )
