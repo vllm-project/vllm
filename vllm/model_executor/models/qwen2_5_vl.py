@@ -1398,12 +1398,10 @@ class Qwen2_5_VLForConditionalGeneration(
         # Tensors
         input_ids_t = torch.as_tensor(input_ids, device=device, dtype=torch.long)
 
-        # fmt: off
-        mm_embeddings_out = [mm[:, :-4] for mm in
-                             multimodal_embeddings]
-        mm_embeddings_pos = [mm[:, -4:].permute(1, 0).long() for mm in
-                             multimodal_embeddings]
-        # fmt: in
+        mm_embeddings_out = [mm[:, :-4] for mm in multimodal_embeddings]
+        mm_embeddings_pos = [
+            mm[:, -4:].permute(1, 0).long() for mm in multimodal_embeddings
+        ]
 
         positions, mrope_positions_delta = recompute_mrope_positions(
             input_ids_t,
