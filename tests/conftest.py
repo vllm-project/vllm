@@ -803,7 +803,7 @@ class VllmRunner:
 
     def generate(
         self,
-        prompts: Union[list[str], list[torch.Tensor]],
+        prompts: Union[list[str], list[torch.Tensor], list[list[int]]],
         sampling_params: SamplingParams,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
@@ -873,7 +873,7 @@ class VllmRunner:
 
     def generate_greedy(
         self,
-        prompts: Union[list[str], list[torch.Tensor]],
+        prompts: Union[list[str], list[torch.Tensor], list[list[int]]],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,

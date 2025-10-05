@@ -26,10 +26,9 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM
 
+from tests.conftest import VllmRunner
 from tests.models.utils import check_outputs_equal
 from tests.utils import create_new_process_for_each_test
-from vllm import LLM, SamplingParams
-from vllm.inputs import TokensPrompt
 
 
 @create_new_process_for_each_test()
@@ -43,6 +42,7 @@ from vllm.inputs import TokensPrompt
 )
 def test_max_context_length(
     model: str,
+    vllm_runner: type[VllmRunner],
     prompt_len: int,
     max_tokens: int,
 ) -> None:
@@ -57,24 +57,18 @@ def test_max_context_length(
     # Construct a prompt of size prompt_len
     prompt_ids = [[43] * prompt_len]
 
-    # Generate max_tokens new tokens deterministically.
-    sampling_params = [
-        SamplingParams(max_tokens=max_tokens, temperature=0.0, ignore_eos=True)
-    ]
-
     # --- vLLM generation ---
-    llm = LLM(
-        model=model,
-        tokenizer=model,
+    with vllm_runner(
+        model_name=model,
+        tokenizer_name=model,
         max_model_len=2048,
         max_num_seqs=1,
         tensor_parallel_size=1,
-    )
+    ) as vllm_model:
+        # Generate max_tokens new tokens deterministically.
+        vllm_outputs = vllm_model.generate_greedy(prompt_ids, max_tokens)
 
-    vllm_token_prompts = [TokensPrompt(prompt_token_ids=prompt_ids[0])]
-    vllm_results = llm.generate(vllm_token_prompts, sampling_params)
-
-    vllm_output_ids = vllm_results[0].outputs[0].token_ids
+    vllm_output_ids = vllm_outputs[0][0][prompt_len:]
 
     # --- HuggingFace generation ---
     with torch.no_grad():
