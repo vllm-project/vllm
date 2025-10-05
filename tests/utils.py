@@ -91,8 +91,10 @@ class RemoteOpenAIServer:
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
         if env_dict is not None:
             env.update(env_dict)
+        serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
+        print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(
-            ["vllm", "serve", model, *vllm_serve_args],
+            serve_cmd,
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,
@@ -1131,16 +1133,18 @@ def has_module_attribute(module_name, attribute_name):
 
 def get_attn_backend_list_based_on_platform() -> list[str]:
     if current_platform.is_cuda():
-        return ["FLASH_ATTN_VLLM_V1", "TRITON_ATTN_VLLM_V1", "TREE_ATTN"]
+        return ["FLASH_ATTN", "TRITON_ATTN", "TREE_ATTN"]
     elif current_platform.is_rocm():
-        attn_backend_list = ["TRITON_ATTN_VLLM_V1"]
+        attn_backend_list = ["TRITON_ATTN"]
         try:
             import aiter  # noqa: F401
-            attn_backend_list.append("FLASH_ATTN_VLLM_V1")
+            attn_backend_list.append("FLASH_ATTN")
         except Exception:
-            print("Skip FLASH_ATTN_VLLM_V1 on ROCm as aiter is not installed")
+            print("Skip FLASH_ATTN on ROCm as aiter is not installed")
 
         return attn_backend_list
+    elif current_platform.is_xpu():
+        return ["FLASH_ATTN", "TRITON_ATTN"]
     else:
         raise ValueError("Unsupported platform")
 

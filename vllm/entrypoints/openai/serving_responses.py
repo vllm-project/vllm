@@ -22,16 +22,16 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallCompletedEvent,
     ResponseCodeInterpreterCallInProgressEvent,
     ResponseCodeInterpreterCallInterpretingEvent,
-    ResponseCodeInterpreterToolCallParam, ResponseCompletedEvent,
-    ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
-    ResponseCreatedEvent, ResponseFunctionToolCall, ResponseFunctionWebSearch,
-    ResponseInProgressEvent, ResponseOutputItem, ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent, ResponseOutputMessage, ResponseOutputText,
-    ResponseReasoningItem, ResponseReasoningTextDeltaEvent,
-    ResponseReasoningTextDoneEvent, ResponseStatus, ResponseTextDeltaEvent,
-    ResponseTextDoneEvent, ResponseWebSearchCallCompletedEvent,
-    ResponseWebSearchCallInProgressEvent, ResponseWebSearchCallSearchingEvent,
-    response_function_web_search, response_text_delta_event)
+    ResponseCodeInterpreterToolCallParam, ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent, ResponseFunctionToolCall,
+    ResponseFunctionWebSearch, ResponseOutputItem,
+    ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent,
+    ResponseOutputMessage, ResponseOutputText, ResponseReasoningItem,
+    ResponseReasoningTextDeltaEvent, ResponseReasoningTextDoneEvent,
+    ResponseStatus, ResponseTextDeltaEvent, ResponseTextDoneEvent,
+    ResponseWebSearchCallCompletedEvent, ResponseWebSearchCallInProgressEvent,
+    ResponseWebSearchCallSearchingEvent, response_function_web_search,
+    response_text_delta_event)
 from openai.types.responses.response_output_text import (Logprob,
                                                          LogprobTopLogprob)
 # yapf: enable
@@ -58,6 +58,9 @@ from vllm.entrypoints.openai.protocol import (DeltaMessage, ErrorResponse,
                                               InputTokensDetails,
                                               OutputTokensDetails,
                                               RequestResponseMetadata,
+                                              ResponseCompletedEvent,
+                                              ResponseCreatedEvent,
+                                              ResponseInProgressEvent,
                                               ResponseReasoningPartAddedEvent,
                                               ResponseReasoningPartDoneEvent,
                                               ResponsesRequest,
@@ -189,6 +192,23 @@ class OpenAIServingResponses(OpenAIServing):
 
         self.tool_server = tool_server
 
+    def _validate_generator_input(
+            self,
+            engine_prompt: EngineTokensPrompt) -> Optional[ErrorResponse]:
+        """Add validations to the input to the generator here."""
+        if self.max_model_len <= len(engine_prompt["prompt_token_ids"]):
+            error_message = (
+                "The engine prompt length"
+                f" {len(engine_prompt['prompt_token_ids'])} "
+                f"exceeds the max_model_len {self.max_model_len}. "
+                "Please reduce prompt.")
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=error_message,
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        return None
+
     async def create_responses(
         self,
         request: ResponsesRequest,
@@ -235,8 +255,6 @@ class OpenAIServingResponses(OpenAIServing):
         # Handle the previous response ID.
         prev_response_id = request.previous_response_id
         if prev_response_id is not None:
-            if not prev_response_id.startswith("resp_"):
-                return self._make_invalid_id_error(prev_response_id)
             async with self.response_store_lock:
                 prev_response = self.response_store.get(prev_response_id)
             if prev_response is None:
@@ -286,8 +304,13 @@ class OpenAIServingResponses(OpenAIServing):
             available_tools = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
+                maybe_error = self._validate_generator_input(engine_prompt)
+                if maybe_error is not None:
+                    return maybe_error
+
                 default_max_tokens = self.max_model_len - len(
                     engine_prompt["prompt_token_ids"])
+
                 sampling_params = request.to_sampling_params(
                     default_max_tokens, self.default_sampling_params)
 
@@ -444,6 +467,19 @@ class OpenAIServingResponses(OpenAIServing):
 
         return messages, [prompt_token_ids], [engine_prompt]
 
+    async def _initialize_tool_sessions(self, request: ResponsesRequest,
+                                        context: ConversationContext,
+                                        exit_stack: AsyncExitStack):
+        # we should only initialize the tool session if the request needs tools
+        if len(request.tools) == 0:
+            return
+        mcp_tools = {
+            tool.server_label: tool
+            for tool in request.tools if tool.type == "mcp"
+        }
+        await context.init_tool_sessions(self.tool_server, exit_stack,
+                                         request.request_id, mcp_tools)
+
     async def responses_full_generator(
         self,
         request: ResponsesRequest,
@@ -460,8 +496,8 @@ class OpenAIServingResponses(OpenAIServing):
 
         async with AsyncExitStack() as exit_stack:
             try:
-                await context.init_tool_sessions(self.tool_server, exit_stack,
-                                                 request.request_id)
+                await self._initialize_tool_sessions(request, context,
+                                                     exit_stack)
                 async for _ in result_generator:
                     pass
             except asyncio.CancelledError:
@@ -748,11 +784,16 @@ class OpenAIServingResponses(OpenAIServing):
             # New conversation.
             reasoning_effort = (request.reasoning.effort
                                 if request.reasoning else None)
-            # Temporary: OpenAI types doesn't have container tool
-            # so we used MCP to cover that, up for change
             tool_types = [tool.type for tool in request.tools]
-            if envs.VLLM_GPT_OSS_USE_CONTAINER_TOOL:
-                tool_types.append("container")
+
+            # Allow the MCP Tool type to enable built in tools if the
+            # server_label is allowlisted in
+            # envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS
+            if envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS:
+                for tool in request.tools:
+                    if (tool.type == "mcp" and tool.server_label
+                            in envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS):
+                        tool_types.append(tool.server_label)
             enable_browser = ("web_search_preview" in tool_types
                               and self.tool_server is not None
                               and self.tool_server.has_tool("browser"))
@@ -915,9 +956,6 @@ class OpenAIServingResponses(OpenAIServing):
         stream: Optional[bool],
     ) -> Union[ErrorResponse, ResponsesResponse, AsyncGenerator[
             StreamingResponsesResponse, None]]:
-        if not response_id.startswith("resp_"):
-            return self._make_invalid_id_error(response_id)
-
         async with self.response_store_lock:
             response = self.response_store.get(response_id)
 
@@ -935,9 +973,6 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         response_id: str,
     ) -> Union[ErrorResponse, ResponsesResponse]:
-        if not response_id.startswith("resp_"):
-            return self._make_invalid_id_error(response_id)
-
         async with self.response_store_lock:
             response = self.response_store.get(response_id)
             if response is None:
@@ -962,13 +997,6 @@ class OpenAIServingResponses(OpenAIServing):
                 logger.exception("Background task for %s was cancelled",
                                  response_id)
         return response
-
-    def _make_invalid_id_error(self, response_id: str) -> ErrorResponse:
-        return self.create_error_response(
-            err_type="invalid_request_error",
-            message=(f"Invalid 'response_id': '{response_id}'. "
-                     "Expected an ID that begins with 'resp'."),
-        )
 
     def _make_not_found_error(self, response_id: str) -> ErrorResponse:
         return self.create_error_response(
@@ -1653,8 +1681,10 @@ class OpenAIServingResponses(OpenAIServing):
         async with AsyncExitStack() as exit_stack:
             processer = None
             if self.use_harmony:
-                await context.init_tool_sessions(self.tool_server, exit_stack,
-                                                 request.request_id)
+                # TODO: in streaming, we noticed this bug:
+                # https://github.com/vllm-project/vllm/issues/25697
+                await self._initialize_tool_sessions(request, context,
+                                                     exit_stack)
                 processer = self._process_harmony_streaming_events
             else:
                 processer = self._process_simple_streaming_events

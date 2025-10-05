@@ -10,13 +10,15 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
-from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
 else:
     ModelConfig = None
     VllmConfig = None
+    _Backend = None
 
 logger = init_logger(__name__)
 
@@ -33,21 +35,25 @@ class XPUPlatform(Platform):
     device_control_env_var: str = "ZE_AFFINITY_MASK"
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool) -> str:
+                             has_sink: bool, use_sparse) -> str:
+        from vllm.attention.backends.registry import _Backend
+        if use_sparse:
+            raise NotImplementedError(
+                "Sparse Attention is not supported on XPU.")
         use_v1 = envs.VLLM_USE_V1
         if not use_v1:
             raise ValueError("XPU backend only supports V1.")
-        TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
-        FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
-        if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
+        TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
+        FLASH_ATTN = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
+        if selected_backend == _Backend.TRITON_ATTN:
             logger.info_once("Using Triton backend on V1 engine.")
-            return TRITON_ATTN_VLLM_V1
+            return TRITON_ATTN
         elif selected_backend == _Backend.FLASH_ATTN:
             logger.info_once("Using Flash Attention backend on V1 engine.")
-            return FLASH_ATTN_V1
+            return FLASH_ATTN
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "
@@ -64,7 +70,7 @@ class XPUPlatform(Platform):
         XPU only support fp8 kv cache with triton backend.
         """
         if envs.is_set("VLLM_ATTENTION_BACKEND") and \
-            envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN_VLLM_V1":
+            envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN":
             return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
 
         return False
@@ -113,6 +119,8 @@ class XPUPlatform(Platform):
         # lazy import to avoid circular import
         from vllm.config import CompilationLevel, CUDAGraphMode
         compilation_config = vllm_config.compilation_config
+        if compilation_config.compile_sizes is None:
+            compilation_config.compile_sizes = []
 
         assert compilation_config.cudagraph_mode == CUDAGraphMode.NONE, \
             "CUDA graph mode should be NONE on XPU"
@@ -193,10 +201,6 @@ class XPUPlatform(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
-
-    @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        return True
 
     @classmethod
     def device_count(cls) -> int:

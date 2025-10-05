@@ -40,6 +40,8 @@ def flashinfer_fused_moe_blockscale_fp8(
     assert global_num_experts % 4 == 0
     assert top_k < (topk_group * global_num_experts / num_expert_group)
     assert block_shape == [128, 128]
+    # Routing kernel expects #experts <= #threads 256
+    assert global_num_experts <= 256
 
     a_q, a_sf = per_token_group_quant_fp8(x, block_shape[1])
     # NOTE: scales of hidden states have to be transposed!
@@ -92,7 +94,6 @@ def flashinfer_fused_moe_blockscale_fp8_fake(
 direct_register_custom_op(
     op_name="flashinfer_fused_moe_blockscale_fp8",
     op_func=flashinfer_fused_moe_blockscale_fp8,
-    mutates_args=[],
     fake_impl=flashinfer_fused_moe_blockscale_fp8_fake,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )

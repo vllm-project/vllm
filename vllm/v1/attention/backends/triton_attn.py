@@ -8,6 +8,8 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.ops.triton_reshape_and_cache_flash import (
+    triton_reshape_and_cache_flash)
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -153,7 +155,7 @@ class TritonAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TRITON_ATTN_VLLM_V1"
+        return "TRITON_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["TritonAttentionImpl"]:
@@ -169,6 +171,7 @@ class TritonAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
@@ -291,7 +294,13 @@ class TritonAttentionImpl(AttentionImpl):
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
-            ops.reshape_and_cache_flash(
+            if self.kv_cache_dtype.startswith("fp8"):
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
+                # triton kernel does not support uint8 kv_cache
+                #  (because some explicit casts (e.g. float8_e4m3fnuz)
+                #   are not supported)
+            triton_reshape_and_cache_flash(
                 key,
                 value,
                 key_cache,
@@ -303,8 +312,9 @@ class TritonAttentionImpl(AttentionImpl):
             )
 
         if self.kv_cache_dtype.startswith("fp8"):
-            key_cache = key_cache.view(self.fp8_dtype)
-            value_cache = value_cache.view(self.fp8_dtype)
+            if key_cache.dtype != self.fp8_dtype:
+                key_cache = key_cache.view(self.fp8_dtype)
+                value_cache = value_cache.view(self.fp8_dtype)
             num_tokens, num_heads, head_size = query.shape
             assert layer._q_scale_float == 1.0, \
                 "A non 1.0 q_scale is not currently supported."

@@ -102,7 +102,6 @@ plugins:
           - https://numpy.org/doc/stable/objects.inv
           - https://pytorch.org/docs/stable/objects.inv
           - https://psutil.readthedocs.io/en/stable/objects.inv
-          - https://huggingface.co/docs/transformers/main/en/objects.inv
 
 markdown_extensions:
   - attr_list

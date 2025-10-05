@@ -20,7 +20,7 @@ from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 from .inductor_pass import enable_fake_mode
-from .vllm_inductor_pass import VllmInductorPass
+from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -348,7 +348,7 @@ class AllGatherCutlassScaledMMPattern(BasePattern):
                                 pm.fwd_only, pm_pass)
 
 
-class AsyncTPPass(VllmInductorPass):
+class AsyncTPPass(VllmPatternMatcherPass):
 
     @enable_fake_mode
     def __init__(self, config: VllmConfig):
@@ -378,18 +378,17 @@ class AsyncTPPass(VllmInductorPass):
             AllGatherCutlassScaledMMPattern(
                 self.model_dtype, self.device).register(self.patterns)
 
+        self.dump_patterns(config, self.patterns)
+
     def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
         # only do replace for specific shapes
         tp_size = get_tensor_model_parallel_world_size()
         return shape is not None and shape % tp_size == 0
 
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
-        self.begin()
-        self.dump_graph(graph, "before_async_tp_pass")
-        count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns with async TP pass.", count)
-        self.dump_graph(graph, "after_async_tp_pass")
-        self.end_and_log()
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug("Replaced %s patterns", self.matched_count)
 
 
 if flashinfer_comm is not None:
@@ -548,7 +547,6 @@ if flashinfer_comm is not None:
             "scale_out",
         ],
         fake_impl=call_trtllm_fused_allreduce_norm_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
     flashinfer_trtllm_fused_allreduce_norm = (
         torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default)
@@ -1068,7 +1066,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
                                 pm.fwd_only, pm_pass)
 
 
-class AllReduceFusionPass(VllmInductorPass):
+class AllReduceFusionPass(VllmPatternMatcherPass):
 
     def __init__(self, config: VllmConfig):
         super().__init__(config)
@@ -1124,6 +1122,7 @@ class AllReduceFusionPass(VllmInductorPass):
             fuse_rms_quant=config.compilation_config.pass_config.enable_fusion)
 
         self.register_patterns()
+        self.dump_patterns(config, self.patterns)
 
     @enable_fake_mode
     def register_patterns(self):
@@ -1172,15 +1171,14 @@ class AllReduceFusionPass(VllmInductorPass):
 
         self.disabled = False
 
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
         if self.disabled:
+            logger.debug("AllReduceFusionPass disabled")
             return
-        self.begin()
-        self.dump_graph(graph, "before_all_reduce_fusion_pass")
-        count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns", count)
-        self.dump_graph(graph, "after_all_reduce_fusion_pass")
-        self.end_and_log()
+
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug("Replaced %s patterns", self.matched_count)
 
     def __del__(self):
         if getattr(self, "disabled", True):

@@ -83,6 +83,14 @@ class RocmAttentionMetadataBuilder(
         # max_model_len will cause graph capture to be extremely
         # slow, so here we set it to 1.
         attn_metadata.seq_lens.fill_(1)
+
+        if envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION:
+            # Here we set the query start locs to 0. This is to
+            # cover up an invalid memory access in the prefix_prefil kernel
+            # that we run into during graph capture (#25985)
+            common_attn_metadata.query_start_loc.zero_()
+            common_attn_metadata.query_start_loc_cpu.zero_()
+
         return attn_metadata
 
     def build(self,
@@ -159,7 +167,7 @@ class RocmAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "ROCM_ATTN_VLLM_V1"
+        return "ROCM_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["RocmAttentionImpl"]:
@@ -175,6 +183,7 @@ class RocmAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")

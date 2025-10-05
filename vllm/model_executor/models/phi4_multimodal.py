@@ -17,6 +17,7 @@ from transformers.models.phi4_multimodal.modeling_phi4_multimodal import (
     Phi4MultimodalAudioRelativeAttentionBias, adaptive_enc_mask, unfold_tensor)
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import MulAndSilu, get_act_fn
@@ -44,13 +45,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
-
-# <|endoftext10|> (see vocab.json in hf model)
-_IMAGE_PLACEHOLDER_TOKEN_ID = 200010
-# <|endoftext11|>
-_AUDIO_PLACEHOLDER_TOKEN_ID = 200011
+                    init_vllm_registered_model, maybe_prefix)
 
 _AUDIO_MAX_SOUNDFILE_SIZE = 241_000
 
@@ -786,6 +781,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
                 target_ratios,
                 orig_width,
                 orig_height,
+                image_size,
             )
 
             # calculate the target width and height
@@ -985,6 +981,7 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         num_images = mm_counts.get("image", 0)
@@ -992,14 +989,19 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
+        image_overrides = mm_options.get("image") if mm_options else None
+        audio_overrides = mm_options.get("audio") if mm_options else None
+
         mm_data = {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images),
+                                   num_images=num_images,
+                                   overrides=image_overrides),
             "audio":
             self._get_dummy_audios(length=_AUDIO_MAX_SOUNDFILE_SIZE,
-                                   num_audios=num_audios),
+                                   num_audios=num_audios,
+                                   overrides=audio_overrides),
         }
 
         return mm_data
@@ -1341,12 +1343,12 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                                             image_attention_mask)
         return image_embeds
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
 
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
-            return None
+            return []
 
         # The result multimodal_embeddings is tuple of tensors, with each
         # tensor corresponding to a multimodal data item (image or video).
@@ -1370,47 +1372,6 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
         return multimodal_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                [_IMAGE_PLACEHOLDER_TOKEN_ID, _AUDIO_PLACEHOLDER_TOKEN_ID])
-        return inputs_embeds
-
-    def get_input_embeddings_v0(
-        self,
-        input_ids: torch.Tensor,
-        image_input: Optional[Phi4MMImagePixelInputs] = None,
-        audio_input: Optional[Phi4MMAudioFeatureInputs] = None,
-    ) -> torch.Tensor:
-        audio_projection_mode = 'speech'
-        inputs_embeds = self.get_input_embeddings(input_ids)
-        if image_input is not None:
-            image_embeds = self._process_image_input(image_input)
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                image_embeds,
-                placeholder_token_id=_IMAGE_PLACEHOLDER_TOKEN_ID,
-            )
-            audio_projection_mode = 'vision'
-
-        if audio_input is not None:
-            audio_embeds = self._process_audio_input(
-                audio_input, audio_projection_mode=audio_projection_mode)
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                audio_embeds,
-                placeholder_token_id=_AUDIO_PLACEHOLDER_TOKEN_ID,
-            )
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -1421,22 +1382,6 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     ) -> torch.Tensor:
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner from
-        # `get_multimodal_embeddings` and `get_input_embeddings`, this
-        # condition is only for v0 compatibility.
-        elif inputs_embeds is None:
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            audio_input = self._parse_and_validate_audio_input(**kwargs)
-
-            if image_input is None and audio_input is None:
-                inputs_embeds = None
-            else:
-                inputs_embeds = self.get_input_embeddings_v0(
-                    input_ids,
-                    image_input=image_input,
-                    audio_input=audio_input)
-                input_ids = None
 
         hidden_states = self.language_model(
             input_ids,

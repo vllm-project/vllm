@@ -13,7 +13,7 @@ from collections import defaultdict
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import IO, Any, Callable, Optional, Union
 
 import filelock
 import huggingface_hub.constants
@@ -102,7 +102,7 @@ def get_lock(model_name_or_path: Union[str, Path],
 @contextmanager
 def atomic_writer(filepath: Union[str, Path],
                   mode: str = 'w',
-                  encoding: Optional[str] = None):
+                  encoding: Optional[str] = None) -> Generator[IO]:
     """
     Context manager that provides an atomic file writing routine.
 
@@ -246,8 +246,34 @@ def get_quant_config(model_config: ModelConfig,
         # compressed-tensors uses a compressions_config
         hf_quant_config = getattr(model_config.hf_config, "compression_config",
                                   None)
+
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
+
+    # if hf_quant_config is None, we will try to get config from
+    # hf_overrides
+    hf_overrides = model_config.hf_overrides
+    quantization_config_file = hf_overrides.get("quantization_config_file",
+                                                None)
+    if quantization_config_file is not None:
+        if hasattr(quant_cls, "from_config_file"):
+            return quant_cls.from_config_file(quantization_config_file)
+        else:
+            raise NotImplementedError(
+                "from_config_file is specified in hf_override config, "
+                "but quant_cls.from_config_file is not implemented in "
+                f"{quant_cls}")
+    quantization_config_json = hf_overrides.get(
+        "quantization_config_dict_json", None)
+    if quantization_config_json is not None:
+        if hasattr(quant_cls, "from_config_dict_json"):
+            return quant_cls.from_config_dict_json(quantization_config_json)
+        else:
+            raise NotImplementedError(
+                "from_config_dict_json is specified in hf_override config, "
+                "but quant_cls.from_config_dict_json is not implemented in "
+                f"{quant_cls}")
+
     # Inflight BNB quantization
     if model_config.quantization == "bitsandbytes":
         return quant_cls.from_config({})
@@ -639,6 +665,19 @@ def runai_safetensors_weights_iterator(
         yield from tensor_iter
 
 
+def _init_loader(
+    pg: torch.distributed.ProcessGroup,
+    device: torch.device,
+    f_list: list[str],
+    *,
+    nogds: bool = False,
+):
+    loader = SafeTensorsFileLoader(pg, device, nogds=nogds)
+    rank_file_map = {i: [f] for i, f in enumerate(f_list)}
+    loader.add_filenames(rank_file_map)
+    return loader
+
+
 def fastsafetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
@@ -656,17 +695,31 @@ def fastsafetensors_weights_iterator(
         for i in range(0, len(hf_weights_files), pg.size())
     ]
 
+    nogds = False
+
     for f_list in tqdm(
             weight_files_sub_lists,
             desc="Loading safetensors using Fastsafetensor loader",
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
     ):
-        loader = SafeTensorsFileLoader(pg, device)
-        rank_file_map = {i: [f] for i, f in enumerate(f_list)}
-        loader.add_filenames(rank_file_map)
+        loader = _init_loader(pg, device, f_list, nogds=nogds)
         try:
-            fb = loader.copy_files_to_device()
+            try:
+                fb = loader.copy_files_to_device()
+            except RuntimeError as e:
+                if "gds" not in str(e):
+                    raise
+
+                loader.close()
+                nogds = True
+                logger.warning_once(
+                    "GDS not enabled, setting `nogds=True`.\n"
+                    "For more information, see: https://github.com/foundation-model-stack/fastsafetensors?tab=readme-ov-file#basic-api-usages"
+                )
+                loader = _init_loader(pg, device, f_list, nogds=nogds)
+                fb = loader.copy_files_to_device()
+
             try:
                 keys = list(fb.key_to_rank_lidx.keys())
                 for k in keys:
@@ -950,12 +1003,18 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
             return None
         return remapped_name
 
+    if any("mla_attn" in key for key in params_dict):
+        attn_str = "mla_attn.mla_attn"
+        logger.debug_once(f"Found mla_attn with k_scale and v_scale in "
+                          f"the checkpoint, using {attn_str} as attn_str")
+    else:
+        attn_str = "attn"
     # Define scale name mapping patterns in order of precedence
     scale_mapping_patterns = [
         # ModelOpt format: .self_attn.{k,v}_proj.{k,v}_scale ->
         # .self_attn.attn.{k,v}_scale
         (r"\.self_attn\.([kv])_proj\.([kv])_scale$",
-         r".self_attn.attn.\2_scale"),
+         rf".self_attn.{attn_str}.\2_scale"),
         # QKV proj format: .self_attn.qkv_proj.{k,v}_scale ->
         # .self_attn.attn.{k,v}_scale
         (r"\.self_attn\.qkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),

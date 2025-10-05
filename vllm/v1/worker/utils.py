@@ -130,15 +130,32 @@ class MultiModalBudget:
 @dataclass
 class AttentionGroup:
     backend: type[AttentionBackend]
+    # When ubatching is enabled we will have a metadata builder for each ubatch
+    # so that if they use internal persistant buffers for cudagraphs, and they
+    # won't have to worry about conflicting with the other ubatches.
     metadata_builders: list[AttentionMetadataBuilder]
     layer_names: list[str]
     kv_cache_spec: KVCacheSpec
 
+    @staticmethod
+    def create_with_metadata_builders(
+        backend: type[AttentionBackend],
+        layer_names: list[str],
+        kv_cache_spec: KVCacheSpec,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        num_metadata_builders: int = 1,
+    ) -> 'AttentionGroup':
+        metadata_builders = [
+            backend.get_builder_cls()(kv_cache_spec, layer_names, vllm_config,
+                                      device)
+            for _ in range(num_metadata_builders)
+        ]
+        return AttentionGroup(backend, metadata_builders, layer_names,
+                              kv_cache_spec)
+
     def get_metadata_builder(self,
-                             ubatch_id: Optional[int] = None
-                             ) -> AttentionMetadataBuilder:
-        if ubatch_id is None:
-            return self.metadata_builders[0]
+                             ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
 
@@ -249,6 +266,7 @@ def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, "Attention"],
     runner_kv_caches: list[torch.Tensor],
+    num_attn_module: Optional[int] = 1,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -272,7 +290,8 @@ def bind_kv_cache(
     # Convert kv_caches dict to a list of tensors in the order of layer_index.
     index2name = defaultdict(list)
     for layer_name in kv_caches:
-        index2name[extract_layer_index(layer_name)].append(layer_name)
+        index2name[extract_layer_index(layer_name,
+                                       num_attn_module)].append(layer_name)
 
     for layer_index in sorted(index2name.keys()):
         layer_names = index2name[layer_index]

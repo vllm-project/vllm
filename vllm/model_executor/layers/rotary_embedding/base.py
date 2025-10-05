@@ -8,6 +8,8 @@ import torch
 from vllm.model_executor.custom_op import CustomOp
 
 from .common import apply_rotary_emb_torch
+from .rocm_aiter_rope_ops import (is_rocm_triton_rotary_embedding_enabled,
+                                  rocm_aiter_rotary_emb)
 
 
 @CustomOp.register("rotary_embedding")
@@ -45,6 +47,8 @@ class RotaryEmbedding(CustomOp):
             cache = cache.to(dtype)
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
+        self.is_rocm_triton_rotary_embedding_enabled = \
+            is_rocm_triton_rotary_embedding_enabled()
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -120,12 +124,29 @@ class RotaryEmbedding(CustomOp):
             return query, key
 
         from vllm import _custom_ops as ops
-
         self._match_cos_sin_cache_dtype(query)
+
         # ops.rotary_embedding() is an in-place operation
         # that updates the query and key tensors.
         ops.rotary_embedding(positions, query, key, self.head_size,
                              self.cos_sin_cache, self.is_neox_style)
+        return query, key
+
+    def forward_hip(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if self.is_rocm_triton_rotary_embedding_enabled:
+            self._match_cos_sin_cache_dtype(query)
+            rocm_aiter_rotary_emb(positions, query, key, self.cos_sin_cache,
+                                  self.head_size, self.rotary_dim,
+                                  self.is_neox_style)
+        else:
+            # ops.rotary_embedding() is an in-place operation
+            # that updates the query and key tensors.
+            self.forward_cuda(positions, query, key)
         return query, key
 
     def forward_xpu(

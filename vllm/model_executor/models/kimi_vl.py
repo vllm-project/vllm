@@ -54,6 +54,7 @@ from transformers import BatchFeature
 from transformers.activations import GELUActivation
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -66,7 +67,6 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
 from vllm.model_executor.models.interfaces import (SupportsMultiModal,
                                                    SupportsPP)
 from vllm.model_executor.models.moonvit import MoonVitPretrainedModel
-from vllm.model_executor.models.utils import merge_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, NestedTensors)
@@ -76,13 +76,13 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
+from .vision import run_dp_sharded_mrope_vision_model
 
 
 # For dummy input only
@@ -213,14 +213,18 @@ class KimiVLDummyInputsBuilder(BaseDummyInputsBuilder[KimiVLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
+
+        image_overrides = mm_options.get("image") if mm_options else None
 
         return {
             "image":
             self._get_dummy_images(width=MaxImageTokenMeta.width,
                                    height=MaxImageTokenMeta.height,
-                                   num_images=num_images)
+                                   num_images=num_images,
+                                   overrides=image_overrides)
         }
 
 
@@ -279,6 +283,7 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
                                         dummy_inputs=KimiVLDummyInputsBuilder)
 class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                      SupportsPP):
+    merge_by_field_config = True
 
     supports_encoder_tp_data = True
 
@@ -338,23 +343,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                 config.vocab_size, logit_scale)
         self.media_placeholder: int = self.config.media_placeholder_token_id
 
-    # ref: qwen2_vl.py
-    def _validate_and_reshape_mm_tensor(self, mm_input: object,
-                                        name: str) -> torch.Tensor:
-        if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(f"Incorrect type of {name}. "
-                             f"Got type: {type(mm_input)}")
-        if isinstance(mm_input, torch.Tensor):
-            if mm_input.ndim == 2:
-                return mm_input
-            if mm_input.ndim != 3:
-                raise ValueError(f"{name} should be 2D or batched 3D tensor. "
-                                 f"Got ndim: {mm_input.ndim} "
-                                 f"(shape={mm_input.shape})")
-            return mm_input.reshape(-1, mm_input.shape[-1])
-        else:
-            return torch.concat(mm_input)
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[KimiVLImageInputs]:
         # image input type must be pixel values now
@@ -363,21 +351,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         if pixel_values is None:
             return None
-
-        image_grid_hws = self._validate_and_reshape_mm_tensor(
-            image_grid_hws, "image grid hws")
-        # pixel_values may have complex shapes
-        num_channels = 3
-        patch_size = self.config.vision_config.patch_size
-        if isinstance(pixel_values, list):
-            pixel_values = torch.cat([
-                x.reshape(-1, num_channels, patch_size, patch_size)
-                for x in pixel_values
-            ])
-        else:
-            pixel_values = pixel_values.reshape(-1, num_channels, patch_size,
-                                                patch_size)
-        pixel_values = pixel_values.to(self.vision_tower.dtype)
 
         return KimiVLImagePixelInputs(
             type="pixel_values",
@@ -424,26 +397,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[NestedTensors] = None,
-    ) -> torch.Tensor:
-
-        # `get_input_embeddings` should already be implemented for the language
-        # model as one of the requirements of basic vLLM model implementation.
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-
-        if multimodal_embeddings is not None and len(
-                multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids=input_ids,
-                inputs_embeds=inputs_embeds,
-                multimodal_embeddings=multimodal_embeddings,
-                placeholder_token_id=self.config.media_placeholder_token_id)
-
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -454,24 +407,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
-        # NOTE: In v1, inputs_embeds is always generated at model runner from
-        # `get_multimodal_embeddings` and `get_input_embeddings`, this
-        # condition is only for v0 compatibility.
-        elif inputs_embeds is None:
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            if image_input is None:
-                inputs_embeds = None
-            else:
-                inputs_embeds = self.get_input_embeddings(input_ids)
-                image_embeds = self._process_image_input(image_input)
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids,
-                    inputs_embeds,
-                    image_embeds,
-                    placeholder_token_id=self.config.
-                    media_placeholder_token_id,
-                )
-                input_ids = None
 
         hidden_states = self.language_model(
             input_ids=input_ids,

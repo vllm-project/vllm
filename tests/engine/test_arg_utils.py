@@ -50,8 +50,11 @@ def test_is_type(type_hint, type, expected):
 
 @pytest.mark.parametrize(("type_hints", "type", "expected"), [
     ({float, int}, int, True),
+    ({int, tuple}, int, True),
     ({int, tuple[int]}, int, True),
+    ({int, tuple[int, ...]}, int, True),
     ({int, tuple[int]}, float, False),
+    ({int, tuple[int, ...]}, float, False),
     ({str, Literal["x", "y"]}, Literal, True),
 ])
 def test_contains_type(type_hints, type, expected):

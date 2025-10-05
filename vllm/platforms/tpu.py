@@ -11,9 +11,10 @@ from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
-from .interface import Platform, PlatformEnum, _Backend
+from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import BlockSize, ModelConfig, VllmConfig
     from vllm.pooling_params import PoolingParams
 else:
@@ -21,6 +22,7 @@ else:
     ModelConfig = None
     VllmConfig = None
     PoolingParams = None
+    _Backend = None
 
 logger = init_logger(__name__)
 
@@ -46,12 +48,15 @@ class TpuPlatform(Platform):
     ]
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink) -> str:
-        if (selected_backend != _Backend.PALLAS
-                and selected_backend != _Backend.PALLAS_VLLM_V1):
+                             has_sink, use_sparse) -> str:
+        from vllm.attention.backends.registry import _Backend
+        if use_sparse:
+            raise NotImplementedError(
+                "Sparse Attention is not supported on TPU.")
+        if selected_backend != _Backend.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if not use_v1:
@@ -172,11 +177,6 @@ class TpuPlatform(Platform):
 
     @classmethod
     def use_all_gather(cls) -> bool:
-        return True
-
-    @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        # V1 support on TPU is experimental
         return True
 
     @classmethod

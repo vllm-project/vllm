@@ -115,6 +115,9 @@ class Request:
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
 
+        # The number of requests being preempted by the scheduler
+        self.num_preemptions = 0
+
         self.block_hashes: list[BlockHash] = []
         self.get_hash_new_full_blocks: Optional[Callable[
             [], list[BlockHash]]] = None

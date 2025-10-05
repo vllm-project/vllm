@@ -108,7 +108,9 @@ class XgrammarBackend(StructuredOutputBackend):
                     end=s["end"],
                 ) for s in s_tag["structures"]
             ]
-            ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
+            structural_tag = xgr.StructuralTag.from_legacy_structural_tag(
+                tags, s_tag["triggers"])
+            ctx = self.compiler.compile_structural_tag(structural_tag)
         else:
             logger.error(
                 "Validation should have already occurred. Please file an issue."
@@ -318,6 +320,8 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                     end=s["end"],
                 ) for s in s_tag["structures"]
             ]
-            xgr.Grammar.from_structural_tag(tags, s_tag["triggers"])
+            structural_tag = xgr.StructuralTag.from_legacy_structural_tag(
+                tags, s_tag["triggers"])
+            xgr.Grammar.from_structural_tag(structural_tag)
         except Exception as e:
             raise ValueError("Invalid structural tag specification.") from e

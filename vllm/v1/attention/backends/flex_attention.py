@@ -18,6 +18,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               is_quantized_kv_cache)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_kernel_override_batch_invariant)
 from vllm.utils import cdiv, is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
@@ -88,6 +90,7 @@ class FlexAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
@@ -839,6 +842,11 @@ def get_kernel_options(query, block_m, block_n,
     kernel_options: dict[str, Union[int, bool]] = {
         "FORCE_USE_FLEX_ATTENTION": True,
     }
+    if vllm_kernel_override_batch_invariant():
+        kernel_options["BLOCK_M"] = 16
+        kernel_options["BLOCK_N"] = 16
+        kernel_options["IS_DIVISIBLE"] = False
+        return kernel_options
     if use_direct_build:
         kernel_options["BLOCK_M"] = block_m
         kernel_options["BLOCK_N"] = block_n

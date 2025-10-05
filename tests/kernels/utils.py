@@ -15,10 +15,10 @@ from torch._prims_common import TensorLikeType
 
 from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
+from vllm.attention.backends.registry import _Backend
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
-from vllm.platforms.interface import _Backend
 from vllm.utils import (STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL,
                         STR_XFORMERS_ATTN_VAL, make_tensor_with_pad)
 
@@ -524,14 +524,14 @@ def make_backend(backend_name: str) -> AttentionBackend:
 
     * Backend instance
     '''
-    if backend_name in (STR_XFORMERS_ATTN_VAL, "XFORMERS_VLLM_V1"):
+    if backend_name == STR_XFORMERS_ATTN_VAL:
         from vllm.v1.attention.backends.xformers import (
             XFormersAttentionBackend)
         return XFormersAttentionBackend()
-    if backend_name in (STR_FLASH_ATTN_VAL, "FLASH_ATTN_VLLM_V1"):
+    if backend_name == STR_FLASH_ATTN_VAL:
         from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
         return FlashAttentionBackend()
-    if backend_name == "TRITON_ATTN_VLLM_V1":
+    if backend_name == "TRITON_ATTN":
         from vllm.v1.attention.backends.triton_attn import (
             TritonAttentionBackend)
         return TritonAttentionBackend()
@@ -539,7 +539,7 @@ def make_backend(backend_name: str) -> AttentionBackend:
         from vllm.v1.attention.backends.flex_attention import (
             FlexAttentionBackend)
         return FlexAttentionBackend()
-    if backend_name in ("TORCH_SDPA", "TORCH_SDPA_VLLM_V1"):
+    if backend_name == "TORCH_SDPA":
         from vllm.v1.attention.backends.cpu_attn import TorchSDPABackend
         return TorchSDPABackend()
     if backend_name == "FLASHINFER":

@@ -8,11 +8,11 @@ import numpy as np
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.multimodal.processing import (PlaceholderFeaturesInfo,
+from vllm.multimodal.processing import (InputProcessingContext,
+                                        PlaceholderFeaturesInfo,
                                         PromptIndexTargets, PromptInsertion,
                                         PromptReplacement, apply_text_matches,
                                         apply_token_matches,
@@ -24,6 +24,8 @@ from vllm.multimodal.profiling import MultiModalProfiler
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .utils import random_image
+
+pytestmark = pytest.mark.cpu_test
 
 
 # yapf: disable

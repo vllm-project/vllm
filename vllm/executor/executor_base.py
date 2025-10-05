@@ -7,19 +7,18 @@ from abc import ABC, abstractmethod
 from functools import cached_property
 from typing import Any, Awaitable, Callable, List, Optional, Set, Union
 
-import torch.nn as nn
-from typing_extensions import TypeVar, deprecated
+from typing_extensions import TypeVar
 
 import vllm.platforms
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest, PoolerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.tasks import SupportedTask
 from vllm.utils import make_async
-from vllm.v1.outputs import SamplerOutput
-from vllm.worker.worker_base import WorkerBase
+from vllm.v1.outputs import PoolerOutput, SamplerOutput
+from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
@@ -30,7 +29,7 @@ class ExecutorBase(ABC):
     """Base class for all executors.
 
     An executor is responsible for executing the model on one device,
-    or it can be a distributed executor 
+    or it can be a distributed executor
     that can execute the model on multiple devices.
     """
 
@@ -83,7 +82,7 @@ class ExecutorBase(ABC):
 
         Returns:
             A list containing the results from each worker.
-        
+
         Note:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
@@ -100,7 +99,7 @@ class ExecutorBase(ABC):
 
         Returns a tuple `(num_gpu_blocks, num_cpu_blocks)`, where
         `num_gpu_blocks` are blocks that are "active" on the device and can be
-        appended to. 
+        appended to.
         `num_cpu_blocks` refers to "swapped" blocks in CPU memory and cannot be
         appended to.
         """
@@ -126,16 +125,6 @@ class ExecutorBase(ABC):
 
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
-
-    @deprecated("`llm_engine.model_executor.apply_model` will no longer work "
-                "in V1 Engine. Please replace with `llm_engine.apply_model` "
-                "and set `VLLM_ALLOW_INSECURE_SERIALIZATION=1`.")
-    def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
-        """
-        Run a function directly on the model inside each worker,
-        returning the result for each of them.
-        """
-        return self.collective_rpc("apply_model", args=(func, ))
 
     @cached_property  # Avoid unnecessary RPC calls
     def supported_tasks(self) -> tuple[SupportedTask, ...]:
@@ -327,7 +316,7 @@ class DistributedExecutorBase(ExecutorBase):
                 run only in the remote TP workers, not the driver worker.
                 It will also be run asynchronously and return a list of futures
                 rather than blocking on the results.
-        
+
         # TODO: simplify and merge with collective_rpc
         """
         raise NotImplementedError

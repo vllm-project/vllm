@@ -14,10 +14,13 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless
 
-from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
+else:
+    _Backend = None
 
 logger = init_logger(__name__)
 
@@ -119,6 +122,12 @@ def on_gfx9() -> bool:
 
 
 @cache
+def on_gfx950() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx950"])
+
+
+@cache
 def use_rocm_custom_paged_attention(
         qtype: torch.dtype,
         head_size: int,
@@ -176,11 +185,10 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int,
-                             dtype: torch.dtype) -> _Backend:
+                             dtype: torch.dtype) -> "_Backend":
+        from vllm.attention.backends.registry import _Backend
         if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
                 and on_gfx9()):
-            # Note: AITER FA is only supported for Qwen-VL models.
-            # TODO: Add support for other VL models in their model class.
             return _Backend.ROCM_AITER_FA
         if on_gfx9():
             return _Backend.FLASH_ATTN
@@ -189,7 +197,11 @@ class RocmPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla,
-                             has_sink) -> str:
+                             has_sink, use_sparse) -> str:
+        from vllm.attention.backends.registry import _Backend
+        if use_sparse:
+            raise NotImplementedError(
+                "Sparse Attention is not supported on ROCm.")
         if use_mla:
             if not use_v1:
                 raise RuntimeError(
@@ -212,8 +224,7 @@ class RocmPlatform(Platform):
                 raise ValueError(
                     f" The selected backend, {selected_backend.name},"
                     f"does not support block size {block_size}.")
-            if selected_backend in (_Backend.ROCM_AITER_MLA,
-                                    _Backend.ROCM_AITER_MLA_VLLM_V1):
+            if selected_backend == _Backend.ROCM_AITER_MLA:
                 if block_size == 1:
                     logger.info("Using AITER MLA backend on V1 engine.")
                     return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
@@ -234,7 +245,7 @@ class RocmPlatform(Platform):
             elif (envs.VLLM_ROCM_USE_AITER and
                 envs.VLLM_USE_AITER_UNIFIED_ATTENTION) or \
                     envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION or \
-                        selected_backend == _Backend.ROCM_ATTN_VLLM_V1:
+                        selected_backend == _Backend.ROCM_ATTN:
                 # rocm specific backend, with aiter and/or
                 #   triton prefix-prefill
                 logger.info("Using Rocm/Aiter Attention backend on V1 engine.")
@@ -322,19 +333,10 @@ class RocmPlatform(Platform):
             cache_config.block_size = 16
 
         if parallel_config.worker_cls == "auto":
-            if vllm_config.speculative_config:
-                if not use_v1:
-                    raise NotImplementedError(
-                        "Speculative decoding is not supported on vLLM V0.")
-                parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
-            else:
-                if use_v1:
-                    parallel_config.worker_cls = \
-                        "vllm.v1.worker.gpu_worker.Worker"
-                else:
-                    parallel_config.worker_cls = "vllm.worker.worker.Worker"
+            parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
         #  Aiter rms norm perform best when CUDA Graph capture is enabled.
-        if use_v1 and use_aiter_rms_norm and not is_eager_execution:
+        if (use_v1 and use_aiter_rms_norm and not is_eager_execution
+                and "-rms_norm" not in compilation_config.custom_ops):
             compilation_config.custom_ops.append("+rms_norm")
 
     @classmethod
@@ -395,11 +397,6 @@ class RocmPlatform(Platform):
             return torch.float8_e4m3fnuz
         else:
             return torch.float8_e4m3fn
-
-    @classmethod
-    def supports_v1(cls, model_config: "ModelConfig") -> bool:
-        # V1 support on AMD gpus is experimental
-        return True
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:

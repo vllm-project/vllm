@@ -4,6 +4,7 @@
 import json
 import os
 import time
+from dataclasses import asdict
 from functools import cache, partial
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, TypeVar, Union
@@ -27,7 +28,8 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.utils import (check_gguf_file,
+                                           parse_safetensors_file_metadata)
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -64,6 +66,8 @@ class LazyConfigDict(dict):
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
+    deepseek_v3="DeepseekV3Config",
+    deepseek_v32="DeepseekV3Config",
     kimi_vl="KimiVLConfig",
     Llama_Nemotron_Nano_VL="Nemotron_Nano_VL_Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
@@ -511,17 +515,17 @@ def maybe_override_with_speculators(
     from vllm.transformers_utils.configs.speculators.base import (
         SpeculatorsConfig)
 
-    vllm_speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
+    speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
         config_dict=config_dict)
 
     # Set the draft model to the speculators model
-    vllm_speculative_config["model"] = model
+    speculative_config["model"] = model
 
     # Override model and tokenizer with the verifier model from config
     verifier_model = speculators_config["verifier"]["name_or_path"]
     model = tokenizer = verifier_model
 
-    return model, tokenizer, vllm_speculative_config
+    return model, tokenizer, speculative_config
 
 
 def get_config(
@@ -947,6 +951,7 @@ def try_get_generation_config(
     model: str,
     trust_remote_code: bool,
     revision: Optional[str] = None,
+    config_format: Union[str, ConfigFormat] = "auto",
 ) -> Optional[GenerationConfig]:
     try:
         return GenerationConfig.from_pretrained(
@@ -959,6 +964,7 @@ def try_get_generation_config(
                 model,
                 trust_remote_code=trust_remote_code,
                 revision=revision,
+                config_format=config_format,
             )
             return GenerationConfig.from_model_config(config)
         except OSError:  # Not found
@@ -997,6 +1003,34 @@ def try_get_tokenizer_config(
         )
     except Exception:
         return None
+
+
+def get_safetensors_params_metadata(
+    model: str,
+    *,
+    revision: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Get the safetensors metadata for remote model repository.
+    """
+    full_metadata = {}
+    if (model_path := Path(model)).exists():
+        safetensors_to_check = model_path.glob("*.safetensors")
+        full_metadata = {
+            param_name: info
+            for file_path in safetensors_to_check if file_path.is_file()
+            for param_name, info in parse_safetensors_file_metadata(
+                file_path).items()
+        }
+    else:
+        repo_mt = try_get_safetensors_metadata(model, revision=revision)
+        if repo_mt and (files_mt := repo_mt.files_metadata):
+            full_metadata = {
+                param_name: asdict(info)
+                for file_mt in files_mt.values()
+                for param_name, info in file_mt.tensors.items()
+            }
+    return full_metadata
 
 
 def _download_mistral_config_file(model, revision) -> dict:

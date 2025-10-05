@@ -103,10 +103,15 @@ start_server() {
         VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 \
             vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     fi
+    local server_pid=$!
 
     # wait for 10 minutes...
     server_started=0
     for i in {1..60}; do
+        # This line checks whether the server is still alive or not,
+        # since that we should always have permission to send signal to the server process.
+        kill -0 $server_pid 2> /dev/null || break
+
         RESPONSE=$(curl -s -X GET "http://0.0.0.0:8004/health" -w "%{http_code}" -o /dev/stdout)
         STATUS_CODE=$(echo "$RESPONSE" | tail -n 1)
         if [[ "$STATUS_CODE" -eq 200 ]]; then
@@ -118,7 +123,7 @@ start_server() {
     done
 
     if (( ! server_started )); then
-        echo "server did not start within 10 minutes. Please check server log at $vllm_log".
+        echo "server did not start within 10 minutes or crashed. Please check server log at $vllm_log".
         return 1
     else
         return 0

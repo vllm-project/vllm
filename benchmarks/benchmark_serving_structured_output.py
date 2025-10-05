@@ -449,7 +449,8 @@ async def benchmark(
     def prepare_extra_body(request) -> dict:
         extra_body = {}
         # Add the schema to the extra_body
-        extra_body[request.structure_type] = request.schema
+        extra_body["structured_outputs"] = {}
+        extra_body["structured_outputs"][request.structure_type] = request.schema
         return extra_body
 
     print("Starting initial single prompt test run...")

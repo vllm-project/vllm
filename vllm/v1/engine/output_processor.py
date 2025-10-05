@@ -248,16 +248,15 @@ class RequestState:
         if prompt_token_ids is None and self.prompt_embeds is not None:
             prompt_token_ids = [0] * len(self.prompt_embeds)
 
-        return RequestOutput(
-            request_id=request_id,
-            prompt=self.prompt,
-            prompt_token_ids=prompt_token_ids,
-            prompt_logprobs=prompt_logprobs,
-            outputs=cast(list[CompletionOutput], outputs),
-            finished=finished,
-            kv_transfer_params=kv_transfer_params,
-            num_cached_tokens=self.num_cached_tokens,
-        )
+        return RequestOutput(request_id=request_id,
+                             prompt=self.prompt,
+                             prompt_token_ids=prompt_token_ids,
+                             prompt_logprobs=prompt_logprobs,
+                             outputs=cast(list[CompletionOutput], outputs),
+                             finished=finished,
+                             kv_transfer_params=kv_transfer_params,
+                             num_cached_tokens=self.num_cached_tokens,
+                             metrics=self.stats)
 
     def _new_completion_output(
         self,
@@ -335,7 +334,14 @@ class OutputProcessor:
                 # Produce final abort output.
                 if req_state.queue is not None and (
                         request_output := req_state.make_request_output(
-                            [], None, FinishReason.ABORT, None, None)):
+                            new_token_ids=[],
+                            # Set pooling_output is not None to
+                            # correctly enter the abort pooling branch
+                            pooling_output=torch.randn(0, device="cpu")
+                            if req_state.detokenizer is None else None,
+                            finish_reason=FinishReason.ABORT,
+                            stop_reason=None,
+                            kv_transfer_params=None)):
                     req_state.queue.put(request_output)
             elif parent := self.parent_requests.get(request_id):
                 # Abort children prior to removing the parent.

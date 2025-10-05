@@ -6,9 +6,10 @@ from typing import Optional
 
 import torch
 
-from tests.v1.attention.utils import (_Backend, create_standard_kv_cache_spec,
+from tests.v1.attention.utils import (create_standard_kv_cache_spec,
                                       create_vllm_config,
                                       get_attention_backend)
+from vllm.attention.backends.registry import _Backend
 from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
@@ -278,7 +279,7 @@ def test_tree_attn_correctness() -> None:
                             block_table=block_table,
                             slot_mapping=branch_slot_mapping,
                             seqlen_k=sequence_position + q_len,
-                            backend=_Backend.FLASH_ATTN_VLLM_V1,
+                            backend=_Backend.FLASH_ATTN,
                         ).view(batch_size, -1, num_heads, dim_per_head)
 
                         # Compare the outputs.

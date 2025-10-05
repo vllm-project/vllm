@@ -149,29 +149,22 @@ def all_gather_fake(tensor: torch.Tensor, dim: int, world_size: int,
 
 
 if supports_custom_op():
-    from vllm.platforms import current_platform
     direct_register_custom_op(
         op_name="all_reduce",
         op_func=all_reduce,
-        mutates_args=[],
         fake_impl=all_reduce_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
         op_name="reduce_scatter",
         op_func=reduce_scatter,
-        mutates_args=[],
         fake_impl=reduce_scatter_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
         op_name="all_gather",
         op_func=all_gather,
-        mutates_args=[],
         fake_impl=all_gather_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
 
@@ -878,17 +871,24 @@ class GroupCoordinator:
                 model)
 
     def dispatch(
-            self, hidden_states: torch.Tensor,
-            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.device_communicator is not None:
             return self.device_communicator.dispatch(hidden_states,
-                                                     router_logits)
+                                                     router_logits,
+                                                     is_sequence_parallel)
         else:
             return hidden_states, router_logits
 
-    def combine(self, hidden_states) -> torch.Tensor:
+    def combine(self,
+                hidden_states,
+                is_sequence_parallel: bool = False) -> torch.Tensor:
         if self.device_communicator is not None:
-            return self.device_communicator.combine(hidden_states)
+            return self.device_communicator.combine(hidden_states,
+                                                    is_sequence_parallel)
         else:
             return hidden_states
 
@@ -1032,7 +1032,9 @@ def init_distributed_environment(world_size: int = -1,
         distributed_init_method, backend)
     from vllm.config import get_current_vllm_config
     config = get_current_vllm_config()
-    if config is not None and config.parallel_config.data_parallel_size > 1:
+    if config is not None and config.parallel_config.data_parallel_size > 1 \
+        and config.parallel_config.distributed_executor_backend \
+        != "external_launcher":
         parallel_config = config.parallel_config
         # adjust to take into account data parallelism
         # offset the rank by the data parallel rank
