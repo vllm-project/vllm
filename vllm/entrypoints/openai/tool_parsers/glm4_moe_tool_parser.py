@@ -8,14 +8,20 @@ from typing import Any, Optional, Union
 
 import regex as re
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              ChatCompletionToolsParam,
-                                              DeltaFunctionCall, DeltaMessage,
-                                              DeltaToolCall,
-                                              ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+    ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
+)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser, ToolParserManager)
+    ToolParser,
+    ToolParserManager,
+)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
@@ -24,7 +30,6 @@ logger = init_logger(__name__)
 
 @ToolParserManager.register_module("glm45")
 class Glm4MoeModelToolParser(ToolParser):
-
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
         self.current_tool_name_sent = False
@@ -36,20 +41,20 @@ class Glm4MoeModelToolParser(ToolParser):
 
         self.tool_calls_start_token = self.tool_call_start_token
 
-        self.func_call_regex = re.compile(r"<tool_call>.*?</tool_call>",
-                                          re.DOTALL)
+        self.func_call_regex = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
         self.func_detail_regex = re.compile(
-            r"<tool_call>([^\n]*)\n(.*)</tool_call>", re.DOTALL)
+            r"<tool_call>([^\n]*)\n(.*)</tool_call>", re.DOTALL
+        )
         self.func_arg_regex = re.compile(
-            r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>",
-            re.DOTALL)
+            r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL
+        )
         if not self.model_tokenizer:
             raise ValueError(
                 "The model tokenizer must be passed to the ToolParser "
-                "constructor during construction.")
+                "constructor during construction."
+            )
 
-        self.tool_call_start_token_id = self.vocab.get(
-            self.tool_call_start_token)
+        self.tool_call_start_token_id = self.vocab.get(self.tool_call_start_token)
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
         self._buffer = ""
 
@@ -58,18 +63,22 @@ class Glm4MoeModelToolParser(ToolParser):
         model_output: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
-
         def _is_string_type(
-                tool_name: str, arg_name: str,
-                tools: Optional[list[ChatCompletionToolsParam]]) -> bool:
+            tool_name: str,
+            arg_name: str,
+            tools: Optional[list[ChatCompletionToolsParam]],
+        ) -> bool:
             if tools is None:
                 return False
             for tool in tools:
                 if tool.function.name == tool_name:
                     if tool.function.parameters is None:
                         return False
-                    arg_type = tool.function.parameters.get(
-                        "properties", {}).get(arg_name, {}).get("type", None)
+                    arg_type = (
+                        tool.function.parameters.get("properties", {})
+                        .get(arg_name, {})
+                        .get("type", None)
+                    )
                     return arg_type == "string"
             logger.warning("No tool named '%s'.", tool_name)
             return False
@@ -101,28 +110,30 @@ class Glm4MoeModelToolParser(ToolParser):
                     arg_val = value.strip()
                     if not _is_string_type(tc_name, arg_key, request.tools):
                         arg_val = _deserialize(arg_val)
-                    logger.debug("arg_key = %s, arg_val = %s", arg_key,
-                                 arg_val)
+                    logger.debug("arg_key = %s, arg_val = %s", arg_key, arg_val)
                     arg_dct[arg_key] = arg_val
                 tool_calls.append(
-                    ToolCall(type="function",
-                             function=FunctionCall(
-                                 name=tc_name, arguments=json.dumps(arg_dct))))
+                    ToolCall(
+                        type="function",
+                        function=FunctionCall(
+                            name=tc_name, arguments=json.dumps(arg_dct)
+                        ),
+                    )
+                )
         except Exception:
             logger.exception("Failed to extract tool call spec")
-            return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
-                                                content=model_output)
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
         else:
             if len(tool_calls) > 0:
-                content = model_output[:model_output.
-                                       find(self.tool_calls_start_token)]
-                return ExtractedToolCallInformation(tools_called=True,
-                                                    tool_calls=tool_calls,
-                                                    content=content)
-            return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
-                                                content=model_output)
+                content = model_output[: model_output.find(self.tool_calls_start_token)]
+                return ExtractedToolCallInformation(
+                    tools_called=True, tool_calls=tool_calls, content=content
+                )
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
 
     def extract_tool_calls_streaming(
         self,
@@ -155,7 +166,8 @@ class Glm4MoeModelToolParser(ToolParser):
                 self.streamed_args_for_tool.append("")
 
             extracted_tool_calls = self.extract_tool_calls(
-                cur_text[:end_idx + len(self.tool_call_end_token)], request)
+                cur_text[: end_idx + len(self.tool_call_end_token)], request
+            )
 
             if len(extracted_tool_calls.tool_calls) == 0:
                 logger.warning("Failed to extract any tool calls.")
@@ -163,22 +175,27 @@ class Glm4MoeModelToolParser(ToolParser):
             tool_call = extracted_tool_calls.tool_calls[0]
             self.prev_tool_call_arr[self.current_tool_id] = {
                 "name": tool_call.function.name,
-                "arguments": json.loads(tool_call.function.arguments)
+                "arguments": json.loads(tool_call.function.arguments),
             }
-            self.streamed_args_for_tool[
-                self.current_tool_id] = tool_call.function.arguments
+            self.streamed_args_for_tool[self.current_tool_id] = (
+                tool_call.function.arguments
+            )
             delta = DeltaMessage(
                 content=extracted_tool_calls.content,
                 tool_calls=[
-                    DeltaToolCall(index=self.current_tool_id,
-                                  id=tool_call.id,
-                                  type=tool_call.type,
-                                  function=DeltaFunctionCall(
-                                      name=tool_call.function.name,
-                                      arguments=tool_call.function.arguments))
-                ])
+                    DeltaToolCall(
+                        index=self.current_tool_id,
+                        id=tool_call.id,
+                        type=tool_call.type,
+                        function=DeltaFunctionCall(
+                            name=tool_call.function.name,
+                            arguments=tool_call.function.arguments,
+                        ),
+                    )
+                ],
+            )
             self.current_tool_id += 1
-            self._buffer = cur_text[end_idx + len(self.tool_call_end_token):]
+            self._buffer = cur_text[end_idx + len(self.tool_call_end_token) :]
             return delta
 
         self._buffer = cur_text[start_idx:]

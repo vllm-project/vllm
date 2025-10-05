@@ -71,8 +71,9 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
         if isinstance(scaling_factors, float):
             scaling_factors = [scaling_factors]
         self.scaling_factors: list[float] = scaling_factors  # noqa
-        super().__init__(head_size, rotary_dim, max_position_embeddings, base,
-                         is_neox_style, dtype)
+        super().__init__(
+            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
+        )
         # Lazy initialized.
         self._scaling_factor_to_offset: dict[float, int]
 

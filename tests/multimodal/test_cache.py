@@ -8,15 +8,20 @@ import torch
 
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import (MultiModalCache,
-                                   MultiModalProcessorCacheItem,
-                                   MultiModalProcessorCacheItemMetadata,
-                                   engine_receiver_cache_from_config,
-                                   processor_cache_from_config)
+from vllm.multimodal.cache import (
+    MultiModalCache,
+    MultiModalProcessorCacheItem,
+    MultiModalProcessorCacheItemMetadata,
+    engine_receiver_cache_from_config,
+    processor_cache_from_config,
+)
 from vllm.multimodal.hasher import MultiModalHasher
-from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargsItem,
-                                    MultiModalKwargsItems,
-                                    MultiModalSharedField)
+from vllm.multimodal.inputs import (
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    MultiModalSharedField,
+)
 from vllm.multimodal.processing import PromptInsertion
 
 pytestmark = pytest.mark.cpu_test
@@ -30,9 +35,9 @@ def _dummy_elem(
     rng: Optional[np.random.RandomState] = None,
 ):
     if rng is None:
-        data = torch.empty((size, ), dtype=torch.int8)
+        data = torch.empty((size,), dtype=torch.int8)
     else:
-        data = torch.from_numpy(rng.randint(4, size=(size, ), dtype=np.int8))
+        data = torch.from_numpy(rng.randint(4, size=(size,), dtype=np.int8))
 
     return MultiModalFieldElem(
         modality=modality,
@@ -48,10 +53,9 @@ def _dummy_item(
     *,
     rng: Optional[np.random.RandomState] = None,
 ):
-    return MultiModalKwargsItem.from_elems([
-        _dummy_elem(modality, key, size, rng=rng)
-        for key, size in size_by_key.items()
-    ])
+    return MultiModalKwargsItem.from_elems(
+        [_dummy_elem(modality, key, size, rng=rng) for key, size in size_by_key.items()]
+    )
 
 
 def _dummy_items(
@@ -59,10 +63,12 @@ def _dummy_items(
     *,
     rng: Optional[np.random.RandomState] = None,
 ):
-    return MultiModalKwargsItems.from_seq([
-        _dummy_item(modality, size_by_key, rng=rng)
-        for modality, size_by_key in size_by_key_modality.items()
-    ])
+    return MultiModalKwargsItems.from_seq(
+        [
+            _dummy_item(modality, size_by_key, rng=rng)
+            for modality, size_by_key in size_by_key_modality.items()
+        ]
+    )
 
 
 # yapf: disable

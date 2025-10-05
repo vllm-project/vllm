@@ -28,17 +28,19 @@ DP_SIZE_LOCAL = DP_SIZE // NUM_NODES  # 2 ranks per node
 
 
 class HybridLBServerManager:
-    """Manages hybrid data parallel vLLM server instances where each node 
-    runs a single logical API server that balances requests only to the 
+    """Manages hybrid data parallel vLLM server instances where each node
+    runs a single logical API server that balances requests only to the
     DP engines running on that same node."""
 
-    def __init__(self,
-                 model_name: str,
-                 dp_size: int,
-                 api_server_count: int,
-                 base_server_args: list,
-                 dp_size_local: int = DP_SIZE_LOCAL,
-                 tp_size: int = TP_SIZE):
+    def __init__(
+        self,
+        model_name: str,
+        dp_size: int,
+        api_server_count: int,
+        base_server_args: list,
+        dp_size_local: int = DP_SIZE_LOCAL,
+        tp_size: int = TP_SIZE,
+    ):
         self.model_name = model_name
         self.dp_size = dp_size
         self.dp_size_local = dp_size_local
@@ -59,25 +61,27 @@ class HybridLBServerManager:
             start_rank = node_id * self.dp_size_local
 
             # Add hybrid LB specific arguments
-            server_args.extend([
-                "--data-parallel-size",
-                str(self.dp_size),
-                "--data-parallel-size-local",
-                str(self.dp_size_local),
-                "--data-parallel-start-rank",
-                str(start_rank),
-                "--data-parallel-hybrid-lb",  # Enable hybrid LB mode
-                "--tensor-parallel-size",
-                str(self.tp_size),
-                "--port",
-                str(8000 + node_id),  # Different port for each node
-                "--api-server-count",
-                str(self.api_server_count),
-                "--data-parallel-address",
-                "127.0.0.1",
-                "--data-parallel-rpc-port",
-                "13345",
-            ])
+            server_args.extend(
+                [
+                    "--data-parallel-size",
+                    str(self.dp_size),
+                    "--data-parallel-size-local",
+                    str(self.dp_size_local),
+                    "--data-parallel-start-rank",
+                    str(start_rank),
+                    "--data-parallel-hybrid-lb",  # Enable hybrid LB mode
+                    "--tensor-parallel-size",
+                    str(self.tp_size),
+                    "--port",
+                    str(8000 + node_id),  # Different port for each node
+                    "--api-server-count",
+                    str(self.api_server_count),
+                    "--data-parallel-address",
+                    "127.0.0.1",
+                    "--data-parallel-rpc-port",
+                    "13345",
+                ]
+            )
 
             # Use a thread to start each server to allow parallel initialization
             def start_server(node: int, sargs: list[str]):
@@ -93,26 +97,25 @@ class HybridLBServerManager:
                         sargs,
                         auto_port=False,
                         env_dict={
-                            "VLLM_SERVER_DEV_MODE":
-                            "1",
-                            current_platform.device_control_env_var:
-                            ",".join(
-                                str(
-                                    current_platform.
-                                    device_id_to_physical_device_id(i))
-                                for i in range(gpu_start, gpu_end))
-                        })
+                            "VLLM_SERVER_DEV_MODE": "1",
+                            current_platform.device_control_env_var: ",".join(
+                                str(current_platform.device_id_to_physical_device_id(i))
+                                for i in range(gpu_start, gpu_end)
+                            ),
+                        },
+                    )
                     server.__enter__()
-                    print(f"Hybrid LB node {node} started successfully with "
-                          f"{self.dp_size_local} local DP ranks and "
-                          f"{self.api_server_count} API servers")
+                    print(
+                        f"Hybrid LB node {node} started successfully with "
+                        f"{self.dp_size_local} local DP ranks and "
+                        f"{self.api_server_count} API servers"
+                    )
                     self.servers.append((server, sargs))
                 except Exception as e:
                     print(f"Failed to start hybrid LB node {node}: {e}")
                     raise
 
-            thread = threading.Thread(target=start_server,
-                                      args=(node_id, server_args))
+            thread = threading.Thread(target=start_server, args=(node_id, server_args))
             thread.start()
 
             self.server_threads.append(thread)
@@ -155,10 +158,14 @@ def default_server_args():
 @pytest.fixture(scope="module", params=[1, 4])
 def server_manager(request, default_server_args):
     api_server_count = request.param
-    server_manager = HybridLBServerManager(MODEL_NAME, DP_SIZE,
-                                           api_server_count,
-                                           default_server_args, DP_SIZE_LOCAL,
-                                           TP_SIZE)
+    server_manager = HybridLBServerManager(
+        MODEL_NAME,
+        DP_SIZE,
+        api_server_count,
+        default_server_args,
+        DP_SIZE_LOCAL,
+        TP_SIZE,
+    )
 
     with server_manager:
         yield server_manager
@@ -198,18 +205,16 @@ def test_hybrid_dp_server_info(server_manager):
         # `n_reqs` is set so that there is a good chance each server
         # receives at least one request
         n_reqs = 2 * api_server_count * api_server_count
-        parallel_configs = [
-            _get_parallel_config(server) for _ in range(n_reqs)
-        ]
-        api_process_counts = [
-            c["_api_process_count"] for c in parallel_configs
-        ]
+        parallel_configs = [_get_parallel_config(server) for _ in range(n_reqs)]
+        api_process_counts = [c["_api_process_count"] for c in parallel_configs]
         api_process_ranks = [c["_api_process_rank"] for c in parallel_configs]
 
-        assert all(c == api_server_count
-                   for c in api_process_counts), api_process_counts
-        assert all(0 <= r < api_server_count
-                   for r in api_process_ranks), api_process_ranks
+        assert all(c == api_server_count for c in api_process_counts), (
+            api_process_counts
+        )
+        assert all(0 <= r < api_server_count for r in api_process_ranks), (
+            api_process_ranks
+        )
 
 
 @pytest.mark.asyncio
@@ -217,17 +222,15 @@ def test_hybrid_dp_server_info(server_manager):
     "model_name",
     [MODEL_NAME],
 )
-async def test_hybrid_lb_completion(clients: list[openai.AsyncOpenAI],
-                                    servers: list[tuple[RemoteOpenAIServer,
-                                                        list[str]]],
-                                    model_name: str) -> None:
-
+async def test_hybrid_lb_completion(
+    clients: list[openai.AsyncOpenAI],
+    servers: list[tuple[RemoteOpenAIServer, list[str]]],
+    model_name: str,
+) -> None:
     async def make_request(client: openai.AsyncOpenAI):
         completion = await client.completions.create(
-            model=model_name,
-            prompt="Hello, my name is",
-            max_tokens=5,
-            temperature=1.0)
+            model=model_name, prompt="Hello, my name is", max_tokens=5, temperature=1.0
+        )
 
         assert completion.id is not None
         assert completion.choices is not None and len(completion.choices) == 1
@@ -251,9 +254,7 @@ async def test_hybrid_lb_completion(clients: list[openai.AsyncOpenAI],
     for i, client in enumerate(clients):
         result = await make_request(client)
         assert result is not None
-        print(
-            f"Hybrid LB node {i} handled single completion request successfully"
-        )
+        print(f"Hybrid LB node {i} handled single completion request successfully")
 
     await asyncio.sleep(0.5)
 
@@ -284,8 +285,10 @@ async def test_hybrid_lb_completion(clients: list[openai.AsyncOpenAI],
 
     _, server_args = servers[0]
     api_server_count = (
-        server_args.count('--api-server-count')
-        and server_args[server_args.index('--api-server-count') + 1] or 1)
+        server_args.count("--api-server-count")
+        and server_args[server_args.index("--api-server-count") + 1]
+        or 1
+    )
     print(
         f"Successfully completed hybrid LB test with {len(clients)} nodes "
         f"({DP_SIZE_LOCAL} DP ranks each, API server count: {api_server_count})"
@@ -302,9 +305,11 @@ async def test_hybrid_lb_completion(clients: list[openai.AsyncOpenAI],
     "model_name",
     [MODEL_NAME],
 )
-async def test_hybrid_lb_completion_streaming(clients: list[
-    openai.AsyncOpenAI], servers: list[tuple[RemoteOpenAIServer, list[str]]],
-                                              model_name: str) -> None:
+async def test_hybrid_lb_completion_streaming(
+    clients: list[openai.AsyncOpenAI],
+    servers: list[tuple[RemoteOpenAIServer, list[str]]],
+    model_name: str,
+) -> None:
     prompt = "What is an LLM?"
 
     async def make_streaming_request(client: openai.AsyncOpenAI):
@@ -318,11 +323,9 @@ async def test_hybrid_lb_completion_streaming(clients: list[
         single_output = single_completion.choices[0].text
 
         # Perform the streaming request
-        stream = await client.completions.create(model=model_name,
-                                                 prompt=prompt,
-                                                 max_tokens=5,
-                                                 temperature=0.0,
-                                                 stream=True)
+        stream = await client.completions.create(
+            model=model_name, prompt=prompt, max_tokens=5, temperature=0.0, stream=True
+        )
         chunks: list[str] = []
         finish_reason_count = 0
         last_chunk = None
@@ -333,25 +336,22 @@ async def test_hybrid_lb_completion_streaming(clients: list[
             last_chunk = chunk  # Keep track of the last chunk
 
         # finish reason should only return in the last block for OpenAI API
-        assert finish_reason_count == 1, (
-            "Finish reason should appear exactly once.")
-        assert last_chunk is not None, (
-            "Stream should have yielded at least one chunk.")
-        assert last_chunk.choices[
-            0].finish_reason == "length", "Finish reason should be 'length'."
+        assert finish_reason_count == 1, "Finish reason should appear exactly once."
+        assert last_chunk is not None, "Stream should have yielded at least one chunk."
+        assert last_chunk.choices[0].finish_reason == "length", (
+            "Finish reason should be 'length'."
+        )
         # Check that the combined text matches the non-streamed version.
-        assert "".join(
-            chunks
-        ) == single_output, "Streamed output should match non-streamed output."
+        assert "".join(chunks) == single_output, (
+            "Streamed output should match non-streamed output."
+        )
         return True  # Indicate success for this request
 
     # Test single request to each node
     for i, client in enumerate(clients):
         result = await make_streaming_request(client)
         assert result is not None
-        print(
-            f"Hybrid LB node {i} handled single streaming request successfully"
-        )
+        print(f"Hybrid LB node {i} handled single streaming request successfully")
 
     await asyncio.sleep(0.5)
 
@@ -382,11 +382,15 @@ async def test_hybrid_lb_completion_streaming(clients: list[
 
     _, server_args = servers[0]
     api_server_count = (
-        server_args.count('--api-server-count')
-        and server_args[server_args.index('--api-server-count') + 1] or 1)
-    print(f"Successfully completed hybrid LB streaming test with "
-          f"{len(clients)} nodes ({DP_SIZE_LOCAL} DP ranks each, "
-          f"API server count: {api_server_count})")
+        server_args.count("--api-server-count")
+        and server_args[server_args.index("--api-server-count") + 1]
+        or 1
+    )
+    print(
+        f"Successfully completed hybrid LB streaming test with "
+        f"{len(clients)} nodes ({DP_SIZE_LOCAL} DP ranks each, "
+        f"API server count: {api_server_count})"
+    )
 
     # Check request balancing within each node
     for i, (server, _) in enumerate(servers):

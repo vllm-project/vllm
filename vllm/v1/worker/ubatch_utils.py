@@ -11,8 +11,10 @@ class UBatchSlice:
     token_slice: slice
 
     def is_empty(self) -> bool:
-        return self.request_slice.start == self.request_slice.stop \
+        return (
+            self.request_slice.start == self.request_slice.stop
             or self.token_slice.start == self.token_slice.stop
+        )
 
     @property
     def num_tokens(self) -> int:
@@ -22,6 +24,7 @@ class UBatchSlice:
 UBatchSlices: TypeAlias = list[UBatchSlice]
 
 
-def is_second_ubatch_empty(orig_num_tokens_per_ubatch: int,
-                           padded_num_tokens_per_ubatch: int) -> bool:
+def is_second_ubatch_empty(
+    orig_num_tokens_per_ubatch: int, padded_num_tokens_per_ubatch: int
+) -> bool:
     return padded_num_tokens_per_ubatch >= 2 * orig_num_tokens_per_ubatch

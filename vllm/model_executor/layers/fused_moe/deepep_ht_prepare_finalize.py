@@ -8,15 +8,20 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+    TopKWeightAndReduceContiguous,
+    TopKWeightAndReduceDelegate,
+)
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils import round_up
 from vllm.v1.worker.ubatching import (
-    dbo_current_ubatch_id, dbo_enabled, dbo_switch_to_comm,
-    dbo_switch_to_compute, dbo_switch_to_compute_sync,
+    dbo_current_ubatch_id,
+    dbo_enabled,
+    dbo_switch_to_comm,
+    dbo_switch_to_compute,
+    dbo_switch_to_compute_sync,
     dbo_yield_and_switch_from_comm_to_compute,
-    dbo_yield_and_switch_from_compute_to_comm)
+    dbo_yield_and_switch_from_compute_to_comm,
+)
 
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -25,8 +30,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
 
     @staticmethod
-    def maybe_roundup_layer_hidden_size(hidden_size: int,
-                                        dtype: torch.dtype) -> int:
+    def maybe_roundup_layer_hidden_size(hidden_size: int, dtype: torch.dtype) -> int:
         # Round up hidden size so it is compatible with DeepEP High Throughput
         # kernels.
         # DeepEP intranode kernels make copies in units of,
@@ -41,8 +45,13 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         hidden_size_bytes = round_up(hidden_size_bytes, xfer_atom_size)
         return hidden_size_bytes // dtype.itemsize
 
-    def __init__(self, buffer: deep_ep.Buffer, num_dispatchers: int,
-                 dp_size: int, rank_expert_offset: int):
+    def __init__(
+        self,
+        buffer: deep_ep.Buffer,
+        num_dispatchers: int,
+        dp_size: int,
+        rank_expert_offset: int,
+    ):
         super().__init__()
         self.buffer = buffer
         self.num_dispatchers_ = num_dispatchers
@@ -91,7 +100,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         a1_scale: Optional[torch.Tensor],
         quant_config: FusedMoEQuantConfig,
     ) -> Callable:
-
         has_scales = token_scales is not None
 
         # We yield before launching the dispatch kernel since the dispatch
@@ -99,22 +107,31 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # for the other ubatch before the dispatch kernel starts.
         dbo_yield_and_switch_from_compute_to_comm()
 
-        (num_tokens_per_rank, num_tokens_per_rdma_rank,
-         dispatch_expert_num_tokens, is_token_in_rank,
-         event) = self.buffer.get_dispatch_layout(
-             topk_idx=rank_topk_ids,
-             num_experts=num_experts,
-             previous_event=None,
-             async_finish=False,
-             allocate_on_comm_stream=False)
+        (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            dispatch_expert_num_tokens,
+            is_token_in_rank,
+            event,
+        ) = self.buffer.get_dispatch_layout(
+            topk_idx=rank_topk_ids,
+            num_experts=num_experts,
+            previous_event=None,
+            async_finish=False,
+            allocate_on_comm_stream=False,
+        )
 
         token_data = tokens
         if has_scales:
             token_data = (tokens, token_scales)
 
         (
-            token_data, expert_topk_ids, expert_topk_weights,
-            expert_num_tokens_per_expert_list, handle, event
+            token_data,
+            expert_topk_ids,
+            expert_topk_weights,
+            expert_num_tokens_per_expert_list,
+            handle,
+            event,
         ) = self.buffer.dispatch(
             x=token_data,
             handle=None,
@@ -130,7 +147,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             config=self._get_dispatch_config(),
             previous_event=None,
             async_finish=self.async_prepare and not dbo_enabled(),
-            allocate_on_comm_stream=False)
+            allocate_on_comm_stream=False,
+        )
 
         # record the handle for this ubatch
         a2a_idx = dbo_current_ubatch_id()
@@ -185,13 +203,15 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_topk_ids = torch.where(
             expert_topk_ids == -1,
             num_experts - 1 if self.rank_expert_offset == 0 else 0,
-            expert_topk_ids + self.rank_expert_offset)
+            expert_topk_ids + self.rank_expert_offset,
+        )
 
         # Makes a GPU-CPU copy.
         # TODO (varun): Maybe it is better to re-compute the expert_num_tokens
         # on GPU.
         expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-            expert_num_tokens_per_expert_list, device=expert_x.device)
+            expert_num_tokens_per_expert_list, device=expert_x.device
+        )
 
         # Dispatch and Quant
         # DeepEP kernels only support dispatching block-quantized
@@ -206,10 +226,16 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     a1_scale,
                     quant_dtype=quant_config.quant_dtype,
                     per_act_token_quant=False,
-                    block_shape=quant_config.block_shape)
+                    block_shape=quant_config.block_shape,
+                )
 
-        return (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
-                expert_topk_weights)
+        return (
+            expert_x,
+            expert_x_scale,
+            expert_tokens_meta,
+            expert_topk_ids,
+            expert_topk_weights,
+        )
 
     def supports_async(self) -> bool:
         return True
@@ -224,12 +250,12 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.ReceiverType:
-
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
             assert topk == 1, (
-                "apply_router_weight_on_input is only implemented for topk=1")
+                "apply_router_weight_on_input is only implemented for topk=1"
+            )
             a1 = a1 * topk_weights.to(a1.dtype)
 
         if quant_config.is_block_quantized:
@@ -249,13 +275,15 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1q_scale = None
             a1_post_scale = quant_config.a1_scale
 
-        return self._do_dispatch(tokens=a1q,
-                                 token_scales=a1q_scale,
-                                 rank_topk_ids=topk_ids,
-                                 rank_topk_weights=topk_weights,
-                                 num_experts=num_experts,
-                                 a1_scale=a1_post_scale,
-                                 quant_config=quant_config)
+        return self._do_dispatch(
+            tokens=a1q,
+            token_scales=a1q_scale,
+            rank_topk_ids=topk_ids,
+            rank_topk_weights=topk_weights,
+            num_experts=num_experts,
+            a1_scale=a1_post_scale,
+            quant_config=quant_config,
+        )
 
     def prepare(
         self,
@@ -267,9 +295,15 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        receiver = self.prepare_async(a1, topk_weights, topk_ids, num_experts,
-                                      expert_map, apply_router_weight_on_input,
-                                      quant_config)
+        receiver = self.prepare_async(
+            a1,
+            topk_weights,
+            topk_ids,
+            num_experts,
+            expert_map,
+            apply_router_weight_on_input,
+            quant_config,
+        )
         return receiver()
 
     def _finalize(
@@ -282,7 +316,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
         do_async: bool,
     ) -> Optional[Callable]:
-
         a2a_idx = dbo_current_ubatch_id()
         handle = self.handles[a2a_idx]
         assert handle is not None
@@ -307,7 +340,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             config=self._get_combine_config(),
             previous_event=None,
             async_finish=do_async and not dbo_enabled(),
-            allocate_on_comm_stream=False)
+            allocate_on_comm_stream=False,
+        )
 
         dbo_switch_to_compute()
 
@@ -341,9 +375,15 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> Callable:
-        receiver = self._finalize(output, fused_expert_output, topk_weights,
-                                  topk_ids, apply_router_weight_on_input,
-                                  weight_and_reduce_impl, True)
+        receiver = self._finalize(
+            output,
+            fused_expert_output,
+            topk_weights,
+            topk_ids,
+            apply_router_weight_on_input,
+            weight_and_reduce_impl,
+            True,
+        )
         assert receiver is not None
         return receiver
 
@@ -356,6 +396,12 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        self._finalize(output, fused_expert_output, topk_weights, topk_ids,
-                       apply_router_weight_on_input, weight_and_reduce_impl,
-                       False)
+        self._finalize(
+            output,
+            fused_expert_output,
+            topk_weights,
+            topk_ids,
+            apply_router_weight_on_input,
+            weight_and_reduce_impl,
+            False,
+        )

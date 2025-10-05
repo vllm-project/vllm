@@ -13,15 +13,18 @@ import torch
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor as RequestLogitsProcessor
 from vllm.sampling_params import SamplingParams
-from vllm.v1.sample.logits_processor.builtin import (LogitBiasLogitsProcessor,
-                                                     MinPLogitsProcessor,
-                                                     MinTokensLogitsProcessor,
-                                                     process_dict_updates)
-from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
-                                                       LogitsProcessor,
-                                                       MoveDirectionality)
-from vllm.v1.sample.logits_processor.state import (BatchUpdateBuilder,
-                                                   LogitsProcessors)
+from vllm.v1.sample.logits_processor.builtin import (
+    LogitBiasLogitsProcessor,
+    MinPLogitsProcessor,
+    MinTokensLogitsProcessor,
+    process_dict_updates,
+)
+from vllm.v1.sample.logits_processor.interface import (
+    BatchUpdate,
+    LogitsProcessor,
+    MoveDirectionality,
+)
+from vllm.v1.sample.logits_processor.state import BatchUpdateBuilder, LogitsProcessors
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -30,10 +33,11 @@ logger = init_logger(__name__)
 
 # Error message when the user tries to initialize vLLM with a pooling model
 # and custom logitsproces
-STR_POOLING_REJECTS_LOGITSPROCS = ("Pooling models do not support custom"
-                                   " logits processors.")
+STR_POOLING_REJECTS_LOGITSPROCS = (
+    "Pooling models do not support custom logits processors."
+)
 
-LOGITSPROCS_GROUP = 'vllm.logits_processors'
+LOGITSPROCS_GROUP = "vllm.logits_processors"
 
 BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
@@ -54,27 +58,29 @@ def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
 
     installed_logitsprocs_plugins = entry_points(group=LOGITSPROCS_GROUP)
     if len(installed_logitsprocs_plugins) == 0:
-        logger.debug("No logitsprocs plugins installed (group %s).",
-                     LOGITSPROCS_GROUP)
+        logger.debug("No logitsprocs plugins installed (group %s).", LOGITSPROCS_GROUP)
         return []
 
     # Load logitsprocs plugins
-    logger.debug("Loading installed logitsprocs plugins (group %s):",
-                 LOGITSPROCS_GROUP)
+    logger.debug("Loading installed logitsprocs plugins (group %s):", LOGITSPROCS_GROUP)
     classes: list[type[LogitsProcessor]] = []
     for entrypoint in installed_logitsprocs_plugins:
         try:
-            logger.debug("- Loading logitproc plugin entrypoint=%s target=%s",
-                         entrypoint.name, entrypoint.value)
+            logger.debug(
+                "- Loading logitproc plugin entrypoint=%s target=%s",
+                entrypoint.name,
+                entrypoint.value,
+            )
             classes.append(entrypoint.load())
         except Exception as e:
             raise RuntimeError(
-                f"Failed to load LogitsProcessor plugin {entrypoint}") from e
+                f"Failed to load LogitsProcessor plugin {entrypoint}"
+            ) from e
     return classes
 
 
 def _load_logitsprocs_by_fqcns(
-    logits_processors: Optional[Sequence[Union[str, type[LogitsProcessor]]]]
+    logits_processors: Optional[Sequence[Union[str, type[LogitsProcessor]]]],
 ) -> list[type[LogitsProcessor]]:
     """Load logit processor types, identifying them by fully-qualified class
     names (FQCNs).
@@ -99,13 +105,14 @@ def _load_logitsprocs_by_fqcns(
 
     logger.debug(
         "%s additional custom logits processors specified, checking whether "
-        "they need to be loaded.", len(logits_processors))
+        "they need to be loaded.",
+        len(logits_processors),
+    )
 
     classes: list[type[LogitsProcessor]] = []
     for ldx, logitproc in enumerate(logits_processors):
         if isinstance(logitproc, type):
-            logger.debug(" - Already-loaded logit processor: %s",
-                         logitproc.__name__)
+            logger.debug(" - Already-loaded logit processor: %s", logitproc.__name__)
             if not issubclass(logitproc, LogitsProcessor):
                 raise ValueError(
                     f"{logitproc.__name__} is not a subclass of LogitsProcessor"
@@ -131,8 +138,7 @@ def _load_logitsprocs_by_fqcns(
         if not isinstance(obj, type):
             raise ValueError("Loaded logit processor must be a type.")
         if not issubclass(obj, LogitsProcessor):
-            raise ValueError(
-                f"{obj.__name__} must be a subclass of LogitsProcessor")
+            raise ValueError(f"{obj.__name__} must be a subclass of LogitsProcessor")
         classes.append(obj)
 
     return classes
@@ -155,13 +161,13 @@ def _load_custom_logitsprocs(
       A list of all loaded logitproc types
     """
     from vllm.platforms import current_platform
+
     if current_platform.is_tpu():
         # No logitsprocs specified by caller
         # TODO(andy) - vLLM V1 on TPU does not support custom logitsprocs
         return []
 
-    return (_load_logitsprocs_plugins() +
-            _load_logitsprocs_by_fqcns(logits_processors))
+    return _load_logitsprocs_plugins() + _load_logitsprocs_by_fqcns(logits_processors)
 
 
 def build_logitsprocs(
@@ -174,23 +180,28 @@ def build_logitsprocs(
     if is_pooling_model:
         if custom_logitsprocs:
             raise ValueError(STR_POOLING_REJECTS_LOGITSPROCS)
-        logger.debug("Skipping logits processor loading because pooling models"
-                     " do not support logits processors.")
+        logger.debug(
+            "Skipping logits processor loading because pooling models"
+            " do not support logits processors."
+        )
         return LogitsProcessors()
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
     return LogitsProcessors(
-        ctor(vllm_config, device, is_pin_memory) for ctor in itertools.chain(
-            BUILTIN_LOGITS_PROCESSORS, custom_logitsprocs_classes))
+        ctor(vllm_config, device, is_pin_memory)
+        for ctor in itertools.chain(
+            BUILTIN_LOGITS_PROCESSORS, custom_logitsprocs_classes
+        )
+    )
 
 
 class AdapterLogitsProcessor(LogitsProcessor):
     """Wrapper for per-request logits processors
-    
+
     To wrap a specific per-request logits processor,
     * Subclass `AdapterLogitsProcessor`
     * Implement `self.is_argmax_invariant()` base-class method
     * Implement `self.new_req_logits_processor(params)`
-    
+
     `self.__init__(vllm_config, device, is_pin_memory)` does not need to be
     overridden in general. However, to implement custom constructor behavior -
     especially any logic which operates on or stores `vllm_config`, `device`,
@@ -199,8 +210,9 @@ class AdapterLogitsProcessor(LogitsProcessor):
     `super().__init__(vllm_config, device, is_pin_memory)`
     """
 
-    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
-                 is_pin_memory: bool):
+    def __init__(
+        self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
+    ):
         """Subclass must invoke
         `super().__init__(vllm_config, device, is_pin_memory)`.
 
@@ -236,7 +248,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
         Returns:
           None if logits processor should not be applied to request; otherwise
           returns a `RequestLogitsProcessor` instance
-        
+
         """
         raise NotImplementedError
 
@@ -257,11 +269,14 @@ class AdapterLogitsProcessor(LogitsProcessor):
 
         Returns:
           logits processor partial[Tensor] or None
-        
+
         """
         if req_lp := self.new_req_logits_processor(params):
-            args = [prompt_ids, output_ids] if (len(
-                inspect.signature(req_lp).parameters) == 3) else [output_ids]
+            args = (
+                [prompt_ids, output_ids]
+                if (len(inspect.signature(req_lp).parameters) == 3)
+                else [output_ids]
+            )
             return partial(req_lp, *args)
         return None
 
@@ -286,9 +301,16 @@ class AdapterLogitsProcessor(LogitsProcessor):
 
 
 __all__ = [
-    "LogitsProcessor", "LogitBiasLogitsProcessor", "MinPLogitsProcessor",
-    "MinTokensLogitsProcessor", "BatchUpdate", "BatchUpdateBuilder",
-    "MoveDirectionality", "LogitsProcessors", "build_logitsprocs",
-    "STR_POOLING_REJECTS_LOGITSPROCS", "LOGITSPROCS_GROUP",
-    "AdapterLogitsProcessor"
+    "LogitsProcessor",
+    "LogitBiasLogitsProcessor",
+    "MinPLogitsProcessor",
+    "MinTokensLogitsProcessor",
+    "BatchUpdate",
+    "BatchUpdateBuilder",
+    "MoveDirectionality",
+    "LogitsProcessors",
+    "build_logitsprocs",
+    "STR_POOLING_REJECTS_LOGITSPROCS",
+    "LOGITSPROCS_GROUP",
+    "AdapterLogitsProcessor",
 ]

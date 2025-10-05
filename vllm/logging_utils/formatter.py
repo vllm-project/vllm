@@ -18,7 +18,6 @@ class NewLineFormatter(logging.Formatter):
             self.root_dir = Path(__file__).resolve().parent.parent.parent
 
     def format(self, record):
-
         def shrink_path(relpath: Path) -> str:
             """
             Shortens a file path for logging display:
@@ -62,8 +61,7 @@ class NewLineFormatter(logging.Formatter):
             abs_path = getattr(record, "pathname", None)
             if abs_path:
                 try:
-                    relpath = Path(abs_path).resolve().relative_to(
-                        self.root_dir)
+                    relpath = Path(abs_path).resolve().relative_to(self.root_dir)
                 except Exception:
                     relpath = Path(record.filename)
             else:

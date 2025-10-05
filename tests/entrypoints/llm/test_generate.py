@@ -29,11 +29,13 @@ TOKEN_IDS = [
 def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(model=MODEL_NAME,
-              max_num_batched_tokens=4096,
-              tensor_parallel_size=1,
-              gpu_memory_utilization=0.10,
-              enforce_eager=True)
+    llm = LLM(
+        model=MODEL_NAME,
+        max_num_batched_tokens=4096,
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.10,
+        enforce_eager=True,
+    )
 
     yield weakref.proxy(llm)
 
@@ -81,7 +83,8 @@ def test_max_model_len():
     outputs = llm.generate(PROMPTS, sampling_params)
     for output in outputs:
         num_total_tokens = len(output.prompt_token_ids) + len(
-            output.outputs[0].token_ids)
+            output.outputs[0].token_ids
+        )
         # Total tokens must not exceed max_model_len + 1 (the last token can be
         # generated with the context length equal to the max model length)
         # It can be less if generation finishes due to other reasons (e.g., EOS)

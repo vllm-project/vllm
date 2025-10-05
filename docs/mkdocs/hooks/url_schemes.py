@@ -25,8 +25,9 @@ from mkdocs.structure.files import Files
 from mkdocs.structure.pages import Page
 
 
-def on_page_markdown(markdown: str, *, page: Page, config: MkDocsConfig,
-                     files: Files) -> str:
+def on_page_markdown(
+    markdown: str, *, page: Page, config: MkDocsConfig, files: Files
+) -> str:
     """
     Custom MkDocs plugin hook to rewrite special GitHub reference links
     in Markdown.
@@ -35,7 +36,7 @@ def on_page_markdown(markdown: str, *, page: Page, config: MkDocsConfig,
     GitHub shorthand links, such as:
       - `[Link text](gh-issue:123)`
       - `<gh-pr:456>`
-    
+
     And rewrites them into fully-qualified GitHub URLs with GitHub icons:
       - `[:octicons-mark-github-16: Link text](https://github.com/vllm-project/vllm/issues/123)`
       - `[:octicons-mark-github-16: Pull Request #456](https://github.com/vllm-project/vllm/pull/456)`
@@ -88,21 +89,21 @@ def on_page_markdown(markdown: str, *, page: Page, config: MkDocsConfig,
         """
         Replaces a matched inline-style GitHub shorthand link
         with a full Markdown link.
-        
+
         Example:
             [My issue](gh-issue:123) → [:octicons-mark-github-16: My issue](https://github.com/vllm-project/vllm/issues/123)
         """
-        url = f'{urls[match.group("type")]}/{match.group("path")}'
+        url = f"{urls[match.group('type')]}/{match.group('path')}"
         if fragment := match.group("fragment"):
             url += f"#{fragment}"
 
-        return f'[{gh_icon} {match.group("title")}]({url})'
+        return f"[{gh_icon} {match.group('title')}]({url})"
 
     def replace_auto_link(match: re.Match) -> str:
         """
         Replaces a matched autolink-style GitHub shorthand
         with a full Markdown link.
-        
+
         Example:
             <gh-pr:456> → [:octicons-mark-github-16: Pull Request #456](https://github.com/vllm-project/vllm/pull/456)
         """

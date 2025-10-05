@@ -14,9 +14,10 @@ from .base_linear import BaseLinearLayerWithLoRA
 
 
 class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
-
     def __init__(self, base_layer: ReplicatedLinear) -> None:
-        super().__init__(base_layer, )
+        super().__init__(
+            base_layer,
+        )
         # To ensure interface compatibility, set to 1 always.
         self.output_size = self.base_layer.output_size
         self.n_slices = 1
@@ -33,14 +34,12 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
             - output
             - bias
         """
-        bias = (self.base_layer.bias
-                if not self.base_layer.skip_bias_add else None)
+        bias = self.base_layer.bias if not self.base_layer.skip_bias_add else None
 
         # Matrix multiply.
         output = self.apply(input_, bias)
 
-        output_bias = (self.base_layer.bias
-                       if self.base_layer.skip_bias_add else None)
+        output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
 
         if not self.base_layer.return_bias:
             return output

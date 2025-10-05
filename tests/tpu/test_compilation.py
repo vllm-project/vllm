@@ -26,16 +26,15 @@ def test_tpu_compilation():
 
         # Currently, top-p sampling is disabled. `top_p` should be 1.0.
         N = 1
-        sampling_params = SamplingParams(temperature=0.7,
-                                         top_p=1.0,
-                                         n=N,
-                                         max_tokens=16)
+        sampling_params = SamplingParams(temperature=0.7, top_p=1.0, n=N, max_tokens=16)
 
-        llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
-                  max_num_batched_tokens=256,
-                  max_model_len=256,
-                  max_num_seqs=32,
-                  enforce_eager=False)
+        llm = LLM(
+            model="Qwen/Qwen2-1.5B-Instruct",
+            max_num_batched_tokens=256,
+            max_model_len=256,
+            max_num_seqs=32,
+            enforce_eager=False,
+        )
 
         outputs = llm.generate(prompts, sampling_params)
         for output, answer in zip(outputs, answers):
@@ -45,7 +44,8 @@ def test_tpu_compilation():
             assert generated_text.startswith(answer)
 
     compiled_codes = sorted(
-        glob.glob(os.path.join(temp_dir, "__transformed_code*for_forward.py")))
+        glob.glob(os.path.join(temp_dir, "__transformed_code*for_forward.py"))
+    )
 
     for i, compiled_code in enumerate(compiled_codes):
         print("{} file: {}".format(i + 1, compiled_code))
@@ -66,9 +66,10 @@ def test_tpu_compilation():
 
     # Check all the compilations are as expected. The dump files include the
     # captured graph for the forward function of the nn.Module.
-    compiled_fns = sorted(glob.glob(
-        os.path.join(temp_dir, "__compiled_fn*Forward_graph*.py")),
-                          key=lambda s: extract_compiled_index(s))
+    compiled_fns = sorted(
+        glob.glob(os.path.join(temp_dir, "__compiled_fn*Forward_graph*.py")),
+        key=lambda s: extract_compiled_index(s),
+    )
 
     for i, compiled_fn in enumerate(compiled_fns):
         print("{} file: {}".format(i + 1, compiled_fn))
@@ -82,4 +83,4 @@ def test_tpu_compilation():
     # ragged_paged_attention
     with open(compiled_fns[1]) as f:
         content = f.read()
-        assert (kv_cache_prefix in content and attn_prefix in content)
+        assert kv_cache_prefix in content and attn_prefix in content

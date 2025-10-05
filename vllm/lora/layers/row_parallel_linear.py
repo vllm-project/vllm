@@ -8,8 +8,11 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config.lora import LoRAConfig
-from vllm.distributed import (split_tensor_along_last_dim,
-                              tensor_model_parallel_all_reduce)
+from vllm.distributed import (
+    split_tensor_along_last_dim,
+    tensor_model_parallel_all_reduce,
+)
+
 # yapf: disable
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.platforms import current_platform

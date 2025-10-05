@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that compute logits from hidden_stats."""
+
 from typing import Optional
 
 import torch
 
-from vllm.distributed import (tensor_model_parallel_all_gather,
-                              tensor_model_parallel_gather)
+from vllm.distributed import (
+    tensor_model_parallel_all_gather,
+    tensor_model_parallel_gather,
+)
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
 
 
@@ -23,12 +25,14 @@ class LogitsProcessor(CustomOp):
     3. Apply logits processors (if any).
     """
 
-    def __init__(self,
-                 vocab_size: int,
-                 org_vocab_size: Optional[int] = None,
-                 scale: float = 1.0,
-                 logits_as_input: bool = False,
-                 soft_cap: Optional[float] = None) -> None:
+    def __init__(
+        self,
+        vocab_size: int,
+        org_vocab_size: Optional[int] = None,
+        scale: float = 1.0,
+        logits_as_input: bool = False,
+        soft_cap: Optional[float] = None,
+    ) -> None:
         """
         Args:
             scale: A scaling factor to apply to the logits.
@@ -87,16 +91,14 @@ class LogitsProcessor(CustomOp):
         embedding_bias: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
-        logits = lm_head.quant_method.apply(lm_head,
-                                            hidden_states,
-                                            bias=embedding_bias)
+        logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
 
         # Gather logits for TP
         logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any).
         if logits is not None:
-            logits = logits[..., :self.org_vocab_size]
+            logits = logits[..., : self.org_vocab_size]
         return logits
 
     def extra_repr(self) -> str:

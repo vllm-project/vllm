@@ -28,9 +28,9 @@ else:
 
 
 def get_max_threads(pid=0):
-    if hasattr(os, 'sched_getaffinity'):
+    if hasattr(os, "sched_getaffinity"):
         return len(os.sched_getaffinity(pid))
-    elif platform.system() == 'Darwin':
+    elif platform.system() == "Darwin":
         return os.cpu_count()
     else:
         raise NotImplementedError("Unsupported OS")
@@ -60,7 +60,8 @@ class LogicalCPUInfo:
             return LogicalCPUInfo(
                 id=LogicalCPUInfo._int(id),
                 physical_core=LogicalCPUInfo._int(physical_core),
-                numa_node=LogicalCPUInfo._int(numa_node))
+                numa_node=LogicalCPUInfo._int(numa_node),
+            )
         else:
             return obj_dict
 
@@ -77,11 +78,15 @@ class CpuPlatform(Platform):
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return [torch.bfloat16, torch.float32]
-        elif (self.get_cpu_architecture() == CpuArchEnum.ARM
-              and sys.platform.startswith("darwin")):
-            if (subprocess.check_output(
-                ["sysctl -n hw.optional.arm.FEAT_BF16"],
-                    shell=True).strip() == b"1"):
+        elif self.get_cpu_architecture() == CpuArchEnum.ARM and sys.platform.startswith(
+            "darwin"
+        ):
+            if (
+                subprocess.check_output(
+                    ["sysctl -n hw.optional.arm.FEAT_BF16"], shell=True
+                ).strip()
+                == b"1"
+            ):
                 return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
         elif self.get_cpu_architecture() == CpuArchEnum.RISCV:
@@ -117,18 +122,26 @@ class CpuPlatform(Platform):
         return "cpu"
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
-                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool, use_sparse: bool) -> str:
+    def get_attn_backend_cls(
+        cls,
+        selected_backend: "_Backend",
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: Optional[str],
+        block_size: int,
+        use_v1: bool,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+    ) -> str:
         from vllm.attention.backends.registry import _Backend
+
         if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:
             raise NotImplementedError("MLA is not supported on CPU.")
         if use_sparse:
-            raise NotImplementedError(
-                "Sparse Attention is not supported on CPU.")
+            raise NotImplementedError("Sparse Attention is not supported on CPU.")
         logger.info("Using Torch SDPA backend.")
         if not use_v1:
             raise ValueError("CPU backend only supports V1.")
@@ -144,7 +157,8 @@ class CpuPlatform(Platform):
             kv_cache_space = 4 * GiB_bytes  # type: ignore
             logger.warning_once(
                 "Environment variable VLLM_CPU_KVCACHE_SPACE (GiB) "
-                "for CPU backend is not set, using 4 by default.")
+                "for CPU backend is not set, using 4 by default."
+            )
         else:
             kv_cache_space *= GiB_bytes
 
@@ -178,53 +192,66 @@ class CpuPlatform(Platform):
         if not ipex_available and cache_config.block_size != 16:
             raise RuntimeError(
                 f"--block-size={cache_config.block_size} requires"
-                " intel_extension_for_pytorch")
+                " intel_extension_for_pytorch"
+            )
 
         scheduler_config = vllm_config.scheduler_config
-        if ((scheduler_config.chunked_prefill_enabled
-             or cache_config.enable_prefix_caching)
-                and cache_config.cache_dtype != "auto"):
-            raise RuntimeError("Chunked-prefill and prefix-cache on the CPU "
-                               "backend is not compatible with FP8 KV cache.")
+        if (
+            scheduler_config.chunked_prefill_enabled
+            or cache_config.enable_prefix_caching
+        ) and cache_config.cache_dtype != "auto":
+            raise RuntimeError(
+                "Chunked-prefill and prefix-cache on the CPU "
+                "backend is not compatible with FP8 KV cache."
+            )
 
         if cache_config.cache_dtype == "fp8_e4m3":
             cache_config.cache_dtype = "fp8_e5m2"
             logger.warning(
-                "CPU backend doesn't support fp8_e4m3 KV cache type, "
-                "cast to fp8_e5m2.")
+                "CPU backend doesn't support fp8_e4m3 KV cache type, cast to fp8_e5m2."
+            )
 
-        if (cache_config.cache_dtype != "auto" and model_config is not None
-                and model_config.dtype == torch.half):
-            logger.warning("FP8 KV cache on the CPU backend only does not"
-                           " support fp16 for now, cast to bf16.")
+        if (
+            cache_config.cache_dtype != "auto"
+            and model_config is not None
+            and model_config.dtype == torch.half
+        ):
+            logger.warning(
+                "FP8 KV cache on the CPU backend only does not"
+                " support fp16 for now, cast to bf16."
+            )
             model_config.dtype = torch.bfloat16
 
-        cache_config.cpu_kvcache_space_bytes = \
-            CpuPlatform.get_device_total_memory()
+        cache_config.cpu_kvcache_space_bytes = CpuPlatform.get_device_total_memory()
 
         parallel_config = vllm_config.parallel_config
-        if (parallel_config.world_size > 1
-                and parallel_config.distributed_executor_backend is not None
-                and parallel_config.distributed_executor_backend != "mp"):
-            logger.warning(("%s is not supported on CPU, fallback to mp "
-                            "distributed executor backend."),
-                           parallel_config.distributed_executor_backend)
+        if (
+            parallel_config.world_size > 1
+            and parallel_config.distributed_executor_backend is not None
+            and parallel_config.distributed_executor_backend != "mp"
+        ):
+            logger.warning(
+                (
+                    "%s is not supported on CPU, fallback to mp "
+                    "distributed executor backend."
+                ),
+                parallel_config.distributed_executor_backend,
+            )
             parallel_config.distributed_executor_backend = "mp"
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
         # Disable DBO
         if parallel_config.enable_dbo:
-            logger.warning(
-                "Dual-Batch Overlap is not supported on CPU, disabled.")
+            logger.warning("Dual-Batch Overlap is not supported on CPU, disabled.")
             parallel_config.enable_dbo = False
 
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationLevel
+
         vllm_config.compilation_config.cudagraph_capture_sizes = []
 
         compilation_config = vllm_config.compilation_config
         if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE:
-
             # Note: vLLM V1 is using PIECEWISE level compilation, which will
             # take time to compile kernels just-in-time with the inductor
             # backend. For CPU CI tests, most of them are executed fast and
@@ -239,16 +266,14 @@ class CpuPlatform(Platform):
 
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
             compilation_config.backend = backend
-            compilation_config.inductor_compile_config.update({
-                "dce":
-                True,
-                "size_asserts":
-                False,
-                "nan_asserts":
-                False,
-                "epilogue_fusion":
-                True,
-            })
+            compilation_config.inductor_compile_config.update(
+                {
+                    "dce": True,
+                    "size_asserts": False,
+                    "nan_asserts": False,
+                    "epilogue_fusion": True,
+                }
+            )
             if compilation_config.use_inductor:
                 compilation_config.custom_ops = ["none"]
 
@@ -278,51 +303,56 @@ class CpuPlatform(Platform):
         if "libiomp5.so" in ld_prealod_str:
             # The time(milliseconds) that a thread should wait after
             # completing the execution of a parallel region, before sleeping.
-            os.environ['KMP_BLOCKTIME'] = "1"
+            os.environ["KMP_BLOCKTIME"] = "1"
             # Prevents the CPU to run into low performance state
-            os.environ['KMP_TPAUSE'] = "0"
+            os.environ["KMP_TPAUSE"] = "0"
             # Provides fine granularity parallelism
-            os.environ['KMP_FORKJOIN_BARRIER_PATTERN'] = "dist,dist"
-            os.environ['KMP_PLAIN_BARRIER_PATTERN'] = "dist,dist"
-            os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"
+            os.environ["KMP_FORKJOIN_BARRIER_PATTERN"] = "dist,dist"
+            os.environ["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
+            os.environ["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
 
         # To hint IPEX uses shared memory based AllReduce
         os.environ["LOCAL_WORLD_SIZE"] = str(
-            vllm_config.parallel_config.tensor_parallel_size)
+            vllm_config.parallel_config.tensor_parallel_size
+        )
 
         if model_config is not None and model_config.use_mla:
             logger.info(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
-                "prefill and prefix caching to be disabled.")
+                "prefill and prefix caching to be disabled."
+            )
             vllm_config.scheduler_config.enable_chunked_prefill = False
             vllm_config.scheduler_config.chunked_prefill_enabled = False
             vllm_config.scheduler_config.max_num_batched_tokens = max(
                 vllm_config.scheduler_config.max_model_len,
-                DEFAULT_MAX_NUM_BATCHED_TOKENS)
+                DEFAULT_MAX_NUM_BATCHED_TOKENS,
+            )
 
     @classmethod
-    def get_allowed_cpu_core_node_list(
-            cls) -> tuple[list[int], list[LogicalCPUInfo]]:
+    def get_allowed_cpu_core_node_list(cls) -> tuple[list[int], list[LogicalCPUInfo]]:
         assert platform.system() == "Linux"
 
         # Init LogicalCPUInfo from lscpu
-        lscpu_output = subprocess.check_output("lscpu -J -e=CPU,CORE,NODE",
-                                               shell=True,
-                                               text=True)
+        lscpu_output = subprocess.check_output(
+            "lscpu -J -e=CPU,CORE,NODE", shell=True, text=True
+        )
         logical_cpu_list: list[LogicalCPUInfo] = json.loads(
-            lscpu_output, object_hook=LogicalCPUInfo.json_decoder)['cpus']
+            lscpu_output, object_hook=LogicalCPUInfo.json_decoder
+        )["cpus"]
 
         # Filter CPUs with invalid attributes
         logical_cpu_list = [
-            x for x in logical_cpu_list
+            x
+            for x in logical_cpu_list
             if -1 not in (x.id, x.physical_core, x.numa_node)
         ]
 
         # Filter allowed CPUs
-        allowed_cpu_id_list = os.sched_getaffinity(0)
-        logical_cpu_list = [
-            x for x in logical_cpu_list if x.id in allowed_cpu_id_list
-        ]
+        if hasattr(os, "sched_getaffinity"):
+            allowed_cpu_id_list = os.sched_getaffinity(0)
+        else:
+            raise NotImplementedError("Unsupported OS")
+        logical_cpu_list = [x for x in logical_cpu_list if x.id in allowed_cpu_id_list]
 
         # Get allowed NUMA nodes
         allowed_numa_nodes = set()
@@ -331,8 +361,8 @@ class CpuPlatform(Platform):
         allowed_numa_nodes_list = sorted(allowed_numa_nodes)
 
         env_key = CpuPlatform.device_control_env_var
-        if (env_key in os.environ and os.environ[env_key] != ""):
-            visible_nodes = [int(s) for s in os.environ[env_key].split(',')]
+        if env_key in os.environ and os.environ[env_key] != "":
+            visible_nodes = [int(s) for s in os.environ[env_key].split(",")]
             allowed_numa_nodes_list = [
                 x for x in visible_nodes if x in allowed_cpu_id_list
             ]

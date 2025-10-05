@@ -103,23 +103,28 @@ def test_compile_correctness(
     attn_backend = test_setting.attn_backend
     method = test_setting.method
     if cuda_device_count_stateless() < pp_size * tp_size:
-        pytest.skip(f"Need at least {pp_size}*{tp_size} CUDA gpus but got "
-                    f"{cuda_device_count_stateless()}")
+        pytest.skip(
+            f"Need at least {pp_size}*{tp_size} CUDA gpus but got "
+            f"{cuda_device_count_stateless()}"
+        )
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
         final_args = [
-            "--enforce-eager", *model_args, "-pp",
-            str(pp_size), "-tp",
-            str(tp_size)
+            "--enforce-eager",
+            *model_args,
+            "-pp",
+            str(pp_size),
+            "-tp",
+            str(tp_size),
         ]
 
         all_args: list[list[str]] = []
         all_envs: list[dict[str, str] | None] = []
 
         for level in [
-                CompilationLevel.NO_COMPILATION,
-                CompilationLevel.PIECEWISE,
+            CompilationLevel.NO_COMPILATION,
+            CompilationLevel.PIECEWISE,
         ]:
             all_args.append(final_args + [f"-O{level}"])
             all_envs.append({})
@@ -130,14 +135,15 @@ def test_compile_correctness(
             model,
             all_args,
             all_envs,
-            method=method if method != "generate" else "generate_close")
+            method=method if method != "generate" else "generate_close",
+        )
         all_envs.clear()
         all_args.clear()
 
         for level in [
-                CompilationLevel.NO_COMPILATION,
-                CompilationLevel.DYNAMO_AS_IS,
-                CompilationLevel.DYNAMO_ONCE,
+            CompilationLevel.NO_COMPILATION,
+            CompilationLevel.DYNAMO_AS_IS,
+            CompilationLevel.DYNAMO_ONCE,
         ]:
             all_args.append(final_args + [f"-O{level}"])
             all_envs.append({})

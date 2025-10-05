@@ -4,10 +4,11 @@ from typing import TYPE_CHECKING, Optional
 
 from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
-from vllm.distributed.kv_transfer.kv_connector.factory import (
-    KVConnectorFactory)
-from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
-                                                          KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.v1 import (
+    KVConnectorBase_V1,
+    KVConnectorRole,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -17,7 +18,8 @@ _KV_CONNECTOR_AGENT: Optional[KVConnectorBaseType] = None
 
 def get_kv_transfer_group() -> KVConnectorBaseType:
     assert _KV_CONNECTOR_AGENT is not None, (
-        "disaggregated KV cache transfer parallel group is not initialized")
+        "disaggregated KV cache transfer parallel group is not initialized"
+    )
     return _KV_CONNECTOR_AGENT
 
 
@@ -25,8 +27,7 @@ def has_kv_transfer_group() -> bool:
     return _KV_CONNECTOR_AGENT is not None
 
 
-def is_v1_kv_transfer_group(
-        connector: Optional[KVConnectorBaseType] = None) -> bool:
+def is_v1_kv_transfer_group(connector: Optional[KVConnectorBaseType] = None) -> bool:
     """Check if the KV connector is the v1 connector.
     If the argument is None, it will check the global KV connector
 
@@ -57,11 +58,14 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
     if vllm_config.kv_transfer_config is None:
         return
 
-    if (vllm_config.kv_transfer_config.is_kv_transfer_instance
-            and _KV_CONNECTOR_AGENT is None):
+    if (
+        vllm_config.kv_transfer_config.is_kv_transfer_instance
+        and _KV_CONNECTOR_AGENT is None
+    ):
         if envs.VLLM_USE_V1:
             _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
-                config=vllm_config, role=KVConnectorRole.WORKER)
+                config=vllm_config, role=KVConnectorRole.WORKER
+            )
         else:
             raise ValueError("V0 is no longer supported")
 

@@ -122,8 +122,9 @@ class NoOpEliminationPass(VllmInductorPass):
         logger.debug("Removed %s no-op reshapes and slices", count)
 
     # ---------------------- Reshape helpers ----------------------
-    def reshape_dims_equivalent(self, dim: Union[int, torch.fx.Node],
-                                i_dim: Union[int, SymInt]) -> bool:
+    def reshape_dims_equivalent(
+        self, dim: Union[int, torch.fx.Node], i_dim: Union[int, SymInt]
+    ) -> bool:
         """
         This function checks if two dimensions are equivalent.
         :param dim: The dimension arg to reshape/slice
@@ -153,6 +154,4 @@ class NoOpEliminationPass(VllmInductorPass):
         dims: Iterable[Union[int, torch.fx.Node]],
         i_dims: Iterable[Union[int, SymInt]],
     ) -> bool:
-        return all(
-            self.reshape_dims_equivalent(s, i_s)
-            for s, i_s in zip(dims, i_dims))
+        return all(self.reshape_dims_equivalent(s, i_s) for s, i_s in zip(dims, i_dims))

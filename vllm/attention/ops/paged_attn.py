@@ -24,6 +24,7 @@ _PARTITION_SIZE = 512
 @dataclass
 class PagedAttentionMetadata:
     """Metadata for PagedAttention."""
+
     # (batch_size,). The length of sequences (entire tokens seen so far) per
     # sequence.
     seq_lens_tensor: Optional[torch.Tensor]
@@ -39,7 +40,6 @@ class PagedAttentionMetadata:
 
 
 class PagedAttention:
-
     @staticmethod
     def get_supported_head_sizes() -> List[int]:
         return [32, 64, 80, 96, 112, 120, 128, 192, 256]
@@ -64,8 +64,7 @@ class PagedAttention:
         num_blocks = kv_cache.shape[1]
 
         key_cache = kv_cache[0]
-        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x,
-                                   -1, x)
+        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x, -1, x)
         value_cache = kv_cache[1]
         value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
         return key_cache, value_cache
@@ -115,16 +114,17 @@ class PagedAttention:
         if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
             # use blocksparse paged attention
             block_size = value_cache.size(-1)
-            assert (blocksparse_block_size > 0 and
-                    blocksparse_block_size % block_size == 0), \
-                (f"{blocksparse_block_size=} needs to be a multiple of"
-                 f"{block_size=} used in block_tables.")
+            assert (
+                blocksparse_block_size > 0 and blocksparse_block_size % block_size == 0
+            ), (
+                f"{blocksparse_block_size=} needs to be a multiple of"
+                f"{block_size=} used in block_tables."
+            )
 
         output = torch.empty_like(query)
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
-        max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
-                              _PARTITION_SIZE)
+        max_num_partitions = (max_seq_len + _PARTITION_SIZE - 1) // _PARTITION_SIZE
         # NOTE(woosuk): We use a simple heuristic to decide whether to use
         # PagedAttention V1 or V2. If the number of partitions is 1, we use
         # V1 to avoid the overhead of reduction. Also, if the number of
@@ -132,8 +132,9 @@ class PagedAttention:
         # to parallelize.
         # TODO(woosuk): Tune this heuristic.
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
-        use_v1 = (max_seq_len <= 8192
-                  and (max_num_partitions == 1 or num_seqs * num_heads > 512))
+        use_v1 = max_seq_len <= 8192 and (
+            max_num_partitions == 1 or num_seqs * num_heads > 512
+        )
 
         if use_v1:
             # Run PagedAttention V1.

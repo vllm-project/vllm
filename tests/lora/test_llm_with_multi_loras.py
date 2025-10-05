@@ -5,6 +5,7 @@ This script contains:
 1. test multi loras service with tp >= 2
 2. test multi loras request
 """
+
 import pytest
 
 from tests.utils import multi_gpu_test
@@ -31,14 +32,8 @@ LORA_TEST_EXPECTED = [
 
 def format_chatml_messages(prompt: str):
     return [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant."
-        },
-        {
-            "role": "user",
-            "content": prompt
-        },
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": prompt},
     ]
 
 
@@ -57,7 +52,6 @@ def make_add_lora_request(name: str, path: str):
 
 @multi_gpu_test(num_gpus=2)
 def test_multi_loras_with_tp_sync():
-
     llm = LLM(
         model=MODEL_PATH,
         enable_lora=True,
@@ -116,15 +110,17 @@ def test_multi_loras_with_tp_sync():
 
     def reload_lora(name: str):
         """
-        reload a lora to simulate the case: 
-        setting `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true` 
+        reload a lora to simulate the case:
+        setting `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true`
         for dynamic lora loading and unloading
         """
         remove_lora_response = llm.llm_engine.remove_lora(
-            lora_id=LORA_NAME_ID_MAP[name])
+            lora_id=LORA_NAME_ID_MAP[name]
+        )
 
         add_lora_response = llm.llm_engine.add_lora(
-            make_add_lora_request(name, LORA_NAME_PATH_MAP[name]))
+            make_add_lora_request(name, LORA_NAME_PATH_MAP[name])
+        )
 
         print(f"{remove_lora_response=}, {add_lora_response=}")
 
@@ -134,7 +130,6 @@ def test_multi_loras_with_tp_sync():
         assert outputs == expected
 
     for prompt, expected_output in zip(LORA_TEST_PROMPTS, LORA_TEST_EXPECTED):
-
         output_text = call_llm_get_outputs(prompt, "Alice")
         check_outputs(output_text, expected_output)
 
@@ -175,8 +170,7 @@ def test_multiple_lora_requests():
     PROMPTS = ["Hello, my name is"] * 2
     LORA_NAME = "Alice"
     lora_request = [
-        LoRARequest(LORA_NAME + str(idx), idx + 1,
-                    LORA_NAME_PATH_MAP[LORA_NAME])
+        LoRARequest(LORA_NAME + str(idx), idx + 1, LORA_NAME_PATH_MAP[LORA_NAME])
         for idx in range(len(PROMPTS))
     ]
     # Multiple SamplingParams should be matched with each prompt

@@ -7,8 +7,11 @@ import numpy as np
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from vllm.benchmarks.datasets import (RandomDataset, RandomMultiModalDataset,
-                                      SampleRequest)
+from vllm.benchmarks.datasets import (
+    RandomDataset,
+    RandomMultiModalDataset,
+    SampleRequest,
+)
 
 
 @pytest.fixture(scope="session")
@@ -27,11 +30,9 @@ class Params(NamedTuple):
 
 @pytest.fixture(scope="session")
 def random_dataset_params() -> Params:
-    return Params(num_requests=16,
-                  prefix_len=7,
-                  range_ratio=0.3,
-                  input_len=50,
-                  output_len=20)
+    return Params(
+        num_requests=16, prefix_len=7, range_ratio=0.3, input_len=50, output_len=20
+    )
 
 
 def _fingerprint_sample(req: SampleRequest) -> tuple[str, int, int]:
@@ -39,13 +40,15 @@ def _fingerprint_sample(req: SampleRequest) -> tuple[str, int, int]:
     return (req.prompt, req.prompt_len, req.expected_output_len)
 
 
-def _collect_samples(dataset: RandomDataset,
-                    tokenizer: PreTrainedTokenizerBase,
-                     num_requests: int = 16,
-                     prefix_len: int = 7,
-                     range_ratio: float = 0.3,
-                     input_len: int = 50,
-                     output_len: int = 20) -> list[tuple[str, int, int]]:
+def _collect_samples(
+    dataset: RandomDataset,
+    tokenizer: PreTrainedTokenizerBase,
+    num_requests: int = 16,
+    prefix_len: int = 7,
+    range_ratio: float = 0.3,
+    input_len: int = 50,
+    output_len: int = 20,
+) -> list[tuple[str, int, int]]:
     samples = dataset.sample(
         tokenizer=tokenizer,
         num_requests=num_requests,
@@ -59,8 +62,8 @@ def _collect_samples(dataset: RandomDataset,
 
 @pytest.mark.benchmark
 def test_random_dataset_same_seed(
-        hf_tokenizer: PreTrainedTokenizerBase,
-        random_dataset_params: Params) -> None:
+    hf_tokenizer: PreTrainedTokenizerBase, random_dataset_params: Params
+) -> None:
     """Same seed should yield identical outputs, even if global RNGs change.
 
     This guards against accidental reliance on Python's random or np.random
@@ -70,13 +73,15 @@ def test_random_dataset_same_seed(
     common_seed = 123
     dataset_a = RandomDataset(random_seed=common_seed)
     dataset_b = RandomDataset(random_seed=common_seed)
-    a = _collect_samples(dataset_a,
-                         hf_tokenizer,
-                         num_requests=p.num_requests,
-                         prefix_len=p.prefix_len,
-                         range_ratio=p.range_ratio,
-                         input_len=p.input_len,
-                         output_len=p.output_len)
+    a = _collect_samples(
+        dataset_a,
+        hf_tokenizer,
+        num_requests=p.num_requests,
+        prefix_len=p.prefix_len,
+        range_ratio=p.range_ratio,
+        input_len=p.input_len,
+        output_len=p.output_len,
+    )
 
     # Perturb global RNG state to ensure isolation
     random.seed(999)
@@ -84,49 +89,57 @@ def test_random_dataset_same_seed(
     np.random.seed(888)
     _ = [np.random.random() for _ in range(100)]
 
-    b = _collect_samples(dataset_b,
-                         hf_tokenizer,
-                         num_requests=p.num_requests,
-                         prefix_len=p.prefix_len,
-                         range_ratio=p.range_ratio,
-                         input_len=p.input_len,
-                         output_len=p.output_len)
+    b = _collect_samples(
+        dataset_b,
+        hf_tokenizer,
+        num_requests=p.num_requests,
+        prefix_len=p.prefix_len,
+        range_ratio=p.range_ratio,
+        input_len=p.input_len,
+        output_len=p.output_len,
+    )
     assert a == b
+
 
 @pytest.mark.benchmark
 def test_random_dataset_different_seeds(
-        hf_tokenizer: PreTrainedTokenizerBase,
-        random_dataset_params: Params) -> None:
+    hf_tokenizer: PreTrainedTokenizerBase, random_dataset_params: Params
+) -> None:
     """Different seeds should change outputs with overwhelming likelihood."""
     p = random_dataset_params
     seed_a = 0
     dataset_a = RandomDataset(random_seed=seed_a)
-    a = _collect_samples(dataset_a,
-                         hf_tokenizer,
-                         num_requests=p.num_requests,
-                         prefix_len=p.prefix_len,
-                         range_ratio=p.range_ratio,
-                         input_len=p.input_len,
-                         output_len=p.output_len)
+    a = _collect_samples(
+        dataset_a,
+        hf_tokenizer,
+        num_requests=p.num_requests,
+        prefix_len=p.prefix_len,
+        range_ratio=p.range_ratio,
+        input_len=p.input_len,
+        output_len=p.output_len,
+    )
 
     seed_b = 999
     dataset_b = RandomDataset(random_seed=seed_b)
     # Perturb global RNG with same seed as dataset_a to ensure isolation
     random.seed(seed_a)
     np.random.seed(seed_a)
-    b = _collect_samples(dataset_b,
-                         hf_tokenizer,
-                         num_requests=p.num_requests,
-                         prefix_len=p.prefix_len,
-                         range_ratio=p.range_ratio,
-                         input_len=p.input_len,
-                         output_len=p.output_len)
+    b = _collect_samples(
+        dataset_b,
+        hf_tokenizer,
+        num_requests=p.num_requests,
+        prefix_len=p.prefix_len,
+        range_ratio=p.range_ratio,
+        input_len=p.input_len,
+        output_len=p.output_len,
+    )
     assert a != b
 
 
 # -----------------------------
 # RandomMultiModalDataset tests
 # -----------------------------
+
 
 def _mm_fingerprint_sample(
     req: SampleRequest,
@@ -152,8 +165,13 @@ def _mm_fingerprint_sample(
             item_prefixes.append(f"video:{url[:22]}")
         else:
             item_prefixes.append("unknown:")
-    return (req.prompt, req.prompt_len, req.expected_output_len, len(items),
-            item_prefixes)
+    return (
+        req.prompt,
+        req.prompt_len,
+        req.expected_output_len,
+        len(items),
+        item_prefixes,
+    )
 
 
 def _collect_mm_samples(
@@ -214,6 +232,7 @@ def test_random_mm_different_seeds(
     fb = [_mm_fingerprint_sample(s) for s in b]
     assert fa != fb
 
+
 @pytest.mark.benchmark
 def test_random_mm_respects_limits(
     hf_tokenizer: PreTrainedTokenizerBase,
@@ -271,9 +290,9 @@ def test_random_mm_zero_items(hf_tokenizer: PreTrainedTokenizerBase) -> None:
     for s in samples:
         assert s.multi_modal_data == []
 
+
 @pytest.mark.benchmark
-def test_random_mm_num_items_per_prompt(
-    hf_tokenizer: PreTrainedTokenizerBase) -> None:
+def test_random_mm_num_items_per_prompt(hf_tokenizer: PreTrainedTokenizerBase) -> None:
     ds = RandomMultiModalDataset(random_seed=0)
     # Fixed number of images per prompt
     # set num_mm_items_range_ratio to 0.0
@@ -300,7 +319,6 @@ def test_random_mm_num_items_per_prompt(
 def test_random_mm_bucket_config_not_mutated(
     hf_tokenizer: PreTrainedTokenizerBase,
 ) -> None:
-
     ds = RandomMultiModalDataset(random_seed=0)
     # This bucket config is not normalized to sum to 1
     # and has more buckets than requested images
@@ -320,7 +338,6 @@ def test_random_mm_bucket_config_not_mutated(
 
     # Ensure the original dict content is unchanged
     assert original == snapshot
-
 
     # Vary number of mm items per prompt
     # set num_mm_items_range_ratio to 0.5

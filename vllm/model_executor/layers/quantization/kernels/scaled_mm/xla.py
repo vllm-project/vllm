@@ -9,25 +9,23 @@ from functorch.experimental.control_flow import cond  # noqa: F401
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    convert_to_channelwise)
+    convert_to_channelwise,
+)
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import (ScaledMMLinearKernel,
-                                   ScaledMMLinearLayerConfig)
+from .ScaledMMLinearKernel import ScaledMMLinearKernel, ScaledMMLinearLayerConfig
 
 
 class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
-
     @classmethod
     def get_min_capability(cls) -> int:
         raise NotImplementedError(
             "TPU platform does have a concept of compute capability, "
-            "this method should not be called.")
+            "this method should not be called."
+        )
 
     @classmethod
-    def can_implement(
-            cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
-
+    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
         if not current_platform.is_tpu():
             return False, "ScaledMMXLA requires running on TPU."
 
@@ -46,8 +44,9 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         # WEIGHT
         # [out, in] (different than cutlass_scaled_mm)
         weight = getattr(layer, self.w_q_name)
-        replace_parameter(layer, self.w_q_name,
-                          torch.nn.Parameter(weight.data, requires_grad=False))
+        replace_parameter(
+            layer, self.w_q_name, torch.nn.Parameter(weight.data, requires_grad=False)
+        )
 
         # WEIGHT SCALE
         # XLA kernels support only per-tensor and per-channel.
@@ -56,14 +55,15 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         is_fused_module = len(layer.logical_widths) > 1
         weight_scale = getattr(layer, self.w_s_name)
         if is_fused_module and not self.config.is_channelwise:
-            weight_scale = convert_to_channelwise(weight_scale,
-                                                  layer.logical_widths)
+            weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
 
         # [out_channel,] (different than cutlass_scaled_mm)
         weight_scale = weight_scale.squeeze(-1)
         replace_parameter(
-            layer, self.w_s_name,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False))
+            layer,
+            self.w_s_name,
+            torch.nn.Parameter(weight_scale.data, requires_grad=False),
+        )
 
         # Only support symmetric dynamic activation quantization.
         setattr(layer, self.i_s_name, None)
@@ -74,8 +74,7 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         # to specialize the graph since bias is not dynamic.
         warnings.filterwarnings(
             "ignore",
-            message=
-            "Pred is a Python constant. When used with torch.cond, it specializes on one of the branches."  # noqa: E501
+            message="Pred is a Python constant. When used with torch.cond, it specializes on one of the branches.",  # noqa: E501
         )
 
     def no_add_bias(self, x: torch.Tensor, bias: Optional[torch.Tensor]):
@@ -84,14 +83,17 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
     def add_bias(self, x: torch.Tensor, bias: Optional[torch.Tensor]):
         return x + bias
 
-    def apply_weights(self,
-                      layer: torch.nn.Module,
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         w_q, w_s, _, _, _ = self._get_weight_params(layer)
 
         # Required to register custom ops.
         import torch_xla.experimental.custom_kernel  # noqa: F401
+
         out = torch.ops.xla.quantized_matmul_int8(
             x,
             w_q,

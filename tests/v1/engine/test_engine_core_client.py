@@ -17,16 +17,14 @@ from transformers import AutoTokenizer
 
 from tests.utils import multi_gpu_test
 from vllm import SamplingParams
-from vllm.distributed.kv_events import (BlockStored, KVEventBatch,
-                                        ZmqEventPublisher)
+from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublisher
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.engine.core_client import (AsyncMPClient, EngineCoreClient,
-                                        SyncMPClient)
+from vllm.v1.engine.core_client import AsyncMPClient, EngineCoreClient, SyncMPClient
 from vllm.v1.engine.utils import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
 
@@ -34,8 +32,7 @@ from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
 
 if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.",
-                allow_module_level=True)
+    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -44,8 +41,8 @@ PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
 
 def make_request(
-        params: SamplingParams,
-        prompt_tokens_ids: Optional[list[int]] = None) -> EngineCoreRequest:
+    params: SamplingParams, prompt_tokens_ids: Optional[list[int]] = None
+) -> EngineCoreRequest:
     if not prompt_tokens_ids:
         prompt_tokens_ids = PROMPT_TOKENS
 
@@ -64,7 +61,6 @@ def make_request(
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):
-
     while True:
         engine_core_outputs = client.get_output().outputs
 
@@ -82,7 +78,6 @@ def loop_until_done(client: EngineCoreClient, outputs: dict):
 
 
 async def loop_until_done_async(client: EngineCoreClient, outputs: dict):
-
     while True:
         engine_core_outputs = (await client.get_output_async()).outputs
 
@@ -100,7 +95,6 @@ async def loop_until_done_async(client: EngineCoreClient, outputs: dict):
 
 
 async def loop_until_fully_done_async(client: EngineCoreClient, outputs: dict):
-
     while True:
         engine_core_outputs = (await client.get_output_async()).outputs
 
@@ -119,10 +113,9 @@ async def loop_until_fully_done_async(client: EngineCoreClient, outputs: dict):
 
 
 # Dummy utility function to monkey-patch into engine core.
-def echo(self,
-         msg: str,
-         err_msg: Optional[str] = None,
-         sleep: Optional[float] = None) -> str:
+def echo(
+    self, msg: str, err_msg: Optional[str] = None, sleep: Optional[float] = None
+) -> str:
     print(f"echo util function called: {msg}, {err_msg}")
     if sleep is not None:
         time.sleep(sleep)
@@ -133,9 +126,9 @@ def echo(self,
 
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("multiprocessing_mode", [True, False])
-def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
-                            multiprocessing_mode: bool):
-
+def test_engine_core_client(
+    monkeypatch: pytest.MonkeyPatch, multiprocessing_mode: bool
+):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
@@ -143,8 +136,7 @@ def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
         m.setattr(EngineCore, "echo", echo, raising=False)
 
         engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
-        vllm_config = engine_args.create_engine_config(
-            UsageContext.UNKNOWN_CONTEXT)
+        vllm_config = engine_args.create_engine_config(UsageContext.UNKNOWN_CONTEXT)
         executor_class = Executor.get_class(vllm_config)
 
         with set_default_torch_num_threads(1):
@@ -172,7 +164,8 @@ def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
 
         for req_id in request_ids:
             assert len(outputs[req_id]) == MAX_TOKENS, (
-                f"{outputs[req_id]=}, {MAX_TOKENS=}")
+                f"{outputs[req_id]=}, {MAX_TOKENS=}"
+            )
         """Abort Request Cycle."""
 
         # Note: this code pathway will only work for multiprocessing
@@ -191,10 +184,12 @@ def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
         for idx, req_id in enumerate(request_ids):
             if idx % 2 == 0:
                 assert len(outputs[req_id]) < MAX_TOKENS, (
-                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}"
+                )
             else:
                 assert len(outputs[req_id]) == MAX_TOKENS, (
-                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}"
+                )
         """Abort after request is finished."""
 
         # Note: this code pathway will only work for multiprocessing
@@ -202,7 +197,7 @@ def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
 
         request = requests[0]
         client.add_request(request)
-        time.sleep(10.)
+        time.sleep(10.0)
 
         client.abort_requests([request.request_id])
 
@@ -222,7 +217,6 @@ def test_engine_core_client(monkeypatch: pytest.MonkeyPatch,
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
-
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
@@ -231,7 +225,8 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
 
         engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
         vllm_config = engine_args.create_engine_config(
-            usage_context=UsageContext.UNKNOWN_CONTEXT)
+            usage_context=UsageContext.UNKNOWN_CONTEXT
+        )
         executor_class = Executor.get_class(vllm_config)
 
         with set_default_torch_num_threads(1):
@@ -261,7 +256,8 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
 
             for req_id in request_ids:
                 assert len(outputs[req_id]) == MAX_TOKENS, (
-                    f"{outputs[req_id]=}, {MAX_TOKENS=}")
+                    f"{outputs[req_id]=}, {MAX_TOKENS=}"
+                )
             """Abort Request Cycle."""
 
             # Add requests to the engine.
@@ -277,10 +273,12 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
             for idx, req_id in enumerate(request_ids):
                 if idx % 2 == 0:
                     assert len(outputs[req_id]) < MAX_TOKENS, (
-                        f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+                        f"{len(outputs[req_id])=}, {MAX_TOKENS=}"
+                    )
                 else:
                     assert len(outputs[req_id]) == MAX_TOKENS, (
-                        f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+                        f"{len(outputs[req_id])=}, {MAX_TOKENS=}"
+                    )
             """Utility method invocation"""
 
             core_client: AsyncMPClient = client
@@ -296,8 +294,8 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
             # Test that cancelling the utility call doesn't destabilize the
             # engine.
             util_task = asyncio.create_task(
-                core_client.call_utility_async("echo", "testarg2", None,
-                                               0.5))  # sleep for 0.5 sec
+                core_client.call_utility_async("echo", "testarg2", None, 0.5)
+            )  # sleep for 0.5 sec
             await asyncio.sleep(0.05)
             cancelled = util_task.cancel()
             assert cancelled
@@ -305,9 +303,9 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
             # Ensure client is still functional. The engine runs utility
             # methods in a single thread so this request won't be processed
             # until the cancelled sleeping one is complete.
-            result = await asyncio.wait_for(core_client.call_utility_async(
-                "echo", "testarg3"),
-                                            timeout=1.0)
+            result = await asyncio.wait_for(
+                core_client.call_utility_async("echo", "testarg3"), timeout=1.0
+            )
             assert result == "testarg3"
         finally:
             client.shutdown()
@@ -353,8 +351,7 @@ def echo_dc_nested(
     msg: str,
     structure_type: str = "list_of_dicts",
 ) -> Any:
-    print(f"echo dc nested util function called: {msg}, "
-          f"structure: {structure_type}")
+    print(f"echo dc nested util function called: {msg}, structure: {structure_type}")
     val = None if msg is None else MyDataclass(msg)
 
     if structure_type == "list_of_dicts":  # noqa
@@ -373,8 +370,8 @@ def echo_dc_nested(
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_util_method_custom_return(
-        monkeypatch: pytest.MonkeyPatch):
-
+    monkeypatch: pytest.MonkeyPatch,
+):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
@@ -386,7 +383,8 @@ async def test_engine_core_client_util_method_custom_return(
 
         engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
         vllm_config = engine_args.create_engine_config(
-            usage_context=UsageContext.UNKNOWN_CONTEXT)
+            usage_context=UsageContext.UNKNOWN_CONTEXT
+        )
         executor_class = Executor.get_class(vllm_config)
 
         with set_default_torch_num_threads(1):
@@ -402,22 +400,17 @@ async def test_engine_core_client_util_method_custom_return(
             # Test utility method returning custom / non-native data type.
             core_client: AsyncMPClient = client
 
-            result = await core_client.call_utility_async(
-                "echo_dc", "testarg2", False)
-            assert isinstance(result,
-                              MyDataclass) and result.message == "testarg2"
-            result = await core_client.call_utility_async(
-                "echo_dc", "testarg2", True)
+            result = await core_client.call_utility_async("echo_dc", "testarg2", False)
+            assert isinstance(result, MyDataclass) and result.message == "testarg2"
+            result = await core_client.call_utility_async("echo_dc", "testarg2", True)
             assert isinstance(result, list) and all(
-                isinstance(r, MyDataclass) and r.message == "testarg2"
-                for r in result)
+                isinstance(r, MyDataclass) and r.message == "testarg2" for r in result
+            )
 
             # Test returning None and list of Nones
-            result = await core_client.call_utility_async(
-                "echo_dc", None, False)
+            result = await core_client.call_utility_async("echo_dc", None, False)
             assert result is None
-            result = await core_client.call_utility_async(
-                "echo_dc", None, True)
+            result = await core_client.call_utility_async("echo_dc", None, True)
             assert isinstance(result, list) and all(r is None for r in result)
 
         finally:
@@ -426,8 +419,8 @@ async def test_engine_core_client_util_method_custom_return(
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_util_method_custom_dict_return(
-        monkeypatch: pytest.MonkeyPatch):
-
+    monkeypatch: pytest.MonkeyPatch,
+):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
@@ -439,7 +432,8 @@ async def test_engine_core_client_util_method_custom_dict_return(
 
         engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
         vllm_config = engine_args.create_engine_config(
-            usage_context=UsageContext.UNKNOWN_CONTEXT)
+            usage_context=UsageContext.UNKNOWN_CONTEXT
+        )
         executor_class = Executor.get_class(vllm_config)
 
         with set_default_torch_num_threads(1):
@@ -457,22 +451,21 @@ async def test_engine_core_client_util_method_custom_dict_return(
 
             # Test single object return
             result = await core_client.call_utility_async(
-                "echo_dc_dict", "testarg3", False)
-            assert isinstance(result,
-                              MyDataclass) and result.message == "testarg3"
+                "echo_dc_dict", "testarg3", False
+            )
+            assert isinstance(result, MyDataclass) and result.message == "testarg3"
 
             # Test dict return with custom value types
             result = await core_client.call_utility_async(
-                "echo_dc_dict", "testarg3", True)
+                "echo_dc_dict", "testarg3", True
+            )
             assert isinstance(result, dict) and len(result) == 3
             for key, val in result.items():
                 assert key in ["key1", "key2", "key3"]
-                assert isinstance(val,
-                                  MyDataclass) and val.message == "testarg3"
+                assert isinstance(val, MyDataclass) and val.message == "testarg3"
 
             # Test returning dict with None values
-            result = await core_client.call_utility_async(
-                "echo_dc_dict", None, True)
+            result = await core_client.call_utility_async("echo_dc_dict", None, True)
             assert isinstance(result, dict) and len(result) == 3
             for key, val in result.items():
                 assert key in ["key1", "key2", "key3"]
@@ -484,8 +477,8 @@ async def test_engine_core_client_util_method_custom_dict_return(
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_util_method_nested_structures(
-        monkeypatch: pytest.MonkeyPatch):
-
+    monkeypatch: pytest.MonkeyPatch,
+):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
@@ -497,7 +490,8 @@ async def test_engine_core_client_util_method_nested_structures(
 
         engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
         vllm_config = engine_args.create_engine_config(
-            usage_context=UsageContext.UNKNOWN_CONTEXT)
+            usage_context=UsageContext.UNKNOWN_CONTEXT
+        )
         executor_class = Executor.get_class(vllm_config)
 
         with set_default_torch_num_threads(1):
@@ -514,42 +508,48 @@ async def test_engine_core_client_util_method_nested_structures(
 
             # Test list of dicts: [{"a": val, "b": val}, {"c": val, "d": val}]
             result = await core_client.call_utility_async(
-                "echo_dc_nested", "nested1", "list_of_dicts")
+                "echo_dc_nested", "nested1", "list_of_dicts"
+            )
             assert isinstance(result, list) and len(result) == 2
             for i, item in enumerate(result):
                 assert isinstance(item, dict)
                 if i == 0:
                     assert "a" in item and "b" in item
-                    assert isinstance(
-                        item["a"],
-                        MyDataclass) and item["a"].message == "nested1"
-                    assert isinstance(
-                        item["b"],
-                        MyDataclass) and item["b"].message == "nested1"
+                    assert (
+                        isinstance(item["a"], MyDataclass)
+                        and item["a"].message == "nested1"
+                    )
+                    assert (
+                        isinstance(item["b"], MyDataclass)
+                        and item["b"].message == "nested1"
+                    )
                 else:
                     assert "c" in item and "d" in item
-                    assert isinstance(
-                        item["c"],
-                        MyDataclass) and item["c"].message == "nested1"
-                    assert isinstance(
-                        item["d"],
-                        MyDataclass) and item["d"].message == "nested1"
+                    assert (
+                        isinstance(item["c"], MyDataclass)
+                        and item["c"].message == "nested1"
+                    )
+                    assert (
+                        isinstance(item["d"], MyDataclass)
+                        and item["d"].message == "nested1"
+                    )
 
             # Test dict of lists: {"list1": [val, val], "list2": [val, val]}
             result = await core_client.call_utility_async(
-                "echo_dc_nested", "nested2", "dict_of_lists")
+                "echo_dc_nested", "nested2", "dict_of_lists"
+            )
             assert isinstance(result, dict) and len(result) == 2
             assert "list1" in result and "list2" in result
             for key, lst in result.items():
                 assert isinstance(lst, list) and len(lst) == 2
                 for item in lst:
-                    assert isinstance(
-                        item, MyDataclass) and item.message == "nested2"
+                    assert isinstance(item, MyDataclass) and item.message == "nested2"
 
             # Test deeply nested: {"outer": [{"inner": [val, val]},
             # {"inner": [val]}]}
             result = await core_client.call_utility_async(
-                "echo_dc_nested", "nested3", "deep_nested")
+                "echo_dc_nested", "nested3", "deep_nested"
+            )
             assert isinstance(result, dict) and "outer" in result
             outer_list = result["outer"]
             assert isinstance(outer_list, list) and len(outer_list) == 2
@@ -560,21 +560,22 @@ async def test_engine_core_client_util_method_nested_structures(
             inner_list1 = inner_dict1["inner"]
             assert isinstance(inner_list1, list) and len(inner_list1) == 2
             for item in inner_list1:
-                assert isinstance(item,
-                                  MyDataclass) and item.message == "nested3"
+                assert isinstance(item, MyDataclass) and item.message == "nested3"
 
             # Second dict in outer list should have "inner" with 1 item
             inner_dict2 = outer_list[1]
             assert isinstance(inner_dict2, dict) and "inner" in inner_dict2
             inner_list2 = inner_dict2["inner"]
             assert isinstance(inner_list2, list) and len(inner_list2) == 1
-            assert isinstance(
-                inner_list2[0],
-                MyDataclass) and inner_list2[0].message == "nested3"
+            assert (
+                isinstance(inner_list2[0], MyDataclass)
+                and inner_list2[0].message == "nested3"
+            )
 
             # Test with None values in nested structures
             result = await core_client.call_utility_async(
-                "echo_dc_nested", None, "list_of_dicts")
+                "echo_dc_nested", None, "list_of_dicts"
+            )
             assert isinstance(result, list) and len(result) == 2
             for item in result:
                 assert isinstance(item, dict)
@@ -595,7 +596,6 @@ def test_kv_cache_events(
     multiprocessing_mode: bool,
     publisher_config,
 ):
-
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
         block_size = 16
@@ -609,8 +609,7 @@ def test_kv_cache_events(
         )
         engine_args.kv_events_config = publisher_config
 
-        vllm_config = engine_args.create_engine_config(
-            UsageContext.UNKNOWN_CONTEXT)
+        vllm_config = engine_args.create_engine_config(UsageContext.UNKNOWN_CONTEXT)
 
         executor_class = Executor.get_class(vllm_config)
         with set_default_torch_num_threads(1):
@@ -622,9 +621,9 @@ def test_kv_cache_events(
                 log_stats=False,
             )
         endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
-        subscriber = MockSubscriber(endpoint,
-                                    topic=publisher_config.topic,
-                                    decode_type=KVEventBatch)
+        subscriber = MockSubscriber(
+            endpoint, topic=publisher_config.topic, decode_type=KVEventBatch
+        )
 
         try:
             custom_tokens = list(range(num_blocks * block_size))
@@ -641,22 +640,25 @@ def test_kv_cache_events(
             seq, received = result
 
             assert seq == 0, "Sequence number mismatch"
-            assert (len(received.events) == 1
-                    ), "We should have exactly one BlockStored event"
+            assert len(received.events) == 1, (
+                "We should have exactly one BlockStored event"
+            )
             event = received.events[0]
-            assert isinstance(
-                event, BlockStored), "We should have a BlockStored event"
-            assert (len(event.block_hashes) == num_blocks
-                    ), "We should have a BlockStored event with 2 block_hashes"
-            assert (event.block_size == block_size
-                    ), "Block size should be the same as the block size"
-            assert (event.parent_block_hash
-                    is None), "Parent block hash should be None"
+            assert isinstance(event, BlockStored), "We should have a BlockStored event"
+            assert len(event.block_hashes) == num_blocks, (
+                "We should have a BlockStored event with 2 block_hashes"
+            )
+            assert event.block_size == block_size, (
+                "Block size should be the same as the block size"
+            )
+            assert event.parent_block_hash is None, "Parent block hash should be None"
             assert event.lora_id is None, "Lora id should be None"
-            assert (len(event.token_ids) == num_blocks * block_size
-                    ), "Token ids should be the same as the custom tokens"
-            assert (event.token_ids == custom_tokens
-                    ), "Token ids should be the same as the custom tokens"
+            assert len(event.token_ids) == num_blocks * block_size, (
+                "Token ids should be the same as the custom tokens"
+            )
+            assert event.token_ids == custom_tokens, (
+                "Token ids should be the same as the custom tokens"
+            )
         finally:
             client.shutdown()
             subscriber.close()
@@ -674,7 +676,6 @@ async def test_kv_cache_events_dp(
     multiprocessing_mode: bool,
     publisher_config,
 ):
-
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
         block_size = 16
@@ -692,8 +693,7 @@ async def test_kv_cache_events_dp(
         )
         engine_args.kv_events_config = publisher_config
 
-        vllm_config = engine_args.create_engine_config(
-            UsageContext.UNKNOWN_CONTEXT)
+        vllm_config = engine_args.create_engine_config(UsageContext.UNKNOWN_CONTEXT)
 
         executor_class = Executor.get_class(vllm_config)
         with set_default_torch_num_threads(1):
@@ -710,13 +710,12 @@ async def test_kv_cache_events_dp(
         base_endpoint = publisher_config.endpoint.replace("*", "127.0.0.1")
         endpoints = []
         for i in range(dp_size):
-            offset_endpoint = ZmqEventPublisher.offset_endpoint_port(
-                base_endpoint, i)
+            offset_endpoint = ZmqEventPublisher.offset_endpoint_port(base_endpoint, i)
             endpoints.append(offset_endpoint)
 
-        subscriber = MockSubscriber(endpoints,
-                                    topic=publisher_config.topic,
-                                    decode_type=KVEventBatch)
+        subscriber = MockSubscriber(
+            endpoints, topic=publisher_config.topic, decode_type=KVEventBatch
+        )
 
         try:
             custom_tokens = list(range(num_blocks * block_size))
@@ -734,15 +733,12 @@ async def test_kv_cache_events_dp(
             await asyncio.sleep(0.1)
 
             # Initialize outputs dict for all requests
-            outputs: dict[str, list] = {
-                req_id: []
-                for req_id in all_request_ids
-            }
+            outputs: dict[str, list] = {req_id: [] for req_id in all_request_ids}
 
             print("processing requests...")
-            await asyncio.wait_for(loop_until_fully_done_async(
-                client, outputs),
-                                   timeout=20.0)
+            await asyncio.wait_for(
+                loop_until_fully_done_async(client, outputs), timeout=20.0
+            )
 
             # Receive from subscriber until no more messages
             print("collecting results...")
@@ -755,13 +751,11 @@ async def test_kv_cache_events_dp(
                 results.append(result)
 
             # Collect all events and data_parallel_ranks from all results
-            all_dp_ranks = [
-                received.data_parallel_rank for (_, received) in results
-            ]
+            all_dp_ranks = [received.data_parallel_rank for (_, received) in results]
             unique_dps = set(all_dp_ranks)
-            assert (
-                len(unique_dps) == 2
-            ), f"Expected 2 unique data_parallel_ranks, got {len(unique_dps)}"
+            assert len(unique_dps) == 2, (
+                f"Expected 2 unique data_parallel_ranks, got {len(unique_dps)}"
+            )
 
         finally:
             client.shutdown()
@@ -770,7 +764,6 @@ async def test_kv_cache_events_dp(
 
 @pytest.mark.timeout(20)
 def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
-
     with monkeypatch.context() as m, pytest.raises(Exception) as e_info:
         m.setenv("VLLM_USE_V1", "1")
 
@@ -787,7 +780,8 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
         t = time.time()
         engine_args = EngineArgs(model=MODEL_NAME)
         vllm_config = engine_args.create_engine_config(
-            usage_context=UsageContext.UNKNOWN_CONTEXT)
+            usage_context=UsageContext.UNKNOWN_CONTEXT
+        )
         executor_class = Executor.get_class(vllm_config)
         print(f"VllmConfig creation took {time.time() - t:.2f} seconds.")
 
@@ -815,8 +809,7 @@ def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
 
 
 @create_new_process_for_each_test()
-def test_engine_core_proc_instantiation_cuda_empty(
-        monkeypatch: pytest.MonkeyPatch):
+def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPatch):
     """
     Test that EngineCoreProc can be instantiated when CUDA_VISIBLE_DEVICES
     is empty. This ensures the engine frontend does not need access to GPUs.
@@ -833,17 +826,13 @@ def test_engine_core_proc_instantiation_cuda_empty(
 
         # Only implement the methods that are actually called during init
         from vllm.v1.kv_cache_interface import FullAttentionSpec
-        mock_spec = FullAttentionSpec(block_size=16,
-                                      num_kv_heads=1,
-                                      head_size=64,
-                                      dtype=torch.float16)
 
-        mock_executor.get_kv_cache_specs.return_value = [{
-            "default": mock_spec
-        }]
-        mock_executor.determine_available_memory.return_value = [
-            1024 * 1024 * 1024
-        ]
+        mock_spec = FullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+        )
+
+        mock_executor.get_kv_cache_specs.return_value = [{"default": mock_spec}]
+        mock_executor.determine_available_memory.return_value = [1024 * 1024 * 1024]
         mock_executor.initialize_from_config.return_value = None
         mock_executor.max_concurrent_batches = 1
 
@@ -857,19 +846,22 @@ def test_engine_core_proc_instantiation_cuda_empty(
 
         from vllm.v1.engine.utils import EngineZmqAddresses
 
-        def mock_startup_handshake(self, handshake_socket, local_client,
-                                   headless, parallel_config):
-            return EngineZmqAddresses(inputs=["tcp://127.0.0.1:5555"],
-                                      outputs=["tcp://127.0.0.1:5556"],
-                                      coordinator_input=None,
-                                      coordinator_output=None)
+        def mock_startup_handshake(
+            self, handshake_socket, local_client, headless, parallel_config
+        ):
+            return EngineZmqAddresses(
+                inputs=["tcp://127.0.0.1:5555"],
+                outputs=["tcp://127.0.0.1:5556"],
+                coordinator_input=None,
+                coordinator_output=None,
+            )
 
         # Background processes are not important here
         m.setattr(EngineCoreProc, "startup_handshake", mock_startup_handshake)
 
         vllm_config = EngineArgs(
-            model="deepseek-ai/DeepSeek-V2-Lite",
-            trust_remote_code=True).create_engine_config()
+            model="deepseek-ai/DeepSeek-V2-Lite", trust_remote_code=True
+        ).create_engine_config()
         engine_core_proc = EngineCoreProc(
             vllm_config=vllm_config,
             local_client=True,

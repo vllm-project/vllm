@@ -18,20 +18,33 @@ from transformers import PretrainedConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItems, MultiModalUUIDDict
-from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
-                                   MultiModalDataItems)
-from vllm.multimodal.processing import (MultiModalProcessingInfo,
-                                        PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
+from vllm.multimodal.parse import (
+    ImageEmbeddingItems,
+    ImageProcessorItems,
+    MultiModalDataItems,
+)
+from vllm.multimodal.processing import (
+    MultiModalProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .intern_vit import InternVisionModel
-from .internvl import (IMG_CONTEXT, IMG_END, IMG_START,
-                       BaseInternVLDummyInputsBuilder,
-                       BaseInternVLMultiModalProcessor,
-                       BaseInternVLProcessingInfo, BaseInternVLProcessor,
-                       InternVLChatModel, build_transform,
-                       find_closest_aspect_ratio, get_internvl_target_ratios)
+from .internvl import (
+    IMG_CONTEXT,
+    IMG_END,
+    IMG_START,
+    BaseInternVLDummyInputsBuilder,
+    BaseInternVLMultiModalProcessor,
+    BaseInternVLProcessingInfo,
+    BaseInternVLProcessor,
+    InternVLChatModel,
+    build_transform,
+    find_closest_aspect_ratio,
+    get_internvl_target_ratios,
+)
 
 
 def resolve_h2ovl_min_max_num(
@@ -61,8 +74,10 @@ def get_h2ovl_target_ratios(
     # if prior_aspect_ratio is provided, filter the target ratios
     if prior_aspect_ratio is not None:
         target_ratios = [
-            ratio for ratio in target_ratios if prior_aspect_ratio[0] %
-            ratio[0] != 0 and prior_aspect_ratio[1] % ratio[1] != 0
+            ratio
+            for ratio in target_ratios
+            if prior_aspect_ratio[0] % ratio[0] != 0
+            and prior_aspect_ratio[1] % ratio[1] != 0
         ]
 
     return target_ratios
@@ -207,7 +222,8 @@ def image_to_pixel_values_h2ovl(
         )
         # combine pixel values
         pixel_values = torch.cat(
-            [pixel_values2[:-1], pixel_values1[:-1], pixel_values2[-1:]], 0)
+            [pixel_values2[:-1], pixel_values1[:-1], pixel_values2[-1:]], 0
+        )
 
     else:
         pixel_values, _ = _preprocess_image(
@@ -223,7 +239,6 @@ def image_to_pixel_values_h2ovl(
 
 
 class H2OVLProcessor(BaseInternVLProcessor):
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -270,14 +285,18 @@ class H2OVLProcessor(BaseInternVLProcessor):
         dynamic_image_size: Optional[bool] = None,
         use_thumbnail: Optional[bool] = None,
     ) -> tuple[int, int]:
-        min_dynamic_patch = (self.min_dynamic_patch if min_dynamic_patch
-                             is None else min_dynamic_patch)
-        max_dynamic_patch = (self.max_dynamic_patch if max_dynamic_patch
-                             is None else max_dynamic_patch)
-        dynamic_image_size = (self.dynamic_image_size if dynamic_image_size
-                              is None else dynamic_image_size)
-        use_thumbnail = (self.use_thumbnail
-                         if use_thumbnail is None else use_thumbnail)
+        min_dynamic_patch = (
+            self.min_dynamic_patch if min_dynamic_patch is None else min_dynamic_patch
+        )
+        max_dynamic_patch = (
+            self.max_dynamic_patch if max_dynamic_patch is None else max_dynamic_patch
+        )
+        dynamic_image_size = (
+            self.dynamic_image_size
+            if dynamic_image_size is None
+            else dynamic_image_size
+        )
+        use_thumbnail = self.use_thumbnail if use_thumbnail is None else use_thumbnail
 
         return resolve_h2ovl_min_max_num(
             min_dynamic_patch=min_dynamic_patch,
@@ -318,7 +337,7 @@ class H2OVLProcessor(BaseInternVLProcessor):
         image_height: int,
         use_msac: Optional[bool] = None,
     ) -> int:
-        use_msac = (self.use_msac if use_msac is None else use_msac)
+        use_msac = self.use_msac if use_msac is None else use_msac
 
         use_thumbnail = self.use_thumbnail
 
@@ -387,12 +406,12 @@ class H2OVLProcessor(BaseInternVLProcessor):
                 max_num=max_num,
                 use_thumbnail=self.use_thumbnail,
                 use_msac=use_msac,
-            ) for image in images
+            )
+            for image in images
         ]
 
 
 class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
-
     def get_hf_processor(self, **kwargs: object) -> H2OVLProcessor:
         return self.ctx.init_processor(
             H2OVLProcessor,
@@ -419,9 +438,7 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-class H2OVLMultiModalProcessor(
-        BaseInternVLMultiModalProcessor[H2OVLProcessingInfo]):
-
+class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingInfo]):
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -446,7 +463,8 @@ class H2OVLMultiModalProcessor(
 
         def get_replacement_internvl(item_idx: int):
             images = mm_items.get_items(
-                "image", (ImageEmbeddingItems, ImageProcessorItems))
+                "image", (ImageEmbeddingItems, ImageProcessorItems)
+            )
 
             if isinstance(images, ImageEmbeddingItems):
                 feature_size = images.get_feature_size(item_idx)
@@ -506,9 +524,9 @@ class H2OVLMultiModalProcessor(
 @MULTIMODAL_REGISTRY.register_processor(
     H2OVLMultiModalProcessor,
     info=H2OVLProcessingInfo,
-    dummy_inputs=BaseInternVLDummyInputsBuilder)
+    dummy_inputs=BaseInternVLDummyInputsBuilder,
+)
 class H2OVLChatModel(InternVLChatModel):
-
     def _init_vision_model(
         self,
         config: PretrainedConfig,
@@ -520,8 +538,9 @@ class H2OVLChatModel(InternVLChatModel):
         if not is_mono:
             vision_feature_layer = config.select_layer
             if vision_feature_layer < 0:
-                num_hidden_layers = (config.vision_config.num_hidden_layers +
-                                     vision_feature_layer + 1)
+                num_hidden_layers = (
+                    config.vision_config.num_hidden_layers + vision_feature_layer + 1
+                )
             else:
                 num_hidden_layers = vision_feature_layer + 1
 
