@@ -39,9 +39,6 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     resolve_chat_template_content_format,
 )
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.entrypoints.score_utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
@@ -50,8 +47,6 @@ from vllm.entrypoints.score_utils import (
     compress_token_type_ids,
     get_score_prompt,
 )
-
-# yapf: enable
 from vllm.entrypoints.utils import _validate_truncation_size, log_non_default_args
 from vllm.inputs import (
     DataPrompt,
@@ -1023,10 +1018,7 @@ class LLM:
             pooling_task = "encode"
 
         if pooling_task is None:
-            if "embed" in self.supported_tasks:
-                pooling_task = "embed"
-            else:
-                pooling_task = "encode"
+            pooling_task = "embed" if "embed" in self.supported_tasks else "encode"
 
             logger.warning_once(
                 "`LLM.encode` is currently using `pooling_task = %s`.\n"
