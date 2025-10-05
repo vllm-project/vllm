@@ -416,8 +416,8 @@ steps:
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s compile/piecewise/
 
-- label: PyTorch Fullgraph Test # 20min
-  timeout_in_minutes: 30
+- label: PyTorch Fullgraph Test # 22min
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
@@ -425,6 +425,7 @@ steps:
   - tests/compile
   commands:
   - pytest -v -s compile/test_full_graph.py
+  - pytest -v -s compile/test_fusions_e2e.py
 
 - label: Kernels Core Operation Test # 48min
   timeout_in_minutes: 75
@@ -794,8 +795,8 @@ steps:
     # Whisper needs spawn method to avoid deadlock
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
 
-- label: Blackwell Test # 38 min
-  timeout_in_minutes: 60
+- label: Blackwell Test # 48 min
+  timeout_in_minutes: 70
   working_dir: "/vllm-workspace/"
   gpu: b200
   # optional: true
@@ -808,8 +809,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_prepare_finalize.py
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
   - vllm/v1/attention/backends/flashinfer.py
-  - vllm/compilation/fusion.py
-  - vllm/compilation/fusion_attn.py
+  - vllm/compilation/
   commands:
     - nvidia-smi
     - python3 examples/offline_inference/basic/chat.py
@@ -833,6 +833,7 @@ steps:
     - pytest -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
+    - pytest -v -s tests/compile/test_fusions_e2e.py
 
 - label: GPT-OSS Eval (Blackwell)
   timeout_in_minutes: 60
@@ -1093,6 +1094,7 @@ steps:
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
+    - pytest -v -s tests/compile/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
 
 ##### RL Integration Tests #####
 - label: Prime-RL Integration Test # 15min

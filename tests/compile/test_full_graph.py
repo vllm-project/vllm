@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import logging
 import tempfile
 from typing import Any, Optional, Union
 
@@ -12,8 +11,6 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
-from vllm.attention.backends.registry import _Backend
-from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
                          PassConfig)
 from vllm.platforms import current_platform
@@ -25,17 +22,22 @@ from ..utils import create_new_process_for_each_test
 def models_list(*, all: bool = True, keywords: Optional[list[str]] = None):
     TEST_MODELS: list[tuple[str, dict[str, Any]]] = [
         ("facebook/opt-125m", {}),
-        ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", {
-            "dtype": torch.float16,
-        }),
         ("neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic", {
             "dtype": torch.float16,
         }),
-        ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {}),
         ("meta-llama/Llama-3.2-1B-Instruct", {}),
     ]
 
     if all:
+        if not current_platform.has_device_capability((10, 0)):
+            # int8 removed on Blackwell
+            TEST_MODELS.extend([
+                ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {}),
+                ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
+                 {
+                     "dtype": torch.float16,
+                 }),
+            ])
 
         # TODO: figure out why this fails.
         if False and is_quant_method_supported("gguf"):  # noqa: SIM223
@@ -75,19 +77,18 @@ def models_list(*, all: bool = True, keywords: Optional[list[str]] = None):
     "optimization_level",
     [CompilationLevel.DYNAMO_ONCE, CompilationLevel.PIECEWISE],
 )
-@pytest.mark.parametrize("model_info", models_list(all=True))
+@pytest.mark.parametrize("model, model_kwargs", models_list(all=True))
 @create_new_process_for_each_test()
 def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
-    model_info: tuple[str, dict[str, Any]],
+    model: str,
+    model_kwargs: dict[str, Any],
     optimization_level: int,
 ):
-    model, model_kwargs = model_info
-
     with monkeypatch.context():
         print(f"MODEL={model}")
 
-        run_model(optimization_level, model, model_kwargs)
+        run_model(optimization_level, model, **model_kwargs)
 
 
 # TODO(luka) add other supported compilation config scenarios here
@@ -136,7 +137,7 @@ def test_custom_compile_config(
 
     model, model_kwargs = model_info
     print(f"MODEL={model}")
-    run_model(compilation_config, model, model_kwargs)
+    run_model(compilation_config, model, **model_kwargs)
 
 
 @pytest.mark.parametrize(
@@ -151,46 +152,15 @@ def test_fp8_kv_scale_compile(optimization_level: int):
         "calculate_kv_scales": True,
         "max_model_len": 512,
     }
-    run_model(optimization_level, model, model_kwargs)
-
-
-def test_inductor_graph_partition_attn_fusion(caplog_vllm):
-    if not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("inductor graph partition is only available "
-                    "in PyTorch 2.9+")
-
-    model = "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8"
-    compilation_config = CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
-        use_inductor_graph_partition=True,
-        cudagraph_mode=CUDAGraphMode.PIECEWISE,
-        custom_ops=["+quant_fp8"],
-        pass_config=PassConfig(enable_attn_fusion=True, enable_noop=True),
-    )
-    model_kwargs = {
-        "kv_cache_dtype": "fp8",
-        "max_model_len": 1024,
-    }
-    with caplog_vllm.at_level(
-            logging.DEBUG), global_force_attn_backend_context_manager(
-                _Backend.FLASHINFER):
-        run_model(compilation_config, model, model_kwargs)
-
-    try:
-        assert ("Fused quantization onto 48 attention nodes"
-                in caplog_vllm.text), caplog_vllm.text
-    except AssertionError:
-        # Note: this message is only triggered when the compilation goes
-        # through the custom pass. Due to multiple layers of cache on
-        # PyTorch side, the compilation of a graph may be cached such
-        # that custom pass directly goes through cache. In this case,
-        # we go through this branch and assert that the pass is not
-        # triggered.
-        assert "Fused quantization" not in caplog_vllm.text
+    run_model(optimization_level, model, **model_kwargs)
 
 
 def run_model(compile_config: Union[int, CompilationConfig], model: str,
-              model_kwargs: dict[str, Any]):
+              **model_kwargs):
+    compilation_config = compile_config if \
+        isinstance(compile_config, CompilationConfig) else \
+        CompilationConfig(level=compile_config)
+
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -198,12 +168,17 @@ def run_model(compile_config: Union[int, CompilationConfig], model: str,
         "The future of AI is",
     ]
     sampling_params = SamplingParams(temperature=0)
+    # Allow override from model_kwargs
+    model_kwargs = {'tensor_parallel_size': 1, **model_kwargs}
+    model_kwargs = {'disable_custom_all_reduce': True, **model_kwargs}
+
+    # No cudagraphs by default
+    if compilation_config.cudagraph_mode is None:
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
     llm = LLM(
         model=model,
-        enforce_eager=True,
-        tensor_parallel_size=1,
-        disable_custom_all_reduce=True,
-        compilation_config=compile_config,
+        compilation_config=compilation_config,
         **model_kwargs,
     )
     outputs = llm.generate(prompts, sampling_params)
