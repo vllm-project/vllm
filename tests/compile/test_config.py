@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
+import torch
+from pydantic_core import ValidationError
 
 import vllm
 from vllm.compilation.counter import compilation_counter
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.config.compilation import CompilationLevel
 from vllm.utils import _is_torch_equal_or_newer
 
 
@@ -19,11 +22,14 @@ def test_version():
 def test_use_cudagraphs_dynamic(monkeypatch):
     assert vllm.envs.VLLM_USE_V1
     vllm_config = VllmConfig()
-    assert vllm_config.compilation_config.use_cudagraph
+    # Default V1 configuration now starts without cudagraphs enabled; the
+    # engine decides when to capture based on runtime settings instead of a
+    # blanket default.
+    assert not vllm_config.compilation_config.use_cudagraph
 
     monkeypatch.setenv('VLLM_USE_V1', '0')
     vllm_config = VllmConfig()
-    assert not vllm_config.compilation_config.use_cudagraph
+    assert vllm_config.compilation_config.use_cudagraph
 
 
 def test_custom_op():
@@ -77,7 +83,7 @@ def test_use_cudagraphs(vllm_runner, monkeypatch, enabled):
             compilation_counter.expect(
                 num_graphs_seen=1,
                 num_gpu_runner_capture_triggers=1 if enabled else 0,
-                num_cudagraph_captured=13 if enabled else 0,
+                num_cudagraph_captured=14 if enabled else 0,
             ),
             # loading the model causes compilation (if enabled) to happen
             vllm_runner('facebook/opt-125m',
@@ -135,22 +141,27 @@ def test_enforce_eager(vllm_runner, monkeypatch):
 def test_splitting_ops_dynamic():
     # Default config
     config = VllmConfig()
-    assert config.compilation_config.cudagraph_mode == \
-        CUDAGraphMode.FULL_AND_PIECEWISE
-    assert config.compilation_config.splitting_ops_contain_attention()
+    # Default V1 config leaves cudagraph mode unset; splitting ops are only
+    # populated when the engine decides to use piecewise compilation.
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    assert not config.compilation_config.splitting_ops_contain_attention()
 
     # When use_inductor_graph_partition=True
-    if _is_torch_equal_or_newer('2.9.0.dev'):
-        # inductor graph partition is only available in PyTorch 2.9+.
-        # this is a fast config check so we are not using pytest.skip.
+    torch_version = torch.__version__
+    if _is_torch_equal_or_newer(torch_version, '2.9.0.dev'):
         config = VllmConfig(compilation_config=CompilationConfig(
+            level=CompilationLevel.PIECEWISE,
             use_inductor_graph_partition=True,
-            splitting_ops=["silly_attention"]))
-        # should ignore splitting_ops
+            splitting_ops=["vllm.unified_attention"]))
+        # with inductor partition we move user-specified ops into partition rules
         assert config.compilation_config.splitting_ops == []
+        assert config.compilation_config.partition_rule_ops == [
+            "vllm.unified_attention"
+        ]
 
     # When attn_fusion pass enabled.
     config = VllmConfig(compilation_config=CompilationConfig(
+        level=CompilationLevel.PIECEWISE,
         pass_config={
             "enable_attn_fusion": True,
             "enable_noop": True
@@ -165,8 +176,9 @@ def test_splitting_ops_dynamic():
 
     # splitting_ops can not contain attention ops when attn_fusion
     # pass enabled.
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValidationError):
         config = VllmConfig(compilation_config=CompilationConfig(
+            level=CompilationLevel.PIECEWISE,
             pass_config={
                 "enable_attn_fusion": True,
                 "enable_noop": True
@@ -178,8 +190,9 @@ def test_splitting_ops_dynamic():
         ))
 
     # When both use_inductor_graph_partition and attn_fusion pass enabled.
-    if _is_torch_equal_or_newer('2.9.0.dev'):
+    if _is_torch_equal_or_newer(torch_version, '2.9.0.dev'):
         config = VllmConfig(compilation_config=CompilationConfig(
+            level=CompilationLevel.PIECEWISE,
             use_inductor_graph_partition=True,
             pass_config={
                 "enable_attn_fusion": True,
@@ -189,8 +202,27 @@ def test_splitting_ops_dynamic():
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         ))
         assert config.compilation_config.splitting_ops == []
-        # enable_attn_fusion is directly support under
+        assert config.compilation_config.partition_rule_ops == list(
+            CompilationConfig()._attention_ops)
+        # enable_attn_fusion is directly supported under
         # use_inductor_graph_partition=True, and cudagraph_mode
         # is unchanged.
         assert config.compilation_config.cudagraph_mode == \
             CUDAGraphMode.PIECEWISE
+
+
+def test_resolve_operator_overload():
+    import torch
+
+    from vllm.compilation.partition_rules import (_parse_operator_name,
+                                                  _resolve_operator_overload)
+
+    assert (_resolve_operator_overload("aten.mm.default")
+            is torch.ops.aten.mm.default)
+    with pytest.raises(ValueError):
+        _parse_operator_name("flash_attention")
+    assert (_resolve_operator_overload("aten.addmm.default")
+            is torch.ops.aten.addmm.default)
+
+    with pytest.raises(ValueError):
+        _resolve_operator_overload("aten.nonexistent_op")

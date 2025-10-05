@@ -7,7 +7,7 @@ import os
 import pprint
 import time
 from collections.abc import Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import Any, Callable, Optional
 
 import torch
@@ -15,6 +15,7 @@ import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
+from vllm.compilation.partition_rules import inductor_partition_rule_context
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -66,6 +67,15 @@ class CompilerManager:
         self.is_cache_updated = False
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
+
+    @contextmanager
+    def compile_context(self):
+        with ExitStack() as stack:
+            if self.compilation_config.use_inductor_graph_partition:
+                partition_ops = self.compilation_config.partition_rule_ops
+                stack.enter_context(
+                    inductor_partition_rule_context(partition_ops))
+            yield
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
@@ -179,9 +189,14 @@ class CompilerManager:
         else:
             maybe_key = \
                 f"artifact_shape_{runtime_shape}_subgraph_{graph_index}"
-        compiled_graph, handle = self.compiler.compile(
-            graph, example_inputs, additional_inductor_config, runtime_shape,
-            maybe_key)
+        with self.compile_context():
+            compiled_graph, handle = self.compiler.compile(
+                graph,
+                example_inputs,
+                additional_inductor_config,
+                runtime_shape,
+                maybe_key,
+            )
 
         assert compiled_graph is not None, "Failed to compile the graph"
 
@@ -566,8 +581,13 @@ class VllmBackend:
         self.graph = graph
         self.configure_post_pass()
 
-        self.split_gm, self.piecewise_graphs = split_graph(
-            graph, self.compilation_config.splitting_ops)
+        if self.compilation_config.use_inductor_graph_partition:
+            # Let Inductor decide partitioning; avoid FX-level pre-splitting.
+            split_ops: list[str] = []
+        else:
+            split_ops = self.compilation_config.splitting_ops or []
+
+        self.split_gm, self.piecewise_graphs = split_graph(graph, split_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
 
