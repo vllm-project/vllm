@@ -1097,10 +1097,7 @@ def init_distributed_environment(
     if local_rank == -1:
         # local rank not set, this usually happens in single-node
         # setting, where we can use rank as local rank
-        if distributed_init_method == "env://":
-            local_rank = envs.LOCAL_RANK
-        else:
-            local_rank = rank
+        local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
     global _WORLD, _NODE_COUNT
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))

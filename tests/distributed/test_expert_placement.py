@@ -12,10 +12,7 @@ def verify_round_robin_pattern(expert_map, ep_rank, ep_size, global_num_experts)
     base_experts = global_num_experts // ep_size
     remainder = global_num_experts % ep_size
 
-    if ep_rank < remainder:
-        local_num_experts = base_experts + 1
-    else:
-        local_num_experts = base_experts
+    local_num_experts = base_experts + 1 if ep_rank < remainder else base_experts
 
     # Expected expert IDs for this rank in round_robin pattern
     # For non-divisible cases, ranks with extra experts start earlier

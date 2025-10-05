@@ -1310,10 +1310,7 @@ def _parse_chat_message_content_part(
 
     modality = None
     if part_type == "image_pil":
-        if content is not None:
-            image_content = cast(Image.Image, content)
-        else:
-            image_content = None
+        image_content = cast(Image.Image, content) if content is not None else None
         mm_parser.parse_image_pil(image_content, uuid)
         modality = "image"
     elif part_type in ("image_url", "input_image"):

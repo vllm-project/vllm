@@ -318,10 +318,7 @@ class GemmaRMSNorm(CustomOp):
         """PyTorch-native implementation equivalent to forward()."""
         orig_dtype = x.dtype
         if residual is not None:
-            if orig_dtype == torch.float16:
-                x = x + residual.float()
-            else:
-                x = x + residual
+            x = x + residual.float() if orig_dtype == torch.float16 else x + residual
             residual = x
 
         x = x.float()

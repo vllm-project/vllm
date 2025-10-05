@@ -458,10 +458,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         else:
             serialized_data = self.input_encoder.encode(execute_model_req)
         outputs = ray.get(self.forward_dag.execute(serialized_data))
-        if self.use_v1:
-            output = outputs[0]
-        else:
-            output = self.output_decoder.decode(outputs[0])
+        output = outputs[0] if self.use_v1 else self.output_decoder.decode(outputs[0])
         return output
 
     def _run_workers(
@@ -482,10 +479,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
           rather than blocking on the results.
         - args/kwargs: All workers share the same args/kwargs
         """
-        if isinstance(method, str):
-            sent_method = method
-        else:
-            sent_method = cloudpickle.dumps(method)
+        sent_method = method if isinstance(method, str) else cloudpickle.dumps(method)
         del method
         if self.use_ray_spmd_worker:
             assert not async_run_tensor_parallel_workers_only, (
@@ -573,8 +567,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
         from ray.dag import InputNode, MultiOutputNode
 
         logger.info(
-            "RAY_CGRAPH_get_timeout is set to %s", os.environ["RAY_CGRAPH_get_timeout"]
-        )  # noqa: SIM112
+            "RAY_CGRAPH_get_timeout is set to %s",
+            os.environ["RAY_CGRAPH_get_timeout"],  # noqa: SIM112
+        )
         logger.info(
             "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE = %s",
             envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE,

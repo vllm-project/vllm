@@ -58,7 +58,7 @@ if __name__ == "__main__":
 
     assert args.phase in profile_data, (
         f"Cannot find phase {args.phase} in profile data. Choose one among"
-        f"{[x for x in profile_data.keys() if 'prefill' in x or 'decode' in x]}"
+        f"{[x for x in profile_data if 'prefill' in x or 'decode' in x]}"
     )  # noqa
 
     if args.table == "summary":

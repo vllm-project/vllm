@@ -84,10 +84,7 @@ def onednn_int8_gemm_test_helper(
         azp = None
         azp_adj = None
 
-    if use_bias:
-        bias = torch.rand((n,), device=device, dtype=out_dtype) * 10
-    else:
-        bias = None
+    bias = torch.rand((n,), device=device, dtype=out_dtype) * 10 if use_bias else None
 
     handler = ops.create_onednn_scaled_mm(
         b,
