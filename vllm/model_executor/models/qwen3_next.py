@@ -62,7 +62,7 @@ from .interfaces import (HasInnerState, IsHybrid, MixtureOfExperts,
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+                    maybe_prefix, should_skip_bias_param)
 
 logger = init_logger(__name__)
 
@@ -978,15 +978,15 @@ class Qwen3NextModel(nn.Module):
                     continue
 
                 name = name.replace(weight_name, param_name)
+                if name not in params_dict:
+                    continue
                 # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
+                if should_skip_bias_param(name):
                     continue
                 # Skip layers on other devices.
                 if is_pp_missing_parameter(name, self):
                     continue
                 # name = apply_attn_prefix(name, params_dict)
-                if name not in params_dict:
-                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -997,12 +997,13 @@ class Qwen3NextModel(nn.Module):
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)
+                    if name not in params_dict:
+                        continue
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
                     # Skip loading extra bias for GPTQ models.
-                    if ((name.endswith(".bias") or name.endswith("_bias"))
-                            and name not in params_dict):
+                    if should_skip_bias_param(name):
                         continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
@@ -1013,8 +1014,10 @@ class Qwen3NextModel(nn.Module):
                                   expert_id=expert_id)
                     break
                 else:
+                    if name not in params_dict:
+                        continue
                     # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
+                    if should_skip_bias_param(name):
                         continue
                     if is_pp_missing_parameter(name, self):
                         continue
