@@ -17,6 +17,7 @@ On the client side, run:
 """
 import argparse
 import asyncio
+import contextlib
 import gc
 import importlib.util
 import json
@@ -47,9 +48,24 @@ from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
+HTTP_STATUS_OK = 200
 
 TERM_PLOTLIB_AVAILABLE = ((importlib.util.find_spec("termplotlib") is not None)
                           and (shutil.which("gnuplot") is not None))
+
+
+@dataclass
+class MetricsSnapshot:
+    timestamp: float
+    num_requests_running: int = 0
+    num_requests_swapped: int = 0
+    num_requests_waiting: int = 0
+    # Token totals aggregated across all engines
+    prompt_tokens_total: int = 0
+    generation_tokens_total: int = 0
+    # Calculated throughput (tokens/sec since last measurement)
+    prompt_throughput: float = 0.0
+    generation_throughput: float = 0.0
 
 
 class TaskType(Enum):
@@ -436,6 +452,325 @@ def calculate_metrics(
     return metrics, actual_output_lens
 
 
+async def _fetch_metrics(
+    base_url: str, session: aiohttp.ClientSession
+) -> Optional[MetricsSnapshot]:
+    """Fetch metrics from /metrics endpoint."""
+    try:
+        async with session.get(f"{base_url}/metrics") as response:
+            if response.status == HTTP_STATUS_OK:
+                text = await response.text()
+                metrics = MetricsSnapshot(timestamp=time.perf_counter())
+
+                for line in text.split('\n'):
+                    if line.startswith('vllm:num_requests_running'):
+                        metrics.num_requests_running += int(
+                            float(line.split()[1]))
+                    elif line.startswith('vllm:num_requests_swapped'):
+                        metrics.num_requests_swapped += int(
+                            float(line.split()[1]))
+                    elif line.startswith('vllm:num_requests_waiting'):
+                        metrics.num_requests_waiting += int(
+                            float(line.split()[1]))
+                    elif line.startswith('vllm:prompt_tokens_total'):
+                        # Aggregate across all engines
+                        metrics.prompt_tokens_total += int(
+                            float(line.split()[1]))
+                    elif line.startswith('vllm:generation_tokens_total'):
+                        # Aggregate across all engines
+                        metrics.generation_tokens_total += int(
+                            float(line.split()[1]))
+
+                return metrics
+    except Exception:
+        pass
+    return None
+
+
+def _calculate_throughput(current: MetricsSnapshot,
+                         previous: MetricsSnapshot) -> MetricsSnapshot:
+    """Calculate throughput based on token deltas between snapshots."""
+    time_diff = current.timestamp - previous.timestamp
+    if time_diff > 0:
+        # Calculate throughput as tokens/second
+        prompt_token_delta = (current.prompt_tokens_total -
+                             previous.prompt_tokens_total)
+        generation_token_delta = (current.generation_tokens_total -
+                                 previous.generation_tokens_total)
+
+        current.prompt_throughput = prompt_token_delta / time_diff
+        current.generation_throughput = generation_token_delta / time_diff
+    else:
+        current.prompt_throughput = 0.0
+        current.generation_throughput = 0.0
+
+    return current
+
+
+def _detect_decode_phase_start_metrics(
+        metrics_history: list[MetricsSnapshot]) -> bool:
+    """Detect decode phase start based on token throughput metrics.
+
+    Decode phase is detected when:
+    1. There are active requests running
+    2. Generation throughput is significantly higher than prompt throughput
+    3. Generation throughput is substantial (>50 tokens/sec)
+    4. The pattern is stable across multiple measurements
+    """
+    if len(metrics_history) < 3:
+        return False
+
+    recent = metrics_history[-3:]
+
+    # Check if we have consistent activity
+    if not all(m.num_requests_running > 0 for m in recent):
+        return False
+
+    # Check if generation throughput significantly exceeds prompt throughput
+    generation_dominant_count = 0
+
+    for m in recent:
+        if m.generation_throughput > 0 and m.prompt_throughput >= 0:
+            # Generation should be significantly higher during decode phase
+            throughput_ratio = (m.generation_throughput /
+                               max(m.prompt_throughput, 1.0))
+            if throughput_ratio > 3.0:  # Generation is 3x+ higher than prompt
+                generation_dominant_count += 1
+
+    # Require both conditions for majority of recent measurements
+    return (generation_dominant_count >= 2)
+
+
+def _detect_decode_phase_end_metrics(metrics_history: list[MetricsSnapshot],
+                                    start_time: float) -> bool:
+    """Detect decode phase end based on token throughput metrics.
+
+    Decode phase ends when:
+    1. No requests are running, OR
+    2. Generation throughput drops significantly, OR
+    3. Minimum profiling duration has passed and activity is low
+    """
+    if len(metrics_history) < 2:
+        return False
+
+    recent = metrics_history[-2:]
+
+    # Simple case: no requests running
+    if all(m.num_requests_running == 0 for m in recent):
+        return True
+
+    # Check if we've been in decode phase long enough (minimum duration)
+    current_time = recent[-1].timestamp
+    if current_time - start_time < 5.0:  # Minimum 5 seconds
+        return False
+
+    # End if generation throughput drops significantly
+    current = recent[-1]
+    if current.generation_throughput < 10.0:  # Very low generation activity
+        return True
+
+    # End if generation throughput becomes lower than prompt throughput
+    return (current.prompt_throughput > 0 and
+            current.generation_throughput < current.prompt_throughput * 0.5)
+
+
+async def _start_profiler(request_func, base_url: str, model_id: str,
+                        model_name: str, test_prompt: str, test_prompt_len: int,
+                        test_output_len: int, logprobs: Optional[int],
+                        test_mm_content, ignore_eos: bool,
+                        extra_headers: Optional[dict],
+                        extra_body: Optional[dict]) -> bool:
+    """Start profiler."""
+    try:
+        profile_input = RequestFuncInput(
+            model=model_id,
+            model_name=model_name,
+            prompt=test_prompt,
+            api_url=base_url + "/start_profile",
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            logprobs=logprobs,
+            multi_modal_content=test_mm_content,
+            ignore_eos=ignore_eos,
+            extra_headers=extra_headers,
+            extra_body=extra_body,
+        )
+
+        # Use a temporary session for profiler start
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=60),
+        ) as session:
+            profile_output = await request_func(
+                request_func_input=profile_input, session=session
+            )
+            return profile_output.http_status == HTTP_STATUS_OK
+    except Exception:
+        return False
+
+
+async def _stop_profiler(request_func, base_url: str, model_id: str,
+                        model_name: str, test_prompt: str, test_prompt_len: int,
+                        test_output_len: int, logprobs: Optional[int],
+                        test_mm_content, ignore_eos: bool,
+                        extra_headers: Optional[dict],
+                        extra_body: Optional[dict]) -> bool:
+    """Stop profiler."""
+    try:
+        profile_input = RequestFuncInput(
+            model=model_id,
+            model_name=model_name,
+            prompt=test_prompt,
+            api_url=base_url + "/stop_profile",
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            logprobs=logprobs,
+            multi_modal_content=test_mm_content,
+            ignore_eos=ignore_eos,
+            extra_headers=extra_headers,
+            extra_body=extra_body,
+        )
+
+        # Use a temporary session for profiler stop
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=300),
+        ) as session:
+            profile_output = await request_func(
+                request_func_input=profile_input, session=session
+            )
+            return profile_output.http_status == HTTP_STATUS_OK
+    except Exception:
+        return False
+
+
+async def _setup_decode_profiling(
+    base_url: str, metrics_interval: float
+) -> tuple[Optional[aiohttp.ClientSession], Optional[MetricsSnapshot]]:
+    """Set up decode profiling and test metrics endpoint availability."""
+    print(f"Decode-only profiling enabled - monitoring metrics "
+          f"every {metrics_interval}s")
+
+    # Create shared session for profiling operations
+    profile_session = aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=60.0))
+
+    # Test metrics endpoint availability
+    test_metrics = await _fetch_metrics(base_url, profile_session)
+    if not test_metrics:
+        print("Metrics endpoint not available. Disabling decode profiling.")
+        await profile_session.close()
+        return None, None
+    else:
+        print("Metrics endpoint available")
+        return profile_session, test_metrics
+
+
+async def _monitor_and_profile(
+    profile_session: aiohttp.ClientSession,
+    base_url: str,
+    metrics_interval: float,
+    decode_profile_duration: Optional[float],
+    metrics_history: list[MetricsSnapshot],
+    request_func,
+    model_id: str,
+    model_name: str,
+    test_prompt: str,
+    test_prompt_len: int,
+    test_output_len: int,
+    logprobs: Optional[int],
+    test_mm_content,
+    ignore_eos: bool,
+    extra_headers: Optional[dict],
+    extra_body: Optional[dict]
+) -> None:
+    """Monitor metrics and handle decode profiling lifecycle."""
+    decode_profiling_active = False
+    decode_start_time = 0.0
+    previous_snapshot = metrics_history[0] if metrics_history else None
+
+    while True:
+        await asyncio.sleep(metrics_interval)
+
+        # Fetch current metrics
+        current_snapshot = await _fetch_metrics(base_url, profile_session)
+        if not current_snapshot:
+            continue
+
+        # Calculate throughput
+        if previous_snapshot:
+            current_snapshot = _calculate_throughput(
+                current_snapshot, previous_snapshot)
+
+        metrics_history.append(current_snapshot)
+
+        # Check for decode phase start
+        if (not decode_profiling_active and
+                _detect_decode_phase_start_metrics(metrics_history)):
+            gen_prompt_ratio = (current_snapshot.generation_throughput /
+                               max(current_snapshot.prompt_throughput, 1.0))
+            print(f"Decode phase detected - "
+                  f"gen_tps={current_snapshot.generation_throughput:.1f}, "
+                  f"prompt_tps={current_snapshot.prompt_throughput:.1f}, "
+                  f"ratio={gen_prompt_ratio:.2f} - starting profiler")
+            decode_start_time = current_snapshot.timestamp
+
+            success = await _start_profiler(
+                request_func, base_url, model_id, model_name,
+                test_prompt, test_prompt_len, test_output_len,
+                logprobs, test_mm_content, ignore_eos,
+                extra_headers, extra_body
+            )
+
+            if success:
+                decode_profiling_active = True
+                print("Decode profiling started")
+            else:
+                print("Failed to start decode profiling")
+
+        # Check for decode phase end
+        elif decode_profiling_active:
+            should_stop = False
+
+            if decode_profile_duration is not None:
+                # Use fixed duration
+                elapsed = current_snapshot.timestamp - decode_start_time
+                if elapsed >= decode_profile_duration:
+                    should_stop = True
+            else:
+                # Use auto-detection
+                if _detect_decode_phase_end_metrics(
+                        metrics_history, decode_start_time):
+                    should_stop = True
+
+            if should_stop:
+                print("Stopping decode profiler")
+                success = await _stop_profiler(
+                    request_func, base_url, model_id, model_name,
+                    test_prompt, test_prompt_len, test_output_len,
+                    logprobs, test_mm_content, ignore_eos,
+                    extra_headers, extra_body
+                )
+                if success:
+                    print("Decode profiling stopped successfully")
+                else:
+                    print("Failed to stop decode profiling")
+                break
+
+        previous_snapshot = current_snapshot
+
+
+async def _cleanup_decode_profiling(
+    monitor_task: Optional[asyncio.Task],
+    profile_session: Optional[aiohttp.ClientSession]
+) -> None:
+    """Clean up decode profiling resources."""
+    if monitor_task:
+        monitor_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await monitor_task
+    if profile_session:
+        await profile_session.close()
+
+
 async def benchmark(
     endpoint_type: str,
     api_url: str,
@@ -449,6 +784,9 @@ async def benchmark(
     burstiness: float,
     disable_tqdm: bool,
     profile: bool,
+    profile_decode_only: bool,
+    metrics_interval: float,
+    decode_profile_duration: Optional[float],
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
     ignore_eos: bool,
@@ -644,7 +982,28 @@ async def benchmark(
                 limited_request_func(request_func_input=request_func_input,
                                      session=session,
                                      pbar=pbar)))
+
+    # Decode-only profiling setup
+    profile_session = None
+    monitor_task = None
+    if profile_decode_only:
+        profile_session, test_metrics = await _setup_decode_profiling(
+            base_url, metrics_interval)
+
+        if profile_session and test_metrics:
+            metrics_history = [test_metrics]
+            monitor_task = asyncio.create_task(_monitor_and_profile(
+                profile_session, base_url, metrics_interval,
+                decode_profile_duration, metrics_history, request_func,
+                model_id, model_name, test_prompt, test_prompt_len,
+                test_output_len, logprobs, test_mm_content, ignore_eos,
+                extra_headers, extra_body
+            ))
+
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
+
+    # Clean up decode profiling
+    await _cleanup_decode_profiling(monitor_task, profile_session)
 
     if pbar is not None:
         pbar.close()
@@ -967,6 +1326,25 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "VLLM_TORCH_PROFILER_DIR to enable profiler.",
     )
     parser.add_argument(
+        "--profile-decode-only",
+        action="store_true",
+        help="Enable decode-only profiling with metrics-based monitoring.",
+    )
+    parser.add_argument(
+        "--metrics-interval",
+        type=float,
+        default=1.0,
+        help="Interval in seconds for metrics monitoring during "
+             "decode profiling.",
+    )
+    parser.add_argument(
+        "--decode-profile-duration",
+        type=float,
+        default=None,
+        help="Duration in seconds for decode profiling. "
+             "If not specified, uses auto-detection.",
+    )
+    parser.add_argument(
         "--save-result",
         action="store_true",
         help="Specify to save benchmark results to a json file",
@@ -1263,6 +1641,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         burstiness=args.burstiness,
         disable_tqdm=args.disable_tqdm,
         profile=args.profile,
+        profile_decode_only=args.profile_decode_only,
+        metrics_interval=args.metrics_interval,
+        decode_profile_duration=args.decode_profile_duration,
         selected_percentile_metrics=args.percentile_metrics.split(","),
         selected_percentiles=[
             float(p) for p in args.metric_percentiles.split(",")
