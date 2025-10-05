@@ -391,6 +391,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
         video_token: Optional[str] = None,
+        video_pruning_rate: Optional[float] = None,
     ) -> None:
         super().__init__(
             config=config,
@@ -401,6 +402,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         )
         # add extra video token for video processing
         self.video_token = video_token
+        self.video_pruning_rate = video_pruning_rate
 
     @property
     def supports_video(self) -> bool:
@@ -458,28 +460,33 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             image_size: int = self.config.force_image_size
             patch_size: int = self.config.patch_size
             downsample_ratio = self.config.downsample_ratio
-            tokens_per_frame = int((image_size * image_size // patch_size**2) *
-                                   (downsample_ratio**2))
-            video_pruning_rate = 0.75  # TODO
+            tokens_per_frame = int(
+                (image_size * image_size // patch_size**2) * (downsample_ratio**2)
+            )
 
             for pixel_values in pixel_values_lst_video:
                 num_frames = pixel_values.shape[0]
 
-                if video_pruning_rate is not None and video_pruning_rate > 0.0:
+                if (
+                    self.video_pruning_rate is not None
+                    and self.video_pruning_rate > 0.0
+                ):
                     # Start of EVS-specific code
                     num_tokens = compute_retained_tokens_count(
                         tokens_per_frame=tokens_per_frame,
                         num_frames=num_frames,
-                        q=video_pruning_rate,
+                        q=self.video_pruning_rate,
                     )
                     video_repl = self.get_dummy_video_repl_for_evs(
                         num_frames=num_frames,  # number of frames
                         num_video_tokens=num_tokens,
-                        #video_context_token=self.hf_processor.video_token
+                        video_context_token=self.video_token,
                     )
                     # End of EVS-specific code
                 else:
-                    raise NotImplementedError("TODO")
+                    video_repl = self.get_video_repl(
+                        tokens_per_frame, num_frames, self.video_token
+                    )
 
                 text = [t.replace('<video>', video_repl.full, 1) for t in text]
         return text, video_inputs
@@ -529,6 +536,22 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         repl_full = IMG_START + repl_features + IMG_END
 
         return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
+
+    @classmethod
+    def get_video_repl(
+        cls,
+        tokens_per_frame: int,
+        num_frames: int,
+        video_context_token: str = IMG_CONTEXT,
+    ) -> PromptUpdateDetails[str]:
+        repl_features = video_context_token * tokens_per_frame
+        repl_features_with_sep = IMG_START + repl_features + IMG_END
+        # num_patches is equal to num_frames
+        repl_full = "".join(
+            [f"Frame{i + 1}: {repl_features_with_sep}" for i in range(num_frames)]
+        )
+
+        return PromptUpdateDetails.select_text(repl_full, repl_full)
 
     @classmethod
     def get_real_video_repl_for_evs(
@@ -673,6 +696,9 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
     def get_video_token(self) -> Optional[str]:
         return IMG_CONTEXT
 
+    def get_video_pruning_rate(self) -> Optional[float]:
+        return self.ctx.get_mm_config().video_pruning_rate
+
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
@@ -696,6 +722,7 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
             video_token=self.get_video_token(),
+            video_pruning_rate=self.get_video_pruning_rate(),
             **kwargs,
         )
 
@@ -888,8 +915,11 @@ class NanoNemotronVLMultiModalProcessor(
                     video_context_token=hf_processor.video_token)
                 # End of EVS-specific code
             else:
-                raise NotImplementedError(
-                    "Implement default prompt replacement without EVS")
+                return hf_processor.get_video_repl(
+                    feature_size,
+                    num_patches,
+                    video_context_token=hf_processor.video_token,
+                )
 
         if self.info.supports_video:
             prompt_repl = [
@@ -1179,21 +1209,38 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid, SupportsMultiModa
             num_frames = video_input["num_patches"][i].item()
             assert single_video_embeddings.shape[0] % num_frames == 0
 
-            retention_mask = compute_retention_mask(
-                single_video_embeddings,
-                video_size_thw=torch.tensor([num_frames, rows, cols]),
-                spatial_merge_size=1,
-                q=video_pruning_rate)
+            if video_pruning_rate is not None and video_pruning_rate > 0.0:
+                retention_mask = compute_retention_mask(
+                    single_video_embeddings,
+                    video_size_thw=torch.tensor([num_frames, rows, cols]),
+                    spatial_merge_size=1,
+                    q=video_pruning_rate,
+                )
 
-            retention_mask_thw = retention_mask.reshape(num_frames, rows, cols)
-            # [T] where each value is number of retained tokens in a given frame
-            num_tokens_per_frame = retention_mask_thw.sum(dim=(1, 2)).long()
+                retention_mask_thw = retention_mask.reshape(num_frames, rows, cols)
+                # [T] where each value is number of retained tokens in a given frame
+                num_tokens_per_frame = retention_mask_thw.sum(dim=(1, 2)).long()
 
-            # Create final embeddings that will replace placeholder embeddings
-            # with video content and indicator tokens
-            final_video_embeddings += (self._create_final_video_embeddings(
-                single_video_embeddings[retention_mask], num_tokens_per_frame,
-                num_frames), )
+                # Create final embeddings that will replace placeholder embeddings
+                # with video content and indicator tokens
+                final_video_embeddings += (
+                    self._create_final_video_embeddings(
+                        single_video_embeddings[retention_mask],
+                        num_tokens_per_frame,
+                        num_frames,
+                    ),
+                )
+            else:
+                num_patches = video_input["num_patches"][i].item()
+                assert single_video_embeddings.shape[0] % num_patches == 0
+                feature_size = single_video_embeddings.shape[0] // num_patches
+                final_video_embeddings += (
+                    self._create_final_video_embeddings(
+                        single_video_embeddings,
+                        feature_size,
+                        num_patches,
+                    ),
+                )
 
         return final_video_embeddings
 
@@ -1214,8 +1261,15 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid, SupportsMultiModa
         device = video_embeddings.device
 
         # Generate video replacement text and convert to token IDs
-        video_repl_text = NanoNemotronVLProcessor.get_real_video_repl_for_evs(
-            num_tokens_per_frame, IMG_CONTEXT).full
+        if self.video_pruning_rate is not None and self.video_pruning_rate > 0.0:
+            video_repl_text = NanoNemotronVLProcessor.get_real_video_repl_for_evs(
+                num_tokens_per_frame, IMG_CONTEXT
+            ).full
+        else:
+            video_repl_text = NanoNemotronVLProcessor.get_video_repl(
+                num_tokens_per_frame, num_frames, IMG_CONTEXT
+            ).full
+
         tokenizer = cached_tokenizer_from_config(self.model_config)
         repl_token_ids = torch.tensor(_seq2tokens(tokenizer, video_repl_text),
                                       device=device)
