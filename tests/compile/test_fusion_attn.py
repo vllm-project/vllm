@@ -8,11 +8,11 @@ import torch._dynamo
 
 from tests.compile.backend import LazyInitPass, TestBackend
 from tests.models.utils import check_outputs_equal
-from tests.v1.attention.utils import (BatchSpec, _Backend,
-                                      create_common_attn_metadata)
+from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm import LLM, SamplingParams
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.backends.registry import _Backend
 from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
@@ -191,7 +191,6 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 dtype=self.kv_cache_dtype,
-                use_mla=False,
             ),
             layer_names=[self.attn.layer_name],
             vllm_config=self.vllm_config,

@@ -22,7 +22,8 @@ else:
 logger = init_logger(__name__)
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
-CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
+CacheDType = Literal["auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2",
+                     "fp8_inc"]
 MambaDType = Literal["auto", "float32"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
 
@@ -52,7 +53,11 @@ class CacheConfig:
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
-    fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc)."""
+    fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc).
+    Some models (namely DeepSeekV3.2) default to fp8, set to bfloat16 to use
+    bfloat16 instead, this is an invalid option for models that do not default
+    to fp8.
+    """
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
@@ -87,7 +92,8 @@ class CacheConfig:
     mamba_page_size_padded: Optional[int] = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
-
+    mamba_block_size: Optional[int] = None
+    """Size of a contiguous cache block in number of tokens for mamba cache."""
     mamba_cache_dtype: MambaDType = "auto"
     """The data type to use for the Mamba cache (both the conv as well as the
     ssm state). If set to 'auto', the data type will be inferred from the model
@@ -171,11 +177,12 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype in get_args(CacheDType):
-            logger.info(
-                "Using fp8 data type to store kv cache. It reduces the GPU "
-                "memory footprint and boosts the performance. "
-                "Meanwhile, it may cause accuracy drop without a proper "
-                "scaling factor.")
+            if self.cache_dtype.startswith("fp8"):
+                logger.info(
+                    "Using fp8 data type to store kv cache. It reduces the GPU "
+                    "memory footprint and boosts the performance. "
+                    "Meanwhile, it may cause accuracy drop without a proper "
+                    "scaling factor.")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
 

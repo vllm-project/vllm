@@ -191,9 +191,13 @@ VLLM also provides a pythonic and JSON-based chat template for Llama 4, but pyth
 
 For Llama 4 model, use `--tool-call-parser llama4_pythonic --chat-template examples/tool_chat_template_llama4_pythonic.jinja`.
 
-#### IBM Granite
+### IBM Granite
 
 Supported models:
+
+* `ibm-granite/granite-4.0-h-small` and other Granite 4.0 models
+
+    Recommended flags: `--tool-call-parser hermes`
 
 * `ibm-granite/granite-3.0-8b-instruct`
 
