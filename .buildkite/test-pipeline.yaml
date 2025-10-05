@@ -835,11 +835,11 @@ steps:
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
 
-- label: GPT-OSS Eval (Blackwell)
+- label: Blackwell GPT-OSS Eval
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
   gpu: b200
-  optional: true # disable while debugging
+  optional: true # run on nightlies
   source_file_dependencies:
   - tests/evals/gpt_oss
   - vllm/model_executor/models/gpt_oss.py
@@ -865,6 +865,16 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   commands:
     - pytest -s -v tests/quantization/test_blackwell_moe.py
+
+- label: Blackwell LM Eval Small Models
+  timeout_in_minutes: 75
+  gpu: b200
+  optional: true # run on nightlies
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt --tp-size=1
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
