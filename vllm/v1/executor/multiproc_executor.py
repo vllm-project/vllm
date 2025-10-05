@@ -200,8 +200,11 @@ class MultiprocExecutor(Executor):
         return self.kv_output_aggregator.aggregate(outputs, self.output_rank)
 
     def execute_dummy_batch(self) -> None:
-        self.collective_rpc("execute_dummy_batch",
-                            unique_reply_rank=self.output_rank)
+        if self.is_sleeping:
+            logger.debug("Engine is currently sleeping, skipping dummy batch execution.")
+        else:
+            self.collective_rpc("execute_dummy_batch",
+                                unique_reply_rank=self.output_rank)
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
