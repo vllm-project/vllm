@@ -30,6 +30,7 @@ from .lora import LoRAConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
+from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
@@ -100,6 +101,8 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: Optional[KVEventsConfig] = None
     """The configurations for event publishing."""
+    reasoning_config: Optional[ReasoningConfig] = None
+    """The configurations for reasoning model."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -478,6 +481,10 @@ class VllmConfig:
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
+
+        if (self.reasoning_config is not None
+                and self.model_config is not None):
+            self.reasoning_config.initialize_token_ids(self.model_config)
 
         if (envs.VLLM_USE_V1
                 and not self.scheduler_config.disable_hybrid_kv_cache_manager):
