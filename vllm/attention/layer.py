@@ -417,12 +417,16 @@ class MultiHeadAttention(nn.Module):
         head_size: int,
         scale: float,
         num_kv_heads: Optional[int] = None,
-    ):
+        # This has no effect, it is only here to make it easier to swap
+        # between Attention and MultiHeadAttention
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = scale
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.layer_name = prefix
 
         assert self.num_heads % self.num_kv_heads == 0, \
             f"num_heads ({self.num_heads}) is not " \
