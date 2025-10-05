@@ -313,6 +313,103 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
 
+        # Compact Encoder Cache Integration
+        # Initialize compact cache components if enabled
+        try:
+            from .encoder_cache_config import get_feature_flag_manager
+            from .compact_encoder_cache import CompactEncoderCache
+            from .token_aware_scheduler import TokenAwareScheduler
+            from .encoder_cache_optimizations import (
+                BatchProcessor,
+                PositionCache,
+                MemoryOptimizer,
+            )
+
+            feature_flags = get_feature_flag_manager()
+
+            if feature_flags.should_use_compact_cache():
+                # Initialize compact cache
+                self._compact_cache = CompactEncoderCache(enable_compact_cache=True)
+
+                # Initialize token-aware scheduler if enabled
+                if feature_flags.should_use_token_aware_scheduling():
+                    self._token_aware_scheduler = TokenAwareScheduler(
+                        compact_cache=self._compact_cache,
+                        enable_batch_processing=feature_flags.should_use_batch_processing(),
+                    )
+                else:
+                    self._token_aware_scheduler = None
+
+                # Initialize optimization components
+                self._batch_processor = BatchProcessor(
+                    device=self.device,
+                    max_batch_size=feature_flags.config.batch_size_threshold,
+                )
+
+                self._position_cache = PositionCache(
+                    max_size=feature_flags.config.max_cache_size, ttl_seconds=3600.0
+                )
+
+                self._memory_optimizer = MemoryOptimizer(
+                    memory_threshold=feature_flags.config.memory_usage_threshold
+                )
+
+                # Add memory monitoring methods
+                def get_encoder_cache_memory_usage():
+                    """Get memory usage statistics for all encoder cache components."""
+                    stats = {
+                        "legacy_cache_size": len(self.encoder_cache),
+                        "compact_cache_enabled": self._compact_cache is not None,
+                    }
+
+                    if self._compact_cache is not None:
+                        stats.update(self._compact_cache.get_memory_usage())
+
+                    if self._position_cache is not None:
+                        stats.update(self._position_cache.get_stats())
+
+                    if self._batch_processor is not None:
+                        stats.update(self._batch_processor.get_stats().__dict__)
+
+                    if self._memory_optimizer is not None:
+                        stats["memory_efficiency_score"] = (
+                            self._memory_optimizer.get_memory_efficiency_score()
+                        )
+
+                    return stats
+
+                def optimize_encoder_cache_memory():
+                    """Optimize memory usage across all components."""
+                    if self._memory_optimizer is not None:
+                        return self._memory_optimizer.optimize_memory_usage(
+                            self._compact_cache,
+                            self._position_cache,
+                            self._batch_processor,
+                        )
+                    return {}
+
+                # Add methods to the GPU model runner
+                self.get_encoder_cache_memory_usage = get_encoder_cache_memory_usage
+                self.optimize_encoder_cache_memory = optimize_encoder_cache_memory
+
+                logger.info("Initialized compact encoder cache components")
+            else:
+                # Initialize with None for backward compatibility
+                self._compact_cache = None
+                self._token_aware_scheduler = None
+                self._batch_processor = None
+                self._position_cache = None
+                self._memory_optimizer = None
+
+        except ImportError as e:
+            # Fallback if compact cache modules are not available
+            logger.warning(f"Compact encoder cache modules not available: {e}")
+            self._compact_cache = None
+            self._token_aware_scheduler = None
+            self._batch_processor = None
+            self._position_cache = None
+            self._memory_optimizer = None
+
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
@@ -1048,9 +1145,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return encoder_seq_lens
 
-    def _prepare_inputs(
-        self, scheduler_output: "SchedulerOutput"
-    ) -> tuple[
+    def _prepare_inputs(self, scheduler_output: "SchedulerOutput") -> tuple[
         PerLayerAttnMetadata,
         torch.Tensor,
         Optional[SpecDecodeMetadata],
@@ -1787,10 +1882,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Cache the encoder outputs by mm_hash
         for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
-            self.encoder_cache[mm_hash] = scatter_mm_placeholders(
-                output,
-                is_embed=pos_info.is_embed,
-            )
+            if self._compact_cache is not None:
+                # Store in compact cache (raw embeddings only)
+                metadata = self._extract_metadata(pos_info)
+                self._compact_cache.store_embeddings(
+                    mm_hash=mm_hash,
+                    embeddings=output,
+                    is_embed_mask=pos_info.is_embed,
+                    metadata=metadata
+                )
+            else:
+                # Fallback to legacy scattered storage
+                self.encoder_cache[mm_hash] = scatter_mm_placeholders(
+                    output,
+                    is_embed=pos_info.is_embed,
+                )
 
     def _gather_mm_embeddings(
         self,
@@ -1838,21 +1944,38 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 assert start_idx < end_idx
 
                 mm_hash = mm_feature.identifier
-                encoder_output = self.encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
 
-                if (is_embed := pos_info.is_embed) is not None:
-                    is_embed = is_embed[start_idx:end_idx]
+                if self._compact_cache is not None:
+                    # Calculate encoder slice range using position info
+                    encoder_start, encoder_end = self._calculate_encoder_slice_range(
+                        pos_info.is_embed, start_idx, end_idx
+                    )
 
-                req_start_pos = req_start_idx + start_pos - num_computed_tokens
-                is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = (
-                    True if is_embed is None else is_embed
-                )
+                    # Retrieve from compact cache
+                    mm_embeds_item = self._compact_cache.retrieve_sequence(
+                        mm_hash, encoder_start, encoder_end
+                    )
 
-                mm_embeds_item = gather_mm_placeholders(
-                    encoder_output[start_idx:end_idx],
-                    is_embed=is_embed,
-                )
+                    # Set mm_embed flags for the entire sequence
+                    req_start_pos = req_start_idx + start_pos - num_computed_tokens
+                    is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = True
+                else:
+                    # Fallback to legacy scattered cache
+                    encoder_output = self.encoder_cache.get(mm_hash, None)
+                    assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
+
+                    if (is_embed := pos_info.is_embed) is not None:
+                        is_embed = is_embed[start_idx:end_idx]
+
+                    req_start_pos = req_start_idx + start_pos - num_computed_tokens
+                    is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = (
+                        True if is_embed is None else is_embed
+                    )
+
+                    mm_embeds_item = gather_mm_placeholders(
+                        encoder_output[start_idx:end_idx],
+                        is_embed=is_embed,
+                    )
                 mm_embeds_req.append(mm_embeds_item)
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
@@ -1879,6 +2002,47 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.mrope_positions.copy_to_gpu(total_num_scheduled_tokens)
 
         return mm_embeds, is_mm_embed
+
+    def _calculate_encoder_slice_range(self, is_embed_mask, start_idx, end_idx):
+        """Calculate encoder output slice range based on position info.
+
+        Args:
+            is_embed_mask: Boolean mask indicating embedding positions
+            start_idx: Start position in the scattered sequence
+            end_idx: End position in the scattered sequence
+
+        Returns:
+            Tuple of (encoder_start, encoder_end) for slicing raw encoder output
+        """
+        if is_embed_mask is None:
+            # If no mask, assume all positions are embeddings
+            return start_idx, end_idx
+
+        # Count True values before start_idx and end_idx
+        encoder_start = is_embed_mask[:start_idx].sum().item()
+        encoder_end = is_embed_mask[:end_idx].sum().item()
+
+        return encoder_start, encoder_end
+
+    def _extract_metadata(self, pos_info):
+        """Extract metadata from position info for compact cache.
+
+        Args:
+            pos_info: Position information object
+
+        Returns:
+            Dictionary of metadata for the cache entry
+        """
+        metadata = {}
+
+        if hasattr(pos_info, 'content_type'):
+            metadata['content_type'] = pos_info.content_type
+        if hasattr(pos_info, 'timestamps'):
+            metadata['timestamps'] = pos_info.timestamps
+        if hasattr(pos_info, 'model_name'):
+            metadata['model_name'] = pos_info.model_name
+
+        return metadata
 
     def _extract_encoder_inputs(
         self,
@@ -1994,9 +2158,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return IntermediateTensors(
             {
-                k: v[: num_tokens // tp]
-                if k == "residual" and is_rs
-                else v[:num_tokens]
+                k: (
+                    v[: num_tokens // tp]
+                    if k == "residual" and is_rs
+                    else v[:num_tokens]
+                )
                 for k, v in self.intermediate_tensors.items()
             }
         )
@@ -2037,9 +2203,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
     ) -> ModelRunnerOutput:
-        assert self.input_batch.num_reqs == len(self.input_batch.pooling_params), (
-            "Either all or none of the requests in a batch must be pooling request"
-        )
+        assert self.input_batch.num_reqs == len(
+            self.input_batch.pooling_params
+        ), "Either all or none of the requests in a batch must be pooling request"
 
         hidden_states = hidden_states[:num_scheduled_tokens]
         pooling_metadata = self.input_batch.get_pooling_metadata()
@@ -2997,9 +3163,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return None
 
     def reload_weights(self) -> None:
-        assert getattr(self, "model", None) is not None, (
-            "Cannot reload weights before model is loaded."
-        )
+        assert (
+            getattr(self, "model", None) is not None
+        ), "Cannot reload weights before model is loaded."
         model_loader = get_model_loader(self.load_config)
         logger.info("Reloading weights inplace...")
         model_loader.load_weights(self.get_model(), model_config=self.model_config)
@@ -3936,9 +4102,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     kv_cache_spec,
                     self.vllm_config,
                     self.device,
-                    num_metadata_builders=1
-                    if not self.parallel_config.enable_dbo
-                    else 2,
+                    num_metadata_builders=(
+                        1 if not self.parallel_config.enable_dbo else 2
+                    ),
                 )
 
                 attn_groups.append(attn_group)
@@ -4250,9 +4416,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 layer_names.add(layer_name)
-        assert layer_names == set(kv_cache_raw_tensors.keys()), (
-            "Some layers are not correctly initialized"
-        )
+        assert layer_names == set(
+            kv_cache_raw_tensors.keys()
+        ), "Some layers are not correctly initialized"
         return kv_cache_raw_tensors
 
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
@@ -4558,9 +4724,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 encoder_only_attn_specs[attn_spec].append(layer_name)
                 self.runner_only_attn_layers.add(layer_name)
         if len(encoder_only_attn_specs) > 0:
-            assert len(encoder_only_attn_specs) == 1, (
-                "Only support one encoder-only attention spec now"
-            )
+            assert (
+                len(encoder_only_attn_specs) == 1
+            ), "Only support one encoder-only attention spec now"
             spec, layer_names = encoder_only_attn_specs.popitem()
             self.kv_cache_config.kv_cache_groups.append(
                 KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec)
