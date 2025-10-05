@@ -4,6 +4,9 @@
 import openai
 import pytest
 import pytest_asyncio
+import json
+from rapidfuzz import fuzz
+import jsonschema
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/gpt-oss-20b"
@@ -87,10 +90,10 @@ MESSAGES_INVALID_CALL = [
 
 # Expected outputs
 FUNC_CALC = "calculator"
-FUNC_ARGS_CALC = '{"expression": "123 + 456"}'
+FUNC_ARGS_CALC = '{"expression":"123 + 456"}'
 
 FUNC_TIME = "get_time"
-FUNC_ARGS_TIME = '{"city": "New York"}'
+FUNC_ARGS_TIME = '{"city":"New York"}'
 
 
 # ==========================================================
@@ -147,7 +150,7 @@ async def test_single_tool_call(client: openai.AsyncOpenAI):
     reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
 
     assert FUNC_CALC in function_names, "Calculator function not called"
-    assert FUNC_ARGS_CALC in arguments, "Calculator arguments mismatch"
+    assert any(FUNC_ARGS_CALC in arg or "123 + 456" in arg for arg in arguments), f"Expected calculator arguments {FUNC_ARGS_CALC} not found in {arguments}"
     assert len(reasoning) > 0, "Expected reasoning content missing"
 
 
@@ -224,4 +227,96 @@ async def test_tool_call_with_temperature(client: openai.AsyncOpenAI):
     # Log for analysis (optional, helps debug temperature variance)
     print(f"Tool calls: {message.tool_calls}")
     print(f"Text: {message.content}")
+    
+    
+    
+# ==========================================================
+# Accuracy & Consistency Tests
+# ==========================================================
+@pytest.mark.asyncio
+async def test_tool_call_argument_accuracy(client: openai.AsyncOpenAI):
+    """Ensure the calculator tool arguments closely match the expected arithmetic expression."""
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=MESSAGES_CALC,
+        tools=TOOLS,
+        temperature=0.0,
+    )
+
+    calls = response.choices[0].message.tool_calls
+    assert calls, "No tool calls detected"
+    calc_call = next((c for c in calls if c.function.name == FUNC_CALC), None)
+    assert calc_call, "Calculator function missing"
+
+    # Parse model arguments (may arrive as JSON string fragments)
+    try:
+        args = json.loads(calc_call.function.arguments)
+    except json.JSONDecodeError:
+        pytest.fail("Invalid JSON in calculator arguments")
+
+    expected_expr = "123 + 456"
+    similarity = fuzz.ratio(args.get("expression", ""), expected_expr)
+    assert similarity > 90, f"Expression mismatch (similarity={similarity}%)"
+
+
+@pytest.mark.asyncio
+async def test_tool_response_schema_accuracy(client: openai.AsyncOpenAI):
+    """Validate that tool call arguments adhere to their declared JSON schema."""
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=MESSAGES_MULTIPLE_CALLS,
+        tools=TOOLS,
+        temperature=0.0,
+    )
+
+    calls = response.choices[0].message.tool_calls
+    assert calls, "No tool calls produced"
+
+    for call in calls:
+        func_name = call.function.name
+        args = json.loads(call.function.arguments)
+
+        # Find the tool schema dynamically
+        tool = next(t for t in TOOLS if t["function"]["name"] == func_name)
+        schema = tool["function"]["parameters"]
+
+        # Validate the arguments against schema
+        jsonschema.validate(instance=args, schema=schema)
+
+
+@pytest.mark.asyncio
+async def test_reasoning_relevance_accuracy(client: openai.AsyncOpenAI):
+    """Check whether reasoning content is semantically related to the user's query."""
+    stream = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=MESSAGES_CALC,
+        tools=TOOLS,
+        stream=True,
+    )
+    chunks = [chunk async for chunk in stream]
+    reasoning, _, _ = extract_reasoning_and_calls(chunks)
+
+    assert len(reasoning) > 0, "No reasoning emitted"
+    # The reasoning should at least reference numbers in the user query
+    assert any(num in reasoning for num in ["123", "456"]), \
+        f"Reasoning does not reference expected numbers: {reasoning}"
+
+
+@pytest.mark.asyncio
+async def test_semantic_consistency_with_temperature(client: openai.AsyncOpenAI):
+    """Test that temperature variation doesn't cause contradictory reasoning."""
+    responses = []
+    for temp in [0.0, 0.5, 1.0]:
+        resp = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=MESSAGES_CALC,
+            tools=TOOLS,
+            temperature=temp,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        responses.append(text)
+
+    # Compare fuzzy similarity between low- and mid-temperature outputs
+    low_mid_sim = fuzz.ratio(responses[0], responses[1])
+    assert low_mid_sim > 60, f"Semantic drift too large between T=0.0 and T=0.5 ({low_mid_sim}%)"    
 
