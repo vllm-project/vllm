@@ -167,11 +167,15 @@ def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation,
     bias = torch.randn(dim, device=device, dtype=itype) if has_bias else None
     conv_state_ref = conv_state.detach().clone()
     activation = None if not silu_activation else "silu"
+
+    conv_state_indices = torch.arange(batch, dtype=torch.int32, device=device)
+
     out = causal_conv1d_update(x,
                                conv_state,
                                weight,
                                bias,
-                               activation=activation)
+                               activation=activation,
+                               conv_state_indices=conv_state_indices)
     out_ref = causal_conv1d_update_ref(x_ref,
                                        conv_state_ref,
                                        weight,
