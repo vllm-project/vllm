@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Generic, List, Optional, Protocol, Tuple, Type, TypeVar
+from typing import Generic, Optional, Protocol, TypeVar
 
 import torch
 
@@ -48,12 +48,12 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_impl_cls() -> Type["AttentionImpl"]:
+    def get_impl_cls() -> type["AttentionImpl"]:
         raise NotImplementedError
 
     @staticmethod
     @abstractmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def get_metadata_cls() -> type["AttentionMetadata"]:
         raise NotImplementedError
 
     @classmethod
@@ -73,11 +73,11 @@ class AttentionBackend(ABC):
         num_kv_heads: int,
         head_size: int,
         cache_dtype_str: str = "auto",
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         raise NotImplementedError
 
     @staticmethod
-    def get_kv_cache_stride_order() -> Tuple[int, ...]:
+    def get_kv_cache_stride_order() -> tuple[int, ...]:
         raise NotImplementedError
 
     @classmethod
@@ -147,7 +147,7 @@ class AttentionImpl(ABC, Generic[T]):
         head_size: int,
         scale: float,
         num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
+        alibi_slopes: Optional[list[float]] = None,
         sliding_window: Optional[int] = None,
         kv_cache_dtype: str = "auto",
         logits_soft_cap: Optional[float] = None,
