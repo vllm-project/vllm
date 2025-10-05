@@ -46,28 +46,24 @@ class EPTestSettings:
     ):
         return EPTestSettings(
             parallel_setups=[
-                ParallelSetup(tp_size=tp_base,
-                              eager_mode=False,
-                              chunked_prefill=False),
-                ParallelSetup(tp_size=tp_base,
-                              eager_mode=False,
-                              chunked_prefill=True),
-                ParallelSetup(tp_size=tp_base,
-                              eager_mode=True,
-                              chunked_prefill=False),
-                ParallelSetup(tp_size=2 * tp_base,
-                              eager_mode=False,
-                              chunked_prefill=True),
-                ParallelSetup(tp_size=2 * tp_base,
-                              eager_mode=True,
-                              chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base, eager_mode=False, chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base, eager_mode=False, chunked_prefill=True),
+                ParallelSetup(tp_size=tp_base, eager_mode=True, chunked_prefill=False),
+                ParallelSetup(
+                    tp_size=2 * tp_base, eager_mode=False, chunked_prefill=True
+                ),
+                ParallelSetup(
+                    tp_size=2 * tp_base, eager_mode=True, chunked_prefill=False
+                ),
             ],
             distributed_backends=["mp", "ray"],
             runner=runner,
-            test_options=EPTestOptions(trust_remote_code=trust_remote_code,
-                                       tokenizer_mode=tokenizer_mode,
-                                       load_format=load_format,
-                                       hf_overrides=hf_overrides),
+            test_options=EPTestOptions(
+                trust_remote_code=trust_remote_code,
+                tokenizer_mode=tokenizer_mode,
+                load_format=load_format,
+                hf_overrides=hf_overrides,
+            ),
         )
 
     @staticmethod
@@ -82,16 +78,16 @@ class EPTestSettings:
     ):
         return EPTestSettings(
             parallel_setups=[
-                ParallelSetup(tp_size=tp_base,
-                              eager_mode=True,
-                              chunked_prefill=False),
+                ParallelSetup(tp_size=tp_base, eager_mode=True, chunked_prefill=False),
             ],
             distributed_backends=["mp"],
             runner=runner,
-            test_options=EPTestOptions(trust_remote_code=trust_remote_code,
-                                       tokenizer_mode=tokenizer_mode,
-                                       load_format=load_format,
-                                       hf_overrides=hf_overrides),
+            test_options=EPTestOptions(
+                trust_remote_code=trust_remote_code,
+                tokenizer_mode=tokenizer_mode,
+                load_format=load_format,
+                hf_overrides=hf_overrides,
+            ),
         )
 
     def iter_params(self, model_name: str):
@@ -99,8 +95,13 @@ class EPTestSettings:
 
         for parallel_setup in self.parallel_setups:
             for distributed_backend in self.distributed_backends:
-                yield (model_name, parallel_setup, distributed_backend,
-                       self.runner, opts)
+                yield (
+                    model_name,
+                    parallel_setup,
+                    distributed_backend,
+                    self.runner,
+                    opts,
+                )
 
 
 # NOTE: You can adjust tp_base locally to fit the model in GPU

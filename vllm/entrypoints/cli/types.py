@@ -24,6 +24,6 @@ class CLISubcommand:
         pass
 
     def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+        self, subparsers: argparse._SubParsersAction
+    ) -> FlexibleArgumentParser:
         raise NotImplementedError("Subclasses should implement this method")

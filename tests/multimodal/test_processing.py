@@ -9,16 +9,22 @@ import pytest
 
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
+
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.multimodal.processing import (InputProcessingContext,
-                                        PlaceholderFeaturesInfo,
-                                        PromptIndexTargets, PromptInsertion,
-                                        PromptReplacement, apply_text_matches,
-                                        apply_token_matches,
-                                        find_mm_placeholders,
-                                        iter_token_matches,
-                                        replace_token_matches)
+from vllm.multimodal.processing import (
+    InputProcessingContext,
+    PlaceholderFeaturesInfo,
+    PromptIndexTargets,
+    PromptInsertion,
+    PromptReplacement,
+    apply_text_matches,
+    apply_token_matches,
+    find_mm_placeholders,
+    iter_token_matches,
+    replace_token_matches,
+)
+
 # yapf: enable
 from vllm.multimodal.profiling import MultiModalProfiler
 from vllm.transformers_utils.tokenizer import AnyTokenizer

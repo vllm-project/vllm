@@ -32,6 +32,7 @@ class FinishReason(enum.IntEnum):
     abort - aborted for another reason
 
     """
+
     STOP = 0
     LENGTH = 1
     ABORT = 2
@@ -41,11 +42,11 @@ class FinishReason(enum.IntEnum):
 
 
 class EngineCoreRequest(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
-
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
     request_id: str
     prompt_token_ids: Optional[list[int]]
     mm_features: Optional[list[MultiModalFeatureSpec]]
@@ -73,6 +74,7 @@ class EngineCoreRequest(
 
 class EngineCoreEventType(enum.IntEnum):
     """The type of engine core request event."""
+
     QUEUED = 1
     SCHEDULED = 2
     PREEMPTED = 3
@@ -85,23 +87,24 @@ class EngineCoreEvent(msgspec.Struct):
     frontend to calculate intervals between engine core events. These
     timestamps should not be compared with timestamps from other processes.
     """
+
     type: EngineCoreEventType
     timestamp: float
 
     @classmethod
-    def new_event(cls,
-                  event_type: EngineCoreEventType,
-                  timestamp: Optional[float] = None) -> "EngineCoreEvent":
+    def new_event(
+        cls, event_type: EngineCoreEventType, timestamp: Optional[float] = None
+    ) -> "EngineCoreEvent":
         timestamp = time.monotonic() if timestamp is None else timestamp
         return cls(event_type, timestamp)
 
 
 class EngineCoreOutput(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
-
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
     request_id: str
     new_token_ids: list[int]
 
@@ -132,10 +135,10 @@ class UtilityResult:
 
 
 class UtilityOutput(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
-
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
     call_id: int
 
     # Non-None implies the call failed, result should be None.
@@ -144,11 +147,11 @@ class UtilityOutput(
 
 
 class EngineCoreOutputs(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
-
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
     # NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout
 
@@ -179,12 +182,13 @@ class EngineCoreRequestType(enum.Enum):
     Request types defined as hex byte strings, so it can be sent over sockets
     without separate encoding step.
     """
-    ADD = b'\x00'
-    ABORT = b'\x01'
-    START_DP_WAVE = b'\x02'
-    UTILITY = b'\x03'
+
+    ADD = b"\x00"
+    ABORT = b"\x01"
+    START_DP_WAVE = b"\x02"
+    UTILITY = b"\x03"
     # Sentinel used within EngineCoreProc.
-    EXECUTOR_FAILED = b'\x04'
+    EXECUTOR_FAILED = b"\x04"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):
@@ -199,5 +203,6 @@ class ReconfigureRankType(enum.IntEnum):
     """
     Rank type for reconfiguring distributed request.
     """
+
     KEEP_CURRENT_RANK = -1
     SHUTDOWN_CURRENT_RANK = -2

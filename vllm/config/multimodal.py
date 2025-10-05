@@ -15,12 +15,14 @@ from vllm.config.utils import config
 @dataclass
 class BaseDummyOptions:
     """Base options for generating dummy data during profiling."""
+
     count: int = Field(999, ge=0)
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
 class VideoDummyOptions(BaseDummyOptions):
     """Options for generating dummy video data during profiling."""
+
     num_frames: Optional[int] = Field(None, gt=0)
     width: Optional[int] = Field(None, gt=0)
     height: Optional[int] = Field(None, gt=0)
@@ -29,6 +31,7 @@ class VideoDummyOptions(BaseDummyOptions):
 @dataclass(config=ConfigDict(extra="forbid"))
 class ImageDummyOptions(BaseDummyOptions):
     """Options for generating dummy image data during profiling."""
+
     width: Optional[int] = Field(None, gt=0)
     height: Optional[int] = Field(None, gt=0)
 
@@ -36,13 +39,15 @@ class ImageDummyOptions(BaseDummyOptions):
 @dataclass(config=ConfigDict(extra="forbid"))
 class AudioDummyOptions(BaseDummyOptions):
     """Options for generating dummy audio data during profiling."""
+
     length: Optional[int] = Field(None, gt=0)
 
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
-DummyOptions = Union[BaseDummyOptions, VideoDummyOptions, ImageDummyOptions,
-                     AudioDummyOptions]
+DummyOptions = Union[
+    BaseDummyOptions, VideoDummyOptions, ImageDummyOptions, AudioDummyOptions
+]
 
 
 @config
@@ -127,9 +132,8 @@ class MultiModalConfig:
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
     def _validate_limit_per_prompt(
-        cls, value: dict[str, Union[int,
-                                    dict[str,
-                                         int]]]) -> dict[str, DummyOptions]:
+        cls, value: dict[str, Union[int, dict[str, int]]]
+    ) -> dict[str, DummyOptions]:
         for k, v in value.items():
             # Handle legacy format where only count is specified
             if isinstance(v, int):
@@ -160,8 +164,7 @@ class MultiModalConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     def get_limit_per_prompt(self, modality: str) -> int:
@@ -196,5 +199,4 @@ class MultiModalConfig:
         return kwargs | dict(inference_kwargs)
 
     def is_multimodal_pruning_enabled(self):
-        return (self.video_pruning_rate is not None
-                and self.video_pruning_rate > 0)
+        return self.video_pruning_rate is not None and self.video_pruning_rate > 0

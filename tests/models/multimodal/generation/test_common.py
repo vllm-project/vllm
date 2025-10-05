@@ -3,27 +3,40 @@
 """Common tests for testing .generate() functionality for single / multiple
 image, embedding, and video support for different VLMs in vLLM.
 """
+
 import math
 import os
 from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
-from transformers import (AutoModel, AutoModelForImageTextToText,
-                          AutoModelForTextToWaveform)
+from transformers import (
+    AutoModel,
+    AutoModelForImageTextToText,
+    AutoModelForTextToWaveform,
+)
 
 from vllm.platforms import current_platform
 from vllm.utils import identity
 
-from ....conftest import (IMAGE_ASSETS, AudioTestAssets, HfRunner,
-                          ImageTestAssets, VideoTestAssets, VllmRunner)
-from ....utils import (create_new_process_for_each_test, large_gpu_mark,
-                       multi_gpu_marks)
+from ....conftest import (
+    IMAGE_ASSETS,
+    AudioTestAssets,
+    HfRunner,
+    ImageTestAssets,
+    VideoTestAssets,
+    VllmRunner,
+)
+from ....utils import create_new_process_for_each_test, large_gpu_mark, multi_gpu_marks
 from ...utils import check_outputs_equal
 from .vlm_utils import custom_inputs, model_utils, runners
 from .vlm_utils.case_filtering import get_parametrized_options
-from .vlm_utils.types import (CustomTestOptions, ExpandableVLMTestArgs,
-                              VLMTestInfo, VLMTestType)
+from .vlm_utils.types import (
+    CustomTestOptions,
+    ExpandableVLMTestArgs,
+    VLMTestInfo,
+    VLMTestType,
+)
 
 # This hack is needed for phi3v & paligemma models
 # ROCm Triton FA can run into shared memory issues with these models,
@@ -828,7 +841,7 @@ def _mark_splits(
     new_test_settings = dict[str, VLMTestInfo]()
 
     for i in range(num_groups):
-        models_in_group = models[i * split_size:(i + 1) * split_size]
+        models_in_group = models[i * split_size : (i + 1) * split_size]
 
         for model in models_in_group:
             for info in test_infos_by_model[model]:
@@ -859,7 +872,8 @@ VLM_TEST_SETTINGS = _mark_splits(VLM_TEST_SETTINGS, num_groups=2)
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.IMAGE,
         create_new_process_for_each_test=False,
-    ))
+    ),
+)
 def test_single_image_models(
     tmp_path: PosixPath,
     model_type: str,
@@ -885,7 +899,8 @@ def test_single_image_models(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.MULTI_IMAGE,
         create_new_process_for_each_test=False,
-    ))
+    ),
+)
 def test_multi_image_models(
     tmp_path: PosixPath,
     model_type: str,
@@ -911,7 +926,8 @@ def test_multi_image_models(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.EMBEDDING,
         create_new_process_for_each_test=False,
-    ))
+    ),
+)
 def test_image_embedding_models(
     model_type: str,
     test_case: ExpandableVLMTestArgs,
@@ -935,7 +951,8 @@ def test_image_embedding_models(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.VIDEO,
         create_new_process_for_each_test=False,
-    ))
+    ),
+)
 def test_video_models(
     model_type: str,
     test_case: ExpandableVLMTestArgs,
@@ -959,7 +976,8 @@ def test_video_models(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.AUDIO,
         create_new_process_for_each_test=False,
-    ))
+    ),
+)
 def test_audio_models(
     model_type: str,
     test_case: ExpandableVLMTestArgs,
@@ -983,7 +1001,8 @@ def test_audio_models(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.CUSTOM_INPUTS,
         create_new_process_for_each_test=False,
-    ))
+    ),
+)
 def test_custom_inputs_models(
     model_type: str,
     test_case: ExpandableVLMTestArgs,
@@ -1006,7 +1025,8 @@ def test_custom_inputs_models(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.IMAGE,
         create_new_process_for_each_test=True,
-    ))
+    ),
+)
 @create_new_process_for_each_test()
 def test_single_image_models_heavy(
     tmp_path: PosixPath,
@@ -1033,7 +1053,8 @@ def test_single_image_models_heavy(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.MULTI_IMAGE,
         create_new_process_for_each_test=True,
-    ))
+    ),
+)
 @create_new_process_for_each_test()
 def test_multi_image_models_heavy(
     tmp_path: PosixPath,
@@ -1060,7 +1081,8 @@ def test_multi_image_models_heavy(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.EMBEDDING,
         create_new_process_for_each_test=True,
-    ))
+    ),
+)
 @create_new_process_for_each_test()
 def test_image_embedding_models_heavy(
     model_type: str,
@@ -1085,7 +1107,8 @@ def test_image_embedding_models_heavy(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.VIDEO,
         create_new_process_for_each_test=True,
-    ))
+    ),
+)
 def test_video_models_heavy(
     model_type: str,
     test_case: ExpandableVLMTestArgs,
@@ -1109,7 +1132,8 @@ def test_video_models_heavy(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.AUDIO,
         create_new_process_for_each_test=True,
-    ))
+    ),
+)
 def test_audio_models_heavy(
     model_type: str,
     test_case: ExpandableVLMTestArgs,
@@ -1133,7 +1157,8 @@ def test_audio_models_heavy(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.CUSTOM_INPUTS,
         create_new_process_for_each_test=True,
-    ))
+    ),
+)
 @create_new_process_for_each_test()
 def test_custom_inputs_models_heavy(
     model_type: str,

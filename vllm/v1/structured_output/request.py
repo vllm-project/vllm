@@ -10,17 +10,19 @@ from concurrent.futures._base import TimeoutError
 from typing import Optional, Union, cast
 
 from vllm.sampling_params import SamplingParams
-from vllm.v1.structured_output.backend_types import (StructuredOutputGrammar,
-                                                     StructuredOutputKey,
-                                                     StructuredOutputOptions)
+from vllm.v1.structured_output.backend_types import (
+    StructuredOutputGrammar,
+    StructuredOutputKey,
+    StructuredOutputOptions,
+)
 
 
 @dataclasses.dataclass
 class StructuredOutputRequest:
-
     sampling_params: SamplingParams
-    _grammar: Optional[Union[Future[StructuredOutputGrammar],
-                             StructuredOutputGrammar]] = None
+    _grammar: Optional[
+        Union[Future[StructuredOutputGrammar], StructuredOutputGrammar]
+    ] = None
     reasoning_ended: Optional[bool] = None
 
     def _check_grammar_completion(self) -> bool:
@@ -43,13 +45,15 @@ class StructuredOutputRequest:
     @property
     def grammar(self) -> Optional[StructuredOutputGrammar]:
         completed = self._check_grammar_completion()
-        return cast(Optional[StructuredOutputGrammar],
-                    self._grammar) if completed else None
+        return (
+            cast(Optional[StructuredOutputGrammar], self._grammar)
+            if completed
+            else None
+        )
 
     @grammar.setter
     def grammar(
-        self, grammar: Union[StructuredOutputGrammar,
-                             Future[StructuredOutputGrammar]]
+        self, grammar: Union[StructuredOutputGrammar, Future[StructuredOutputGrammar]]
     ) -> None:
         self._grammar = grammar
 
@@ -58,8 +62,7 @@ class StructuredOutputRequest:
         return get_structured_output_key(self.sampling_params)
 
 
-def get_structured_output_key(
-        sampling_params: SamplingParams) -> StructuredOutputKey:
+def get_structured_output_key(sampling_params: SamplingParams) -> StructuredOutputKey:
     params = sampling_params.structured_outputs
     assert params is not None, "params can't be None."
     if params.json is not None:

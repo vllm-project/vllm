@@ -12,11 +12,11 @@ from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 pytestmark = pytest.mark.cpu_test
 
 STRING_INPUTS = [
-    '',
-    'foo',
-    'foo bar',
-    'foo baz bar',
-    'foo bar qux baz',
+    "",
+    "foo",
+    "foo bar",
+    "foo baz bar",
+    "foo bar qux baz",
 ]
 
 TOKEN_INPUTS = [
@@ -42,22 +42,21 @@ def test_parse_raw_single_batch_empty():
         parse_raw_prompts([[]])
 
 
-@pytest.mark.parametrize('string_input', STRING_INPUTS)
+@pytest.mark.parametrize("string_input", STRING_INPUTS)
 def test_parse_raw_single_batch_string_consistent(string_input: str):
-    assert parse_raw_prompts(string_input) \
-        == parse_raw_prompts([string_input])
+    assert parse_raw_prompts(string_input) == parse_raw_prompts([string_input])
 
 
-@pytest.mark.parametrize('token_input', TOKEN_INPUTS)
+@pytest.mark.parametrize("token_input", TOKEN_INPUTS)
 def test_parse_raw_single_batch_token_consistent(token_input: list[int]):
-    assert parse_raw_prompts(token_input) \
-        == parse_raw_prompts([token_input])
+    assert parse_raw_prompts(token_input) == parse_raw_prompts([token_input])
 
 
-@pytest.mark.parametrize('inputs_slice', INPUTS_SLICES)
+@pytest.mark.parametrize("inputs_slice", INPUTS_SLICES)
 def test_parse_raw_single_batch_string_slice(inputs_slice: slice):
-    assert parse_raw_prompts(STRING_INPUTS)[inputs_slice] \
-        == parse_raw_prompts(STRING_INPUTS[inputs_slice])
+    assert parse_raw_prompts(STRING_INPUTS)[inputs_slice] == parse_raw_prompts(
+        STRING_INPUTS[inputs_slice]
+    )
 
 
 # yapf: disable

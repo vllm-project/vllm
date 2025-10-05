@@ -16,6 +16,7 @@ class Logprob:
         rank: The vocab rank of chosen token (>=1)
         decoded_token: The decoded chosen token index
     """
+
     logprob: float
     rank: Optional[int] = None
     decoded_token: Optional[str] = None

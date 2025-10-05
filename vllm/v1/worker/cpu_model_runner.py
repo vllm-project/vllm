@@ -19,7 +19,6 @@ logger = init_logger(__name__)
 
 
 class CPUModelRunner(GPUModelRunner):
-
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
@@ -35,14 +34,15 @@ class CPUModelRunner(GPUModelRunner):
     # Note: Remove the override after new attention backend finished
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         if len(self.kv_cache_config.kv_cache_groups) > 1:
-            raise ValueError("Multiple KVCacheGroups is not"
-                             "currently supported with CPU model runner.")
+            raise ValueError(
+                "Multiple KVCacheGroups is not"
+                "currently supported with CPU model runner."
+            )
         super()._may_reorder_batch(scheduler_output)
 
     def _postprocess_tensors(self) -> None:
         # Note: replace device tensors with cpu tensors
-        def replace_tensor(obj: Any, cpu_attr_name: str,
-                           device_attr_name) -> None:
+        def replace_tensor(obj: Any, cpu_attr_name: str, device_attr_name) -> None:
             cpu_tensor = getattr(obj, cpu_attr_name, None)
             device_tensor = getattr(obj, device_attr_name, None)
             if cpu_tensor is not None and device_tensor is not None:
@@ -68,8 +68,7 @@ class CPUModelRunner(GPUModelRunner):
         self.model = get_model(vllm_config=self.vllm_config)
 
         if self.lora_config:
-            self.model = self.load_lora_model(self.model, self.vllm_config,
-                                              self.device)
+            self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -90,23 +89,19 @@ class CPUModelRunner(GPUModelRunner):
     def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
         return sampled_token_ids.tolist()
 
-    def get_dp_padding(self,
-                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+    def get_dp_padding(self, num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
         # Note: For CPU backend, dp padding is not required for now.
         return 0, None
 
 
 @contextmanager
 def _torch_cuda_wrapper():
-
     class _EventPlaceholder:
-
         def __init__(self, *args, **kwargs) -> None:
             self.record = lambda: None
             self.synchronize = lambda: None
 
     class _StreamPlaceholder:
-
         def __init__(self, *args, **kwargs) -> None:
             pass
 

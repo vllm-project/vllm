@@ -8,24 +8,25 @@ import huggingface_hub.constants
 import torch
 
 from vllm.model_executor.model_loader.weight_utils import (
-    download_weights_from_hf, runai_safetensors_weights_iterator,
-    safetensors_weights_iterator)
+    download_weights_from_hf,
+    runai_safetensors_weights_iterator,
+    safetensors_weights_iterator,
+)
 
 
 def test_runai_model_loader():
     with tempfile.TemporaryDirectory() as tmpdir:
         huggingface_hub.constants.HF_HUB_OFFLINE = False
-        download_weights_from_hf("openai-community/gpt2",
-                                 allow_patterns=["*.safetensors"],
-                                 cache_dir=tmpdir)
+        download_weights_from_hf(
+            "openai-community/gpt2", allow_patterns=["*.safetensors"], cache_dir=tmpdir
+        )
         safetensors = glob.glob(f"{tmpdir}/**/*.safetensors", recursive=True)
         assert len(safetensors) > 0
 
         runai_model_streamer_tensors = {}
         hf_safetensors_tensors = {}
 
-        for name, tensor in runai_safetensors_weights_iterator(
-                safetensors, True):
+        for name, tensor in runai_safetensors_weights_iterator(safetensors, True):
             runai_model_streamer_tensors[name] = tensor
 
         for name, tensor in safetensors_weights_iterator(safetensors, True):

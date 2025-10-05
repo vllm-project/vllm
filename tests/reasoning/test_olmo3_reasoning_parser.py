@@ -18,29 +18,25 @@ NO_REASONING = {
 }
 
 NO_REASONING_WITH_NEWLINE = {
-    "output":
-    f"{START_REASONING}\n{END_REASONING}\n\nNo thoughts, head empty!",
+    "output": f"{START_REASONING}\n{END_REASONING}\n\nNo thoughts, head empty!",
     "reasoning_content": "\n",
     "content": "\n\nNo thoughts, head empty!",
 }
 
 SIMPLE_REASONING = {
-    "output":
-    f"{START_REASONING}This is a reasoning section{END_REASONING}This is the rest",  # noqa: E501
+    "output": f"{START_REASONING}This is a reasoning section{END_REASONING}This is the rest",  # noqa: E501
     "reasoning_content": "This is a reasoning section",
     "content": "This is the rest",
 }
 
 SIMPLE_REASONING_WITH_NEWLINE = {
-    "output":
-    f"{START_REASONING} Look!\n\nI'm thinking...{END_REASONING}\nThis is the rest",  # noqa: E501
+    "output": f"{START_REASONING} Look!\n\nI'm thinking...{END_REASONING}\nThis is the rest",  # noqa: E501
     "reasoning_content": " Look!\n\nI'm thinking...",
     "content": "\nThis is the rest",
 }
 
 SIMPLE_REASONING_WITH_MULTIPLE_NEWLINES = {
-    "output":
-    f"{START_REASONING}\nLook!\nI'm thinking...\n\n{END_REASONING}\n\n\nThis is the rest",  # noqa: E501
+    "output": f"{START_REASONING}\nLook!\nI'm thinking...\n\n{END_REASONING}\n\n\nThis is the rest",  # noqa: E501
     "reasoning_content": "\nLook!\nI'm thinking...\n\n",
     "content": "\n\n\nThis is the rest",
 }
@@ -52,8 +48,7 @@ NO_REASONING_ONLY_END_THINK = {
 }
 
 REASONING_ONLY_END_THINK = {
-    "output":
-    f"The user is asking me not to think.{END_REASONING}No thoughts!",
+    "output": f"The user is asking me not to think.{END_REASONING}No thoughts!",
     "reasoning_content": "The user is asking me not to think.",
     "content": "No thoughts!",
 }
@@ -149,9 +144,9 @@ def test_reasoning(
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
     parser: ReasoningParser = parser_cls(tokenizer)
 
-    reasoning, content = run_reasoning_extraction(reasoning_parser=parser,
-                                                  model_output=model_output,
-                                                  streaming=streaming)
+    reasoning, content = run_reasoning_extraction(
+        reasoning_parser=parser, model_output=model_output, streaming=streaming
+    )
 
     assert reasoning == param_dict["reasoning_content"]
     assert content == param_dict["content"]

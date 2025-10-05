@@ -6,8 +6,7 @@ import torch
 
 from vllm.model_executor.models.glm4_1v import Glm4vImageEmbeddingInputs
 from vllm.model_executor.models.granite_speech import GraniteSpeechAudioInputs
-from vllm.model_executor.models.hyperclovax_vision import (
-    HCXVisionVideoPixelInputs)
+from vllm.model_executor.models.hyperclovax_vision import HCXVisionVideoPixelInputs
 from vllm.model_executor.models.phi3v import Phi3VImagePixelInputs
 
 
@@ -56,9 +55,10 @@ def test_tensor_schema_rank_mismatch():
 
 
 def test_tensor_schema_missing_required_field():
-    with pytest.raises(ValueError,
-                       match="Required field 'pixel_values' is missing"):
-        Phi3VImagePixelInputs(image_sizes=torch.randint(0, 256, (16, 2)), )
+    with pytest.raises(ValueError, match="Required field 'pixel_values' is missing"):
+        Phi3VImagePixelInputs(
+            image_sizes=torch.randint(0, 256, (16, 2)),
+        )
 
 
 def test_tensor_schema_symbolic_dim_mismatch():
@@ -140,10 +140,7 @@ def test_tensor_schema_with_valid_resolve_binding_dims():
     Phi3VImagePixelInputs(
         pixel_values=pixel_values,
         image_sizes=image_sizes,
-        resolve_bindings={
-            "h": 336,
-            "w": 336
-        },
+        resolve_bindings={"h": 336, "w": 336},
     )
 
 
@@ -156,10 +153,7 @@ def test_tensor_schema_with_invalid_resolve_binding_dims():
         Phi3VImagePixelInputs(
             pixel_values=pixel_values,
             image_sizes=image_sizes,
-            resolve_bindings={
-                "h": 336,
-                "w": 336
-            },
+            resolve_bindings={"h": 336, "w": 336},
         )
 
 

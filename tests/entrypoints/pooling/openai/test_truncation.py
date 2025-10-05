@@ -54,12 +54,10 @@ async def test_smaller_truncation_size(client: openai.AsyncOpenAI):
     kwargs: dict[str, Any] = {
         "model": MODEL_NAME,
         "input": input,
-        "truncate_prompt_tokens": truncation_size
+        "truncate_prompt_tokens": truncation_size,
     }
 
-    response = await client.post(path="embeddings",
-                                 cast_to=object,
-                                 body={**kwargs})
+    response = await client.post(path="embeddings", cast_to=object, body={**kwargs})
 
     assert response["usage"]["prompt_tokens"] == truncation_size
 
@@ -70,12 +68,10 @@ async def test_zero_truncation_size(client: openai.AsyncOpenAI):
     kwargs: dict[str, Any] = {
         "model": MODEL_NAME,
         "input": input,
-        "truncate_prompt_tokens": truncation_size
+        "truncate_prompt_tokens": truncation_size,
     }
 
-    response = await client.post(path="embeddings",
-                                 cast_to=object,
-                                 body={**kwargs})
+    response = await client.post(path="embeddings", cast_to=object, body={**kwargs})
 
     assert response["usage"]["prompt_tokens"] == truncation_size
 
@@ -86,7 +82,7 @@ async def test_bigger_truncation_size(client: openai.AsyncOpenAI):
     kwargs: dict[str, Any] = {
         "model": MODEL_NAME,
         "input": input,
-        "truncate_prompt_tokens": truncation_size
+        "truncate_prompt_tokens": truncation_size,
     }
 
     with pytest.raises(openai.BadRequestError) as err:
@@ -95,9 +91,11 @@ async def test_bigger_truncation_size(client: openai.AsyncOpenAI):
     assert err.value.status_code == 400
     error_details = err.value.response.json()["error"]
     assert error_details["type"] == "BadRequestError"
-    expected_message = ("truncate_prompt_tokens value is "
-                        "greater than max_model_len."
-                        " Please, select a smaller truncation size.")
+    expected_message = (
+        "truncate_prompt_tokens value is "
+        "greater than max_model_len."
+        " Please, select a smaller truncation size."
+    )
     assert error_details["message"] == expected_message
 
 
@@ -107,11 +105,9 @@ async def test_max_truncation_size(client: openai.AsyncOpenAI):
     kwargs: dict[str, Any] = {
         "model": MODEL_NAME,
         "input": input,
-        "truncate_prompt_tokens": truncation_size
+        "truncate_prompt_tokens": truncation_size,
     }
 
-    response = await client.post(path="embeddings",
-                                 cast_to=object,
-                                 body={**kwargs})
+    response = await client.post(path="embeddings", cast_to=object, body={**kwargs})
 
     assert response["usage"]["prompt_tokens"] == max_model_len

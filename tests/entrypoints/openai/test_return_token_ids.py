@@ -50,13 +50,16 @@ async def test_basic_completion_with_emoji(server):
         # Check against the expected prompt token IDs
         tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
         encoded_tokens = tokenizer.encode(
-            "Complete this sentence with emojis: I love coding 🚀")
+            "Complete this sentence with emojis: I love coding 🚀"
+        )
         # Check that encoded_tokens is a subsequence of prompt_token_ids
-        assert any(completion.choices[0].prompt_token_ids[i:i +
-                                                          len(encoded_tokens)]
-                   == encoded_tokens for i in range(
-                       len(completion.choices[0].prompt_token_ids) -
-                       len(encoded_tokens) + 1))
+        assert any(
+            completion.choices[0].prompt_token_ids[i : i + len(encoded_tokens)]
+            == encoded_tokens
+            for i in range(
+                len(completion.choices[0].prompt_token_ids) - len(encoded_tokens) + 1
+            )
+        )
 
         # Verify token_ids field is present in the choice
         assert completion.choices[0].token_ids is not None
@@ -86,44 +89,38 @@ async def test_basic_completion_with_emoji(server):
 @pytest.mark.asyncio
 async def test_chat_completion_with_tool_use(server):
     """Test chat completion with tool use (get_weather function)."""
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get the current weather in a given location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {
-                        "type":
-                        "string",
-                        "description":
-                        "The city and state, e.g. San Francisco, CA",
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The city and state, e.g. San Francisco, CA",
+                        },
+                        "unit": {
+                            "type": "string",
+                            "enum": ["celsius", "fahrenheit"],
+                            "description": "The unit of temperature",
+                        },
                     },
-                    "unit": {
-                        "type": "string",
-                        "enum": ["celsius", "fahrenheit"],
-                        "description": "The unit of temperature",
-                    },
+                    "required": ["location"],
                 },
-                "required": ["location"],
             },
-        },
-    }]
+        }
+    ]
 
     async with server.get_async_client() as client:
         # Test with return_token_ids enabled
         response = await client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant."
-                },
-                {
-                    "role": "user",
-                    "content": "What's the weather like in Paris?"
-                },
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What's the weather like in Paris?"},
             ],
             tools=tools,
             tool_choice="auto",
@@ -145,10 +142,11 @@ async def test_chat_completion_with_tool_use(server):
         tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
         prompt_text = tokenizer.decode(response.prompt_token_ids)
         assert prompt_text.startswith(
-            "<|im_start|>system\nYou are a helpful assistant.")
+            "<|im_start|>system\nYou are a helpful assistant."
+        )
         assert prompt_text.endswith(
-            "What's the weather like in Paris?<|im_end|>\n"
-            "<|im_start|>assistant\n")
+            "What's the weather like in Paris?<|im_end|>\n<|im_start|>assistant\n"
+        )
 
         response_text = tokenizer.decode(response.choices[0].token_ids)
         assert response_text.startswith('<tool_call>\n{"name": "get_weather"')
@@ -164,14 +162,8 @@ async def test_chat_completion_with_tool_use(server):
         response_without = await client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant."
-                },
-                {
-                    "role": "user",
-                    "content": "What's the weather like in Paris?"
-                },
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What's the weather like in Paris?"},
             ],
             tools=tools,
             tool_choice="auto",
@@ -203,7 +195,7 @@ async def test_comparison_with_prompt_logprobs_and_logprobs(server):
             extra_body={
                 "return_token_ids": True,
                 "return_tokens_as_token_ids": True,
-                "prompt_logprobs": 1
+                "prompt_logprobs": 1,
             },
         )
 
@@ -228,16 +220,17 @@ async def test_comparison_with_prompt_logprobs_and_logprobs(server):
         # The prompt_token_ids should match the prompt portion
         assert len(completion.choices[0].token_ids) < len(logprobs_token_ids)
         response_token_ids_length = len(completion.choices[0].token_ids)
-        assert logprobs_token_ids[-response_token_ids_length:] == \
-            completion.choices[0].token_ids
+        assert (
+            logprobs_token_ids[-response_token_ids_length:]
+            == completion.choices[0].token_ids
+        )
 
         # Verify tokenizer consistency
         tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
 
         # Decode prompt tokens
         if completion.choices[0].prompt_token_ids:
-            prompt_text = tokenizer.decode(
-                completion.choices[0].prompt_token_ids)
+            prompt_text = tokenizer.decode(completion.choices[0].prompt_token_ids)
             # The decoded prompt should match or close to original prompt
             assert "Hello, world" in prompt_text
 
@@ -255,10 +248,7 @@ async def test_comparison_with_prompt_logprobs_and_logprobs(server):
             stream=True,
             echo=False,
             logprobs=1,
-            extra_body={
-                "return_token_ids": True,
-                "return_tokens_as_token_ids": True
-            },
+            extra_body={"return_token_ids": True, "return_tokens_as_token_ids": True},
         )
 
         # Collect streamed tokens
@@ -287,14 +277,8 @@ async def test_comparison_with_prompt_logprobs_and_logprobs(server):
 async def test_chat_completion_with_emoji_and_token_ids(server):
     """Test chat completion with emojis to verify token_ids handling."""
     chat_messages = [
-        {
-            "role": "system",
-            "content": "You like to use emojis in your responses."
-        },
-        {
-            "role": "user",
-            "content": "Repeat after me: I love cats 🐱"
-        },
+        {"role": "system", "content": "You like to use emojis in your responses."},
+        {"role": "user", "content": "Repeat after me: I love cats 🐱"},
     ]
     async with server.get_async_client() as client:
         response = await client.chat.completions.create(
@@ -319,15 +303,16 @@ async def test_chat_completion_with_emoji_and_token_ids(server):
 
         decoded_prompt = tokenizer.decode(response.prompt_token_ids)
         assert decoded_prompt.startswith(
-            "<|im_start|>system\nYou like to use emojis in your responses.")
+            "<|im_start|>system\nYou like to use emojis in your responses."
+        )
         assert decoded_prompt.endswith(
-            "I love cats 🐱<|im_end|>\n<|im_start|>assistant\n")
+            "I love cats 🐱<|im_end|>\n<|im_start|>assistant\n"
+        )
 
         decoded_response = tokenizer.decode(response.choices[0].token_ids)
         # The content should match the response text
         # except the ending <|im_end|>
-        assert decoded_response == response.choices[
-            0].message.content + "<|im_end|>"
+        assert decoded_response == response.choices[0].message.content + "<|im_end|>"
 
         # Test with streaming
         stream = await client.chat.completions.create(
@@ -348,14 +333,14 @@ async def test_chat_completion_with_emoji_and_token_ids(server):
                 assert chunk.prompt_token_ids is not None
                 assert isinstance(chunk.prompt_token_ids, list)
                 # Check the prompt_token_ids match the initial prompt
-                decoded_prompt_stream = tokenizer.decode(
-                    chunk.prompt_token_ids)
+                decoded_prompt_stream = tokenizer.decode(chunk.prompt_token_ids)
                 assert decoded_prompt_stream == decoded_prompt
                 first_chunk = False
             else:
                 chunk_dump = chunk.model_dump()
-                assert "prompt_token_ids" not in chunk_dump, \
+                assert "prompt_token_ids" not in chunk_dump, (
                     "Subsequent chunks should not have prompt_token_ids"
+                )
 
             if chunk.choices:
                 if chunk.choices[0].delta.content:
