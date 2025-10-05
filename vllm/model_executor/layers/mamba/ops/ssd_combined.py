@@ -14,7 +14,8 @@ from vllm.triton_utils import triton
 
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
-from .ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd, _state_cache_fwd, _init_state_fwd
+from .ssd_chunk_state import (_chunk_cumsum_fwd, _chunk_state_fwd,
+                              _init_state_fwd, _state_cache_fwd)
 from .ssd_state_passing import _state_passing_fwd
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
@@ -122,7 +123,7 @@ def _mamba_chunk_scan_combined_fwd(x,
                         state_indices=state_indices,
                         initial_state_idx=initial_state_idx,
                         has_initial_states=has_initial_states)
-    
+
     states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum,  # (nheads, nchunks, chunk_size)
@@ -133,18 +134,19 @@ def _mamba_chunk_scan_combined_fwd(x,
         seq_idx=seq_idx,
         out_dtype=state_dtype if state_dtype is not None else C.dtype)
     states = rearrange(states, "... (p n) -> ... p n", n=dstate)
-    
+
     # 3.1 store the computed states
-    _state_cache_fwd(ssm_states=states,
-                     cache_ssm_states=ssm_state,
-                     cu_seqlens=cu_seqlens,
-                     state_indices=state_indices,
-                     block_size_to_align=block_size_to_align,
-                     chunk_size=chunk_size,
-                     block_idx_first_scheduled_token=block_idx_first_scheduled_token,
-                     block_idx_last_scheduled_token=block_idx_last_scheduled_token,
-                     last_chunk_indices=last_chunk_indices,
-                     num_computed_tokens=num_computed_tokens)
+    _state_cache_fwd(
+        ssm_states=states,
+        cache_ssm_states=ssm_state,
+        cu_seqlens=cu_seqlens,
+        state_indices=state_indices,
+        block_size_to_align=block_size_to_align,
+        chunk_size=chunk_size,
+        block_idx_first_scheduled_token=block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token=block_idx_last_scheduled_token,
+        last_chunk_indices=last_chunk_indices,
+        num_computed_tokens=num_computed_tokens)
 
     # 4. Compute batched matrix multiply for C_j^T B_i terms
     CB = _bmm_chunk_fwd(C,
@@ -247,7 +249,7 @@ def mamba_chunk_scan_combined_varlen(
     Return:
         varlen_states: (batch, nheads, headdim, dstate)
     """
-    
+
     assert cu_seqlens is not None, "cu_seqlens must be provided assuming varlen input"
     assert seq_idx is not None
 

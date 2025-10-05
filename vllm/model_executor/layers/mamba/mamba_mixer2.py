@@ -684,8 +684,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 block_size_to_align=mamba_block_size,
                 block_idx_first_scheduled_token=
                 block_idx_first_scheduled_token_p,
-                block_idx_last_scheduled_token=
-                block_idx_last_scheduled_token_p,
+                block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
                 num_computed_tokens=num_computed_tokens_p,
                 return_intermediate_states=prefix_caching_enabled,
                 dt_softplus=True,

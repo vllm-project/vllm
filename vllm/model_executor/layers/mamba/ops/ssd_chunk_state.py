@@ -713,13 +713,15 @@ def chunk_state_varlen(B,
             HAS_INITSTATES=initial_states is not None)
     return states
 
+
 # TODO: Improve autotuning configuration
 @triton.autotune(
     configs=[
-        triton.Config({
-            'BLOCK_SIZE_M': 4,
-            'BLOCK_SIZE_N': 4,
-            'BLOCK_SIZE_H': 4,
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 4,
+                'BLOCK_SIZE_N': 4,
+                'BLOCK_SIZE_H': 4,
             },
             num_stages=4,
             num_warps=8),
@@ -757,44 +759,44 @@ def _state_cache_fwd_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr,
-    ):
-    
+):
+
     # single-sequence id
     idx_seq = tl.program_id(0) % nseq
     idx_block_to_fill = tl.program_id(0) // nseq
-                
+
     num_pid_n = tl.cdiv(dstate, BLOCK_SIZE_N)
     pid_m = tl.program_id(2) // num_pid_n
     pid_n = tl.program_id(2) % num_pid_n
     pid_h = tl.program_id(1)
-    
+
     # elements along the number of heads
     idx_nheads = pid_h * BLOCK_SIZE_H + tl.arange(0, BLOCK_SIZE_H)
-    
+
     # elements along the head dimension
     idx_headdim = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    
+
     # elements along the state dimension
     idx_dstate = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    
+
     # The chunk_stride is the number of chunks per mamba block
     # e.g., if mamba_block_size = 512 and chunk_size = 256,
     # then chunk_stride = 2
     chunk_stride = block_size_to_align // chunk_size
-    
+
     ssm_state_input_coord = tl.load(last_chunk_ptr + idx_seq).to(tl.int64)
-    
+
     # Compute the index of the cache -> target
-    # In this case, it is the 
+    # In this case, it is the
     ssm_state_output_coord = tl.load(state_indices_tensor_ptr +
-                              idx_seq * state_indices_stride
-                              ).to(tl.int64)
-    
+                                     idx_seq * state_indices_stride).to(
+                                         tl.int64)
+
     if n_blocks_to_fill_ptr is not None:
         # Number of blocks that need to be written.
         # If larger than the number of blocks to fill for the current sequence, return
         n_blocks_to_fill = tl.load(n_blocks_to_fill_ptr + idx_seq)
-        
+
         if idx_block_to_fill > n_blocks_to_fill:
             return
         else:
@@ -803,38 +805,41 @@ def _state_cache_fwd_kernel(
             else:
                 # Get the current block index for the sequence
                 # Block index for the first scheduled token
-                idx_block_cache = tl.load(block_idx_first_scheduled_token_ptr + idx_seq) + idx_block_to_fill
-            
+                idx_block_cache = tl.load(block_idx_first_scheduled_token_ptr +
+                                          idx_seq) + idx_block_to_fill
+
             # Compute the index of the cache -> target
             # Get the index from the state_indices_tensor
             ssm_state_output_coord = tl.load(state_indices_tensor_ptr +
-                                    idx_seq * state_indices_stride + 
-                                    idx_block_cache
-                                    ).to(tl.int64)
-            
+                                             idx_seq * state_indices_stride +
+                                             idx_block_cache).to(tl.int64)
+
             if idx_block_to_fill < n_blocks_to_fill:
-                
+
                 # First chunk index for this sequence
                 if idx_seq == 0:
                     first_chunk = tl.full((), 0, dtype=tl.int64)
                 else:
-                    first_chunk = 1 + tl.load(last_chunk_ptr + (idx_seq - 1)).to(tl.int64)
-            
+                    first_chunk = 1 + tl.load(last_chunk_ptr +
+                                              (idx_seq - 1)).to(tl.int64)
+
                 # First chunk that is aligned on the mamba block boundary
                 first_aligned_chunk = first_chunk + chunk_stride - 1
-                
+
                 # Calculate the number of computed tokens that were not
                 # already cached
                 if num_computed_tokens_ptr is not None:
-                    num_unaligned_computed_tokens = tl.load(num_computed_tokens_ptr + idx_seq).to(tl.int64) % block_size_to_align
+                    num_unaligned_computed_tokens = tl.load(
+                        num_computed_tokens_ptr + idx_seq).to(
+                            tl.int64) % block_size_to_align
 
                     if num_unaligned_computed_tokens > 0:
                         # If the number of computed tokens is not block aligned,
                         # then we need to shift the index accordingly
                         first_aligned_chunk -= num_unaligned_computed_tokens // chunk_size
-                
+
                 ssm_state_input_coord = first_aligned_chunk + idx_block_to_fill * chunk_stride
-        
+
     ssm_state_input_ptr = states_ptr + \
                         ssm_state_input_coord * state_chunk_stride + \
                         (idx_nheads * state_nheads_stride)[:, None, None] + \
@@ -844,22 +849,24 @@ def _state_cache_fwd_kernel(
         (idx_headdim < headdim)[None, :, None] & \
         (idx_dstate < dstate)[None, None, :]
     ssm_state_input = tl.load(ssm_state_input_ptr, mask, 0.0)
-    
+
     ssm_state_output_ptr = cache_state_ptr + \
                         ssm_state_output_coord * cache_state_cacheline_stride + \
                         (idx_nheads * cache_state_nheads_stride)[:, None, None] + \
                         (idx_headdim * cache_state_headdim_stride)[None, :, None] + \
                         (idx_dstate * cache_state_dstate_stride)[None, None, :]
-    
+
     tl.store(ssm_state_output_ptr, ssm_state_input, mask)
-    
+
+
 # TODO: Improve autotuning configuration
 @triton.autotune(
     configs=[
-        triton.Config({
-            'BLOCK_SIZE_M': 4,
-            'BLOCK_SIZE_N': 4,
-            'BLOCK_SIZE_H': 4,
+        triton.Config(
+            {
+                'BLOCK_SIZE_M': 4,
+                'BLOCK_SIZE_N': 4,
+                'BLOCK_SIZE_H': 4,
             },
             num_stages=4,
             num_warps=8),
@@ -894,52 +901,53 @@ def _init_state_fwd_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr,
-    ):
-    
+):
+
     # single-sequence id
     idx_seq = tl.program_id(0)
-    
+
     num_pid_n = tl.cdiv(dstate, BLOCK_SIZE_N)
     pid_m = tl.program_id(2) // num_pid_n
     pid_n = tl.program_id(2) % num_pid_n
     pid_h = tl.program_id(1)
-    
+
     # elements along the number of heads
     idx_nheads = pid_h * BLOCK_SIZE_H + tl.arange(0, BLOCK_SIZE_H)
-    
+
     # elements along the head dimension
     idx_headdim = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    
+
     # elements along the state dimension
     idx_dstate = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    
+
     # Indicates whether the sequence with idx_seq has an initial state
     has_initial_states = tl.load(has_initial_states_ptr + idx_seq).to(tl.int32)
-    
+
     if IS_CACHE_ENABLED:
         # Collect the block index which contains the initial state
-        ssm_state_init_index = tl.load(initial_state_idx_ptr + idx_seq).to(tl.int64)
-        
+        ssm_state_init_index = tl.load(initial_state_idx_ptr + idx_seq).to(
+            tl.int64)
+
         ssm_state_input_coord = tl.load(state_indices_ptr +
-                                  idx_seq * state_indices_stride + 
-                                  ssm_state_init_index
-                                 ).to(tl.int64)
+                                        idx_seq * state_indices_stride +
+                                        ssm_state_init_index).to(tl.int64)
     else:
-        ssm_state_input_coord = tl.load(state_indices_ptr + idx_seq).to(tl.int64)
-             
+        ssm_state_input_coord = tl.load(state_indices_ptr + idx_seq).to(
+            tl.int64)
+
     ssm_state_init_input_ptr = ssm_state_ptr + \
                              ssm_state_input_coord * state_chunk_stride + \
                              (idx_nheads * state_nheads_stride)[:, None, None] + \
                              (idx_headdim * state_headdim_stride)[None, :, None] + \
                              (idx_dstate * state_dstate_stride)[None, None, :]
-    # The mask_load is designed such that in case there is no initial state for 
+    # The mask_load is designed such that in case there is no initial state for
     # the sequence, 0s are loaded.
     mask_load = (has_initial_states > 0) & \
                 (idx_nheads < nheads)[:, None, None] & \
                 (idx_headdim < headdim)[None, :, None] & \
                 (idx_dstate < dstate)[None, None, :]
     ssm_state_init = tl.load(ssm_state_init_input_ptr, mask_load, 0.0)
-    
+
     mask_store = (idx_nheads < nheads)[:, None, None] & \
                  (idx_headdim < headdim)[None, :, None] & \
                  (idx_dstate < dstate)[None, None, :]
@@ -948,8 +956,9 @@ def _init_state_fwd_kernel(
                               (idx_nheads * cache_state_nheads_stride)[:, None, None] + \
                               (idx_headdim * cache_state_headdim_stride)[None, :, None] + \
                               (idx_dstate * cache_state_dstate_stride)[None, None, :]
-    
+
     tl.store(ssm_state_init_output_ptr, ssm_state_init, mask_store)
+
 
 def _state_cache_fwd(ssm_states: torch.Tensor = None,
                      cache_ssm_states: torch.Tensor = None,
@@ -986,25 +995,31 @@ def _state_cache_fwd(ssm_states: torch.Tensor = None,
     chunk_size: int
         The chunk_size used for computation, e.g., for chunked prefill
     """
-    
+
     _, nheads, headdim, dstate = ssm_states.shape
-    nseq = cu_seqlens.shape[0] - 1 # Actually is number of sequences in the "batch"
-    
+    nseq = cu_seqlens.shape[
+        0] - 1  # Actually is number of sequences in the "batch"
+
     if block_idx_last_scheduled_token is None:
         n_blocks_to_fill = None
-        
-        grid = lambda META: (nseq,
-                            triton.cdiv(nheads, META['BLOCK_SIZE_H']),
-                            triton.cdiv(headdim, META['BLOCK_SIZE_M']) * triton.cdiv(dstate, META['BLOCK_SIZE_N']),
-                            )
+
+        grid = lambda META: (
+            nseq,
+            triton.cdiv(nheads, META['BLOCK_SIZE_H']),
+            triton.cdiv(headdim, META['BLOCK_SIZE_M']) * triton.cdiv(
+                dstate, META['BLOCK_SIZE_N']),
+        )
     else:
         n_blocks_to_fill = block_idx_last_scheduled_token - block_idx_first_scheduled_token
-    
-        grid = lambda META: (nseq * (n_blocks_to_fill.max() + 1), # The +1 is for the last state that is always stored
-                            triton.cdiv(nheads, META['BLOCK_SIZE_H']),
-                            triton.cdiv(headdim, META['BLOCK_SIZE_M']) * triton.cdiv(dstate, META['BLOCK_SIZE_N']),
-                            )
-    
+
+        grid = lambda META: (
+            nseq * (n_blocks_to_fill.max() + 1
+                    ),  # The +1 is for the last state that is always stored
+            triton.cdiv(nheads, META['BLOCK_SIZE_H']),
+            triton.cdiv(headdim, META['BLOCK_SIZE_M']) * triton.cdiv(
+                dstate, META['BLOCK_SIZE_N']),
+        )
+
     with torch.cuda.device(ssm_states.device.index):
         _state_cache_fwd_kernel[grid](
             ssm_states,
@@ -1014,14 +1029,12 @@ def _state_cache_fwd(ssm_states: torch.Tensor = None,
             block_idx_first_scheduled_token,
             last_chunk_indices,
             num_computed_tokens,
-            
             block_size_to_align,
             chunk_size,
             nheads,
             headdim,
             dstate,
             nseq,
-            
             state_indices.stride(0),
             ssm_states.stride(0),
             ssm_states.stride(1),
@@ -1031,16 +1044,17 @@ def _state_cache_fwd(ssm_states: torch.Tensor = None,
             cache_ssm_states.stride(1),
             cache_ssm_states.stride(2),
             cache_ssm_states.stride(3),
-            
         )
-        
-def _init_state_fwd(cache_ssm_states: torch.Tensor,
-                    init_states: torch.Tensor,
-                    cu_seqlens: torch.Tensor,
-                    state_indices: torch.Tensor,
-                    initial_state_idx: torch.Tensor,
-                    has_initial_states: torch.Tensor,
-                    ):
+
+
+def _init_state_fwd(
+    cache_ssm_states: torch.Tensor,
+    init_states: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    state_indices: torch.Tensor,
+    initial_state_idx: torch.Tensor,
+    has_initial_states: torch.Tensor,
+):
     """
     cache_ssm_states: (cache_lines, nheads, headdim, dstate)
         Cached ssm states.
@@ -1059,16 +1073,17 @@ def _init_state_fwd(cache_ssm_states: torch.Tensor,
         state for the calculations
         [single boolean for each sequence in the batch: True or False]
     """
-    
-    
+
     _, nheads, headdim, dstate = cache_ssm_states.shape
-    nseq = cu_seqlens.shape[0] - 1 # Number of sequences in the "batch"
-    
-    grid = lambda META: (nseq,
-                        triton.cdiv(nheads, META['BLOCK_SIZE_H']),
-                        triton.cdiv(headdim, META['BLOCK_SIZE_M']) * triton.cdiv(dstate, META['BLOCK_SIZE_N']),
+    nseq = cu_seqlens.shape[0] - 1  # Number of sequences in the "batch"
+
+    grid = lambda META: (
+        nseq,
+        triton.cdiv(nheads, META['BLOCK_SIZE_H']),
+        triton.cdiv(headdim, META['BLOCK_SIZE_M']) * triton.cdiv(
+            dstate, META['BLOCK_SIZE_N']),
     )
-    
+
     with torch.cuda.device(init_states.device.index):
         _init_state_fwd_kernel[grid](
             cache_ssm_states,
@@ -1076,11 +1091,9 @@ def _init_state_fwd(cache_ssm_states: torch.Tensor,
             state_indices,
             initial_state_idx,
             has_initial_states,
-            
             nheads,
             headdim,
             dstate,
-            
             state_indices.stride(0),
             cache_ssm_states.stride(0),
             cache_ssm_states.stride(1),
@@ -1090,6 +1103,5 @@ def _init_state_fwd(cache_ssm_states: torch.Tensor,
             init_states.stride(1),
             init_states.stride(2),
             init_states.stride(3),
-            
             IS_CACHE_ENABLED=initial_state_idx is not None,
         )
