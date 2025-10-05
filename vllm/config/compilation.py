@@ -13,10 +13,7 @@ from pydantic.dataclasses import dataclass
 
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.compilation.partition_rules import (  # noqa: F401 re-exported for tests
-    _parse_operator_name)
-from vllm.compilation.partition_rules import (  # noqa: F401 re-exported for tests
-    _resolve_operator_overload)
-from vllm.compilation.partition_rules import (  # noqa: F401 re-exported for tests
+    _parse_operator_name, _resolve_operator_overload,
     inductor_partition_rule_context)
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -28,9 +25,6 @@ else:
     VllmConfig = object
 
 logger = init_logger(__name__)
-
-# Track which OpOverload objects already have partition rules registered so we
-# do not re-register them on every configuration update.
 
 
 class CompilationLevel:
@@ -216,9 +210,6 @@ class CompilationConfig:
     splitting_ops: Optional[list[str]] = None
     """A list of ops to split the full graph into subgraphs, used in piecewise
     compilation."""
-    partition_rule_ops: list[str] = field(default_factory=list)
-    """Ops to register as Inductor partition rules
-    when use_inductor_graph_partition is enabled."""
 
     # Inductor capture
     use_inductor: bool = True
@@ -406,7 +397,6 @@ class CompilationConfig:
         factors.append(self.backend)
         factors.append(self.custom_ops)
         factors.append(self.splitting_ops)
-        factors.append(self.partition_rule_ops)
         factors.append(self.use_inductor)
         factors.append(self.inductor_compile_config)
         factors.append(self.inductor_passes)
@@ -642,17 +632,8 @@ class CompilationConfig:
 
     def set_splitting_ops_for_inductor_graph_partition(self):
         assert self.use_inductor_graph_partition
-        use_inductor_graph_partition_msg = (
-            "When use_inductor_graph_partition=True, splitting_ops "
-            "are ignored and set to an empty list. Instead, "
-            "\"tags=(torch._C.Tag.cudagraph_unsafe, ),\" is "
-            "used to annotate custom ops for graph partition.")
-        if self.splitting_ops:
-            logger.warning_once(use_inductor_graph_partition_msg)
-            self.partition_rule_ops = list(self.splitting_ops)
-        elif not self.partition_rule_ops:
-            self.partition_rule_ops = list(self._attention_ops)
-        self.splitting_ops = []
+        if not self.splitting_ops:
+            self.splitting_ops = list(self._attention_ops)
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.enable_attn_fusion

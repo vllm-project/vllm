@@ -152,9 +152,9 @@ def test_splitting_ops_dynamic():
             level=CompilationLevel.PIECEWISE,
             use_inductor_graph_partition=True,
             splitting_ops=["vllm.unified_attention"]))
-        # with inductor partition we disregard user-specified splitting_ops
-        assert config.compilation_config.splitting_ops == []
-        assert config.compilation_config.partition_rule_ops == [
+        # with inductor partition we use splitting_ops directly for
+        # partition rules
+        assert config.compilation_config.splitting_ops == [
             "vllm.unified_attention"
         ]
 

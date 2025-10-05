@@ -75,7 +75,7 @@ class CompilerManager:
     def compile_context(self):
         """Provide compilation context (e.g. partition rules)."""
         if self.compilation_config.use_inductor_graph_partition:
-            partition_ops = self.compilation_config.partition_rule_ops or []
+            partition_ops = self.compilation_config.splitting_ops or []
             context = inductor_partition_rule_context(partition_ops)
         else:
             context = nullcontext()
