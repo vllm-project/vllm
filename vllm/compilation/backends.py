@@ -72,7 +72,7 @@ class CompilerManager:
     def compile_context(self):
         with ExitStack() as stack:
             if self.compilation_config.use_inductor_graph_partition:
-                partition_ops = self.compilation_config.splitting_ops
+                partition_ops = self.compilation_config.partition_rule_ops
                 stack.enter_context(
                     inductor_partition_rule_context(partition_ops))
             yield

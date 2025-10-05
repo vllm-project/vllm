@@ -205,11 +205,11 @@ class CompilationConfig:
     disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: Optional[list[str]] = None
-    """Ops that control graph partitioning.
-
-    When `use_inductor_graph_partition` is False they are passed to Dynamo to
-    split the FX graph. Otherwise they are registered as Inductor partition
-    rules while the FX graph remains whole."""
+    """Ops that control FX graph partitioning when Inductor partitioning
+    is disabled."""
+    partition_rule_ops: list[str] = field(default_factory=list, init=False)
+    """Ops to register as Inductor partition rules when
+    `use_inductor_graph_partition` is enabled."""
     # Inductor capture
     use_inductor: bool = True
     """Whether to use inductor compilation:
@@ -396,6 +396,7 @@ class CompilationConfig:
         factors.append(self.backend)
         factors.append(self.custom_ops)
         factors.append(self.splitting_ops)
+        factors.append(self.partition_rule_ops)
         factors.append(self.use_inductor)
         factors.append(self.inductor_compile_config)
         factors.append(self.inductor_passes)
@@ -632,18 +633,27 @@ class CompilationConfig:
     def set_splitting_ops_for_inductor_graph_partition(self):
         assert self.use_inductor_graph_partition
 
-        if self.splitting_ops is not None:
-            logger.debug(
-                "Using splitting_ops=%s for inductor partition rules.",
-                self.splitting_ops,
-            )
-            return
-        else:
+        use_inductor_graph_partition_msg = (
+            "When use_inductor_graph_partition=True, splitting_ops "
+            "are ignored and set to an empty list. Instead, "
+            "'partition_rule_ops' controls Inductor partitioning.")
+
+        if self.splitting_ops:
+            logger.warning_once(use_inductor_graph_partition_msg)
+            self.partition_rule_ops = list(self.splitting_ops)
+        elif not self.partition_rule_ops:
             logger.debug(
                 "No splitting_ops provided; defaulting to attention ops for "
                 "inductor partition rules.", )
+            self.partition_rule_ops = list(self._attention_ops)
+        else:
+            logger.debug(
+                "Reusing existing partition_rule_ops=%s for inductor "
+                "partition rules.",
+                self.partition_rule_ops,
+            )
 
-        self.splitting_ops = list(self._attention_ops)
+        self.splitting_ops = []
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.enable_attn_fusion

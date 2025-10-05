@@ -83,12 +83,40 @@ def inductor_partition_rule_context(op_names: list[str]):
     from torch._inductor import scheduler as inductor_scheduler  # type: ignore
 
     unique_names = list(dict.fromkeys(op_names))
-    overloads = [_resolve_operator_overload(name) for name in unique_names]
+    overloads: list[object] = []
+    registered_names: list[str] = []
+
+    for name in unique_names:
+        try:
+            overloads.append(_resolve_operator_overload(name))
+            registered_names.append(name)
+        except ValueError:
+            logger.debug(
+                "Skipping unregistered operator '%s' for Inductor partition",
+                name,
+            )
+
+    if not overloads:
+        logger.debug(
+            "No resolved operators for partition rules; skipping registration.",
+        )
+        yield
+        return
 
     def _always_partition(*_args, **_kwargs):
         return True
 
+    previous_rules: dict[object, object] = {}
+    newly_registered: list[object] = []
+
     for overload in overloads:
+        existing_rule = inductor_scheduler._custom_should_partition_fns.get(
+            overload)
+        if existing_rule is None:
+            newly_registered.append(overload)
+        else:
+            previous_rules[overload] = existing_rule
+
         inductor_scheduler.register_should_partition_rule(
             overload,
             _always_partition,
@@ -96,10 +124,18 @@ def inductor_partition_rule_context(op_names: list[str]):
 
     logger.debug(
         "Registered inductor partition rules for ops: %s",
-        unique_names,
+        registered_names,
     )
 
     try:
         yield
-    finally: 
-        logger.debug("Partition rules remain registered")
+    finally:
+        custom_rules = inductor_scheduler._custom_should_partition_fns
+
+        for overload in newly_registered:
+            if custom_rules.get(overload) is _always_partition:
+                custom_rules.pop(overload, None)
+
+        for overload, old_rule in previous_rules.items():
+            if custom_rules.get(overload) is _always_partition:
+                custom_rules[overload] = old_rule

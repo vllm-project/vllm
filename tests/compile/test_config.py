@@ -153,8 +153,9 @@ def test_splitting_ops_dynamic():
             level=CompilationLevel.PIECEWISE,
             use_inductor_graph_partition=True,
             splitting_ops=["vllm.unified_attention"]))
-        # with inductor partition we preserve user-specified splitting_ops
-        assert config.compilation_config.splitting_ops == [
+        # with inductor partition we move user-specified ops into partition rules
+        assert config.compilation_config.splitting_ops == []
+        assert config.compilation_config.partition_rule_ops == [
             "vllm.unified_attention"
         ]
 
@@ -200,8 +201,9 @@ def test_splitting_ops_dynamic():
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         ))
-        assert config.compilation_config.splitting_ops == CompilationConfig(
-        )._attention_ops
+        assert config.compilation_config.splitting_ops == []
+        assert config.compilation_config.partition_rule_ops == list(
+            CompilationConfig()._attention_ops)
         # enable_attn_fusion is directly supported under
         # use_inductor_graph_partition=True, and cudagraph_mode
         # is unchanged.
