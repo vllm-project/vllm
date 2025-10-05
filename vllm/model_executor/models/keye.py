@@ -20,6 +20,7 @@ from transformers.utils import torch_int
 from vllm.attention.backends.registry import _Backend
 from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -29,7 +30,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, VideoItem)
@@ -41,7 +42,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -99,8 +99,7 @@ def smart_resize(
 class KeyeImagePixelInputs(TensorSchema):
     """
     Dimensions:
-        - b: Batch size
-        - np: Number of patches
+        - bnp: Batch size * Number of patches
         - c: Number of channels
         - ps: Patch size
         - ni: Number of images
@@ -109,7 +108,7 @@ class KeyeImagePixelInputs(TensorSchema):
     type: Literal["pixel_values"]
     pixel_values: Annotated[
         torch.Tensor,
-        TensorShape("b", "np", 3, "ps", "ps", dynamic_dims={"np"})]
+        TensorShape("bnp", 3, "ps", "ps", dynamic_dims={"bnp"})]
     image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
@@ -133,8 +132,7 @@ KeyeImageInputs = Union[KeyeImagePixelInputs, KeyeImageEmbeddingInputs]
 class KeyeVideoPixelInputs(TensorSchema):
     """
     Dimensions:
-        - b: Batch size
-        - np: Number of patches
+        - bnp: Batch size * Number of patches
         - c: Number of channels
         - ps: Patch size
         - ni: Number of images
@@ -143,7 +141,7 @@ class KeyeVideoPixelInputs(TensorSchema):
     type: Literal["pixel_values_videos"]
     pixel_values_videos: Annotated[
         torch.Tensor,
-        TensorShape("b", "np", 3, "ps", "ps", dynamic_dims={"np"})]
+        TensorShape("bnp", 3, "ps", "ps", dynamic_dims={"bnp"})]
     video_grid_thw: Annotated[torch.Tensor, TensorShape("nv", 3)]
 
 
@@ -1170,6 +1168,7 @@ class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1179,12 +1178,16 @@ class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len)
 
+        image_overrides = mm_options.get("image") if mm_options else None
+        video_overrides = mm_options.get("video") if mm_options else None
+
         mm_data = {
             "image":
             self._get_dummy_images(
                 width=target_width,
                 height=target_height,
                 num_images=num_images,
+                overrides=image_overrides,
             ),
             "video":
             self._get_dummy_videos(
@@ -1192,6 +1195,7 @@ class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                 height=target_height,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
+                overrides=video_overrides,
             ),
         }
 
@@ -1251,6 +1255,8 @@ class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
 
 
 class BaseKeyeModule(nn.Module):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1517,28 +1523,6 @@ class KeyeForConditionalGeneration(BaseKeyeModule, SupportsMultiModal,
                          prefix: str = "") -> nn.Module:
         return Projector(text_config, vision_config, quant_config, prefix)
 
-    def _validate_and_reshape_mm_tensor(
-            self, mm_input: NestedTensors,
-            name: str) -> Union[torch.Tensor, list[torch.Tensor]]:
-        if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(f"Incorrect type of {name}. "
-                             f"Got type: {type(mm_input)}")
-        if isinstance(mm_input, torch.Tensor):
-            if mm_input.ndim == 2:
-                return mm_input
-            if mm_input.ndim == 5:
-                return mm_input
-            if mm_input.ndim != 3:
-                raise ValueError(f"{name} should be 2D or batched 3D tensor. "
-                                 f"Got ndim: {mm_input.ndim} "
-                                 f"(shape={mm_input.shape})")
-            return mm_input.reshape(-1, mm_input.shape[-1])
-        elif is_list_of(mm_input, torch.Tensor):
-            if all(p.dim() == 4 for p in mm_input) or all(p.dim() == 2
-                                                          for p in mm_input):
-                return mm_input
-        return torch.concat(mm_input)
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[KeyeImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -1549,11 +1533,6 @@ class KeyeForConditionalGeneration(BaseKeyeModule, SupportsMultiModal,
             return None
 
         if pixel_values is not None:
-            pixel_values = self._validate_and_reshape_mm_tensor(
-                pixel_values, "image pixel values")
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw")
-
             return KeyeImagePixelInputs(
                 type="pixel_values",
                 pixel_values=pixel_values,
@@ -1561,11 +1540,6 @@ class KeyeForConditionalGeneration(BaseKeyeModule, SupportsMultiModal,
             )
 
         if image_embeds is not None:
-            image_embeds = self._validate_and_reshape_mm_tensor(
-                image_embeds, "image embeds")
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw")
-
             return KeyeImageEmbeddingInputs(
                 type="image_embeds",
                 image_embeds=image_embeds,
@@ -1582,13 +1556,6 @@ class KeyeForConditionalGeneration(BaseKeyeModule, SupportsMultiModal,
             return None
 
         if pixel_values_videos is not None:
-            pixel_values_videos = self._validate_and_reshape_mm_tensor(
-                pixel_values_videos,
-                "video pixel values",
-            )
-            video_grid_thw = self._validate_and_reshape_mm_tensor(
-                video_grid_thw, "video grid_thw")
-
             return KeyeVideoPixelInputs(
                 type="pixel_values_videos",
                 pixel_values_videos=pixel_values_videos,
@@ -1596,11 +1563,6 @@ class KeyeForConditionalGeneration(BaseKeyeModule, SupportsMultiModal,
             )
 
         if video_embeds is not None:
-            video_embeds = self._validate_and_reshape_mm_tensor(
-                video_embeds, "video embeds")
-            video_grid_thw = self._validate_and_reshape_mm_tensor(
-                video_grid_thw, "video grid_thw")
-
             return KeyeVideoEmbeddingInputs(
                 type="video_embeds",
                 video_embeds=video_embeds,
