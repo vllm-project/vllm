@@ -139,6 +139,11 @@ class IterationStats:
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
 
+    def __repr__(self) -> str:
+        field_to_value_str = ", ".join(f"{k}={v}"
+                                       for k, v in vars(self).items())
+        return f"{self.__class__.__name__}({field_to_value_str})"
+
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
         return self.iteration_timestamp - start
