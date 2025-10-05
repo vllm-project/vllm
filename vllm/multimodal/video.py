@@ -121,14 +121,22 @@ class OpenCVVideoBackend(VideoLoader):
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         duration = total_frames_num / original_fps if original_fps > 0 else 0
 
+        validate_frames_list = []
+        for idx in range(total_frames_num):
+            ok = cap.grab()
+            if ok:
+                validate_frames_list.append(idx)
+
+        validate_total_frames_num = len(validate_frames_list)
+
         # resample video to target num_frames
         full_read = num_frames == -1 or total_frames_num < num_frames
         if full_read:
-            num_frames = total_frames_num
+            num_frames = validate_total_frames_num
             frame_idx = list(range(0, num_frames))
         else:
             uniform_sampled_frames = np.linspace(0,
-                                                 total_frames_num - 1,
+                                                 validate_total_frames_num - 1,
                                                  num_frames,
                                                  dtype=int)
             frame_idx = uniform_sampled_frames.tolist()
@@ -138,15 +146,21 @@ class OpenCVVideoBackend(VideoLoader):
         frames = np.empty((len(frame_idx), height, width, 3), dtype=np.uint8)
 
         i = 0
-        for idx in range(total_frames_num):
-            ok = cap.grab()
-            if not ok:
-                break
-            if idx in frame_idx:
-                ret, frame = cap.retrieve()
-                if ret:
-                    frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    i += 1
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        validate_list_idx = frame_idx[i]
+        target_frame_pos = validate_frames_list[validate_list_idx]
+        for pos in range(total_frames_num):
+            cap.grab()
+            if target_frame_pos != pos:
+                continue
+            ret, frame = cap.retrieve()
+            if ret:
+                frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                i += 1
+                if i >= len(frame_idx):
+                    break
+                validate_list_idx = frame_idx[i]
+                target_frame_pos = validate_frames_list[validate_list_idx]
 
         assert i == num_frames, (f"Expected reading {num_frames} frames, "
                                  f"but only loaded {i} frames from video.")
