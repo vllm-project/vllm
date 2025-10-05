@@ -313,6 +313,7 @@ class InputPreprocessor:
         prompt_token_ids = self._truncate_inputs(
             parsed_content["prompt_token_ids"], tokenization_kwargs)
 
+        inputs: Union[TokenInputs, MultiModalInputs]
         if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_token_ids,
