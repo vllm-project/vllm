@@ -24,6 +24,8 @@ logger = init_logger(__name__)
 
 
 def kernel_warmup(worker: "Worker"):
+    return
+
     # Deep GEMM warmup
     do_deep_gemm_warmup = (envs.VLLM_USE_DEEP_GEMM
                            and is_deep_gemm_supported()
