@@ -661,13 +661,15 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         if attn_masks is None:
             if self.alibi_slopes is not None:
                 attn_masks = _make_alibi_bias(
-                    self.alibi_slopes, query.dtype, attn_metadata.seq_lens
-                )  # type: ignore
+                    self.alibi_slopes,
+                    query.dtype,
+                    attn_metadata.seq_lens,  # type: ignore
+                )
             elif self.sliding_window is not None:
                 assert attn_metadata.seq_lens is not None
                 attn_masks = _make_sliding_window_bias(
                     attn_metadata.seq_lens, self.sliding_window, query.dtype
-                )  # type: ignore
+                )
             else:
                 seq_lens, _ = attn_metadata.get_seq_lens(attn_type)
                 attn_masks = [None] * len(seq_lens)

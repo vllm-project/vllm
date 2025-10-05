@@ -181,10 +181,10 @@ class SeedOssToolParser(ToolParser):
                 try:
                     float_param_value = float(param_value)
                     param_value = (
-                        float_param_value
+                        float_param_value  # type: ignore
                         if float_param_value - int(float_param_value) != 0
-                        else int(float_param_value)
-                    )  # type: ignore
+                        else int(float_param_value)  # type: ignore
+                    )
                 except (ValueError, TypeError):
                     logger.warning(
                         "Parsed value '%s' of parameter '%s' is not a float in tool "

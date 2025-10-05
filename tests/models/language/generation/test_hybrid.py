@@ -407,8 +407,8 @@ def test_apc_single_prompt(
         pass
 
     compare_operator: Callable = (
-        check_logprobs_close if num_logprobs > 0 else check_outputs_equal
-    )  # type: ignore
+        check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore
+    )
 
     MULTIPLE = 300
 
@@ -473,8 +473,8 @@ def test_apc_single_prompt_block_align_alignment(
         pass
 
     compare_operator: Callable = (
-        check_logprobs_close if num_logprobs > 0 else check_outputs_equal
-    )  # type: ignore
+        check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore
+    )
 
     MULTIPLE = 300
 
@@ -555,8 +555,8 @@ def test_apc_multiple_prompts_all_cached_outputs(
         pass
 
     compare_operator: Callable = (
-        check_logprobs_close if num_logprobs > 0 else check_outputs_equal
-    )  # type: ignore
+        check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore
+    )
 
     MULTIPLE = 300
 
@@ -622,8 +622,8 @@ def test_apc_multiple_prompts_block_align_alignment(
         pass
 
     compare_operator: Callable = (
-        check_logprobs_close if num_logprobs > 0 else check_outputs_equal
-    )  # type: ignore
+        check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore
+    )
 
     MULTIPLE = 300
 
@@ -706,8 +706,8 @@ def test_apc_multiple_prompts_partial_cached_outputs(
         pass
 
     compare_operator: Callable = (
-        check_logprobs_close if num_logprobs > 0 else check_outputs_equal
-    )  # type: ignore
+        check_logprobs_close if num_logprobs > 0 else check_outputs_equal  # type: ignore
+    )
 
     MULTIPLE = 300
 

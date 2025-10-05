@@ -168,9 +168,9 @@ class BitBLASLinearKernel(MPLinearKernel):
 
         # Default names since bitblas requires empty parameters for these,
         # TODO: remove this requirement from bitblas (allow optional tensors)
-        if self.w_gidx_name is None:
+        if getattr(self, "w_gidx_name", None) is None:
             self.w_gidx_name = "g_idx"
-        if self.w_zp_name is None:
+        if getattr(self, "w_zp_name", None) is None:
             self.w_zp_name = "qzeros"
 
         if c.has_g_idx:
@@ -192,10 +192,7 @@ class BitBLASLinearKernel(MPLinearKernel):
         bitblas_qweight, bitblas_scales, bitblas_qzeros = self.repack_bitblas_from_gptq(
             layer.qweight,
             layer.scales,
-            None
-            if quant_config.is_sym
-            # type: ignore[union-attr]
-            else layer.qzeros,  # type: ignore[union-attr]
+            None if quant_config.is_sym else layer.qzeros,  # type: ignore[union-attr]
         )
         replace_parameter(layer, self.w_q_name, bitblas_qweight)
         replace_parameter(layer, self.w_s_name, bitblas_scales)
