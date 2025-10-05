@@ -1046,8 +1046,8 @@ class ShareGPTDataset(BenchmarkDataset):
             for entry in self.data
             if "conversations" in entry and len(entry["conversations"]) >= 2
         ]
+        random.seed(self.random_seed)
         if not getattr(self, 'disable_shuffle', False):
-            random.seed(self.random_seed)
             random.shuffle(self.data)
 
     def sample(
@@ -1756,8 +1756,8 @@ class CustomDataset(BenchmarkDataset):
                 "Only JSONL format is supported for CustomDataset."
             )
 
+        random.seed(self.random_seed)
         if not getattr(self, 'disable_shuffle', False):
-            random.seed(self.random_seed)
             random.shuffle(self.data)
 
     def sample(
@@ -1849,8 +1849,8 @@ class SpecBench(CustomDataset):
                 prompt = row["turns"][0]
                 self.data.append({"prompt": prompt})
 
+        random.seed(self.random_seed)
         if not getattr(self, 'disable_shuffle', False):
-            random.seed(self.random_seed)
             random.shuffle(self.data)
 
     def sample(self, **kwargs) -> list:
