@@ -314,15 +314,19 @@ class InputPreprocessor:
             parsed_content["prompt_token_ids"], tokenization_kwargs)
 
         inputs: Union[TokenInputs, MultiModalInputs]
-        if multi_modal_data := parsed_content.get("multi_modal_data"):
+        if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_token_ids,
-                multi_modal_data,
+                parsed_content.get("multi_modal_data", {}),
                 parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
         else:
+            if parsed_content.get("multi_modal_data"):
+                raise ValueError(
+                    "This model does not support multimodal inputs")
+
             inputs = token_inputs(prompt_token_ids)
 
         if cache_salt := parsed_content.get("cache_salt"):
@@ -340,15 +344,19 @@ class InputPreprocessor:
         prompt_text = parsed_content["prompt"]
 
         inputs: Union[TokenInputs, MultiModalInputs]
-        if multi_modal_data := parsed_content.get("multi_modal_data"):
+        if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_text,
-                multi_modal_data,
+                parsed_content.get("multi_modal_data", {}),
                 parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
         else:
+            if parsed_content.get("multi_modal_data"):
+                raise ValueError(
+                    "This model does not support multimodal inputs")
+
             prompt_token_ids = self._tokenize_prompt(
                 prompt_text,
                 tokenization_kwargs=tokenization_kwargs,

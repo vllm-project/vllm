@@ -331,6 +331,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         """
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
+        self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
 
         use_audio_in_video = False
         if "video" in mm_kwargs:
