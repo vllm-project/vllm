@@ -14,32 +14,11 @@ from vllm.distributed.parallel_state import (
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig, _get_config_dtype_str
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     modular_triton_fused_moe, try_get_optimal_moe_config)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_lora_align_block_size)
-
-
-def get_config_dtype_str(
-        dtype: torch.dtype,
-        use_int4_w4a16: Optional[bool] = False,
-        use_int8_w8a16: Optional[bool] = False,
-        use_fp8_w8a8: Optional[bool] = False,
-        use_mxfp4_w4a4: Optional[bool] = False) -> Optional[str]:
-    if use_fp8_w8a8:
-        return "fp8_w8a8"
-    elif use_int8_w8a16:
-        return "int8_w8a16"
-    elif use_int4_w4a16:
-        return "int4_w4a16"
-    elif use_mxfp4_w4a4:
-        return "mxfp4_w4a4"
-    elif dtype == torch.float:
-        # avoiding cases where kernel fails when float32 MoE
-        # use fp16/bfloat16 configs
-        return "float32"
-    return None
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
@@ -87,7 +66,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 (token_lora_mapping, _, _, _, _,
                  _) = layer.punica_wrapper.token_mapping_meta.meta_args(
                      hidden_states.size(0))
-                config_dtype = get_config_dtype_str(use_fp8_w8a8=False,
+                config_dtype = _get_config_dtype_str(use_fp8_w8a8=False,
                                                     use_int8_w8a16=False,
                                                     use_int4_w4a16=False,
                                                     use_mxfp4_w4a4=False,
@@ -159,7 +138,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 topk_weights = layer._lora["topk_weights"]
                 curr_topk_ids = layer._lora["topk_ids"]
 
-                config_dtype = get_config_dtype_str(use_fp8_w8a8=False,
+                config_dtype = _get_config_dtype_str(use_fp8_w8a8=False,
                                                     use_int8_w8a16=False,
                                                     use_int4_w4a16=False,
                                                     use_mxfp4_w4a4=False,
