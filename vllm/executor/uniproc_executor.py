@@ -4,7 +4,7 @@ import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import cached_property
 from multiprocessing import Lock
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -68,10 +68,10 @@ class UniProcExecutor(ExecutorBase):
         self,
         method: Union[str, Callable],
         timeout: Optional[float] = None,
-        args: Tuple = (),
-        kwargs: Optional[Dict] = None,
+        args: tuple = (),
+        kwargs: Optional[dict] = None,
         non_block: bool = False,
-    ) -> List[Any]:
+    ) -> list[Any]:
         if kwargs is None:
             kwargs = {}
         if self.mm_receiver_cache is not None and method == "execute_model":
@@ -158,7 +158,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         local_rank = int(os.environ["LOCAL_RANK"])
         return distributed_init_method, rank, local_rank
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> tuple[int, int]:
         """
         Determine the number of available KV blocks.
         Add an additional all_reduce to get the min across all ranks.

@@ -12,7 +12,7 @@ import functools
 import importlib
 import importlib.util
 import os
-from typing import Any, Callable, NoReturn, Optional
+from typing import Any, Callable, NoReturn
 
 import requests
 import torch
@@ -202,14 +202,14 @@ def supports_trtllm_attention() -> bool:
 
 
 @functools.cache
-def _force_use_trtllm_attention(env_value: Optional[bool]) -> Optional[bool]:
+def _force_use_trtllm_attention(env_value: bool | None) -> bool | None:
     """Cache the env value for VLLM_USE_TRTLLM_ATTENTION"""
     if env_value is not None:
         logger.info_once("VLLM_USE_TRTLLM_ATTENTION is set to %s", env_value)
     return env_value
 
 
-def force_use_trtllm_attention() -> Optional[bool]:
+def force_use_trtllm_attention() -> bool | None:
     """
     Return ``None`` if VLLM_USE_TRTLLM_ATTENTION is not set,
     return ``True`` if TRTLLM attention is forced to be used,
@@ -401,7 +401,7 @@ def flashinfer_scaled_fp8_mm(
     scale_a: torch.Tensor,
     scale_b: torch.Tensor,
     out_dtype: torch.dtype,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert a.ndim == 2 and b.ndim == 2
     assert a.shape[1] == b.shape[0]

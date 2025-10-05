@@ -9,7 +9,7 @@ import os
 import tempfile
 import urllib.request
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 import albumentations
 import numpy as np
@@ -98,9 +98,9 @@ def _convert_np_uint8(float_image: torch.Tensor):
 
 
 def read_geotiff(
-    file_path: Optional[str] = None,
-    path_type: Optional[str] = None,
-    file_data: Optional[bytes] = None,
+    file_path: str | None = None,
+    path_type: str | None = None,
+    file_data: bytes | None = None,
 ) -> tuple[torch.Tensor, dict, tuple[float, float] | None]:
     """Read all bands from *file_path* and return image + meta info.
 
@@ -114,8 +114,8 @@ def read_geotiff(
 
     if all([x is None for x in [file_path, path_type, file_data]]):
         raise Exception("All input fields to read_geotiff are None")
-    write_to_file: Optional[bytes] = None
-    path: Optional[str] = None
+    write_to_file: bytes | None = None
+    path: str | None = None
     if file_data is not None:
         # with tempfile.NamedTemporaryFile() as tmpfile:
         #     tmpfile.write(file_data)
@@ -162,9 +162,9 @@ def read_geotiff(
 def load_image(
     data: Union[list[str]],
     path_type: str,
-    mean: Optional[list[float]] = None,
-    std: Optional[list[float]] = None,
-    indices: Optional[Union[list[int], None]] = None,
+    mean: list[float] | None = None,
+    std: list[float] | None = None,
+    indices: Union[list[int], None] | None = None,
 ):
     """Build an input example by loading images in *file_paths*.
 
@@ -278,7 +278,7 @@ class PrithviMultimodalDataProcessor(IOProcessor):
     def pre_process(
         self,
         prompt: IOProcessorInput,
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
         **kwargs,
     ) -> Union[PromptType, Sequence[PromptType]]:
         image_data = dict(prompt)
@@ -359,7 +359,7 @@ class PrithviMultimodalDataProcessor(IOProcessor):
     def post_process(
         self,
         model_output: Sequence[PoolingRequestOutput],
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
         **kwargs,
     ) -> IOProcessorOutput:
         pred_imgs_list = []

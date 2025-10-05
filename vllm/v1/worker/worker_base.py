@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, Callable, TypeVar, Union
 
 import torch
 import torch.nn as nn
@@ -78,8 +78,8 @@ class WorkerBase:
         self.is_driver_worker = is_driver_worker
 
         # Device and model state
-        self.device: Optional[torch.device] = None
-        self.model_runner: Optional[nn.Module] = None
+        self.device: torch.device | None = None
+        self.model_runner: nn.Module | None = None
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """Get specifications for KV cache implementation."""
@@ -115,8 +115,8 @@ class WorkerBase:
         raise NotImplementedError
 
     def execute_model(
-        self, execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[list[SamplerOutput]]:
+        self, execute_model_req: ExecuteModelRequest | None = None
+    ) -> list[SamplerOutput] | None:
         raise NotImplementedError
 
     def start_worker_execution_loop(self) -> None:
@@ -198,8 +198,8 @@ class WorkerWrapperBase:
         group.
         """
         self.rpc_rank = rpc_rank
-        self.worker: Optional[WorkerBase] = None
-        self.vllm_config: Optional[VllmConfig] = None
+        self.worker: WorkerBase | None = None
+        self.vllm_config: VllmConfig | None = None
         # do not store this `vllm_config`, `init_worker` will set the final
         # one. TODO: investigate if we can remove this field in
         # `WorkerWrapperBase`, `init_cached_hf_modules` should be

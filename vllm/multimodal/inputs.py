@@ -289,7 +289,7 @@ class MultiModalFieldElem:
         return (
             (self.modality, self.key) == (other.modality, other.key)
             and data_equal
-            and type(self.field) == type(other.field)
+            and type(self.field) is type(other.field)
         )  # noqa: E721
 
 

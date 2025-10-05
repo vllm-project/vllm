@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import random
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -78,7 +78,7 @@ def vllm_model_skip_tokenizer_init(vllm_runner, request, monkeypatch):
 
 def _get_test_sampling_params(
     prompt_list: list[str],
-    seed: Optional[int] = 42,
+    seed: int | None = 42,
     structured_outputs: bool = False,
 ) -> tuple[list[SamplingParams], list[int]]:
     """Generate random sampling params for a batch."""

@@ -6,7 +6,7 @@ from __future__ import annotations
 import datetime
 import json
 from collections.abc import Iterable, Sequence
-from typing import Literal, Optional, Union
+from typing import Literal, Union
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -79,13 +79,13 @@ def get_encoding():
 
 
 def get_system_message(
-    model_identity: Optional[str] = None,
-    reasoning_effort: Optional[Literal["high", "medium", "low"]] = None,
-    start_date: Optional[str] = None,
-    browser_description: Optional[str] = None,
-    python_description: Optional[str] = None,
-    container_description: Optional[str] = None,
-    instructions: Optional[str] = None,
+    model_identity: str | None = None,
+    reasoning_effort: Literal["high", "medium", "low"] | None = None,
+    start_date: str | None = None,
+    browser_description: str | None = None,
+    python_description: str | None = None,
+    container_description: str | None = None,
+    instructions: str | None = None,
     with_custom_tools: bool = False,
 ) -> Message:
     sys_msg_content = SystemContent.new()
@@ -137,8 +137,8 @@ def create_tool_definition(tool: Union[ChatCompletionToolsParam, Tool]):
 
 
 def get_developer_message(
-    instructions: Optional[str] = None,
-    tools: Optional[list[Union[Tool, ChatCompletionToolsParam]]] = None,
+    instructions: str | None = None,
+    tools: list[Union[Tool, ChatCompletionToolsParam]] | None = None,
 ) -> Message:
     dev_msg_content = DeveloperContent.new()
     if instructions is not None and not envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
@@ -202,7 +202,7 @@ def parse_response_input(
             msg = msg.with_channel("final")
     elif response_msg["type"] == "function_call_output":
         call_id = response_msg["call_id"]
-        call_response: Optional[ResponseFunctionToolCall] = None
+        call_response: ResponseFunctionToolCall | None = None
         for prev_response in reversed(prev_responses):
             if (
                 isinstance(prev_response, ResponseFunctionToolCall)
@@ -450,7 +450,7 @@ def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
 
 def parse_chat_output(
     token_ids: Sequence[int],
-) -> tuple[Optional[str], Optional[str], bool]:
+) -> tuple[str | None, str | None, bool]:
     parser = parse_output_into_messages(token_ids)
     output_msgs = parser.messages
     is_tool_call = False  # TODO: update this when tool call is supported
