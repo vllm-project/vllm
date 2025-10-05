@@ -22,8 +22,7 @@ def server():
         PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
     )
 
-    with RemoteOpenAIServer(MODEL_NAME, args,
-                            env_dict=env_dict) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
 
 
@@ -323,12 +322,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                 # {
                 #     "type": "web_search_preview"
                 # },
-                {
-                    "type": "code_interpreter",
-                    "container": {
-                        "type": "auto"
-                    }
-                },
+                {"type": "code_interpreter", "container": {"type": "auto"}},
             ],
             stream=True,
             background=background,

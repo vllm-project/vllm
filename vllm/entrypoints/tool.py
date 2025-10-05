@@ -35,8 +35,10 @@ def validate_gpt_oss_install():
         raise ImportError(f"Invalid version string for 'gpt_oss': {e}") from None
 
     if pkg_version < Version(MIN_GPT_OSS_VERSION):
-        raise ImportError(f"gpt_oss >= {MIN_GPT_OSS_VERSION} is required, "
-                          f"but {pkg_version} is installed.") from None
+        raise ImportError(
+            f"gpt_oss >= {MIN_GPT_OSS_VERSION} is required, "
+            f"but {pkg_version} is installed."
+        ) from None
 
 
 class Tool(ABC):
