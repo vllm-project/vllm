@@ -15,7 +15,7 @@ import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
-from vllm.compilation.partition_rules import _inductor_partition_rule_context
+from vllm.compilation.partition_rules import inductor_partition_rule_context
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -182,7 +182,7 @@ class CompilerManager:
                 f"artifact_shape_{runtime_shape}_subgraph_{graph_index}"
         if self.compilation_config.use_inductor_graph_partition:
             partition_ops = self.compilation_config.partition_rule_ops or []
-            context = _inductor_partition_rule_context(partition_ops)
+            context = inductor_partition_rule_context(partition_ops)
         else:
             context = nullcontext()
 
