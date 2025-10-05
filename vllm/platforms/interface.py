@@ -178,7 +178,6 @@ class Platform:
         with contextlib.suppress(ImportError):
             import vllm._moe_C  # noqa: F401
             return True
-        logger.warning("Failed to import from vllm._moe_C")
         return False
 
     @classmethod
