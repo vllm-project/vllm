@@ -164,7 +164,9 @@ class TensorSchema:
 
         if len(actual_shape) != len(expected_shape):
             raise ValueError(f"{field_name} has rank {len(actual_shape)} "
-                             f"but expected {len(expected_shape)}")
+                             f"but expected {len(expected_shape)}. "
+                             f"Expected shape: {expected_shape}, "
+                             f"but got {actual_shape}")
 
         for i, dim in enumerate(expected_shape):
             if dim in dynamic_dims:
@@ -172,7 +174,9 @@ class TensorSchema:
             elif isinstance(dim, int):
                 if actual_shape[i] != dim:
                     raise ValueError(f"{field_name} dim[{i}] expected "
-                                     f"{dim}, got {actual_shape[i]}")
+                                     f"{dim}, got {actual_shape[i]}. "
+                                     f"Expected shape: {expected_shape}, "
+                                     f"but got {actual_shape}")
             elif isinstance(dim, str):
                 if dim in shape_env:
                     if actual_shape[i] != shape_env[dim]:

@@ -548,7 +548,7 @@ def load_keye_vl1_5(question: str, image_urls: list[str]) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         trust_remote_code=True,
-        max_model_len=8192,
+        max_model_len=32768,
         max_num_seqs=5,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
