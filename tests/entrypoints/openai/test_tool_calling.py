@@ -14,7 +14,6 @@ def server():
     args = [
         "--max-model-len", "8192",
         "--enforce-eager",
-        "--reasoning-parser", "deepseek_r1",
         "--enable-auto-tool-choice",
         "--tool-call-parser", "openai"
     ]
