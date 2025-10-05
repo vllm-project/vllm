@@ -5,7 +5,7 @@ from typing import Optional
 
 from typing_extensions import TypeAlias
 
-from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
 from vllm.logger import init_logger
 
@@ -124,8 +124,7 @@ class CudagraphDispatcher:
         """Check if candidate cudagraph can handle the batch request."""
         if candidate.num_reqs is None:
             return True
-        if batch_descriptor.num_reqs is None:
-            return False
+        assert batch_descriptor.num_reqs is not None
         return candidate.num_reqs >= batch_descriptor.num_reqs
 
     def dispatch(

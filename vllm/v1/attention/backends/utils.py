@@ -757,7 +757,9 @@ def split_decodes_and_prefills(
     if require_uniform:
         is_prefill = query_lens != query_lens[0]
     else:
-        is_prefill = query_lens > decode_threshold
+        # 0-query len indicates a padded request; leave this at the back
+        # of the batch with the prefills
+        is_prefill = query_lens > decode_threshold | query_lens == 0
 
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0

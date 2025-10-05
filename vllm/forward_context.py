@@ -41,6 +41,10 @@ class BatchDescriptor(NamedTuple):
     cudagraph supporting non-uniform batches.
     """
     num_reqs: Optional[int] = None
+    """
+    Number of requests in the batch. Can be None for PIECEWISE cudagraphs where
+    we don't need to know the number of requests.
+    """
 
     @property
     def non_uniform(self) -> "BatchDescriptor":
