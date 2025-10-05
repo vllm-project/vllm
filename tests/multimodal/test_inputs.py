@@ -5,7 +5,6 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig
-from vllm.inputs import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
 from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
@@ -108,19 +107,16 @@ def test_multimodal_input_batch_mixed_stacking_depths():
 @pytest.mark.parametrize("model_id", [
     "facebook/chameleon-7b",
 ])
-@pytest.mark.parametrize("prompt_type", ["text", "tokens"])
-def test_preprocessor_always_mm_code_path(model_id, prompt_type):
+@pytest.mark.parametrize("prompt", [
+    "",
+    {
+        "prompt_token_ids": []
+    },
+])
+def test_preprocessor_always_mm_code_path(model_id, prompt):
     model_config = ModelConfig(model=model_id)
     tokenizer = init_tokenizer_from_configs(model_config)
     input_preprocessor = InputPreprocessor(model_config, tokenizer)
-
-    prompt: PromptType
-    if prompt_type == "text":
-        prompt = ""
-    elif prompt_type == "tokens":
-        prompt = {"prompt_token_ids": []}
-    else:
-        raise NotImplementedError(prompt_type)
 
     # HF processor adds sep token
     sep_token_id = tokenizer.vocab[tokenizer.sep_token]
