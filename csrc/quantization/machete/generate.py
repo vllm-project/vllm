@@ -12,9 +12,6 @@ from functools import reduce
 from typing import Optional, Union
 
 import jinja2
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm_cutlass_library_extension import (
     DataType,
     EpilogueScheduleTag,
@@ -30,8 +27,6 @@ from vllm_cutlass_library_extension import (
     VLLMDataTypeVLLMScalarTypeTag,
     VLLMKernelScheduleTag,
 )
-
-# yapf: enable
 
 #
 #   Generator templating
