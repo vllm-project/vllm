@@ -7,8 +7,6 @@ from typing import Union
 import pytest
 
 from tests.utils import create_new_process_for_each_test
-
-# yapf: disable
 from tests.v1.logits_processors.utils import (
     DUMMY_LOGITPROC_ARG,
     DUMMY_LOGITPROC_FQCN,
@@ -24,8 +22,6 @@ from tests.v1.logits_processors.utils import (
     prompts,
 )
 from tests.v1.logits_processors.utils import entry_points as fake_entry_points
-
-# yapf: enable
 from vllm import LLM, SamplingParams
 from vllm.v1.sample.logits_processor import (
     STR_POOLING_REJECTS_LOGITSPROCS,

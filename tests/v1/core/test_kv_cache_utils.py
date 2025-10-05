@@ -16,9 +16,6 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes, sha256, sha256_cbor
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-
-# disable yapf here as it formats differently than isort such that both fail
-# yapf: disable
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
@@ -47,8 +44,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
-
-# yapf: enable
 
 pytestmark = pytest.mark.cpu_test
 

@@ -12,8 +12,6 @@ from vllm.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_reduce,
 )
-
-# yapf: disable
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.platforms import current_platform
 
@@ -22,7 +20,6 @@ from .utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace
 
 
 class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
-
     def __init__(self, base_layer: RowParallelLinear) -> None:
         super().__init__(base_layer)
 
@@ -33,11 +30,10 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         self.n_slices = 1
 
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
-
         shard_size = self.input_size
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
-        lora_a = lora_a[:,start_idx:end_idx]
+        lora_a = lora_a[:, start_idx:end_idx]
         return lora_a
 
     def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
@@ -66,7 +62,8 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         else:
             # TODO: simplify code below
             splitted_input = split_tensor_along_last_dim(
-                input_, num_partitions=self.tp_size)
+                input_, num_partitions=self.tp_size
+            )
             input_parallel = splitted_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
@@ -77,8 +74,11 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             output_ = output_parallel
 
         if not self.base_layer.skip_bias_add:
-            output = (output_ + self.base_layer.bias
-                      if self.base_layer.bias is not None else output_)
+            output = (
+                output_ + self.base_layer.bias
+                if self.base_layer.bias is not None
+                else output_
+            )
             output_bias = None
         else:
             output = output_
@@ -101,10 +101,10 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         return type(source_layer) is RowParallelLinear
 
 
-
 # The following layer is based on the tensor parallelism strategy given in
 # Y. Sheng et al., S-LoRA: Serving Thousands of Concurrent LoRA Adapters. 2023,
 # https://arxiv.org/abs/2311.03285.
+
 
 class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
     """
@@ -120,28 +120,26 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         shard_size = self.lora_b_stacked[0].shape[2]
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
-        lora_b = lora_b[ start_idx:end_idx,:]
+        lora_b = lora_b[start_idx:end_idx, :]
         return lora_b
 
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
         if bias is None:
             return bias
-        self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
-                                      self.lora_bias_stacked)
+        self.lora_bias_stacked = cast(tuple[torch.Tensor, ...], self.lora_bias_stacked)
         shard_size = self.lora_bias_stacked[0].shape[2]
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
         bias = bias[start_idx:end_idx]
         return bias
 
-    def apply(self,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(
+        self, x: torch.Tensor, bias: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x)
 
         x = x.view(-1, x.shape[-1])
-        output, out_orig_shape = output.view(-1,
-                                             output.shape[-1]), output.shape
+        output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
         buffer = torch.zeros(
             (self.n_slices, x.shape[0], self.lora_a_stacked[0].shape[2]),
             dtype=torch.float32,
@@ -149,10 +147,11 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         )
 
         shrunk_buffer: Optional[torch.Tensor] = self.punica_wrapper.add_shrink(
-            buffer, x, self.lora_a_stacked, 1.0)
+            buffer, x, self.lora_a_stacked, 1.0
+        )
         if not current_platform.can_update_inplace():
             buffer = shrunk_buffer
-        if self.tp_size>1:
+        if self.tp_size > 1:
             buffer = tensor_model_parallel_all_reduce(buffer)
 
         # following S-LoRA, allows the fusing of all_gather and all_reduce

@@ -287,29 +287,15 @@ def test_prefix_cache_default():
     assert not engine_args.enable_prefix_caching
 
 
-# yapf: disable
-@pytest.mark.parametrize(("arg", "expected", "option"), [
-    (None, None, "mm-processor-kwargs"),
-    ("{}", {}, "mm-processor-kwargs"),
-    (
-        '{"num_crops": 4}',
-        {
-            "num_crops": 4
-        },
-        "mm-processor-kwargs"
-    ),
-    (
-        '{"foo": {"bar": "baz"}}',
-        {
-            "foo":
-            {
-                "bar": "baz"
-            }
-        },
-        "mm-processor-kwargs"
-    ),
-])
-# yapf: enable
+@pytest.mark.parametrize(
+    ("arg", "expected", "option"),
+    [
+        (None, None, "mm-processor-kwargs"),
+        ("{}", {}, "mm-processor-kwargs"),
+        ('{"num_crops": 4}', {"num_crops": 4}, "mm-processor-kwargs"),
+        ('{"foo": {"bar": "baz"}}', {"foo": {"bar": "baz"}}, "mm-processor-kwargs"),
+    ],
+)
 def test_composite_arg_parser(arg, expected, option):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if arg is None:
@@ -321,8 +307,7 @@ def test_composite_arg_parser(arg, expected, option):
 
 def test_human_readable_model_len():
     # `exit_on_error` disabled to test invalid values below
-    parser = EngineArgs.add_cli_args(
-        FlexibleArgumentParser(exit_on_error=False))
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser(exit_on_error=False))
 
     args = parser.parse_args([])
     assert args.max_model_len is None

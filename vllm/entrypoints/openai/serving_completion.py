@@ -13,9 +13,6 @@ from fastapi import Request
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.entrypoints.openai.protocol import (
     CompletionLogProbs,
     CompletionRequest,
@@ -29,8 +26,6 @@ from vllm.entrypoints.openai.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
-
-# yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import get_max_tokens

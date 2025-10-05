@@ -12,7 +12,6 @@ from ...utils import build_model_context
 
 
 @pytest.mark.parametrize("model_id", ["HuggingFaceM4/Idefics3-8B-Llama3"])
-# yapf: disable
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "expected_toks_per_img"),
     [
@@ -20,7 +19,6 @@ from ...utils import build_model_context
         ({"size": {"longest_edge": 728}}, 169 * (2**2 + 1)),
     ],
 )
-# yapf: enable
 @pytest.mark.parametrize("num_imgs", [1, 2])
 @pytest.mark.parametrize("kwargs_on_init", [True, False])
 def test_processor_override(

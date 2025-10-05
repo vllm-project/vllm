@@ -33,24 +33,26 @@ TEST_IMG_PLACEHOLDER = "<vlm_image>"
 TEST_VIDEO_PLACEHOLDER = "<vlm_video>"
 TEST_AUDIO_PLACEHOLDER = "<lmm_audio>"
 
-# yapf: disable
-SINGLE_IMAGE_BASE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign": f"{TEST_IMG_PLACEHOLDER}What's the content of the image?",
-    "cherry_blossom": f"{TEST_IMG_PLACEHOLDER}What is the season?",
-})
-SINGLE_AUDIO_BASE_PROMPT = AUDIO_ASSETS.prompts({
-    "mary_had_lamb": f"{TEST_AUDIO_PLACEHOLDER}Transcribe this audio into English.",    # noqa: E501
-    "winning_call": f"{TEST_AUDIO_PLACEHOLDER}What is happening in this audio clip?",     # noqa: E501
-})
+SINGLE_IMAGE_BASE_PROMPTS = IMAGE_ASSETS.prompts(
+    {
+        "stop_sign": f"{TEST_IMG_PLACEHOLDER}What's the content of the image?",
+        "cherry_blossom": f"{TEST_IMG_PLACEHOLDER}What is the season?",
+    }
+)
+SINGLE_AUDIO_BASE_PROMPT = AUDIO_ASSETS.prompts(
+    {
+        "mary_had_lamb": f"{TEST_AUDIO_PLACEHOLDER}Transcribe this audio into English.",  # noqa: E501
+        "winning_call": f"{TEST_AUDIO_PLACEHOLDER}What is happening in this audio clip?",  # noqa: E501
+    }
+)
 
 MULTI_IMAGE_BASE_PROMPT = f"Image-1: {TEST_IMG_PLACEHOLDER}Image-2: {TEST_IMG_PLACEHOLDER}Describe the two images in detail.\n"  # noqa: E501
 VIDEO_BASE_PROMPT = f"{TEST_VIDEO_PLACEHOLDER}Why is this video funny?"
 
 
-IMAGE_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0)]
-EMBEDDING_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0)]
+IMAGE_SIZE_FACTORS = [(), (1.0,), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0)]
+EMBEDDING_SIZE_FACTORS = [(), (1.0,), (1.0, 1.0, 1.0)]
 RunnerOutput = tuple[list[int], str, Optional[SampleLogprobs]]
-# yapf: enable
 
 
 class PromptWithMultiModalInput(NamedTuple):

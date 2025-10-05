@@ -24,8 +24,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
-
-# yapf: disable
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     BlockQuantScaleParameter,
@@ -35,8 +33,6 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
     RowvLLMParameter,
 )
-
-# yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import GiB_bytes

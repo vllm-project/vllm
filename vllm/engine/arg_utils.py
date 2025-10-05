@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# yapf: disable
 import argparse
 import copy
 import dataclasses
@@ -87,8 +86,6 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import FlexibleArgumentParser, GiB_bytes, get_ip, is_in_ray_actor
 from vllm.v1.sample.logits_processor import LogitsProcessor
-
-# yapf: enable
 
 if TYPE_CHECKING:
     from vllm.executor.executor_base import ExecutorBase
