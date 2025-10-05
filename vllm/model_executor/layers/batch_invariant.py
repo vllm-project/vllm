@@ -439,10 +439,7 @@ def mean_dim(
     output = torch.empty(output_shape, dtype=dtype, device=input.device)
 
     # Reshape output for kernel
-    if keepdim:
-        output_2d = output.reshape(M, 1, K).squeeze(1)
-    else:
-        output_2d = output.reshape(M, K)
+    output_2d = output.reshape(M, 1, K).squeeze(1) if keepdim else output.reshape(M, K)
 
     # Launch kernel
     grid = (M * K,)

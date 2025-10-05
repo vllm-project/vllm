@@ -3052,10 +3052,7 @@ def make_zmq_socket(
     # - Set a large 0.5GB buffer to improve throughput
     # For systems with less memory:
     # - Use system default (-1) to avoid excessive memory consumption
-    if total_mem > 32 and available_mem > 16:
-        buf_size = int(0.5 * 1024**3)  # 0.5GB in bytes
-    else:
-        buf_size = -1  # Use system default buffer size
+    buf_size = int(0.5 * 1024**3) if total_mem > 32 and available_mem > 16 else -1
 
     if bind is None:
         bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
