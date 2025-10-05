@@ -24,9 +24,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.entrypoints.score_utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
@@ -35,8 +32,6 @@ from vllm.entrypoints.score_utils import (
     compress_token_type_ids,
     get_score_prompt,
 )
-
-# yapf: enable
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger

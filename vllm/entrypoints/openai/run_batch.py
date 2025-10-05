@@ -18,8 +18,6 @@ from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-
-# yapf: disable
 from vllm.entrypoints.openai.protocol import (
     BatchRequestInput,
     BatchRequestOutput,
@@ -30,8 +28,6 @@ from vllm.entrypoints.openai.protocol import (
     RerankResponse,
     ScoreResponse,
 )
-
-# yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels

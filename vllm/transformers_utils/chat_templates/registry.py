@@ -28,7 +28,6 @@ def _get_minicpmv_chat_template_fallback(tokenizer_name_or_path: str) -> Optiona
     return CHAT_TEMPLATES_DIR / "template_chatml.jinja"
 
 
-# yapf: disable
 _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "blip-2": CHAT_TEMPLATES_DIR / "template_blip2.jinja",
     "clip": CHAT_TEMPLATES_DIR / "template_basic.jinja",
@@ -39,7 +38,6 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "paligemma": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "qwen": _get_qwen_chat_template_fallback,
 }
-# yapf: enable
 
 
 def register_chat_template_fallback_path(

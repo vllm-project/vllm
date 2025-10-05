@@ -14,9 +14,6 @@ from typing import Callable, Final, Optional, Union
 
 import jinja2
 from fastapi import Request
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
     ResponseCodeInterpreterCallCodeDoneEvent,
@@ -46,8 +43,6 @@ from openai.types.responses import (
     response_text_delta_event,
 )
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
-
-# yapf: enable
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
@@ -78,9 +73,6 @@ from vllm.entrypoints.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.logger import RequestLogger
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
     ErrorResponse,
@@ -97,8 +89,6 @@ from vllm.entrypoints.openai.protocol import (
     ResponseUsage,
     StreamingResponsesResponse,
 )
-
-# yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.tool_server import ToolServer

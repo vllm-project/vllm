@@ -8,12 +8,9 @@ from transformers import SmolVLMProcessor
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-# yapf: disable
 from .idefics3 import Idefics3DummyInputsBuilder as SmolVLMDummyInputsBuilder
 from .idefics3 import Idefics3ForConditionalGeneration, Idefics3ProcessingInfo
 from .idefics3 import Idefics3MultiModalProcessor as SmolVLMMultiModalProcessor
-
-# yapf: enable
 
 
 class SmolVLMProcessingInfo(Idefics3ProcessingInfo):
