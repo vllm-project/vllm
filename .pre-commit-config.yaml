@@ -7,9 +7,9 @@ default_stages:
 exclude: 'vllm/third_party/.*'
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.11.7
+  rev: v0.13.3
   hooks:
-  - id: ruff
+  - id: ruff-check
     args: [--output-format, github, --fix]
   - id: ruff-format
 - repo: https://github.com/crate-ci/typos
