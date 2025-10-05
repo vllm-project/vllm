@@ -16,9 +16,7 @@ from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
     from vllm.lora.ops.triton_ops import (LoRAKernelMeta, lora_expand,
-                                          lora_shrink)
-
-from vllm.lora.fused_moe_lora import invoke_fused_moe_lora_kernel
+                                          lora_shrink, fused_moe_lora)
 
 from .punica_base import PunicaWrapperBase
 
@@ -289,7 +287,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         mul_routed_weight=False,
     ):
 
-        invoke_fused_moe_lora_kernel(
+        fused_moe_lora(
             y,
             x,
             lora_a_stacked,
@@ -300,6 +298,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             num_tokens_post_padded,
             max_lora_rank,
             top_k_num,
-            config,
+            config["BLOCK_SIZE_M"],
+            config["BLOCK_SIZE_N"],
+            config["BLOCK_SIZE_K"],
+            config["GROUP_SIZE_M"],
             mul_routed_weight,
         )
