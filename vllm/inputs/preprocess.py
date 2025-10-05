@@ -323,7 +323,7 @@ class InputPreprocessor:
                 mm_uuids=mm_uuids,
             )
         else:
-            if "multi_modal_data" in parsed_content:
+            if parsed_content.get("multi_modal_data"):
                 raise ValueError(
                     "This model does not support multimodal inputs")
 
@@ -353,7 +353,7 @@ class InputPreprocessor:
                 mm_uuids=mm_uuids,
             )
         else:
-            if "multi_modal_data" in parsed_content:
+            if parsed_content.get("multi_modal_data"):
                 raise ValueError(
                     "This model does not support multimodal inputs")
 
