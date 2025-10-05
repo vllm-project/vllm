@@ -313,11 +313,10 @@ class InputPreprocessor:
         prompt_token_ids = self._truncate_inputs(
             parsed_content["prompt_token_ids"], tokenization_kwargs)
 
-        inputs: Union[TokenInputs, MultiModalInputs]
-        if multi_modal_data := parsed_content.get("multi_modal_data"):
+        if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_token_ids,
-                multi_modal_data,
+                parsed_content.get("multi_modal_data", {}),
                 parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
@@ -340,10 +339,10 @@ class InputPreprocessor:
         prompt_text = parsed_content["prompt"]
 
         inputs: Union[TokenInputs, MultiModalInputs]
-        if multi_modal_data := parsed_content.get("multi_modal_data"):
+        if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_text,
-                multi_modal_data,
+                parsed_content.get("multi_modal_data", {}),
                 parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
