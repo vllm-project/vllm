@@ -619,8 +619,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # All possible options loaded dynamically from _Backend enum
     "VLLM_ATTENTION_BACKEND":
     env_with_choices("VLLM_ATTENTION_BACKEND", None,
-                     lambda: list(__import__('vllm.platforms.interface', \
-                        fromlist=['_Backend'])._Backend.__members__.keys())),
+                     lambda: list(__import__(
+                         'vllm.attention.backends.registry',
+                         fromlist=['_Backend'])._Backend.__members__.keys())),
 
     # If set, vllm will use flashinfer sampler
     "VLLM_USE_FLASHINFER_SAMPLER":
