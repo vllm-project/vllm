@@ -445,21 +445,22 @@ class LoRAModelManager:
 
                     down_proj_lora = module_lora
                     num_experts = module_lora.lora_a.shape[
-                        -1] // module_lora.rank
-                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts,
-                                                                 dim=-1)
-                    up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts,
-                                                               dim=-1)
+                        0] // module_lora.rank
 
-                    gate_proj_b = gate_up_proj_lora.lora_b[..., ::2].chunk(
-                        num_experts, dim=0)
-                    up_proj_b = gate_up_proj_lora.lora_b[..., 1::2].chunk(
-                        num_experts, dim=0)
+                    gate_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts,
+                                                                 dim=0)
+                    up_proj_a = gate_up_proj_lora.lora_a.chunk(num_experts,
+                                                               dim=0)
+
+                    gate_proj_b = gate_up_proj_lora.lora_b[::2, ...].chunk(
+                        num_experts, dim=-1)
+                    up_proj_b = gate_up_proj_lora.lora_b[1::2, ...].chunk(
+                        num_experts, dim=-1)
 
                     down_proj_a = down_proj_lora.lora_a.chunk(num_experts,
-                                                              dim=-1)
-                    down_proj_b = down_proj_lora.lora_b.chunk(num_experts,
                                                               dim=0)
+                    down_proj_b = down_proj_lora.lora_b.chunk(num_experts,
+                                                              dim=-1)
 
                     lora_a = []
                     lora_b = []
