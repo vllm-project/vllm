@@ -64,11 +64,13 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .qwen2_5_omni_thinker import Qwen2_5OmniConditionalGenerationMixin
-from .qwen2_5_omni_thinker import (
-    Qwen2_5OmniThinkerDummyInputsBuilder as Qwen3OmniMoeThinkerDummyInputsBuilder)
-from .qwen2_5_omni_thinker import (Qwen2_5OmniThinkerMultiModalProcessor,
+# yapf conflicts with isort for this block
+# yapf: disable
+from .qwen2_5_omni_thinker import (Qwen2_5OmniConditionalGenerationMixin,
+                                   Qwen2_5OmniThinkerDummyInputsBuilder,
+                                   Qwen2_5OmniThinkerMultiModalProcessor,
                                    Qwen2_5OmniThinkerProcessingInfo)
+# yapf: enable
 from .qwen2_5_vl import (Qwen2_5_VisionAttention,
                          Qwen2_5_VisionRotaryEmbedding,
                          Qwen2_5_VLProcessingInfo)
@@ -632,6 +634,9 @@ class Qwen3OmniMoeThinkerProcessingInfo(Qwen2AudioProcessingInfo,
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None, "image": None, "video": None}
+
+
+Qwen3OmniMoeThinkerDummyInputsBuilder = Qwen2_5OmniThinkerDummyInputsBuilder
 
 
 class Qwen3OmniMoeThinkerMultiModalProcessor(
