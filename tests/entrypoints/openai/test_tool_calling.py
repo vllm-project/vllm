@@ -1,322 +1,146 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import openai
+import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
-import json
-from rapidfuzz import fuzz
-import jsonschema
+
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "openai/gpt-oss-20b"
+# a reasoning and tool calling model
+MODEL_NAME = "Qwen/QwQ-32B"
 
 
 @pytest.fixture(scope="module")
-def server():
+def server():  # noqa: F811
     args = [
-        "--max-model-len", "8192",
-        "--enforce-eager",
-        "--enable-auto-tool-choice",
-        "--tool-call-parser", "openai"
+        "--max-model-len", "8192", "--enforce-eager", "--reasoning-parser",
+        "deepseek_r1", "--enable-auto-tool-choice", "--tool-call-parser",
+        "hermes"
     ]
+
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
 @pytest_asyncio.fixture
 async def client(server):
-    """Async fixture providing an OpenAI-compatible vLLM client."""
     async with server.get_async_client() as async_client:
         yield async_client
 
 
-# ==========================================================
-# Tool Definitions
-# ==========================================================
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "calculator",
-            "description": "Performs basic arithmetic calculations.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expression": {
-                        "type": "string",
-                        "description": "Arithmetic expression to evaluate, e.g. '123 + 456'."
-                    }
+TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "get_current_weather",
+        "description": "Get the current weather in a given location",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type":
+                    "string",
+                    "description":
+                    "The city to find the weather for, e.g. 'San Francisco'"
                 },
-                "required": ["expression"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_time",
-            "description": "Retrieves the current local time for a given city.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": {
-                        "type": "string",
-                        "description": "City name, e.g. 'New York'."
-                    }
+                "state": {
+                    "type":
+                    "string",
+                    "description":
+                    "the two-letter abbreviation for the state that the city is"
+                    " in, e.g. 'CA' which would mean 'California'"
                 },
-                "required": ["city"],
+                "unit": {
+                    "type": "string",
+                    "description": "The unit to fetch the temperature in",
+                    "enum": ["celsius", "fahrenheit"]
+                }
             },
-        },
-    },
-]
+            "required": ["city", "state", "unit"]
+        }
+    }
+}]
+
+MESSAGES = [{
+    "role": "user",
+    "content": "Hi! How are you doing today?"
+}, {
+    "role": "assistant",
+    "content": "I'm doing well! How can I help you?"
+}, {
+    "role":
+    "user",
+    "content":
+    "Can you tell me what the temperate will be in Dallas, in fahrenheit?"
+}]
+
+FUNC_NAME = "get_current_weather"
+FUNC_ARGS = """{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}"""
 
 
-# ==========================================================
-# Message Examples
-# ==========================================================
-MESSAGES_CALC = [
-    {"role": "user", "content": "Calculate 123 + 456 using the calculator."}
-]
-
-MESSAGES_MULTIPLE_CALLS = [
-    {"role": "user", "content": "What is 7 * 8? And what time is it in New York?"}
-]
-
-MESSAGES_INVALID_CALL = [
-    {"role": "user", "content": "Use the calculator but give no expression."}
-]
-
-
-# Expected outputs
-FUNC_CALC = "calculator"
-FUNC_ARGS_CALC = '{"expression":"123 + 456"}'
-
-FUNC_TIME = "get_time"
-FUNC_ARGS_TIME = '{"city":"New York"}'
-
-
-# ==========================================================
-# Utility to extract reasoning and tool calls
-# ==========================================================
 def extract_reasoning_and_calls(chunks: list):
-    """Extract accumulated reasoning text and tool call arguments from streaming chunks."""
     reasoning_content = ""
-    tool_calls = {}  # index -> {"name": str, "arguments": str}
-
+    tool_call_idx = -1
+    arguments = []
+    function_names = []
     for chunk in chunks:
-        choice = getattr(chunk.choices[0], "delta", None)
-        if not choice:
-            continue
+        if chunk.choices[0].delta.tool_calls:
+            tool_call = chunk.choices[0].delta.tool_calls[0]
+            if tool_call.index != tool_call_idx:
+                tool_call_idx = chunk.choices[0].delta.tool_calls[0].index
+                arguments.append("")
+                function_names.append("")
 
-        # Handle reasoning deltas
-        if hasattr(choice, "reasoning_content") and choice.reasoning_content:
-            reasoning_content += choice.reasoning_content
+            if tool_call.function:
+                if tool_call.function.name:
+                    function_names[tool_call_idx] = tool_call.function.name
 
-        # Handle tool call deltas
-        for tc in getattr(choice, "tool_calls", []) or []:
-            idx = getattr(tc, "index", 0)
-            tool_entry = tool_calls.setdefault(idx, {"name": "", "arguments": ""})
-
-            if getattr(tc, "function", None):
-                func = tc.function
-                if getattr(func, "name", None):
-                    tool_entry["name"] = func.name
-                if getattr(func, "arguments", None):
-                    tool_entry["arguments"] += func.arguments
-
-    # Convert dict to parallel lists
-    function_names = [v["name"] for _, v in sorted(tool_calls.items())]
-    arguments = [v["arguments"] for _, v in sorted(tool_calls.items())]
-
+                if tool_call.function.arguments:
+                    arguments[tool_call_idx] += tool_call.function.arguments
+        else:
+            if hasattr(chunk.choices[0].delta, "reasoning_content"):
+                reasoning_content += chunk.choices[0].delta.reasoning_content
     return reasoning_content, arguments, function_names
 
 
-
-# ==========================================================
-# Test Scenarios
-# ==========================================================
+# test streaming
 @pytest.mark.asyncio
-async def test_single_tool_call(client: openai.AsyncOpenAI):
-    """Verify single tool call reasoning with the calculator."""
+async def test_chat_streaming_of_tool_and_reasoning(
+        client: openai.AsyncOpenAI):
+
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
-        messages=MESSAGES_CALC,
+        messages=MESSAGES,
         tools=TOOLS,
         temperature=0.0,
-        stream=True
+        stream=True,
     )
-    chunks = [chunk async for chunk in stream]
-    reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
 
-    assert FUNC_CALC in function_names, "Calculator function not called"
-    assert any(FUNC_ARGS_CALC in arg or "123 + 456" in arg for arg in arguments), f"Expected calculator arguments {FUNC_ARGS_CALC} not found in {arguments}"
-    assert len(reasoning) > 0, "Expected reasoning content missing"
+    chunks = []
+    async for chunk in stream:
+        chunks.append(chunk)
+
+    reasoning_content, arguments, function_names = extract_reasoning_and_calls(
+        chunks)
+    assert len(reasoning_content) > 0
+    assert len(function_names) > 0 and function_names[0] == FUNC_NAME
+    assert len(arguments) > 0 and arguments[0] == FUNC_ARGS
 
 
+# test full generate
 @pytest.mark.asyncio
-async def test_multiple_tool_calls(client: openai.AsyncOpenAI):
-    """Verify model handles multiple tools in one query."""
-    response = await client.chat.completions.create(
+async def test_chat_full_of_tool_and_reasoning(client: openai.AsyncOpenAI):
+
+    tool_calls = await client.chat.completions.create(
         model=MODEL_NAME,
-        messages=MESSAGES_MULTIPLE_CALLS,
+        messages=MESSAGES,
         tools=TOOLS,
         temperature=0.0,
         stream=False,
     )
 
-    calls = response.choices[0].message.tool_calls
-    assert any(c.function.name == FUNC_CALC for c in calls), "Calculator tool missing"
-    assert any(c.function.name == FUNC_TIME for c in calls), "Time tool missing"
-    assert len(response.choices[0].message.reasoning_content) > 0
-
-
-@pytest.mark.asyncio
-async def test_invalid_tool_call(client: openai.AsyncOpenAI):
-    """Verify that incomplete or ambiguous tool instructions do not produce tool calls."""
-    response = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES_INVALID_CALL,
-        tools=TOOLS,
-        temperature=0.0,
-    )
-
-    assert response is not None
-    assert hasattr(response.choices[0].message, "content")
-    assert not getattr(response.choices[0].message, "tool_calls", None), \
-        "Model unexpectedly attempted a tool call on invalid input"
-
-
-
-@pytest.mark.asyncio
-async def test_streaming_multiple_tools(client: openai.AsyncOpenAI):
-    """Test streamed multi-tool response with reasoning."""
-    stream = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES_MULTIPLE_CALLS,
-        tools=TOOLS,
-        temperature=0.0,
-        stream=True,
-    )
-    chunks = [chunk async for chunk in stream]
-    reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
-
-    assert FUNC_CALC in function_names
-    assert FUNC_TIME in function_names
-    assert len(reasoning) > 0
-
-
-@pytest.mark.asyncio
-async def test_tool_call_with_temperature(client: openai.AsyncOpenAI):
-    """Verify model produces valid output (tool or text) under non-deterministic sampling."""
-    response = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES_CALC,
-        tools=TOOLS,
-        temperature=0.7,
-        stream=False,
-    )
-
-    message = response.choices[0].message
-    assert message is not None
-    # Accept either a tool call or a direct text answer
-    assert (
-        message.tool_calls or message.content
-    ), "Response missing both text and tool calls"
-
-    # Log for analysis (optional, helps debug temperature variance)
-    print(f"Tool calls: {message.tool_calls}")
-    print(f"Text: {message.content}")
-    
-    
-    
-# ==========================================================
-# Accuracy & Consistency Tests
-# ==========================================================
-@pytest.mark.asyncio
-async def test_tool_call_argument_accuracy(client: openai.AsyncOpenAI):
-    """Ensure the calculator tool arguments closely match the expected arithmetic expression."""
-    response = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES_CALC,
-        tools=TOOLS,
-        temperature=0.0,
-    )
-
-    calls = response.choices[0].message.tool_calls
-    assert calls, "No tool calls detected"
-    calc_call = next((c for c in calls if c.function.name == FUNC_CALC), None)
-    assert calc_call, "Calculator function missing"
-
-    # Parse model arguments (may arrive as JSON string fragments)
-    try:
-        args = json.loads(calc_call.function.arguments)
-    except json.JSONDecodeError:
-        pytest.fail("Invalid JSON in calculator arguments")
-
-    expected_expr = "123 + 456"
-    similarity = fuzz.ratio(args.get("expression", ""), expected_expr)
-    assert similarity > 90, f"Expression mismatch (similarity={similarity}%)"
-
-
-@pytest.mark.asyncio
-async def test_tool_response_schema_accuracy(client: openai.AsyncOpenAI):
-    """Validate that tool call arguments adhere to their declared JSON schema."""
-    response = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES_MULTIPLE_CALLS,
-        tools=TOOLS,
-        temperature=0.0,
-    )
-
-    calls = response.choices[0].message.tool_calls
-    assert calls, "No tool calls produced"
-
-    for call in calls:
-        func_name = call.function.name
-        args = json.loads(call.function.arguments)
-
-        # Find the tool schema dynamically
-        tool = next(t for t in TOOLS if t["function"]["name"] == func_name)
-        schema = tool["function"]["parameters"]
-
-        # Validate the arguments against schema
-        jsonschema.validate(instance=args, schema=schema)
-
-
-@pytest.mark.asyncio
-async def test_reasoning_relevance_accuracy(client: openai.AsyncOpenAI):
-    """Check whether reasoning content is semantically related to the user's query."""
-    stream = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES_CALC,
-        tools=TOOLS,
-        stream=True,
-    )
-    chunks = [chunk async for chunk in stream]
-    reasoning, _, _ = extract_reasoning_and_calls(chunks)
-
-    assert len(reasoning) > 0, "No reasoning emitted"
-    # The reasoning should at least reference numbers in the user query
-    assert any(num in reasoning for num in ["123", "456"]), \
-        f"Reasoning does not reference expected numbers: {reasoning}"
-
-
-@pytest.mark.asyncio
-async def test_semantic_consistency_with_temperature(client: openai.AsyncOpenAI):
-    """Test that temperature variation doesn't cause contradictory reasoning."""
-    responses = []
-    for temp in [0.0, 0.5, 1.0]:
-        resp = await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=MESSAGES_CALC,
-            tools=TOOLS,
-            temperature=temp,
-        )
-        text = (resp.choices[0].message.content or "").strip()
-        responses.append(text)
-
-    # Compare fuzzy similarity between low- and mid-temperature outputs
-    low_mid_sim = fuzz.ratio(responses[0], responses[1])
-    assert low_mid_sim > 60, f"Semantic drift too large between T=0.0 and T=0.5 ({low_mid_sim}%)"    
-
+    assert len(tool_calls.choices[0].message.reasoning_content) > 0
+    assert tool_calls.choices[0].message.tool_calls[0].function.name \
+          == FUNC_NAME
+    assert tool_calls.choices[0].message.tool_calls[0].function.arguments \
+          == FUNC_ARGS
