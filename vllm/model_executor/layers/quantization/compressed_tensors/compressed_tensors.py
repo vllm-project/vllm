@@ -502,15 +502,11 @@ class CompressedTensorsConfig(QuantizationConfig):
             QuantizationStrategy.CHANNEL,
             QuantizationStrategy.BLOCK,
         ]
-        if not (
+        return (
             is_symmetric_weight
-            and is_static_weight  # noqa: SIM103
+            and is_static_weight
             and is_tensor_or_channel_or_block_weight
-        ):
-            return False
-
-        # All conditions satisfied.
-        return True
+        )
 
     def _is_wNa16_group_channel(
         self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs

@@ -33,10 +33,7 @@ def reference_lightning_attention(q, k, v, ed, block_size, kv_history):
 
     # More efficient implementation
     # Convert decay factors to matrix form
-    if ed.dim() == 1:
-        decay = torch.exp(-ed).view(1, -1, 1, 1)
-    else:
-        decay = torch.exp(-ed)
+    decay = torch.exp(-ed).view(1, -1, 1, 1) if ed.dim() == 1 else torch.exp(-ed)
 
     for b in range(B):
         for step in range(S):

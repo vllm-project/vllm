@@ -507,12 +507,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         removed_req_indices = sorted(removed_req_indices, reverse=True)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
-            if removed_req_indices:
-                # Fill the empty index.
-                req_index = removed_req_indices.pop()
-            else:
-                # Append to the end.
-                req_index = None
+            # Fill the empty index or append to the end
+            req_index = removed_req_indices.pop() if removed_req_indices else None
             self.input_batch.add_request(req_state, req_index)
 
         # Condense the batched states if there are empty indices.

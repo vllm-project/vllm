@@ -66,10 +66,7 @@ def test_cutlass_mla_decode(
     b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal, varlen, torch_dtype
 ):
     device = torch.device("cuda:0")
-    if torch_dtype == torch.float8_e4m3fn:
-        init_dtype = torch.bfloat16
-    else:
-        init_dtype = torch_dtype
+    init_dtype = torch.bfloat16 if torch_dtype == torch.float8_e4m3fn else torch_dtype
     torch.set_default_dtype(init_dtype)
     torch.set_default_device(device)
     torch.cuda.set_device(device)

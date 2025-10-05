@@ -81,10 +81,7 @@ def check_equal_or_regex_match(layer_name: str, targets: Iterable[str]) -> bool:
     Checks whether a layer_name is exactly equal or a regex match for
     if target starts with 're:' to any target in list.
     """
-    for target in targets:
-        if _is_equal_or_regex_match(layer_name, target):
-            return True
-    return False
+    return any(_is_equal_or_regex_match(layer_name, target) for target in targets)
 
 
 def _is_equal_or_regex_match(

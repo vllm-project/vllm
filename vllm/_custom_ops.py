@@ -2370,10 +2370,7 @@ class CPUDNNLGEMMHandler:
             torch.ops._C.release_dnnl_matmul_handler(self.handler)
 
 
-if hasattr(torch.ops._C, "create_onednn_mm_handler"):
-    _supports_onednn = True
-else:
-    _supports_onednn = False
+_supports_onednn = bool(hasattr(torch.ops._C, "create_onednn_mm_handler"))
 
 
 def is_onednn_acl_supported():
