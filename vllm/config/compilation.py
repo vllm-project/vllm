@@ -13,6 +13,9 @@ from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
+from vllm.compilation.partition_rules import (_inductor_partition_rule_context,
+                                              _parse_operator_name,
+                                              _resolve_operator_overload)
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
@@ -725,69 +728,3 @@ class CompilationConfig:
                 enable_str = "enabling" if op[0] == '+' else "disabling"
                 logger.warning_once("Op '%s' %s, %s with '%s' has no effect",
                                     op_name, missing_str, enable_str, op)
-
-
-def _parse_operator_name(op_name: str) -> tuple[str, str, str]:
-    if not op_name:
-        raise ValueError("Operator name must be non-empty")
-
-    parts = op_name.split(".")
-    if len(parts) < 2:
-        raise ValueError(
-            f"Operator name '{op_name}' must include a namespace and operator")
-
-    namespace, remainder = parts[0], ".".join(parts[1:])
-    if not remainder:
-        raise ValueError(
-            f"Operator name '{op_name}' must include an operator identifier")
-
-    if "." in remainder:
-        operator, overload = remainder.split(".", 1)
-    else:
-        operator, overload = remainder, "default"
-    overload = overload or "default"
-    return namespace, operator, overload
-
-
-def _resolve_operator_overload(op_name: str):
-    import torch
-
-    namespace, operator, overload = _parse_operator_name(op_name)
-    target_overload = overload or "default"
-
-    try:
-        return getattr(getattr(getattr(torch.ops, namespace), operator),
-                       target_overload)
-    except AttributeError as exc:
-        raise ValueError(f"Cannot resolve operator '{op_name}': "
-                         f"namespace='{namespace}', operator='{operator}', "
-                         f"overload='{target_overload}'") from exc
-
-
-@contextlib.contextmanager
-def _inductor_partition_rule_context(op_names: list[str]):
-    if not op_names:
-        logger.info("No partition ops provided; skipping rule registration.")
-        yield
-        return
-
-    from torch._inductor import scheduler as inductor_scheduler  # type: ignore
-
-    unique_names = list(dict.fromkeys(op_names))
-    overloads = [_resolve_operator_overload(name) for name in unique_names]
-
-    def _always_partition(*_args, **_kwargs):
-        return True
-
-    for overload in overloads:
-        inductor_scheduler.register_should_partition_rule(
-            overload, _always_partition)
-
-    logger.info("Registered inductor partition rules for ops: %s",
-                unique_names)
-
-    try:
-        yield
-    finally:
-        logger.info("Partition rules remain registered; "
-                    "PyTorch does not expose a clear API.")

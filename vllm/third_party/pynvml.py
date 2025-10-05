@@ -31,16 +31,16 @@
 # THE POSSIBILITY OF SUCH DAMAGE.
 #####
 
+import os
+import string
+import sys
+import threading
 ##
 # Python bindings for the NVML library
 ##
 from ctypes import *
 from ctypes.util import find_library
 from functools import wraps
-import sys
-import os
-import threading
-import string
 
 ## C Type mappings ##
 ## Enums
