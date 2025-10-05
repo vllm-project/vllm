@@ -508,7 +508,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.layer = layer
         self.quant_config = quant_config
         self.weight_block_size = self.quant_config.weight_block_size
-        self.block_quant = self.weight_block_size is not None
+        self.block_quant: bool = self.weight_block_size is not None
 
         self.fused_experts: Optional[
             mk.FusedMoEModularKernel] = None  # type: ignore
@@ -1094,7 +1094,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 expert_map=expert_map,
             )
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert self.block_quant is None
+            assert not self.block_quant
             assert (not renormalize and custom_routing_function is not None)
             assert activation == 'silu', (
                 f"Expected 'silu' activation but got {activation}")
