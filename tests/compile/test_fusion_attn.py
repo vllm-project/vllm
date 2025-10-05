@@ -565,7 +565,7 @@ def test_attention_quant_pattern(
     elif quant_key.dtype == FP4_DTYPE:
         assert attn_nodes_post[0].kwargs.get("output_block_scale") is not None, (
             "Attention should have output_block_scale after FP4 fusion"
-        )  # noqa: E501
+        )
 
     # Check that results are close
     torch.testing.assert_close(result_unfused, result_fused_1, atol=1e-2, rtol=1e-2)
