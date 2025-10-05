@@ -25,6 +25,7 @@ from transformers import (BatchFeature, CLIPVisionConfig, PretrainedConfig,
                           ProcessorMixin)
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -108,7 +109,7 @@ class Phi3VImagePixelInputs(TensorSchema):
     type: Literal["pixel_values", "image_embeds"] = "pixel_values"
 
     # Supports either a stacked tensor or a list of (p, 3, h, w) tensors
-    data: Annotated[
+    pixel_values: Annotated[
         Union[torch.Tensor, list[torch.Tensor]],
         TensorShape("bn", "p", 3, "h", "w", dynamic_dims={"p"}
                     ),  # 'p' may vary across items
@@ -356,17 +357,21 @@ class Phi3VDummyInputsBuilder(BaseDummyInputsBuilder[Phi3VProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images)
+                                   num_images=num_images,
+                                   overrides=image_overrides)
         }
 
 
@@ -589,7 +594,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         if pixel_values is not None:
             return Phi3VImagePixelInputs(
                 type="pixel_values",
-                data=flatten_bn(pixel_values),
+                pixel_values=flatten_bn(pixel_values),
                 image_sizes=flatten_bn(image_sizes, concat=True),
                 resolve_bindings={
                     "h": CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size,
@@ -623,7 +628,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             )
 
         assert self.vision_embed_tokens is not None
-        image_embeds = self.vision_embed_tokens(image_input["data"],
+        image_embeds = self.vision_embed_tokens(image_input["pixel_values"],
                                                 image_input["image_sizes"])
 
         return image_embeds

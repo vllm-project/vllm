@@ -4,6 +4,7 @@ import contextlib
 import copy
 import logging
 import math
+import os
 import queue
 import threading
 import time
@@ -54,10 +55,12 @@ logger = init_logger(__name__)
 # Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
 try:
     from nixl._api import nixl_agent as NixlWrapper
+    from nixl._bindings import nixlXferTelemetry
     logger.info("NIXL is available")
 except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
+    nixlXferTelemetry = None
 
 try:
     from nixl._api import nixl_agent_config
@@ -110,6 +113,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.reqs_in_batch: set[ReqId] = set()
+        self.reqs_not_processed: set[ReqId] = set()
 
     def add_new_req(
         self,
@@ -284,6 +288,9 @@ class NixlConnectorScheduler:
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
         self._reqs_in_batch: set[ReqId] = set()
+        # Reqs to remove from processed set because they're not to send after
+        # remote prefill or aborted.
+        self._reqs_not_processed: set[ReqId] = set()
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -398,11 +405,13 @@ class NixlConnectorScheduler:
 
         meta.reqs_to_send = self._reqs_need_send
         meta.reqs_in_batch = self._reqs_in_batch
+        meta.reqs_not_processed = self._reqs_not_processed
 
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
         self._reqs_need_save.clear()
         self._reqs_in_batch = set()
+        self._reqs_not_processed = set()
         self._reqs_need_send = {}
 
         return meta
@@ -436,8 +445,12 @@ class NixlConnectorScheduler:
             params["do_remote_prefill"] = False
             return False, None
 
-        if (not params.get("do_remote_decode")
-                or request.status != RequestStatus.FINISHED_LENGTH_CAPPED):
+        if not params.get("do_remote_decode"):
+            return False, None
+        if request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
+            # Also include the case of a P/D Prefill request with immediate
+            # block free (eg abort). Stop tracking this request.
+            self._reqs_not_processed.add(request.request_id)
             return False, None
 
         # TODO: check whether block_ids actually ever be 0. If not we could
@@ -476,6 +489,9 @@ class NixlConnectorWorker:
         self.nixl_backends = \
             vllm_config.kv_transfer_config.get_from_extra_config(
                 "backends", ["UCX"])
+        # TODO temporary, once nixl allows for telemetry flag in config
+        # (next release), we can remove this env var.
+        os.environ["NIXL_TELEMETRY_ENABLE"] = "1"
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
         if nixl_agent_config is None:
@@ -1175,9 +1191,10 @@ class NixlConnectorWorker:
             for handle, _xfer_stime in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
+                    # Get telemetry from NIXL
+                    res = self.nixl_wrapper.get_xfer_telemetry(handle)
+                    self.xfer_stats.record_transfer(res)
                     self.nixl_wrapper.release_xfer_handle(handle)
-                    # TODO (NickLucche) Get from NIXL telemetry once integrated
-                    self.xfer_stats.record_transfer()
                 elif xfer_state == "PROC":
                     in_progress = True
                     continue
@@ -1226,6 +1243,10 @@ class NixlConnectorWorker:
         # expiration for requests that have not been read from D yet.
         for req_id in metadata.reqs_in_batch:
             self._reqs_to_process.add(req_id)
+
+        # Remove all requests that are not to be processed (eg aborted).
+        for req_id in metadata.reqs_not_processed:
+            self._reqs_to_process.discard(req_id)
 
         # Add to requests that are waiting to be read and track expiration.
         for req_id, expiration_time in metadata.reqs_to_send.items():
@@ -1449,15 +1470,25 @@ class NixlKVConnectorStats(KVConnectorStats):
     """Container for transfer performance metrics"""
 
     def __post_init__(self):
-        if "num_successful_transfers" not in self.data:
-            self.data["num_successful_transfers"] = 0
+        if not self.data:
+            # Empty container init, no data is passed in.
+            self.reset()
 
     def reset(self):
-        self.data = {"num_successful_transfers": 0}
+        # Must be serializable
+        self.data: dict[str, list[float]] = {
+            "transfer_duration": [],
+            "post_duration": [],
+            "bytes_transferred": [],
+            "num_descriptors": [],
+        }
 
-    def record_transfer(self):
-        # TODO: record actual transfer stats when available
-        self.data["num_successful_transfers"] += 1
+    def record_transfer(self, res: nixlXferTelemetry):
+        # Keep metrics units consistent with rest of the code: time us->s
+        self.data["transfer_duration"].append(res.xferDuration / 1e6)
+        self.data["post_duration"].append(res.postDuration / 1e6)
+        self.data["bytes_transferred"].append(res.totalBytes)
+        self.data["num_descriptors"].append(res.descCount)
 
     def clone_and_reset(self) -> "NixlKVConnectorStats":
         old = copy.copy(self)
@@ -1465,16 +1496,55 @@ class NixlKVConnectorStats(KVConnectorStats):
         return old
 
     def is_empty(self) -> bool:
-        return self.data["num_successful_transfers"] == 0
+        return self.num_successful_transfers == 0
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
-            self.data["num_successful_transfers"] += other.data[
-                "num_successful_transfers"]
+            for k, v in other.data.items():
+                accumulator = self.data[k]
+                assert isinstance(accumulator, list)
+                accumulator.extend(v)
         return self
 
     def reduce(self) -> dict[str, Union[int, float]]:
-        # TODO: reduce stats to a single value, calculate latency/throughput
+        # Compute compact representative stats suitable for CLI logging
+        if self.is_empty():
+            return {
+                "Num successful transfers": 0,
+                "Avg xfer time (ms)": 0,
+                "P90 xfer time (ms)": 0,
+                "Avg post time (ms)": 0,
+                "P90 post time (ms)": 0,
+                "Avg MB per transfer": 0,
+                "Throughput (MB/s)": 0,
+                "Avg number of descriptors": 0,
+            }
+
+        xfer_time = np.asarray(self.data["transfer_duration"])
+        post_time = np.asarray(self.data["post_duration"])
+        # Convert to MB for CLI logging.
+        mb = np.asarray(self.data["bytes_transferred"]) / 2**20
+        descs = np.asarray(self.data["num_descriptors"], dtype=np.uint32)
+        n = len(descs)
+        assert n == self.num_successful_transfers
+
+        total_mb = mb.sum()
+        avg_mb = total_mb / n
+
+        total_time_seconds = xfer_time.sum()
+        throughput_mb_s = total_mb / total_time_seconds
+
         return {
-            "num_successful_transfers": self.data["num_successful_transfers"]
+            "Num successful transfers": n,
+            "Avg xfer time (ms)": round(xfer_time.mean() * 1e3, 3),
+            "P90 xfer time (ms)": round(np.percentile(xfer_time, 90) * 1e3, 3),
+            "Avg post time (ms)": round(post_time.mean() * 1e3, 3),
+            "P90 post time (ms)": round(np.percentile(post_time, 90) * 1e3, 3),
+            "Avg MB per transfer": round(avg_mb, 3),
+            "Throughput (MB/s)": round(throughput_mb_s, 3),
+            "Avg number of descriptors": round(descs.mean(), 1),
         }
+
+    @property
+    def num_successful_transfers(self) -> int:
+        return len(self.data["transfer_duration"])
