@@ -3,7 +3,7 @@
 """Attention layer with FlexAttention."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 import torch._dynamo.decorators
@@ -659,8 +659,8 @@ class FlexAttentionMetadata:
 
 class FlexAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlexAttentionMetadata]):
-    # CUDA graphs are supported when we can stay on the direct mask build path.
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+   
+    cudagraph_support: AttentionCGSupport = AttentionCGSupport.ALWAYS
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
