@@ -13,10 +13,13 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import (enable_trace_function_call_for_thread,
-                        resolve_obj_by_qualname, run_method,
-                        update_environment_variables,
-                        warn_for_unimplemented_methods)
+from vllm.utils import (
+    enable_trace_function_call_for_thread,
+    resolve_obj_by_qualname,
+    run_method,
+    update_environment_variables,
+    warn_for_unimplemented_methods,
+)
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.outputs import SamplerOutput
 
@@ -65,6 +68,7 @@ class WorkerBase:
         self.compilation_config = vllm_config.compilation_config
 
         from vllm.platforms import current_platform
+
         self.current_platform = current_platform
 
         self.parallel_config.rank = rank
@@ -95,10 +99,8 @@ class WorkerBase:
         """
         raise NotImplementedError
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
-        """Initialize the KV cache with the given size in blocks.
-        """
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
+        """Initialize the KV cache with the given size in blocks."""
         raise NotImplementedError
 
     def get_model(self) -> nn.Module:
@@ -113,8 +115,7 @@ class WorkerBase:
         raise NotImplementedError
 
     def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        self, execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> Optional[list[SamplerOutput]]:
         raise NotImplementedError
 
@@ -209,6 +210,7 @@ class WorkerWrapperBase:
             if trust_remote_code:
                 # note: lazy import to avoid importing torch before initializing
                 from vllm.utils import init_cached_hf_modules
+
                 init_cached_hf_modules()
 
     def shutdown(self) -> None:
@@ -229,7 +231,7 @@ class WorkerWrapperBase:
         envs_list: list[dict[str, str]],
     ) -> None:
         envs = envs_list[self.rpc_rank]
-        key = 'CUDA_VISIBLE_DEVICES'
+        key = "CUDA_VISIBLE_DEVICES"
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
             # suppress the warning in `update_environment_variables`
@@ -244,22 +246,26 @@ class WorkerWrapperBase:
         kwargs = all_kwargs[self.rpc_rank]
         self.vllm_config = kwargs.get("vllm_config")
         assert self.vllm_config is not None, (
-            "vllm_config is required to initialize the worker")
+            "vllm_config is required to initialize the worker"
+        )
         enable_trace_function_call_for_thread(self.vllm_config)
 
         from vllm.plugins import load_general_plugins
+
         load_general_plugins()
 
         if isinstance(self.vllm_config.parallel_config.worker_cls, str):
             worker_class = resolve_obj_by_qualname(
-                self.vllm_config.parallel_config.worker_cls)
+                self.vllm_config.parallel_config.worker_cls
+            )
         else:
             raise ValueError(
                 "passing worker_cls is no longer supported. Please pass keep the class in a separate module and pass the qualified name of the class as a string."  # noqa: E501
             )
         if self.vllm_config.parallel_config.worker_extension_cls:
             worker_extension_cls = resolve_obj_by_qualname(
-                self.vllm_config.parallel_config.worker_extension_cls)
+                self.vllm_config.parallel_config.worker_extension_cls
+            )
             extended_calls = []
             if worker_extension_cls not in worker_class.__bases__:
                 # check any conflicts between worker and worker_extension_cls
@@ -269,15 +275,20 @@ class WorkerWrapperBase:
                     assert not hasattr(worker_class, attr), (
                         f"Worker class {worker_class} already has an attribute"
                         f" {attr}, which conflicts with the worker"
-                        f" extension class {worker_extension_cls}.")
+                        f" extension class {worker_extension_cls}."
+                    )
                     if callable(getattr(worker_extension_cls, attr)):
                         extended_calls.append(attr)
                 # dynamically inherit the worker extension class
                 worker_class.__bases__ = worker_class.__bases__ + (
-                    worker_extension_cls, )
+                    worker_extension_cls,
+                )
                 logger.info(
                     "Injected %s into %s for extended collective_rpc calls %s",
-                    worker_extension_cls, worker_class, extended_calls)
+                    worker_extension_cls,
+                    worker_class,
+                    extended_calls,
+                )
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
@@ -305,8 +316,10 @@ class WorkerWrapperBase:
             # exceptions in the rest worker may cause deadlock in rpc like ray
             # see https://github.com/vllm-project/vllm/issues/3455
             # print the error and inform the user to solve the error
-            msg = (f"Error executing method {method!r}. "
-                   "This might cause deadlock in distributed execution.")
+            msg = (
+                f"Error executing method {method!r}. "
+                "This might cause deadlock in distributed execution."
+            )
             logger.exception(msg)
             raise e
 

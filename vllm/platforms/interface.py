@@ -156,8 +156,10 @@ class Platform:
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
         # a CPU-only placement group located on a GPU node.
-        if cls.device_control_env_var in os.environ and os.environ[
-                cls.device_control_env_var] != "":
+        if (
+            cls.device_control_env_var in os.environ
+            and os.environ[cls.device_control_env_var] != ""
+        ):
             device_ids = os.environ[cls.device_control_env_var].split(",")
             physical_device_id = device_ids[device_id]
             return int(physical_device_id)
@@ -166,7 +168,7 @@ class Platform:
 
     @classmethod
     def import_core_kernels(cls) -> None:
-        """ Import any platform-specific C kernels. """
+        """Import any platform-specific C kernels."""
         try:
             import vllm._C  # noqa: F401
         except ImportError as e:
@@ -174,23 +176,32 @@ class Platform:
 
     @classmethod
     def try_import_moe_kernels(cls) -> bool:
-        """ Import any platform-specific MoE kernels. """
+        """Import any platform-specific MoE kernels."""
         with contextlib.suppress(ImportError):
             import vllm._moe_C  # noqa: F401
+
             return True
         return False
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int,
-                             dtype: torch.dtype) -> "_Backend":
+    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
         from vllm.attention.backends.registry import _Backend
+
         return _Backend.TORCH_SDPA
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
-                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool, use_sparse: bool) -> str:
+    def get_attn_backend_cls(
+        cls,
+        selected_backend: "_Backend",
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: Optional[str],
+        block_size: int,
+        use_v1: bool,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+    ) -> str:
         """Get the attention backend class of a device."""
         return ""
 
@@ -296,9 +307,9 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
-    def pre_register_and_update(cls,
-                                parser: Optional[FlexibleArgumentParser] = None
-                                ) -> None:
+    def pre_register_and_update(
+        cls, parser: Optional[FlexibleArgumentParser] = None
+    ) -> None:
         """
         Do some pre-registration or update action for the current platform.
 
@@ -341,11 +352,10 @@ class Platform:
         """
         Verify whether the quantization is supported by the current platform.
         """
-        if cls.supported_quantization and \
-            quant not in cls.supported_quantization:
+        if cls.supported_quantization and quant not in cls.supported_quantization:
             raise ValueError(
-                f"{quant} quantization is currently not supported in "
-                f"{cls.device_name}.")
+                f"{quant} quantization is currently not supported in {cls.device_name}."
+            )
 
     @classmethod
     def get_cpu_architecture(cls) -> CpuArchEnum:
@@ -374,15 +384,17 @@ class Platform:
         if in_wsl():
             # Pinning memory in WSL is not supported.
             # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-            logger.warning("Using 'pin_memory=False' as WSL is detected. "
-                           "This may slow down the performance.")
+            logger.warning(
+                "Using 'pin_memory=False' as WSL is detected. "
+                "This may slow down the performance."
+            )
             return False
         return True
 
     @classmethod
-    def get_current_memory_usage(cls,
-                                 device: Optional[torch.types.Device] = None
-                                 ) -> float:
+    def get_current_memory_usage(
+        cls, device: Optional[torch.types.Device] = None
+    ) -> float:
         """
         Return the memory usage in bytes.
         """
@@ -469,9 +481,10 @@ class Platform:
         from vllm.config import get_current_vllm_config
 
         parallel_config = get_current_vllm_config().parallel_config
-        return (envs.VLLM_USE_V1
-                or parallel_config.distributed_executor_backend
-                == "external_launcher")
+        return (
+            envs.VLLM_USE_V1
+            or parallel_config.distributed_executor_backend == "external_launcher"
+        )
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
@@ -502,8 +515,11 @@ class Platform:
         if device is not None and hasattr(device, key):
             return getattr(device, key)
         else:
-            logger.warning("Current platform %s does not have '%s'" \
-            " attribute.", self.device_type, key)
+            logger.warning(
+                "Current platform %s does not have '%s' attribute.",
+                self.device_type,
+                key,
+            )
             return None
 
     def get_global_graph_pool(self) -> Any:
@@ -544,8 +560,9 @@ class Platform:
         raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
-                                    model_config: "ModelConfig") -> bool:
+    def is_kv_cache_dtype_supported(
+        cls, kv_cache_dtype: str, model_config: "ModelConfig"
+    ) -> bool:
         """
         Returns if the kv_cache_dtype is supported by the current platform.
         """
@@ -598,7 +615,7 @@ class Platform:
     @classmethod
     def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
         """
-        Returns a mapping from device_type to a tuple of supported 
+        Returns a mapping from device_type to a tuple of supported
         kv_buffer_device for nixl.
         """
         return {}

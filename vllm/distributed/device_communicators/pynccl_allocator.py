@@ -98,7 +98,9 @@ def compile_nccl_allocator():
             "This is expected if NCCL headers are not available. "
             "optionally set VLLM_NCCL_INCLUDE_PATH to point to a directory "
             "containing the NCCL header. "
-            "Error: %s", str(e))
+            "Error: %s",
+            str(e),
+        )
 
 
 def get_nccl_mem_pool():
@@ -125,21 +127,24 @@ atexit.register(_cleanup_nccl_allocator_wrapper)
 
 
 class nccl_symm_mem_context:
-
     def __init__(
         self,
         pynccl_comm: PyNcclCommunicator,
         disabled: bool = False,
     ):
-        self.disabled = (disabled or not is_symmetric_memory_enabled()
-                         or pynccl_comm.world_size == 1
-                         or not current_platform.is_cuda()
-                         or get_nccl_mem_pool() is None or version.parse(
-                             torch.__version__) < version.parse("2.8.0.a0"))
+        self.disabled = (
+            disabled
+            or not is_symmetric_memory_enabled()
+            or pynccl_comm.world_size == 1
+            or not current_platform.is_cuda()
+            or get_nccl_mem_pool() is None
+            or version.parse(torch.__version__) < version.parse("2.8.0.a0")
+        )
         if self.disabled:
             self.pynccl_comm: Optional[PyNcclCommunicator] = None
-            self._mem_pool_ctx: contextlib.AbstractContextManager[
-                Any] = contextlib.nullcontext()
+            self._mem_pool_ctx: contextlib.AbstractContextManager[Any] = (
+                contextlib.nullcontext()
+            )
             self.is_graph_capture = None
             self.device = None
         else:
@@ -151,16 +156,16 @@ class nccl_symm_mem_context:
     def __enter__(self):
         if self.disabled:
             return self
-        assert (
-            self.pynccl_comm
-            is not None), "Symmetric memory requires pynccl to be initalized"
-        assert (
-            self.pynccl_comm.nccl_version >= 22703
-        ), "NCCL version 2.27.3 or higher is required for NCCL symmetric memory"
+        assert self.pynccl_comm is not None, (
+            "Symmetric memory requires pynccl to be initalized"
+        )
+        assert self.pynccl_comm.nccl_version >= 22703, (
+            "NCCL version 2.27.3 or higher is required for NCCL symmetric memory"
+        )
         if self.is_graph_capture:
-            assert (
-                _graph_pool_id
-                is not None), "graph_pool_id is not set under graph capture"
+            assert _graph_pool_id is not None, (
+                "graph_pool_id is not set under graph capture"
+            )
             # Pause graph memory pool to use symmetric memory with cuda graph
             torch._C._cuda_endAllocateToPool(self.device, _graph_pool_id)
         self._mem_pool_ctx.__enter__()
@@ -179,8 +184,8 @@ class nccl_symm_mem_context:
         for segment in _cached_pool_snapshot:
             if segment["address"] not in _registered_base_addrs:
                 self.pynccl_comm.register_comm_window_raw(
-                    segment["address"], segment["total_size"])
+                    segment["address"], segment["total_size"]
+                )
                 _registered_base_addrs.add(segment["address"])
         if self.is_graph_capture:
-            torch._C._cuda_beginAllocateCurrentThreadToPool(
-                self.device, _graph_pool_id)
+            torch._C._cuda_beginAllocateCurrentThreadToPool(self.device, _graph_pool_id)

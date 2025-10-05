@@ -8,11 +8,12 @@ import tempfile
 
 import huggingface_hub.constants
 
-from vllm.model_executor.model_loader.weight_utils import (
-    download_weights_from_hf)
-from vllm.transformers_utils.runai_utils import (ObjectStorageModel,
-                                                 is_runai_obj_uri,
-                                                 list_safetensors)
+from vllm.model_executor.model_loader.weight_utils import download_weights_from_hf
+from vllm.transformers_utils.runai_utils import (
+    ObjectStorageModel,
+    is_runai_obj_uri,
+    list_safetensors,
+)
 
 
 def test_is_runai_obj_uri():
@@ -24,14 +25,14 @@ def test_is_runai_obj_uri():
 def test_runai_list_safetensors_local():
     with tempfile.TemporaryDirectory() as tmpdir:
         huggingface_hub.constants.HF_HUB_OFFLINE = False
-        download_weights_from_hf("openai-community/gpt2",
-                                 allow_patterns=["*.safetensors", "*.json"],
-                                 cache_dir=tmpdir)
+        download_weights_from_hf(
+            "openai-community/gpt2",
+            allow_patterns=["*.safetensors", "*.json"],
+            cache_dir=tmpdir,
+        )
         safetensors = glob.glob(f"{tmpdir}/**/*.safetensors", recursive=True)
         assert len(safetensors) > 0
-        parentdir = [
-            os.path.dirname(safetensor) for safetensor in safetensors
-        ][0]
+        parentdir = [os.path.dirname(safetensor) for safetensor in safetensors][0]
         files = list_safetensors(parentdir)
         assert len(safetensors) == len(files)
 
@@ -50,9 +51,9 @@ def test_runai_pull_files_gcs(monkeypatch):
     #     | cut -d":" -f2 | base64 -d | xxd -p
     expected_checksum = "f60dea775da1392434275b311b31a431"
     hasher = hashlib.new("md5")
-    with open(os.path.join(model.dir, filename), 'rb') as f:
+    with open(os.path.join(model.dir, filename), "rb") as f:
         # Read the file in chunks to handle large files efficiently
-        for chunk in iter(lambda: f.read(4096), b''):
+        for chunk in iter(lambda: f.read(4096), b""):
             hasher.update(chunk)
     actual_checksum = hasher.hexdigest()
     assert actual_checksum == expected_checksum

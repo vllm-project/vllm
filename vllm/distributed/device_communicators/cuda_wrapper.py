@@ -42,7 +42,7 @@ def find_loaded_library(lib_name) -> Optional[str]:
     the file `/proc/self/maps` contains the memory maps of the process, which includes the
     shared libraries loaded by the process. We can use this file to find the path of the
     a loaded library.
-    """ # noqa
+    """  # noqa
     found = False
     with open("/proc/self/maps") as f:
         for line in f:
@@ -57,8 +57,9 @@ def find_loaded_library(lib_name) -> Optional[str]:
     start = line.index("/")
     path = line[start:].strip()
     filename = path.split("/")[-1]
-    assert filename.rpartition(".so")[0].startswith(lib_name), \
+    assert filename.rpartition(".so")[0].startswith(lib_name), (
         f"Unexpected filename: {filename} for library {lib_name}"
+    )
     return path
 
 
@@ -70,30 +71,38 @@ class CudaRTLibrary:
         Function("cudaDeviceSynchronize", cudaError_t, []),
         # ​cudaError_t cudaDeviceReset ( void )
         Function("cudaDeviceReset", cudaError_t, []),
-
         # const char* 	cudaGetErrorString ( cudaError_t error )
         Function("cudaGetErrorString", ctypes.c_char_p, [cudaError_t]),
-
         # ​cudaError_t 	cudaMalloc ( void** devPtr, size_t size )
-        Function("cudaMalloc", cudaError_t,
-                 [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t]),
+        Function(
+            "cudaMalloc",
+            cudaError_t,
+            [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t],
+        ),
         # ​cudaError_t 	cudaFree ( void* devPtr )
         Function("cudaFree", cudaError_t, [ctypes.c_void_p]),
         # ​cudaError_t cudaMemset ( void* devPtr, int  value, size_t count )
-        Function("cudaMemset", cudaError_t,
-                 [ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t]),
+        Function(
+            "cudaMemset", cudaError_t, [ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t]
+        ),
         # ​cudaError_t cudaMemcpy ( void* dst, const void* src, size_t count, cudaMemcpyKind kind ) # noqa
-        Function("cudaMemcpy", cudaError_t, [
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, cudaMemcpyKind
-        ]),
-
+        Function(
+            "cudaMemcpy",
+            cudaError_t,
+            [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, cudaMemcpyKind],
+        ),
         # cudaError_t cudaIpcGetMemHandle ( cudaIpcMemHandle_t* handle, void* devPtr ) # noqa
-        Function("cudaIpcGetMemHandle", cudaError_t,
-                 [ctypes.POINTER(cudaIpcMemHandle_t), ctypes.c_void_p]),
+        Function(
+            "cudaIpcGetMemHandle",
+            cudaError_t,
+            [ctypes.POINTER(cudaIpcMemHandle_t), ctypes.c_void_p],
+        ),
         # ​cudaError_t cudaIpcOpenMemHandle ( void** devPtr, cudaIpcMemHandle_t handle, unsigned int  flags ) # noqa
-        Function("cudaIpcOpenMemHandle", cudaError_t, [
-            ctypes.POINTER(ctypes.c_void_p), cudaIpcMemHandle_t, ctypes.c_uint
-        ]),
+        Function(
+            "cudaIpcOpenMemHandle",
+            cudaError_t,
+            [ctypes.POINTER(ctypes.c_void_p), cudaIpcMemHandle_t, ctypes.c_uint],
+        ),
     ]
 
     # class attribute to store the mapping from the path to the library
@@ -109,11 +118,10 @@ class CudaRTLibrary:
             so_file = find_loaded_library("libcudart")
             if so_file is None:
                 so_file = envs.VLLM_CUDART_SO_PATH  # fallback to env var
-            assert so_file is not None, \
-                (
-                    "libcudart is not loaded in the current process, "
-                    "try setting VLLM_CUDART_SO_PATH"
-                )
+            assert so_file is not None, (
+                "libcudart is not loaded in the current process, "
+                "try setting VLLM_CUDART_SO_PATH"
+            )
         if so_file not in CudaRTLibrary.path_to_library_cache:
             lib = ctypes.CDLL(so_file)
             CudaRTLibrary.path_to_library_cache[so_file] = lib
@@ -154,27 +162,29 @@ class CudaRTLibrary:
     def cudaFree(self, devPtr: ctypes.c_void_p) -> None:
         self.CUDART_CHECK(self.funcs["cudaFree"](devPtr))
 
-    def cudaMemset(self, devPtr: ctypes.c_void_p, value: int,
-                   count: int) -> None:
+    def cudaMemset(self, devPtr: ctypes.c_void_p, value: int, count: int) -> None:
         self.CUDART_CHECK(self.funcs["cudaMemset"](devPtr, value, count))
 
-    def cudaMemcpy(self, dst: ctypes.c_void_p, src: ctypes.c_void_p,
-                   count: int) -> None:
+    def cudaMemcpy(
+        self, dst: ctypes.c_void_p, src: ctypes.c_void_p, count: int
+    ) -> None:
         cudaMemcpyDefault = 4
         kind = cudaMemcpyDefault
         self.CUDART_CHECK(self.funcs["cudaMemcpy"](dst, src, count, kind))
 
-    def cudaIpcGetMemHandle(self,
-                            devPtr: ctypes.c_void_p) -> cudaIpcMemHandle_t:
+    def cudaIpcGetMemHandle(self, devPtr: ctypes.c_void_p) -> cudaIpcMemHandle_t:
         handle = cudaIpcMemHandle_t()
-        self.CUDART_CHECK(self.funcs["cudaIpcGetMemHandle"](
-            ctypes.byref(handle), devPtr))
+        self.CUDART_CHECK(
+            self.funcs["cudaIpcGetMemHandle"](ctypes.byref(handle), devPtr)
+        )
         return handle
 
-    def cudaIpcOpenMemHandle(self,
-                             handle: cudaIpcMemHandle_t) -> ctypes.c_void_p:
+    def cudaIpcOpenMemHandle(self, handle: cudaIpcMemHandle_t) -> ctypes.c_void_p:
         cudaIpcMemLazyEnablePeerAccess = 1
         devPtr = ctypes.c_void_p()
-        self.CUDART_CHECK(self.funcs["cudaIpcOpenMemHandle"](
-            ctypes.byref(devPtr), handle, cudaIpcMemLazyEnablePeerAccess))
+        self.CUDART_CHECK(
+            self.funcs["cudaIpcOpenMemHandle"](
+                ctypes.byref(devPtr), handle, cudaIpcMemLazyEnablePeerAccess
+            )
+        )
         return devPtr

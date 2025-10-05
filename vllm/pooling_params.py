@@ -14,16 +14,17 @@ if TYPE_CHECKING:
 
 
 class PoolingParams(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        array_like=True):  # type: ignore[call-arg]
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    array_like=True,
+):  # type: ignore[call-arg]
     """API parameters for pooling models.
 
     Attributes:
         truncate_prompt_tokens: Controls prompt truncation.
             Set to -1 to use the model's default truncation size.
             Set to k to keep only the last k tokens (left truncation).
-            Set to None to disable truncation.         
+            Set to None to disable truncation.
         normalize: Whether to normalize the embeddings outputs.
         dimensions: Reduce the dimensions of embeddings
             if model support matryoshka representation.
@@ -33,8 +34,7 @@ class PoolingParams(
     """
 
     # --8<-- [start:common-pooling-params]
-    truncate_prompt_tokens: Optional[Annotated[int,
-                                               msgspec.Meta(ge=-1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=-1)]] = None
     # --8<-- [end:common-pooling-params]
 
     ## for embeddings models
@@ -67,8 +67,12 @@ class PoolingParams(
     @property
     def all_parameters(self) -> list[str]:
         return [
-            "dimensions", "normalize", "activation", "softmax", "step_tag_id",
-            "returned_token_ids"
+            "dimensions",
+            "normalize",
+            "activation",
+            "softmax",
+            "step_tag_id",
+            "returned_token_ids",
         ]
 
     @property
@@ -84,10 +88,9 @@ class PoolingParams(
         """Returns a deep copy of the PoolingParams instance."""
         return deepcopy(self)
 
-    def verify(self,
-               task: PoolingTask,
-               model_config: Optional["ModelConfig"] = None) -> None:
-
+    def verify(
+        self, task: PoolingTask, model_config: Optional["ModelConfig"] = None
+    ) -> None:
         if self.task is None:
             self.task = task
         elif self.task != task:
@@ -102,10 +105,9 @@ class PoolingParams(
         self._set_default_parameters(model_config)
         self._verify_valid_parameters()
 
-    def _merge_default_parameters(self,
-                                  model_config: Optional["ModelConfig"] = None
-                                  ) -> None:
-
+    def _merge_default_parameters(
+        self, model_config: Optional["ModelConfig"] = None
+    ) -> None:
         if model_config is None:
             return
 
@@ -132,8 +134,8 @@ class PoolingParams(
                 if not model_config.is_matryoshka:
                     raise ValueError(
                         f'Model "{model_config.served_model_name}" does not '
-                        f'support matryoshka representation, '
-                        f'changing output dimensions will lead to poor results.'
+                        f"support matryoshka representation, "
+                        f"changing output dimensions will lead to poor results."
                     )
 
                 mds = model_config.matryoshka_dimensions
@@ -141,9 +143,10 @@ class PoolingParams(
                     if self.dimensions not in mds:
                         raise ValueError(
                             f'Model "{model_config.served_model_name}" '
-                            f'only supports {str(mds)} matryoshka dimensions, '
-                            f'use other output dimensions will '
-                            f'lead to poor results.')
+                            f"only supports {str(mds)} matryoshka dimensions, "
+                            f"use other output dimensions will "
+                            f"lead to poor results."
+                        )
                 elif self.dimensions < 1:
                     raise ValueError("Dimensions must be greater than 0")
 
@@ -172,20 +175,24 @@ class PoolingParams(
             raise ValueError(
                 f"Task {self.task} only supports {valid_parameters} "
                 f"parameters, does not support "
-                f"{invalid_parameters} parameters")
+                f"{invalid_parameters} parameters"
+            )
 
     def __repr__(self) -> str:
-        return (f"PoolingParams("
-                f"task={self.task}, "
-                f"normalize={self.normalize}, "
-                f"dimensions={self.dimensions}, "
-                f"activation={self.activation}, "
-                f"softmax={self.softmax}, "
-                f"step_tag_id={self.step_tag_id}, "
-                f"returned_token_ids={self.returned_token_ids}, "
-                f"requires_token_ids={self.requires_token_ids}, "
-                f"extra_kwargs={self.extra_kwargs})")
+        return (
+            f"PoolingParams("
+            f"task={self.task}, "
+            f"normalize={self.normalize}, "
+            f"dimensions={self.dimensions}, "
+            f"activation={self.activation}, "
+            f"softmax={self.softmax}, "
+            f"step_tag_id={self.step_tag_id}, "
+            f"returned_token_ids={self.returned_token_ids}, "
+            f"requires_token_ids={self.requires_token_ids}, "
+            f"extra_kwargs={self.extra_kwargs})"
+        )
 
     def __post_init__(self) -> None:
-        assert self.output_kind == RequestOutputKind.FINAL_ONLY,\
+        assert self.output_kind == RequestOutputKind.FINAL_ONLY, (
             "For pooling output_kind has to be FINAL_ONLY"
+        )

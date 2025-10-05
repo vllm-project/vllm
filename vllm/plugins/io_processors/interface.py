@@ -10,12 +10,11 @@ from vllm.entrypoints.openai.protocol import IOProcessorResponse
 from vllm.inputs.data import PromptType
 from vllm.outputs import PoolingRequestOutput
 
-IOProcessorInput = TypeVar('IOProcessorInput')
-IOProcessorOutput = TypeVar('IOProcessorOutput')
+IOProcessorInput = TypeVar("IOProcessorInput")
+IOProcessorOutput = TypeVar("IOProcessorOutput")
 
 
 class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
-
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
 
@@ -37,10 +36,12 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
         return self.pre_process(prompt, request_id, **kwargs)
 
     @abstractmethod
-    def post_process(self,
-                     model_output: Sequence[PoolingRequestOutput],
-                     request_id: Optional[str] = None,
-                     **kwargs) -> IOProcessorOutput:
+    def post_process(
+        self,
+        model_output: Sequence[PoolingRequestOutput],
+        request_id: Optional[str] = None,
+        **kwargs,
+    ) -> IOProcessorOutput:
         raise NotImplementedError
 
     async def post_process_async(
@@ -52,8 +53,9 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
         # We cannot guarantee outputs are returned in the same order they were
         # fed to vLLM.
         # Let's sort them by id before post_processing
-        sorted_output = sorted([(i, item) async for i, item in model_output],
-                               key=lambda output: output[0])
+        sorted_output = sorted(
+            [(i, item) async for i, item in model_output], key=lambda output: output[0]
+        )
         collected_output = [output[1] for output in sorted_output]
         return self.post_process(collected_output, request_id, **kwargs)
 
@@ -63,5 +65,6 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
 
     @abstractmethod
     def output_to_response(
-            self, plugin_output: IOProcessorOutput) -> IOProcessorResponse:
+        self, plugin_output: IOProcessorOutput
+    ) -> IOProcessorResponse:
         raise NotImplementedError

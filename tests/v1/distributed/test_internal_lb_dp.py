@@ -31,66 +31,71 @@ class MultinodeInternalLBServerManager:
     """Manages multi-node data parallel vLLM server instances for internal
     load balancer testing using --headless mode."""
 
-    def __init__(self,
-                 model_name: str,
-                 dp_size: int,
-                 api_server_count: int,
-                 base_server_args: list,
-                 dp_per_node: int = 1,
-                 tp_size: int = TP_SIZE):
+    def __init__(
+        self,
+        model_name: str,
+        dp_size: int,
+        api_server_count: int,
+        base_server_args: list,
+        dp_per_node: int = 1,
+        tp_size: int = TP_SIZE,
+    ):
         self.model_name = model_name
         self.dp_size = dp_size
         self.dp_per_node = dp_per_node
         self.tp_size = tp_size
         self.api_server_count = api_server_count
         self.base_server_args = base_server_args
-        self.servers: list[Optional[tuple[RemoteOpenAIServer,
-                                          list[str]]]] = [None] * (dp_size //
-                                                                   dp_per_node)
+        self.servers: list[Optional[tuple[RemoteOpenAIServer, list[str]]]] = [None] * (
+            dp_size // dp_per_node
+        )
         self.server_threads: list[threading.Thread] = []
 
     def __enter__(self) -> list[tuple[RemoteOpenAIServer, list[str]]]:
         """Start all server instances for multi-node internal LB mode."""
-        for server_idx, rank in enumerate(
-                range(0, self.dp_size, self.dp_per_node)):
+        for server_idx, rank in enumerate(range(0, self.dp_size, self.dp_per_node)):
             # Create server args for this specific rank
             server_args = self.base_server_args.copy()
 
             if rank == 0:
                 # Head node - runs API server and first DP rank
-                server_args.extend([
-                    "--data-parallel-size",
-                    str(self.dp_size),
-                    "--data-parallel-size-local",
-                    str(self.dp_per_node),
-                    "--tensor-parallel-size",
-                    str(self.tp_size),
-                    "--port",
-                    "8000",  # Single endpoint for all requests
-                    "--api-server-count",
-                    str(self.api_server_count),
-                    "--data-parallel-address",
-                    "127.0.0.1",
-                    "--data-parallel-rpc-port",
-                    "13345",
-                ])
+                server_args.extend(
+                    [
+                        "--data-parallel-size",
+                        str(self.dp_size),
+                        "--data-parallel-size-local",
+                        str(self.dp_per_node),
+                        "--tensor-parallel-size",
+                        str(self.tp_size),
+                        "--port",
+                        "8000",  # Single endpoint for all requests
+                        "--api-server-count",
+                        str(self.api_server_count),
+                        "--data-parallel-address",
+                        "127.0.0.1",
+                        "--data-parallel-rpc-port",
+                        "13345",
+                    ]
+                )
             else:
                 # Secondary nodes - run in headless mode
-                server_args.extend([
-                    "--headless",
-                    "--data-parallel-size",
-                    str(self.dp_size),
-                    "--data-parallel-size-local",
-                    str(self.dp_per_node),
-                    "--data-parallel-start-rank",
-                    str(rank),
-                    "--tensor-parallel-size",
-                    str(self.tp_size),
-                    "--data-parallel-address",
-                    "127.0.0.1",
-                    "--data-parallel-rpc-port",
-                    "13345",
-                ])
+                server_args.extend(
+                    [
+                        "--headless",
+                        "--data-parallel-size",
+                        str(self.dp_size),
+                        "--data-parallel-size-local",
+                        str(self.dp_per_node),
+                        "--data-parallel-start-rank",
+                        str(rank),
+                        "--tensor-parallel-size",
+                        str(self.tp_size),
+                        "--data-parallel-address",
+                        "127.0.0.1",
+                        "--data-parallel-rpc-port",
+                        "13345",
+                    ]
+                )
 
             # Use a thread to start each server to allow parallel initialization
             def start_server(sidx: int, r: int, sargs: list[str]):
@@ -102,20 +107,19 @@ class MultinodeInternalLBServerManager:
                         sargs,
                         auto_port=False,
                         env_dict={
-                            "VLLM_SERVER_DEV_MODE":
-                            "1",
-                            current_platform.device_control_env_var:
-                            ",".join(
-                                str(
-                                    current_platform.
-                                    device_id_to_physical_device_id(i))
-                                for i in range(r, r + gpus_per_node))
-                        })
+                            "VLLM_SERVER_DEV_MODE": "1",
+                            current_platform.device_control_env_var: ",".join(
+                                str(current_platform.device_id_to_physical_device_id(i))
+                                for i in range(r, r + gpus_per_node)
+                            ),
+                        },
+                    )
                     server.__enter__()
                     if r == 0:
                         print(
                             f"Head node (rank {r}) started successfully with "
-                            f"{self.api_server_count} API servers")
+                            f"{self.api_server_count} API servers"
+                        )
                     else:
                         print(f"Headless node (rank {r}) started successfully")
                     self.servers[sidx] = (server, sargs)
@@ -124,8 +128,9 @@ class MultinodeInternalLBServerManager:
                     traceback.print_exc()
                     raise
 
-            thread = threading.Thread(target=start_server,
-                                      args=(server_idx, rank, server_args))
+            thread = threading.Thread(
+                target=start_server, args=(server_idx, rank, server_args)
+            )
             thread.start()
 
             self.server_threads.append(thread)
@@ -157,19 +162,20 @@ class APIOnlyServerManager:
     """Manages API-only server (Node 0) and headless engines server (Node 1)
     for testing separated API server and engine configuration."""
 
-    def __init__(self,
-                 model_name: str,
-                 dp_size: int,
-                 api_server_count: int,
-                 base_server_args: list,
-                 tp_size: int = TP_SIZE):
+    def __init__(
+        self,
+        model_name: str,
+        dp_size: int,
+        api_server_count: int,
+        base_server_args: list,
+        tp_size: int = TP_SIZE,
+    ):
         self.model_name = model_name
         self.dp_size = dp_size
         self.tp_size = tp_size
         self.api_server_count = api_server_count
         self.base_server_args = base_server_args
-        self.servers: list[Optional[tuple[RemoteOpenAIServer,
-                                          list[str]]]] = [None] * 2
+        self.servers: list[Optional[tuple[RemoteOpenAIServer, list[str]]]] = [None] * 2
         self.server_threads: list[threading.Thread] = []
 
     def __enter__(self) -> list[tuple[RemoteOpenAIServer, list[str]]]:
@@ -177,38 +183,42 @@ class APIOnlyServerManager:
 
         # Start API-only server (Node 0) - no engines, only API server
         api_server_args = self.base_server_args.copy()
-        api_server_args.extend([
-            "--data-parallel-size",
-            str(self.dp_size),
-            "--data-parallel-size-local",
-            "0",  # No engines on this node
-            "--tensor-parallel-size",
-            str(self.tp_size),
-            "--port",
-            "8000",
-            "--api-server-count",
-            str(self.api_server_count),
-            "--data-parallel-address",
-            "127.0.0.1",
-            "--data-parallel-rpc-port",
-            "13345",
-        ])
+        api_server_args.extend(
+            [
+                "--data-parallel-size",
+                str(self.dp_size),
+                "--data-parallel-size-local",
+                "0",  # No engines on this node
+                "--tensor-parallel-size",
+                str(self.tp_size),
+                "--port",
+                "8000",
+                "--api-server-count",
+                str(self.api_server_count),
+                "--data-parallel-address",
+                "127.0.0.1",
+                "--data-parallel-rpc-port",
+                "13345",
+            ]
+        )
 
         # Start headless engines server (Node 1) - all engines, no API server
         engines_server_args = self.base_server_args.copy()
-        engines_server_args.extend([
-            "--headless",
-            "--data-parallel-size",
-            str(self.dp_size),
-            "--data-parallel-size-local",
-            str(self.dp_size),  # All engines on this node
-            "--tensor-parallel-size",
-            str(self.tp_size),
-            "--data-parallel-address",
-            "127.0.0.1",
-            "--data-parallel-rpc-port",
-            "13345",
-        ])
+        engines_server_args.extend(
+            [
+                "--headless",
+                "--data-parallel-size",
+                str(self.dp_size),
+                "--data-parallel-size-local",
+                str(self.dp_size),  # All engines on this node
+                "--tensor-parallel-size",
+                str(self.tp_size),
+                "--data-parallel-address",
+                "127.0.0.1",
+                "--data-parallel-rpc-port",
+                "13345",
+            ]
+        )
 
         # Use threads to start both servers in parallel
         def start_api_server():
@@ -220,10 +230,13 @@ class APIOnlyServerManager:
                     env_dict={
                         "VLLM_SERVER_DEV_MODE": "1",
                         # No GPUs needed for API-only server
-                    })
+                    },
+                )
                 server.__enter__()
-                print(f"API-only server started successfully with "
-                      f"{self.api_server_count} API servers")
+                print(
+                    f"API-only server started successfully with "
+                    f"{self.api_server_count} API servers"
+                )
                 self.servers[0] = (server, api_server_args)
             except Exception as e:
                 print(f"Failed to start API-only server: {e}")
@@ -236,16 +249,17 @@ class APIOnlyServerManager:
                     engines_server_args,
                     auto_port=False,
                     env_dict={
-                        current_platform.device_control_env_var:
-                        ",".join(
-                            str(
-                                current_platform.
-                                device_id_to_physical_device_id(i))
-                            for i in range(self.dp_size * self.tp_size))
-                    })
+                        current_platform.device_control_env_var: ",".join(
+                            str(current_platform.device_id_to_physical_device_id(i))
+                            for i in range(self.dp_size * self.tp_size)
+                        )
+                    },
+                )
                 server.__enter__()
-                print(f"Headless engines server started successfully with "
-                      f"{self.dp_size} engines")
+                print(
+                    f"Headless engines server started successfully with "
+                    f"{self.dp_size} engines"
+                )
                 self.servers[1] = (server, engines_server_args)
             except Exception as e:
                 print(f"Failed to start headless engines server: {e}")
@@ -301,11 +315,14 @@ def default_server_args():
 @pytest.fixture(scope="module", params=[1, 4])
 def server_manager(request, default_server_args):
     api_server_count = request.param
-    server_manager = MultinodeInternalLBServerManager(MODEL_NAME, DP_SIZE,
-                                                      api_server_count,
-                                                      default_server_args,
-                                                      DP_SIZE // NUM_NODES,
-                                                      TP_SIZE)
+    server_manager = MultinodeInternalLBServerManager(
+        MODEL_NAME,
+        DP_SIZE,
+        api_server_count,
+        default_server_args,
+        DP_SIZE // NUM_NODES,
+        TP_SIZE,
+    )
 
     with server_manager:
         yield server_manager
@@ -320,8 +337,9 @@ def servers(server_manager):
 def api_only_servers(request, default_server_args):
     """Fixture for API-only server + headless engines configuration."""
     api_server_count = request.param
-    with APIOnlyServerManager(MODEL_NAME, DP_SIZE, api_server_count,
-                              default_server_args, TP_SIZE) as server_list:
+    with APIOnlyServerManager(
+        MODEL_NAME, DP_SIZE, api_server_count, default_server_args, TP_SIZE
+    ) as server_list:
         yield server_list
 
 
@@ -335,8 +353,7 @@ async def client(servers: list[tuple[RemoteOpenAIServer, list[str]]]):
 
 
 @pytest_asyncio.fixture
-async def api_only_client(api_only_servers: list[tuple[RemoteOpenAIServer,
-                                                       list[str]]]):
+async def api_only_client(api_only_servers: list[tuple[RemoteOpenAIServer, list[str]]]):
     """Client fixture for API-only server configuration."""
     # Connect to the API-only server (first server in the list)
     api_server = api_only_servers[0][0]
@@ -360,16 +377,12 @@ def test_multinode_dp_server_info(server_manager):
     # `n_reqs` is set so that there is a good chance each server
     # receives at least one request
     n_reqs = 2 * api_server_count * api_server_count
-    parallel_configs = [
-        _get_parallel_config(head_server) for _ in range(n_reqs)
-    ]
+    parallel_configs = [_get_parallel_config(head_server) for _ in range(n_reqs)]
     api_process_counts = [c["_api_process_count"] for c in parallel_configs]
     api_process_ranks = [c["_api_process_rank"] for c in parallel_configs]
 
-    assert all(c == api_server_count
-               for c in api_process_counts), api_process_counts
-    assert all(0 <= r < api_server_count
-               for r in api_process_ranks), api_process_ranks
+    assert all(c == api_server_count for c in api_process_counts), api_process_counts
+    assert all(0 <= r < api_server_count for r in api_process_ranks), api_process_ranks
 
 
 @pytest.mark.asyncio
@@ -377,17 +390,15 @@ def test_multinode_dp_server_info(server_manager):
     "model_name",
     [MODEL_NAME],
 )
-async def test_multinode_dp_completion(client: openai.AsyncOpenAI,
-                                       servers: list[tuple[RemoteOpenAIServer,
-                                                           list[str]]],
-                                       model_name: str) -> None:
-
+async def test_multinode_dp_completion(
+    client: openai.AsyncOpenAI,
+    servers: list[tuple[RemoteOpenAIServer, list[str]]],
+    model_name: str,
+) -> None:
     async def make_request():
         completion = await client.completions.create(
-            model=model_name,
-            prompt="Hello, my name is",
-            max_tokens=5,
-            temperature=1.0)
+            model=model_name, prompt="Hello, my name is", max_tokens=5, temperature=1.0
+        )
 
         assert completion.id is not None
         assert completion.choices is not None and len(completion.choices) == 1
@@ -410,9 +421,7 @@ async def test_multinode_dp_completion(client: openai.AsyncOpenAI,
     # Test single request
     result = await make_request()
     assert result is not None
-    print(
-        "Multi-node internal LB handled single completion request successfully"
-    )
+    print("Multi-node internal LB handled single completion request successfully")
 
     await asyncio.sleep(0.5)
 
@@ -441,10 +450,14 @@ async def test_multinode_dp_completion(client: openai.AsyncOpenAI,
 
     _, server_args = servers[0]
     api_server_count = (
-        server_args.count('--api-server-count')
-        and server_args[server_args.index('--api-server-count') + 1] or 1)
-    print(f"Successfully completed multi-node internal LB test with "
-          f"{len(servers)} DP ranks (API server count: {api_server_count})")
+        server_args.count("--api-server-count")
+        and server_args[server_args.index("--api-server-count") + 1]
+        or 1
+    )
+    print(
+        f"Successfully completed multi-node internal LB test with "
+        f"{len(servers)} DP ranks (API server count: {api_server_count})"
+    )
 
     # Check request balancing via Prometheus metrics
     head_server = servers[0][0]
@@ -456,11 +469,11 @@ async def test_multinode_dp_completion(client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME],
 )
-async def test_multinode_dp_completion_streaming(client: openai.AsyncOpenAI,
-                                                 servers: list[
-                                                     tuple[RemoteOpenAIServer,
-                                                           list[str]]],
-                                                 model_name: str) -> None:
+async def test_multinode_dp_completion_streaming(
+    client: openai.AsyncOpenAI,
+    servers: list[tuple[RemoteOpenAIServer, list[str]]],
+    model_name: str,
+) -> None:
     prompt = "What is an LLM?"
 
     async def make_streaming_request():
@@ -474,11 +487,9 @@ async def test_multinode_dp_completion_streaming(client: openai.AsyncOpenAI,
         single_output = single_completion.choices[0].text
 
         # Perform the streaming request
-        stream = await client.completions.create(model=model_name,
-                                                 prompt=prompt,
-                                                 max_tokens=5,
-                                                 temperature=0.0,
-                                                 stream=True)
+        stream = await client.completions.create(
+            model=model_name, prompt=prompt, max_tokens=5, temperature=0.0, stream=True
+        )
         chunks: list[str] = []
         finish_reason_count = 0
         last_chunk = None
@@ -489,23 +500,21 @@ async def test_multinode_dp_completion_streaming(client: openai.AsyncOpenAI,
             last_chunk = chunk  # Keep track of the last chunk
 
         # finish reason should only return in the last block for OpenAI API
-        assert finish_reason_count == 1, (
-            "Finish reason should appear exactly once.")
-        assert last_chunk is not None, (
-            "Stream should have yielded at least one chunk.")
-        assert last_chunk.choices[
-            0].finish_reason == "length", "Finish reason should be 'length'."
+        assert finish_reason_count == 1, "Finish reason should appear exactly once."
+        assert last_chunk is not None, "Stream should have yielded at least one chunk."
+        assert last_chunk.choices[0].finish_reason == "length", (
+            "Finish reason should be 'length'."
+        )
         # Check that the combined text matches the non-streamed version.
-        assert "".join(
-            chunks
-        ) == single_output, "Streamed output should match non-streamed output."
+        assert "".join(chunks) == single_output, (
+            "Streamed output should match non-streamed output."
+        )
         return True  # Indicate success for this request
 
     # Test single streaming request
     result = await make_streaming_request()
     assert result is not None
-    print(
-        "Multi-node internal LB handled single streaming request successfully")
+    print("Multi-node internal LB handled single streaming request successfully")
 
     await asyncio.sleep(0.5)
 
@@ -535,10 +544,14 @@ async def test_multinode_dp_completion_streaming(client: openai.AsyncOpenAI,
 
     _, server_args = servers[0]
     api_server_count = (
-        server_args.count('--api-server-count')
-        and server_args[server_args.index('--api-server-count') + 1] or 1)
-    print(f"Successfully completed multi-node internal LB streaming test with "
-          f"{len(servers)} DP ranks (API server count: {api_server_count})")
+        server_args.count("--api-server-count")
+        and server_args[server_args.index("--api-server-count") + 1]
+        or 1
+    )
+    print(
+        f"Successfully completed multi-node internal LB streaming test with "
+        f"{len(servers)} DP ranks (API server count: {api_server_count})"
+    )
 
     # Check request balancing via Prometheus metrics
     head_server = servers[0][0]
@@ -551,17 +564,16 @@ async def test_multinode_dp_completion_streaming(client: openai.AsyncOpenAI,
     [MODEL_NAME],
 )
 async def test_api_only_multinode_dp_completion(
-        api_only_client: openai.AsyncOpenAI,
-        api_only_servers: list[tuple[RemoteOpenAIServer,
-                                     list[str]]], model_name: str) -> None:
+    api_only_client: openai.AsyncOpenAI,
+    api_only_servers: list[tuple[RemoteOpenAIServer, list[str]]],
+    model_name: str,
+) -> None:
     """Test API-only server with all engines on separate headless server."""
 
     async def make_request():
         completion = await api_only_client.completions.create(
-            model=model_name,
-            prompt="Hello, my name is",
-            max_tokens=5,
-            temperature=1.0)
+            model=model_name, prompt="Hello, my name is", max_tokens=5, temperature=1.0
+        )
 
         assert completion.id is not None
         assert completion.choices is not None and len(completion.choices) == 1
@@ -614,11 +626,14 @@ async def test_api_only_multinode_dp_completion(
 
     api_server, api_server_args = api_only_servers[0]
     api_server_count = (
-        api_server_args.count('--api-server-count')
-        and api_server_args[api_server_args.index('--api-server-count') + 1]
-        or 1)
-    print(f"Successfully completed API-only multi-node test with {DP_SIZE} "
-          f"engines on headless server (API server count: {api_server_count})")
+        api_server_args.count("--api-server-count")
+        and api_server_args[api_server_args.index("--api-server-count") + 1]
+        or 1
+    )
+    print(
+        f"Successfully completed API-only multi-node test with {DP_SIZE} "
+        f"engines on headless server (API server count: {api_server_count})"
+    )
 
     # Check request balancing via Prometheus metrics
     check_request_balancing(api_server, DP_SIZE)
@@ -630,9 +645,10 @@ async def test_api_only_multinode_dp_completion(
     [MODEL_NAME],
 )
 async def test_api_only_multinode_dp_completion_streaming(
-        api_only_client: openai.AsyncOpenAI,
-        api_only_servers: list[tuple[RemoteOpenAIServer,
-                                     list[str]]], model_name: str) -> None:
+    api_only_client: openai.AsyncOpenAI,
+    api_only_servers: list[tuple[RemoteOpenAIServer, list[str]]],
+    model_name: str,
+) -> None:
     """Test API-only server streaming with all engines on separate
     headless server."""
     prompt = "What is an LLM?"
@@ -648,11 +664,9 @@ async def test_api_only_multinode_dp_completion_streaming(
         single_output = single_completion.choices[0].text
 
         # Perform the streaming request
-        stream = await api_only_client.completions.create(model=model_name,
-                                                          prompt=prompt,
-                                                          max_tokens=5,
-                                                          temperature=0.0,
-                                                          stream=True)
+        stream = await api_only_client.completions.create(
+            model=model_name, prompt=prompt, max_tokens=5, temperature=0.0, stream=True
+        )
         chunks: list[str] = []
         finish_reason_count = 0
         last_chunk = None
@@ -663,16 +677,15 @@ async def test_api_only_multinode_dp_completion_streaming(
             last_chunk = chunk  # Keep track of the last chunk
 
         # finish reason should only return in the last block for OpenAI API
-        assert finish_reason_count == 1, (
-            "Finish reason should appear exactly once.")
-        assert last_chunk is not None, (
-            "Stream should have yielded at least one chunk.")
-        assert last_chunk.choices[
-            0].finish_reason == "length", "Finish reason should be 'length'."
+        assert finish_reason_count == 1, "Finish reason should appear exactly once."
+        assert last_chunk is not None, "Stream should have yielded at least one chunk."
+        assert last_chunk.choices[0].finish_reason == "length", (
+            "Finish reason should be 'length'."
+        )
         # Check that the combined text matches the non-streamed version.
-        assert "".join(
-            chunks
-        ) == single_output, "Streamed output should match non-streamed output."
+        assert "".join(chunks) == single_output, (
+            "Streamed output should match non-streamed output."
+        )
         return True  # Indicate success for this request
 
     # Test single streaming request
@@ -707,11 +720,14 @@ async def test_api_only_multinode_dp_completion_streaming(
 
     _, api_server_args = api_only_servers[0]
     api_server_count = (
-        api_server_args.count('--api-server-count')
-        and api_server_args[api_server_args.index('--api-server-count') + 1]
-        or 1)
-    print(f"Successfully completed API-only streaming test with {DP_SIZE} "
-          f"engines on headless server (API server count: {api_server_count})")
+        api_server_args.count("--api-server-count")
+        and api_server_args[api_server_args.index("--api-server-count") + 1]
+        or 1
+    )
+    print(
+        f"Successfully completed API-only streaming test with {DP_SIZE} "
+        f"engines on headless server (API server count: {api_server_count})"
+    )
 
     # Check request balancing via Prometheus metrics
     api_server = api_only_servers[0][0]

@@ -34,11 +34,9 @@ class MockConversationContext(ConversationContext):
     def render_for_completion(self):
         return []
 
-    async def init_tool_sessions(self, tool_server, exit_stack, request_id,
-                                 mcp_tools):
+    async def init_tool_sessions(self, tool_server, exit_stack, request_id, mcp_tools):
         self.init_tool_sessions_called = True
-        self.init_tool_sessions_args = (tool_server, exit_stack, request_id,
-                                        mcp_tools)
+        self.init_tool_sessions_args = (tool_server, exit_stack, request_id, mcp_tools)
 
     async def cleanup_session(self) -> None:
         pass
@@ -96,35 +94,31 @@ class TestInitializeToolSessions:
         return instance
 
     @pytest.mark.asyncio
-    async def test_initialize_tool_sessions(self, serving_responses_instance,
-                                            mock_context, mock_exit_stack):
+    async def test_initialize_tool_sessions(
+        self, serving_responses_instance, mock_context, mock_exit_stack
+    ):
         """Test that method works correctly with only MCP tools"""
 
         request = ResponsesRequest(input="test input", tools=[])
 
         # Call the method
         await serving_responses_instance._initialize_tool_sessions(
-            request, mock_context, mock_exit_stack)
+            request, mock_context, mock_exit_stack
+        )
         assert mock_context.init_tool_sessions_called is False
 
         # Create only MCP tools
         tools = [
-            {
-                "type": "web_search_preview"
-            },
-            {
-                "type": "code_interpreter",
-                "container": {
-                    "type": "auto"
-                }
-            },
+            {"type": "web_search_preview"},
+            {"type": "code_interpreter", "container": {"type": "auto"}},
         ]
 
         request = ResponsesRequest(input="test input", tools=tools)
 
         # Call the method
         await serving_responses_instance._initialize_tool_sessions(
-            request, mock_context, mock_exit_stack)
+            request, mock_context, mock_exit_stack
+        )
 
         # Verify that init_tool_sessions was called
         assert mock_context.init_tool_sessions_called
@@ -165,25 +159,20 @@ class TestValidateGeneratorInput:
         """Test _validate_generator_input with valid prompt length"""
         # Create an engine prompt with valid length (less than max_model_len)
         valid_prompt_token_ids = list(range(5))  # 5 tokens < 100 max_model_len
-        engine_prompt = EngineTokensPrompt(
-            prompt_token_ids=valid_prompt_token_ids)
+        engine_prompt = EngineTokensPrompt(prompt_token_ids=valid_prompt_token_ids)
 
         # Call the method
-        result = serving_responses_instance._validate_generator_input(
-            engine_prompt)
+        result = serving_responses_instance._validate_generator_input(engine_prompt)
 
         # Should return None for valid input
         assert result is None
 
         # create an invalid engine prompt
-        invalid_prompt_token_ids = list(
-            range(200))  # 100 tokens >= 100 max_model_len
-        engine_prompt = EngineTokensPrompt(
-            prompt_token_ids=invalid_prompt_token_ids)
+        invalid_prompt_token_ids = list(range(200))  # 100 tokens >= 100 max_model_len
+        engine_prompt = EngineTokensPrompt(prompt_token_ids=invalid_prompt_token_ids)
 
         # Call the method
-        result = serving_responses_instance._validate_generator_input(
-            engine_prompt)
+        result = serving_responses_instance._validate_generator_input(engine_prompt)
 
         # Should return an ErrorResponse
         assert result is not None

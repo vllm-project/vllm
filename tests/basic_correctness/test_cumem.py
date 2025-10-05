@@ -23,13 +23,13 @@ def test_python_error():
     tensors = []
     with allocator.use_memory_pool():
         # allocate 70% of the total memory
-        x = torch.empty(alloc_bytes, dtype=torch.uint8, device='cuda')
+        x = torch.empty(alloc_bytes, dtype=torch.uint8, device="cuda")
         tensors.append(x)
     # release the memory
     allocator.sleep()
 
     # allocate more memory than the total memory
-    y = torch.empty(alloc_bytes, dtype=torch.uint8, device='cuda')
+    y = torch.empty(alloc_bytes, dtype=torch.uint8, device="cuda")
     tensors.append(y)
     with pytest.raises(RuntimeError):
         # when the allocator is woken up, it should raise an error
@@ -41,17 +41,17 @@ def test_python_error():
 def test_basic_cumem():
     # some tensors from default memory pool
     shape = (1024, 1024)
-    x = torch.empty(shape, device='cuda')
+    x = torch.empty(shape, device="cuda")
     x.zero_()
 
     # some tensors from custom memory pool
     allocator = CuMemAllocator.get_instance()
     with allocator.use_memory_pool():
         # custom memory pool
-        y = torch.empty(shape, device='cuda')
+        y = torch.empty(shape, device="cuda")
         y.zero_()
         y += 1
-        z = torch.empty(shape, device='cuda')
+        z = torch.empty(shape, device="cuda")
         z.zero_()
         z += 2
 
@@ -74,16 +74,16 @@ def test_basic_cumem():
 def test_cumem_with_cudagraph():
     allocator = CuMemAllocator.get_instance()
     with allocator.use_memory_pool():
-        weight = torch.eye(1024, device='cuda')
+        weight = torch.eye(1024, device="cuda")
     with allocator.use_memory_pool(tag="discard"):
-        cache = torch.empty(1024, 1024, device='cuda')
+        cache = torch.empty(1024, 1024, device="cuda")
 
     def model(x):
         out = x @ weight
-        cache[:out.size(0)].copy_(out)
+        cache[: out.size(0)].copy_(out)
         return out + 1
 
-    x = torch.empty(128, 1024, device='cuda')
+    x = torch.empty(128, 1024, device="cuda")
 
     # warmup
     model(x)
@@ -109,7 +109,7 @@ def test_cumem_with_cudagraph():
     model_graph.replay()
 
     # cache content is as expected
-    assert torch.allclose(x, cache[:x.size(0)])
+    assert torch.allclose(x, cache[: x.size(0)])
 
     # output content is as expected
     assert torch.allclose(y, x + 1)
@@ -123,7 +123,8 @@ def test_cumem_with_cudagraph():
         ("meta-llama/Llama-3.2-1B", True),
         # sleep mode with pytorch checkpoint
         ("facebook/opt-125m", True),
-    ])
+    ],
+)
 def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
     with monkeypatch.context() as m:
         assert use_v1

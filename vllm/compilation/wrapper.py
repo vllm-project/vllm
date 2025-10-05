@@ -10,8 +10,7 @@ from typing import Callable, Optional
 
 import torch
 
-from vllm.config import (CompilationLevel, CUDAGraphMode,
-                         get_current_vllm_config)
+from vllm.config import CompilationLevel, CUDAGraphMode, get_current_vllm_config
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -30,10 +29,9 @@ class TorchCompileWrapperWithCustomDispatcher:
         `torch.compile` over the forward method.
     """
 
-    def __init__(self,
-                 compiled_callable: Optional[Callable] = None,
-                 compilation_level: int = 0):
-
+    def __init__(
+        self, compiled_callable: Optional[Callable] = None, compilation_level: int = 0
+    ):
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
         if compiled_callable is None:
@@ -43,13 +41,13 @@ class TorchCompileWrapperWithCustomDispatcher:
             backend = vllm_config.compilation_config.init_backend(vllm_config)
             options = None
             if isinstance(backend, str) and backend == "inductor":
-                options = get_current_vllm_config(
-                ).compilation_config.inductor_compile_config
+                options = (
+                    get_current_vllm_config().compilation_config.inductor_compile_config
+                )
 
-            compiled_callable = torch.compile(self.forward,
-                                              fullgraph=True,
-                                              backend=backend,
-                                              options=options)
+            compiled_callable = torch.compile(
+                self.forward, fullgraph=True, backend=backend, options=options
+            )
 
         self.compiled_callable = compiled_callable
         self.original_code_object = self.__class__.forward.__code__
@@ -59,8 +57,9 @@ class TorchCompileWrapperWithCustomDispatcher:
         # read the env var to determine whether to use the custom dispatcher
         # subclasses can use this to switch between the custom dispatcher
         # and the default Dynamo guard mechanism.
-        self.use_custom_dispatcher: bool = \
+        self.use_custom_dispatcher: bool = (
             compilation_level >= CompilationLevel.DYNAMO_ONCE
+        )
 
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.
@@ -70,8 +69,7 @@ class TorchCompileWrapperWithCustomDispatcher:
         return self.compiled_callable(*args, **kwargs)
 
     @abstractmethod
-    def forward(self, *args, **kwargs):
-        ...
+    def forward(self, *args, **kwargs): ...
 
     def bytecode_hook(self, old_code: CodeType, new_code: CodeType):
         """Hook to save the compiled bytecode for direct execution."""
@@ -103,21 +101,27 @@ class TorchCompileWrapperWithCustomDispatcher:
                     # but there's no 100% guarantee, since decompliation is
                     # not a reversible process.
                     import depyf
+
                     src = depyf.decompile(new_code)
 
                     with open(decompiled_file, "w") as f:
                         f.write(src)
 
-                    logger.debug("Dynamo transformed code saved to %s",
-                                 decompiled_file)
+                    logger.debug("Dynamo transformed code saved to %s", decompiled_file)
                 except Exception:
                     pass
 
-        if self.vllm_config.compilation_config.cudagraph_mode != \
-            CUDAGraphMode.NONE and "update" in new_code.co_names:
+        if (
+            self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            and "update" in new_code.co_names
+        ):
             import depyf
+
             src = depyf.decompile(new_code)
-            msg = "Assigning / modifying buffers of nn.Module during forward pass is not allowed when using cudagraph inside the compiler because it will cause silent errors. Please use eager mode or fix the code. The following code contains clues about which buffer is being modified (please search for the usage of the function `update`):\n" + src  # noqa
+            msg = (
+                "Assigning / modifying buffers of nn.Module during forward pass is not allowed when using cudagraph inside the compiler because it will cause silent errors. Please use eager mode or fix the code. The following code contains clues about which buffer is being modified (please search for the usage of the function `update`):\n"
+                + src
+            )  # noqa
             raise RuntimeError(msg)
 
     @contextmanager
@@ -129,7 +133,7 @@ class TorchCompileWrapperWithCustomDispatcher:
         the code object in the function and call it.
 
         See https://dev-discuss.pytorch.org/t/what-is-the-relationship-requirement-among-original-bytecode-transformed-bytecode-and-bytecode-returned-by-hooks-in-dynamo/1693/7 for more details.
-        """ # noqa
+        """  # noqa
         self.__class__.forward.__code__ = self.compiled_codes[index]
         yield
         self.__class__.forward.__code__ = self.original_code_object

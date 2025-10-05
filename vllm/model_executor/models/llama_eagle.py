@@ -13,11 +13,9 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.llama import (LlamaDecoderLayer,
-                                              LlamaForCausalLM)
+from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
 
 from .utils import AutoWeightsLoader, maybe_prefix
 
@@ -25,7 +23,6 @@ logger = init_logger(__name__)
 
 
 class LlamaDecoderLayer(LlamaDecoderLayer):
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -44,7 +41,6 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 
 @support_torch_compile
 class LlamaModel(nn.Module):
-
     def __init__(
         self,
         *,
@@ -53,8 +49,7 @@ class LlamaModel(nn.Module):
         start_layer_id: int = 0,
     ) -> None:
         super().__init__()
-        self.config = vllm_config. \
-            speculative_config.draft_model_config.hf_config
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
@@ -63,17 +58,20 @@ class LlamaModel(nn.Module):
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
-        self.layers = nn.ModuleList([
-            LlamaDecoderLayer(
-                vllm_config,
-                i == 0,
-                prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
-                config=self.config,
-            ) for i in range(self.config.num_hidden_layers)
-        ])
-        self.fc = torch.nn.Linear(self.config.hidden_size * 2,
-                                  self.config.hidden_size,
-                                  bias=False)
+        self.layers = nn.ModuleList(
+            [
+                LlamaDecoderLayer(
+                    vllm_config,
+                    i == 0,
+                    prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                    config=self.config,
+                )
+                for i in range(self.config.num_hidden_layers)
+            ]
+        )
+        self.fc = torch.nn.Linear(
+            self.config.hidden_size * 2, self.config.hidden_size, bias=False
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -85,8 +83,7 @@ class LlamaModel(nn.Module):
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_embeds = self.embed_tokens(input_ids)
-        hidden_states = self.fc(
-            torch.cat((input_embeds, hidden_states), dim=-1))
+        hidden_states = self.fc(torch.cat((input_embeds, hidden_states), dim=-1))
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
@@ -97,8 +94,7 @@ class LlamaModel(nn.Module):
         hidden_states = hidden_states + residual
         return hidden_states, hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -119,40 +115,37 @@ class LlamaModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-
                 # if PP disabled then draft will share embed with target
-                if get_pp_group().world_size == 1 and \
-                    "embed_tokens." in name:
+                if get_pp_group().world_size == 1 and "embed_tokens." in name:
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
 
 class EagleLlamaForCausalLM(LlamaForCausalLM):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.config = vllm_config. \
-            speculative_config.draft_model_config.hf_config
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
         # Ensure draft_vocab_size is set
         # default to the base vocab size when absent
         if getattr(self.config, "draft_vocab_size", None) is None:
             base_vocab_size = getattr(self.config, "vocab_size", None)
             self.config.draft_vocab_size = base_vocab_size
         target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config)
-        self.model = LlamaModel(vllm_config=vllm_config,
-                                prefix="model",
-                                start_layer_id=target_layer_num)
+            vllm_config.parallel_config
+        )
+        self.model = LlamaModel(
+            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
+        )
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(self.config.vocab_size,
-                                                scale=logit_scale)
+        self.logits_processor = LogitsProcessor(
+            self.config.vocab_size, scale=logit_scale
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -171,7 +164,6 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         return self.model(input_ids, positions, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-
         def transform(inputs):
             name, loaded_weight = inputs
             if "lm_head" not in name:

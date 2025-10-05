@@ -12,6 +12,7 @@ from vllm.transformers_utils.configs.deepseek_v3 import DeepseekV3Config
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.configs.dotsocr import DotsOCRConfig
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
+
 # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
 # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
 # `FalconConfig` class from the official HuggingFace transformers library.
@@ -30,9 +31,11 @@ from vllm.transformers_utils.configs.ovis import OvisConfig
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.transformers_utils.configs.radio import RadioConfig
 from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
-from vllm.transformers_utils.configs.step3_vl import (Step3TextConfig,
-                                                      Step3VisionEncoderConfig,
-                                                      Step3VLConfig)
+from vllm.transformers_utils.configs.step3_vl import (
+    Step3TextConfig,
+    Step3VisionEncoderConfig,
+    Step3VLConfig,
+)
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 __all__ = [

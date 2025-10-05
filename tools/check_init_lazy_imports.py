@@ -17,12 +17,16 @@ REPO_ROOT: Final = pathlib.Path(__file__).resolve().parent.parent
 INIT_PATH: Final = REPO_ROOT / "vllm" / "__init__.py"
 
 # If you need to add items to whitelist, do it here.
-ALLOWED_IMPORTS: Final[frozenset[str]] = frozenset({
-    "vllm.env_override",
-})
-ALLOWED_FROM_MODULES: Final[frozenset[str]] = frozenset({
-    ".version",
-})
+ALLOWED_IMPORTS: Final[frozenset[str]] = frozenset(
+    {
+        "vllm.env_override",
+    }
+)
+ALLOWED_FROM_MODULES: Final[frozenset[str]] = frozenset(
+    {
+        ".version",
+    }
+)
 
 
 def _is_internal(name: str | None, *, level: int = 0) -> bool:
@@ -34,8 +38,7 @@ def _is_internal(name: str | None, *, level: int = 0) -> bool:
 
 
 def _fail(violations: Iterable[tuple[int, str]]) -> None:
-    print("ERROR: Disallowed eager imports in vllm/__init__.py:\n",
-          file=sys.stderr)
+    print("ERROR: Disallowed eager imports in vllm/__init__.py:\n", file=sys.stderr)
     for lineno, msg in violations:
         print(f"  Line {lineno}: {msg}", file=sys.stderr)
     sys.exit(1)
@@ -48,7 +51,6 @@ def main() -> None:
     violations: list[tuple[int, str]] = []
 
     class Visitor(ast.NodeVisitor):
-
         def __init__(self) -> None:
             super().__init__()
             self._in_type_checking = False
@@ -56,10 +58,10 @@ def main() -> None:
         def visit_If(self, node: ast.If) -> None:
             guard_is_type_checking = False
             test = node.test
-            if isinstance(test, ast.Attribute) and isinstance(
-                    test.value, ast.Name):
-                guard_is_type_checking = (test.value.id == "typing"
-                                          and test.attr == "TYPE_CHECKING")
+            if isinstance(test, ast.Attribute) and isinstance(test.value, ast.Name):
+                guard_is_type_checking = (
+                    test.value.id == "typing" and test.attr == "TYPE_CHECKING"
+                )
             elif isinstance(test, ast.Name):
                 guard_is_type_checking = test.id == "TYPE_CHECKING"
 
@@ -79,24 +81,28 @@ def main() -> None:
                 return
             for alias in node.names:
                 module_name = alias.name
-                if _is_internal(
-                        module_name) and module_name not in ALLOWED_IMPORTS:
-                    violations.append((
-                        node.lineno,
-                        f"import '{module_name}' must be inside typing.TYPE_CHECKING",  # noqa: E501
-                    ))
+                if _is_internal(module_name) and module_name not in ALLOWED_IMPORTS:
+                    violations.append(
+                        (
+                            node.lineno,
+                            f"import '{module_name}' must be inside typing.TYPE_CHECKING",  # noqa: E501
+                        )
+                    )
 
         def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
             if self._in_type_checking:
                 return
             module_as_written = ("." * node.level) + (node.module or "")
-            if _is_internal(
-                    node.module, level=node.level
-            ) and module_as_written not in ALLOWED_FROM_MODULES:
-                violations.append((
-                    node.lineno,
-                    f"from '{module_as_written}' import ... must be inside typing.TYPE_CHECKING",  # noqa: E501
-                ))
+            if (
+                _is_internal(node.module, level=node.level)
+                and module_as_written not in ALLOWED_FROM_MODULES
+            ):
+                violations.append(
+                    (
+                        node.lineno,
+                        f"from '{module_as_written}' import ... must be inside typing.TYPE_CHECKING",  # noqa: E501
+                    )
+                )
 
     Visitor().visit(tree)
 

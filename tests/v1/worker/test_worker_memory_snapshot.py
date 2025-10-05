@@ -13,8 +13,7 @@ import torch
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import MemorySnapshot
-from vllm.v1.worker.gpu_worker import (Worker,
-                                       init_worker_distributed_environment)
+from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 
 # Global queue to track operation order across processes
 _QUEUE: Optional[Queue] = None
@@ -28,11 +27,11 @@ def track_operation(operation: str, rank: int):
 
 def make_operation_tracker(operation_name: str, original_func):
     """Create a mock function that tracks when an operation is called.
-    
+
     Args:
         operation_name: Name to use when tracking this operation
         original_func: The original function to wrap
-    
+
     Returns:
         A wrapper function that tracks the operation and calls the original
     """
@@ -45,8 +44,13 @@ def make_operation_tracker(operation_name: str, original_func):
     return wrapper
 
 
-def worker_process(rank: int, world_size: int, distributed_init_method: str,
-                   queue: Queue, error_queue: Queue):
+def worker_process(
+    rank: int,
+    world_size: int,
+    distributed_init_method: str,
+    queue: Queue,
+    error_queue: Queue,
+):
     """Worker process that initializes a GPU worker with proper tracking."""
     global _QUEUE
     _QUEUE = queue
@@ -58,9 +62,9 @@ def worker_process(rank: int, world_size: int, distributed_init_method: str,
         os.environ["WORLD_SIZE"] = str(world_size)
 
         # Create vLLM config with small model
-        vllm_config = EngineArgs(model="facebook/opt-125m",
-                                 tensor_parallel_size=2,
-                                 load_format="dummy").create_engine_config()
+        vllm_config = EngineArgs(
+            model="facebook/opt-125m", tensor_parallel_size=2, load_format="dummy"
+        ).create_engine_config()
 
         # Create worker
         worker = Worker(
@@ -77,19 +81,22 @@ def worker_process(rank: int, world_size: int, distributed_init_method: str,
 
         # Apply minimal patches to track operation order
         init_patch = patch(
-            'vllm.v1.worker.gpu_worker.init_worker_distributed_environment',
-            side_effect=make_operation_tracker("init_distributed",
-                                               original_init_worker))
+            "vllm.v1.worker.gpu_worker.init_worker_distributed_environment",
+            side_effect=make_operation_tracker(
+                "init_distributed", original_init_worker
+            ),
+        )
         memory_patch = patch.object(
-            MemorySnapshot, '__init__',
-            make_operation_tracker("memory_snapshot",
-                                   original_memory_snapshot_init))
-        all_reduce_patch = patch('torch.distributed.all_reduce',
-                                 side_effect=make_operation_tracker(
-                                     "nccl_all_reduce", original_all_reduce))
+            MemorySnapshot,
+            "__init__",
+            make_operation_tracker("memory_snapshot", original_memory_snapshot_init),
+        )
+        all_reduce_patch = patch(
+            "torch.distributed.all_reduce",
+            side_effect=make_operation_tracker("nccl_all_reduce", original_all_reduce),
+        )
 
         with init_patch, memory_patch, all_reduce_patch:
-
             # Initialize device (this is where we test the order)
             worker.init_device()
 
@@ -104,13 +111,14 @@ def worker_process(rank: int, world_size: int, distributed_init_method: str,
         raise
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2,
-                    reason="Need at least 2 GPUs for tensor parallelism")
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 2, reason="Need at least 2 GPUs for tensor parallelism"
+)
 def test_init_distributed_is_called_before_memory_snapshot():
     """Test that distributed env is setup before memory snapshot.
-    
-    This test makes sure during worker initialization, the initial memory 
-    snapshot is taken after distributed env is setup to include all the buffers 
+
+    This test makes sure during worker initialization, the initial memory
+    snapshot is taken after distributed env is setup to include all the buffers
     allocated by distributed env.
     """
     world_size = 2
@@ -127,9 +135,16 @@ def test_init_distributed_is_called_before_memory_snapshot():
     # Start worker processes
     processes = []
     for rank in range(world_size):
-        p = ctx.Process(target=worker_process,
-                        args=(rank, world_size, distributed_init_method,
-                              operation_queue, error_queue))
+        p = ctx.Process(
+            target=worker_process,
+            args=(
+                rank,
+                world_size,
+                distributed_init_method,
+                operation_queue,
+                error_queue,
+            ),
+        )
         p.start()
         processes.append(p)
 
@@ -168,7 +183,8 @@ def test_init_distributed_is_called_before_memory_snapshot():
         assert init_distributed < nccl_all_reduce < memory_snapshot, (
             f"Rank {rank}: init_distributed (index {init_distributed}) "
             f"must happen before nccl_all_reduce (index {nccl_all_reduce}) "
-            f"and memory_snapshot (index {memory_snapshot})")
+            f"and memory_snapshot (index {memory_snapshot})"
+        )
 
     # Clean up
     os.unlink(distributed_init_method.replace("file://", ""))

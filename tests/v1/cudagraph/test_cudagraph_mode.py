@@ -45,10 +45,8 @@ combo_cases_1 = [
 ]
 
 
-@pytest.mark.parametrize("backend_name, cudagraph_mode, supported",
-                         combo_cases_1)
-def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode,
-                                          supported):
+@pytest.mark.parametrize("backend_name, cudagraph_mode, supported", combo_cases_1)
+def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supported):
     if backend_name == "FlashInfer":
         try:
             import flashinfer  # noqa: F401
@@ -56,8 +54,10 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode,
             pytest.skip("FlashInfer is not installed")
     backend_config = backend_configs[backend_name]
     # Dynamically skip test if GPU capability is not met
-    if backend_config.specific_gpu_arch and backend_config.specific_gpu_arch\
-        != current_platform.get_device_capability():
+    if (
+        backend_config.specific_gpu_arch
+        and backend_config.specific_gpu_arch != current_platform.get_device_capability()
+    ):
         pytest.skip("Only Hopper GPUs support FA3 and FlashMLA")
 
     env_vars = {"VLLM_USE_V1": "1", **backend_configs[backend_name].env_vars}
@@ -66,13 +66,16 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode,
         if not supported:
             stack.enter_context(pytest.raises(Exception))
 
-        llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
-                  max_num_seqs=256,
-                  trust_remote_code=True,
-                  gpu_memory_utilization=0.45,
-                  max_model_len=1024,
-                  compilation_config=CompilationConfig(
-                      level=3, cudagraph_mode=cudagraph_mode))
+        llm = LLM(
+            model="Qwen/Qwen2-1.5B-Instruct",
+            max_num_seqs=256,
+            trust_remote_code=True,
+            gpu_memory_utilization=0.45,
+            max_model_len=1024,
+            compilation_config=CompilationConfig(
+                level=3, cudagraph_mode=cudagraph_mode
+            ),
+        )
         llm.generate(["Hello, my name is"] * 10)
     # when above code raises, `llm` may be undefined, so we need to catch that
     try:
@@ -93,10 +96,13 @@ combo_cases_2 = [
     ("FA2", "FULL", 0, True),  # no compilation + full cudagraph
     ("FA2", "FULL", 3, True),  # piecewise compilation + full cudagraph
     ("FA2", "PIECEWISE", 0, False),  # no compilation + piecewise cudagraph
-    ("FA2", "PIECEWISE", 3,
-     True),  # piecewise compilation + piecewise cudagraph
-    ("FA2", "FULL_AND_PIECEWISE", 0,
-     False),  # piecewise cudagraph not supported without piecewise compilation
+    ("FA2", "PIECEWISE", 3, True),  # piecewise compilation + piecewise cudagraph
+    (
+        "FA2",
+        "FULL_AND_PIECEWISE",
+        0,
+        False,
+    ),  # piecewise cudagraph not supported without piecewise compilation
     ("FA2", "FULL_AND_PIECEWISE", 3, True),
     ("FA2", "FULL_DECODE_ONLY", 0, True),
     ("FA2", "FULL_DECODE_ONLY", 3, True),
@@ -105,11 +111,11 @@ combo_cases_2 = [
 ]
 
 
-@pytest.mark.parametrize("backend_name,cudagraph_mode,compilation_level,"\
-                         "supported", combo_cases_2)
+@pytest.mark.parametrize(
+    "backend_name,cudagraph_mode,compilation_level,supported", combo_cases_2
+)
 def test_cudagraph_compilation_combo(combo_case):
-    backend_name, cudagraph_mode, compilation_level, supported\
-        = combo_case
+    backend_name, cudagraph_mode, compilation_level, supported = combo_case
 
     env_vars = {"VLLM_USE_V1": "1", **backend_configs[backend_name].env_vars}
 
@@ -117,13 +123,16 @@ def test_cudagraph_compilation_combo(combo_case):
         if not supported:
             stack.enter_context(pytest.raises(Exception))
 
-        llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
-                  max_num_seqs=256,
-                  trust_remote_code=True,
-                  gpu_memory_utilization=0.45,
-                  max_model_len=1024,
-                  compilation_config=CompilationConfig(
-                      level=compilation_level, cudagraph_mode=cudagraph_mode))
+        llm = LLM(
+            model="Qwen/Qwen2-1.5B-Instruct",
+            max_num_seqs=256,
+            trust_remote_code=True,
+            gpu_memory_utilization=0.45,
+            max_model_len=1024,
+            compilation_config=CompilationConfig(
+                level=compilation_level, cudagraph_mode=cudagraph_mode
+            ),
+        )
         llm.generate(["Hello, my name is"] * 10)
     # when above code raises, `llm` may be undefined, so we need to catch that
     try:
