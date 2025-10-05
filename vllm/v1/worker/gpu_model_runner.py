@@ -2810,12 +2810,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                           self.vllm_config,
                                           runtime_mode=CUDAGraphMode.FULL)
         elif self.parallel_config.enable_dbo:
+            delayed_start = getattr(self.model, "delayed_dbo_start", False)
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-                self.model = UBatchWrapper(self.model, self.vllm_config,
-                                           CUDAGraphMode.FULL, self.device)
+                self.model = UBatchWrapper(self.model,
+                                           self.vllm_config,
+                                           CUDAGraphMode.FULL,
+                                           self.device,
+                                           delayed_start=delayed_start)
             else:
-                self.model = UBatchWrapper(self.model, self.vllm_config,
-                                           CUDAGraphMode.NONE, self.device)
+                self.model = UBatchWrapper(self.model,
+                                           self.vllm_config,
+                                           CUDAGraphMode.NONE,
+                                           self.device,
+                                           delayed_start=delayed_start)
 
     def reload_weights(self) -> None:
         assert getattr(self, "model", None) is not None, \

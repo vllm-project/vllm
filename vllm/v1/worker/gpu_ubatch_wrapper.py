@@ -85,8 +85,12 @@ class SMControlContextManager:
 
 class UBatchWrapper:
 
-    def __init__(self, runnable: Callable, vllm_config: VllmConfig,
-                 runtime_mode: CUDAGraphMode, device: torch.cuda.device):
+    def __init__(self,
+                 runnable: Callable,
+                 vllm_config: VllmConfig,
+                 runtime_mode: CUDAGraphMode,
+                 device: torch.cuda.device,
+                 delayed_start: bool = False):
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
@@ -105,6 +109,7 @@ class UBatchWrapper:
 
         self.sm_control = self._create_sm_control_context(vllm_config)
         self.device = device
+        self.delayed_start = delayed_start
 
     @staticmethod
     def _create_sm_control_context(vllm_config: VllmConfig):
@@ -122,7 +127,6 @@ class UBatchWrapper:
 
             if comm_sms > 0:
                 set_comm_sms = lambda sms: all2all_manager.set_num_sms(sms)
-
         # TODO(lucas): support other kernels besides DeepGEMM
         set_compute_sms = lambda sms: None
         if has_deep_gemm() and comm_sms > 0:
@@ -263,10 +267,19 @@ class UBatchWrapper:
         result = torch.cat(sorted_results, dim=0)
         return result
 
-    def _make_ubatch_metadata(self, ubatch_slices, attn_metadata, input_ids,
-                              positions, inputs_embeds, intermediate_tensors,
-                              compute_stream, dp_metadata, batch_descriptor,
-                              cudagraph_runtime_mode) -> list[UbatchMetadata]:
+    def _make_ubatch_metadata(
+            self,
+            ubatch_slices,
+            attn_metadata,
+            input_ids,
+            positions,
+            inputs_embeds,
+            intermediate_tensors,
+            compute_stream,
+            dp_metadata,
+            batch_descriptor,
+            cudagraph_runtime_mode,
+            delayed_start: bool = False) -> list[UbatchMetadata]:
 
         # Create one forward context per ubatch
         forward_contexts = []
@@ -284,7 +297,8 @@ class UBatchWrapper:
             comm_stream=self.comm_stream,
             compute_stream=compute_stream,
             forward_contexts=forward_contexts,
-            ready_barrier=self.ready_barrier)
+            ready_barrier=self.ready_barrier,
+            delayed_start=delayed_start)
 
         ubatch_metadata: list[UbatchMetadata] = []
         for i, ubatch_slice in enumerate(ubatch_slices):

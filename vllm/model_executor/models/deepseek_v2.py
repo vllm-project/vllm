@@ -1180,8 +1180,10 @@ class DeepseekV2Model(nn.Module):
         return hidden_states
 
 
+
 class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
                             SupportsLoRA):
+    delayed_dbo_start = True
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
