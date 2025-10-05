@@ -276,7 +276,8 @@ def apply_rotary_emb_torch(x: torch.Tensor,
 
 def apply_rotary_pos_emb_vision(t: torch.Tensor,
                                 freqs: torch.Tensor) -> torch.Tensor:
-    rotary_emb_function = dispatch_rotary_emb_function()
+    rotary_emb_function = dispatch_rotary_emb_function(
+        default=apply_rotary_emb_torch)
     t_ = t.float()
     cos = freqs.cos()
     sin = freqs.sin()
@@ -719,7 +720,7 @@ class Qwen2VisionTransformer(nn.Module):
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
         # compute cu_seqlens
-        grid_thw_ = torch.tensor(grid_thw)
+        grid_thw_ = torch.tensor(grid_thw, device=x.device, dtype=torch.long)
         cu_seqlens = torch.repeat_interleave(grid_thw_[:, 1] * grid_thw_[:, 2],
                                              grid_thw_[:, 0]).cumsum(
                                                  dim=0, dtype=torch.int32)
