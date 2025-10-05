@@ -477,6 +477,7 @@ steps:
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
+  - vllm/model_executor/layers/mamba/ops
   commands:
     - pytest -v -s kernels/mamba
 
