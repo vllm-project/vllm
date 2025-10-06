@@ -562,16 +562,20 @@ class CompilationConfig:
         # for piecewise compilation. Custom backends are not suppported for
         # piecewise compilation. Update when more backends are supported.
         if self.level == CompilationLevel.PIECEWISE and self.backend not in [
-                "", "eager", "inductor"
+            "",
+            "eager",
+            "inductor",
         ]:
             raise ValueError(
-                f"Invalid backend for piecewise compilation: {self.backend}")
+                f"Invalid backend for piecewise compilation: {self.backend}"
+            )
 
         if self.use_inductor is not None:
             logger.warning_once(
                 "The 'use_inductor' flag is deprecated and will be\
                     removed in a future release."
-                "Please use the 'backend' option instead.", )
+                "Please use the 'backend' option instead.",
+            )
             self.backend = "inductor" if self.use_inductor else "eager"
 
         if self.backend == "":
@@ -589,16 +593,15 @@ class CompilationConfig:
             raise ValueError(
                 "No compilation level is set. This method should only be \
                 called via vllm config where the level is set if none is \
-                provided.")
+                provided."
+            )
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
         from torch._dynamo.backends.registry import list_backends
 
         torch_backends = list_backends(exclude_tags=tuple())
-        if self.level in [
-                CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE
-        ]:
+        if self.level in [CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE]:
             if self.backend in torch_backends:
                 return self.backend
             return resolve_obj_by_qualname(self.backend)
@@ -606,7 +609,8 @@ class CompilationConfig:
         assert self.level == CompilationLevel.PIECEWISE
         if self.backend not in ["eager", "inductor"]:
             raise ValueError(
-                f"Invalid backend for piecewise compilation: {self.backend}")
+                f"Invalid backend for piecewise compilation: {self.backend}"
+            )
 
         from vllm.compilation.backends import VllmBackend
 
