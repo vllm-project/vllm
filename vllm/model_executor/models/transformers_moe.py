@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
+from .interfaces import MixtureOfExperts
 from .transformers import (
     TransformersBase,
     TransformersForCausalLM,
@@ -116,16 +117,40 @@ direct_register_custom_op(
 )
 
 
-class TransformersMoEBase(TransformersBase):
+class TransformersMoEBase(TransformersBase, MixtureOfExperts):
     def __init__(self, *, vllm_config, prefix=""):
         self.check_version("4.57.0.dev0", "MoE models support")
+        self.ep_group = get_ep_group()
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-        if self.parallel_config.enable_eplb:
-            raise NotImplementedError(
-                "Transformers backend does not support expert parallel load "
-                "balancing yet."
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ):
+        for moe_layer_idx, mlp_layer in enumerate(self.mlp_layers):
+            mlp_layer.experts.set_eplb_state(
+                moe_layer_idx=moe_layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
             )
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ):
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for mlp in self.mlp_layers:
+            mlp.n_local_physical_experts = num_local_physical_experts
+            mlp.n_physical_experts = num_physical_experts
+            mlp.n_redundant_experts = self.num_redundant_experts
+            mlp.experts.update_expert_map()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         """
@@ -138,6 +163,8 @@ class TransformersMoEBase(TransformersBase):
             ("w1", "w2", "w3"),  # Granite, Mixtral, Phi MoE style
             ("linear", "linear_1", "linear_v"),  # Grok1 style
         ]
+        num_experts = self.model_config.get_num_experts()
+        num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
         expert_mapping = []
         for gate_proj, down_proj, up_proj in ckpt_names:
             expert_mapping.extend(
@@ -145,8 +172,8 @@ class TransformersMoEBase(TransformersBase):
                     ckpt_gate_proj_name=gate_proj,
                     ckpt_down_proj_name=down_proj,
                     ckpt_up_proj_name=up_proj,
-                    num_experts=self.model_config.get_num_experts(),
-                    num_redundant_experts=0,  # TODO: enable EPLB
+                    num_experts=num_experts,
+                    num_redundant_experts=num_redundant_experts,
                 )
             )
         return expert_mapping
@@ -167,12 +194,15 @@ class TransformersMoEBase(TransformersBase):
 
         # If there are shared experts, the results are
         # reduced after mlp.forward() not inside FusedMoE
-        num_experts_shared = getattr_iter(
+        num_shared_experts = getattr_iter(
             text_config,
-            ["num_experts_shared", "n_shared_experts", "moe_num_shared_experts"],
+            [
+                "n_shared_experts",  # DeepSeek, Docs, GLM
+                "moe_num_shared_experts",  # Aria, Ernie
+            ],
             0,
         )
-        reduce_results = num_experts_shared == 0
+        reduce_results = num_shared_experts == 0
 
         def add_all_reduce(mlp: nn.Module):
             """Adds an all-reduce to the output of `mlp.forward()`."""
@@ -207,13 +237,23 @@ class TransformersMoEBase(TransformersBase):
         # Expert mapping for `AutoWeightsLoader`
         expert_mapping = self.get_expert_mapping()
 
-        # Configs
-        parallel_config = self.parallel_config
-        eplb_config = parallel_config.eplb_config
-
         # Expert parallel load balancing kwargs
-        enable_eplb = parallel_config.enable_eplb
-        num_redundant_experts = eplb_config.num_redundant_experts
+        enable_eplb = self.parallel_config.enable_eplb
+        num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
+
+        # MixtureOfExperts mixin settings
+        ep_size = self.ep_group.world_size
+
+        self.mlp_layers = []  # Used for MixtureOfExperts methods
+        self.expert_weights = []
+        self.num_moe_layers = 0
+        self.num_expert_groups = 1 if num_expert_group is None else num_expert_group
+        self.num_logical_experts = num_experts
+        self.num_physical_experts = num_experts + num_redundant_experts
+        self.num_local_physical_experts = self.num_physical_experts // ep_size
+        self.num_routed_experts = num_experts
+        self.num_shared_experts = num_shared_experts
+        self.num_redundant_experts = num_redundant_experts
 
         # Recursively fuse MoE layers
         def _recursive_replace(module: nn.Module, prefix: str):
@@ -235,6 +275,9 @@ class TransformersMoEBase(TransformersBase):
                         for mlp_param_name, _ in mlp.named_parameters():
                             if "shared_expert" in mlp_param_name:
                                 reduce_results = False
+                                # If the config does not specify num_shared_experts, but
+                                # the model has shared experts, we assume there is one.
+                                self.num_shared_experts = 1
                                 break
                     # Replace experts module with FusedMoE
                     fused_experts = TransformersFusedMoE(
@@ -258,6 +301,10 @@ class TransformersMoEBase(TransformersBase):
                     )
                     mlp.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
+                    # Update MixtureOfExperts mixin state
+                    self.mlp_layers.append(mlp)
+                    self.expert_weights.append(fused_experts.get_expert_weights())
+                    self.num_moe_layers += 1
                     # If results are not all-reduced in FusedMoE, ensure they
                     # are all-reduced at the end of mlp.forward() if tensor
                     # parallel or expert parallel is enabled

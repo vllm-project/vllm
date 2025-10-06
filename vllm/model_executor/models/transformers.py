@@ -40,7 +40,7 @@ from vllm.config import (
 )
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.config.utils import getattr_iter
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -506,9 +506,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         self.quant_config: Optional[QuantizationConfig] = vllm_config.quant_config
 
         self.pp_group = get_pp_group()
-        self.pp_size = self.pp_group.world_size
-        self.pp_rank = self.pp_group.rank_in_group
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_group = get_tp_group()
 
         # Weights to skip in `self.load_weights`
         self.skip_prefixes: list[str] = []
@@ -576,7 +574,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         """
         Apply the model's pipeline parallelization plan.
         """
-        if self.pp_size <= 1:
+        if self.pp_group.world_size <= 1:
             return
 
         if not self.model.supports_pp_plan:
@@ -613,7 +611,9 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
         # Module list
         start_layer, end_layer = get_pp_indices(
-            self.text_config.num_hidden_layers, self.pp_rank, self.pp_size
+            self.text_config.num_hidden_layers,
+            self.pp_group.rank_in_group,
+            self.pp_group.world_size,
         )
         layers_name = pp_plan[module_list_idx]
         layers = getattr(self.model, layers_name)
@@ -638,7 +638,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         """
         tp_plan = self.model.tp_plan
 
-        if not tp_plan and self.tp_size > 1:
+        if not tp_plan and self.tp_group.world_size > 1:
             tip = get_feature_request_tip(
                 self.model_config.model, self.model_config.trust_remote_code
             )
@@ -687,7 +687,9 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         head_size = self.model_config.get_head_size()
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         start, end = get_pp_indices(
-            self.text_config.num_hidden_layers, self.pp_rank, self.pp_size
+            self.text_config.num_hidden_layers,
+            self.pp_group.rank_in_group,
+            self.pp_group.world_size,
         )
 
         attention_instances = {}
@@ -749,7 +751,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        if not get_pp_group().is_first_rank:
+        if not self.pp_group.is_first_rank:
             assert intermediate_tensors is not None
             input_ids = None
             inputs_embeds = intermediate_tensors["hidden_states"]
@@ -773,7 +775,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             return_dict=False,
         )[0][0, ...]  # we remove batch dimension for now
 
-        if not get_pp_group().is_last_rank:
+        if not self.pp_group.is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
 
         return hidden_states
@@ -811,7 +813,7 @@ class TransformersForCausalLM(TransformersBase):
         if self.text_config.tie_word_embeddings:
             self.skip_prefixes.append("lm_head.")
 
-        if get_pp_group().is_last_rank:
+        if self.pp_group.is_last_rank:
             self.unpadded_vocab_size = self.text_config.vocab_size
             self.lm_head = ParallelLMHead(
                 self.text_config.vocab_size,
