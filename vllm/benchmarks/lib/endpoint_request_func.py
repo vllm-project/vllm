@@ -62,6 +62,7 @@ class StreamedResponseHandler:
 @dataclass
 class RequestFuncInput:
     """The input for the request function."""
+
     prompt: str
     api_url: str
     prompt_len: int
@@ -80,13 +81,13 @@ class RequestFuncInput:
 @dataclass
 class RequestFuncOutput:
     """The output of the request function including metrics."""
+
     generated_text: str = ""
     success: bool = False
     latency: float = 0.0
     output_tokens: int = 0
     ttft: float = 0.0  # Time to first token
-    itl: list[float] = field(
-        default_factory=list)  # list of inter-token latencies
+    itl: list[float] = field(default_factory=list)  # list of inter-token latencies
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
@@ -99,8 +100,7 @@ class RequestFunc(Protocol):
         request_func_input: RequestFuncInput,
         session: aiohttp.ClientSession,
         pbar: Optional[tqdm] = None,
-    ) -> Awaitable[RequestFuncOutput]:
-        ...
+    ) -> Awaitable[RequestFuncOutput]: ...
 
 
 async def async_request_openai_completions(
@@ -118,13 +118,14 @@ async def async_request_openai_completions(
         The output of the request function.
     """
     api_url = request_func_input.api_url
-    assert api_url.endswith(
-        ("completions", "profile")
-    ), "OpenAI Completions API URL must end with 'completions' or 'profile'."
+    assert api_url.endswith(("completions", "profile")), (
+        "OpenAI Completions API URL must end with 'completions' or 'profile'."
+    )
 
     payload = {
         "model": request_func_input.model_name
-        if request_func_input.model_name else request_func_input.model,
+        if request_func_input.model_name
+        else request_func_input.model,
         "prompt": request_func_input.prompt,
         "temperature": 0.0,
         "repetition_penalty": 1.0,
@@ -139,9 +140,7 @@ async def async_request_openai_completions(
         payload["ignore_eos"] = request_func_input.ignore_eos
     if request_func_input.extra_body:
         payload.update(request_func_input.extra_body)
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
-    }
+    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
     if request_func_input.extra_headers:
         headers |= request_func_input.extra_headers
     if request_func_input.request_id:
@@ -155,8 +154,7 @@ async def async_request_openai_completions(
     output.start_time = st
     most_recent_timestamp = st
     try:
-        async with session.post(url=api_url, json=payload,
-                                headers=headers) as response:
+        async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
                 first_chunk_received = False
                 handler = StreamedResponseHandler()
@@ -195,21 +193,20 @@ async def async_request_openai_completions(
 
                                 # Decoding phase
                                 else:
-                                    output.itl.append(timestamp -
-                                                    most_recent_timestamp)
+                                    output.itl.append(timestamp - most_recent_timestamp)
 
                                 most_recent_timestamp = timestamp
                                 generated_text += text or ""
                             elif usage := data.get("usage"):
-                                output.output_tokens = usage.get(
-                                    "completion_tokens")
+                                output.output_tokens = usage.get("completion_tokens")
                 if first_chunk_received:
                     output.success = True
                 else:
                     output.success = False
                     output.error = (
                         "Never received a valid chunk to calculate TTFT."
-                        "This response will be marked as failed!")
+                        "This response will be marked as failed!"
+                    )
                 output.generated_text = generated_text
                 output.latency = most_recent_timestamp - st
             else:
@@ -232,7 +229,8 @@ async def async_request_openai_chat_completions(
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(("chat/completions", "profile")), (
-        "OpenAI Chat Completions API URL must end with 'chat/completions'.")
+        "OpenAI Chat Completions API URL must end with 'chat/completions'."
+    )
 
     content = [{"type": "text", "text": request_func_input.prompt}]
     if request_func_input.multi_modal_content:
@@ -243,25 +241,18 @@ async def async_request_openai_chat_completions(
             content.append(mm_content)
         else:
             raise TypeError(
-                "multi_modal_content must be a dict or list[dict] "
-                "for openai-chat"
+                "multi_modal_content must be a dict or list[dict] for openai-chat"
             )
     payload = {
-        "model":
-        request_func_input.model_name
-        if request_func_input.model_name else request_func_input.model,
+        "model": request_func_input.model_name
+        if request_func_input.model_name
+        else request_func_input.model,
         "messages": [
-            {
-                "role": "user",
-                "content": content
-            },
+            {"role": "user", "content": content},
         ],
-        "temperature":
-        0.0,
-        "max_completion_tokens":
-        request_func_input.output_len,
-        "stream":
-        True,
+        "temperature": 0.0,
+        "max_completion_tokens": request_func_input.output_len,
+        "stream": True,
         "stream_options": {
             "include_usage": True,
         },
@@ -288,8 +279,7 @@ async def async_request_openai_chat_completions(
     output.start_time = st
     most_recent_timestamp = st
     try:
-        async with session.post(url=api_url, json=payload,
-                                headers=headers) as response:
+        async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
@@ -320,13 +310,11 @@ async def async_request_openai_chat_completions(
 
                                 # Decoding phase
                                 else:
-                                    output.itl.append(timestamp -
-                                                    most_recent_timestamp)
+                                    output.itl.append(timestamp - most_recent_timestamp)
 
                                 generated_text += content or ""
                             elif usage := data.get("usage"):
-                                output.output_tokens = usage.get(
-                                    "completion_tokens")
+                                output.output_tokens = usage.get("completion_tokens")
 
                             most_recent_timestamp = timestamp
 
@@ -356,27 +344,22 @@ async def async_request_openai_audio(
 
     api_url = request_func_input.api_url
     assert api_url.endswith(("transcriptions", "translations")), (
-        "OpenAI Chat Completions API URL must end with 'transcriptions' ")
+        "OpenAI Chat Completions API URL must end with 'transcriptions' "
+    )
     "or `translations`."
 
     content = [{"type": "text", "text": request_func_input.prompt}]
     payload = {
-        "model":
-        request_func_input.model_name
-        if request_func_input.model_name else request_func_input.model,
-        "temperature":
-        0.0,
-        "max_completion_tokens":
-        request_func_input.output_len,
-        "stream":
-        True,
-        "language":
-        "en",
+        "model": request_func_input.model_name
+        if request_func_input.model_name
+        else request_func_input.model,
+        "temperature": 0.0,
+        "max_completion_tokens": request_func_input.output_len,
+        "stream": True,
+        "language": "en",
         # Flattened due to multipart/form-data
-        "stream_include_usage":
-        True,
-        "stream_continuous_usage_stats":
-        True,
+        "stream_include_usage": True,
+        "stream_continuous_usage_stats": True,
     }
     if request_func_input.extra_body:
         payload.update(request_func_input.extra_body)
@@ -413,9 +396,9 @@ async def async_request_openai_audio(
         output.start_time = st
         most_recent_timestamp = st
         try:
-            async with session.post(url=api_url,
-                                    data=form,
-                                    headers=headers) as response:
+            async with session.post(
+                url=api_url, data=form, headers=headers
+            ) as response:
                 if response.status == 200:
                     handler = StreamedResponseHandler()
 
@@ -426,15 +409,13 @@ async def async_request_openai_audio(
 
                         messages = handler.add_chunk(chunk_bytes)
                         for message in messages:
-                            chunk = message.decode("utf-8").removeprefix(
-                                "data: ")
+                            chunk = message.decode("utf-8").removeprefix("data: ")
                             if chunk != "[DONE]":
                                 timestamp = time.perf_counter()
                                 data = json.loads(chunk)
 
                                 if choices := data.get("choices"):
-                                    content = choices[0]["delta"].get(
-                                        "content")
+                                    content = choices[0]["delta"].get("content")
                                     # First token
                                     if ttft == 0.0:
                                         ttft = timestamp - st
@@ -443,12 +424,14 @@ async def async_request_openai_audio(
                                     # Decoding phase
                                     else:
                                         output.itl.append(
-                                            timestamp - most_recent_timestamp)
+                                            timestamp - most_recent_timestamp
+                                        )
 
                                     generated_text += content or ""
                                 elif usage := data.get("usage"):
                                     output.output_tokens = usage.get(
-                                        "completion_tokens")
+                                        "completion_tokens"
+                                    )
 
                                 most_recent_timestamp = timestamp
 
@@ -474,9 +457,9 @@ async def async_request_openai_embeddings(
     pbar: Optional[tqdm] = None,
 ):
     api_url = request_func_input.api_url
-    assert api_url.endswith(
-        "embeddings"
-    ), "OpenAI Embeddings API URL must end with 'embeddings'."
+    assert api_url.endswith("embeddings"), (
+        "OpenAI Embeddings API URL must end with 'embeddings'."
+    )
 
     headers = {
         "Content-Type": "application/json",
@@ -492,19 +475,13 @@ async def async_request_openai_embeddings(
     st = time.perf_counter()
     output.start_time = st
     try:
-        async with session.post(
-            url=api_url,
-            headers=headers,
-            json=payload
-        ) as response:
+        async with session.post(url=api_url, headers=headers, json=payload) as response:
             if response.status == 200:
                 output.latency = time.perf_counter() - st
                 data = await response.json()
                 output.success = True
                 output.generated_text = ""
-                output.prompt_len = data.get(
-                    "usage", {}).get(
-                    "prompt_tokens", 0)
+                output.prompt_len = data.get("usage", {}).get("prompt_tokens", 0)
             else:
                 output.success = False
                 output.error = response.reason or ""
@@ -527,7 +504,7 @@ ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [
-    k for k, v in ASYNC_REQUEST_FUNCS.items()
-    if v in (async_request_openai_completions,
-             async_request_openai_chat_completions)
+    k
+    for k, v in ASYNC_REQUEST_FUNCS.items()
+    if v in (async_request_openai_completions, async_request_openai_chat_completions)
 ]

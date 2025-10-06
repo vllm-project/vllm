@@ -661,8 +661,7 @@ Benchmark the performance of multi-modal requests in vLLM.
 Start vLLM:
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen2.5-VL-7B-Instruct \
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
   --dtype bfloat16 \
   --limit-mm-per-prompt '{"image": 1}' \
   --allowed-local-media-path /path/to/sharegpt4v/images
@@ -688,8 +687,7 @@ vllm bench serve \
 Start vLLM:
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen2.5-VL-7B-Instruct \
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
   --dtype bfloat16 \
   --limit-mm-per-prompt '{"video": 1}' \
   --allowed-local-media-path /path/to/sharegpt4video/videos
@@ -822,6 +820,30 @@ For more results visualization, check the [visualizing the results](https://gith
 The latest performance results are hosted on the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
 More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](gh-file:.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
+
+### Continuous Benchmarking
+
+The continuous benchmarking provides automated performance monitoring for vLLM across different models and GPU devices. This helps track vLLM's performance characteristics over time and identify any performance regressions or improvements.
+
+#### How It Works
+
+The continuous benchmarking is triggered via a [GitHub workflow CI](https://github.com/pytorch/pytorch-integration-testing/actions/workflows/vllm-benchmark.yml) in the PyTorch infrastructure repository, which runs automatically every 4 hours. The workflow executes three types of performance tests:
+
+- **Serving tests**: Measure request handling and API performance
+- **Throughput tests**: Evaluate token generation rates
+- **Latency tests**: Assess response time characteristics
+
+#### Benchmark Configuration
+
+The benchmarking currently runs on a predefined set of models configured in the [vllm-benchmarks directory](https://github.com/pytorch/pytorch-integration-testing/tree/main/vllm-benchmarks/benchmarks). To add new models for benchmarking:
+
+1. Navigate to the appropriate GPU directory in the benchmarks configuration
+2. Add your model specifications to the corresponding configuration files
+3. The new models will be included in the next scheduled benchmark run
+
+#### Viewing Results
+
+All continuous benchmarking results are automatically published to the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
 [](){ #nightly-benchmarks }
 

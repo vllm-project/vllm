@@ -84,7 +84,7 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - Connection info is passed via KVTransferParams from prefiller to decoder for handshake
 
 - `VLLM_NIXL_ABORT_REQUEST_TIMEOUT`: Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request. (Optional)
-    - Default: 120
+    - Default: 480
     - If a request is aborted and the decoder has not yet read the KV-cache blocks through the nixl channel, the prefill instance will release its KV-cache blocks after this timeout to avoid holding them indefinitely.
 
 ## Multi-Instance Setup
