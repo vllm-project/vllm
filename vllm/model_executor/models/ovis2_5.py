@@ -380,7 +380,9 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
                 self.visual_indicators_to_visual_tokens(indicator)
                 for indicator in visual_indicators
             ]
-            processed_outputs["video_indicator_tokens"] = indicator_tokens
+            processed_outputs["video_indicator_tokens"] = torch.tensor(
+                [indicator_tokens]
+            )
         if "images" in mm_data:
             visual_indicators = [
                 hf_processor.construct_visual_indicators((1, 1, 1), False)
@@ -391,7 +393,7 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
                 for indicator in visual_indicators
             ]
 
-            processed_outputs["indicator_tokens"] = indicator_tokens
+            processed_outputs["indicator_tokens"] = torch.tensor([indicator_tokens])
         return processed_outputs
 
     def _apply_hf_processor_tokens_only(
@@ -441,6 +443,8 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
     dummy_inputs=Ovis2_5DummyInputsBuilder,
 )
 class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
+    merge_by_field_config = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -491,13 +495,13 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
             return OvisImagePatchInputs(
                 type="image_patches",
-                flat_data=flatten_bn(flatten_bn(pixel_values), concat=True),
+                flat_data=pixel_values,
                 patches_per_image=[
                     x.shape[0] // (self.config.vit_config.hidden_stride**2)
                     for x in flatten_bn(pixel_values)
                 ],
-                indicator_tokens=flatten_bn(flatten_bn(indicator_tokens), concat=True),
-                grids=flatten_bn(flatten_bn(grids), concat=True),
+                indicator_tokens=indicator_tokens,
+                grids=grids,
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -525,13 +529,13 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
             return OvisVideoPatchInputs(
                 type="video_patches",
-                flat_data=flatten_bn(flatten_bn(pixel_values), concat=True),
+                flat_data=flatten_bn(pixel_values, concat=True),
                 patches_per_image=[
                     x.shape[0] // (self.config.vit_config.hidden_stride**2)
-                    for x in flatten_bn(pixel_values)
+                    for x in pixel_values
                 ],
-                indicator_tokens=flatten_bn(flatten_bn(indicator_tokens), concat=True),
-                grids=flatten_bn(flatten_bn(grids), concat=True),
+                indicator_tokens=flatten_bn(indicator_tokens, concat=True),
+                grids=flatten_bn(grids, concat=True),
             )
 
         raise AssertionError("This line should be unreachable.")
