@@ -462,7 +462,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             image_size: int = self.config.force_image_size
             patch_size: int = self.config.patch_size
             downsample_ratio = self.config.downsample_ratio
-            tokens_per_frame = int(
+            tokens_in_single_frame = int(
                 (image_size * image_size // patch_size**2) * (downsample_ratio**2)
             )
 
@@ -475,7 +475,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                 ):
                     # Start of EVS-specific code
                     num_tokens = compute_retained_tokens_count(
-                        tokens_per_frame=tokens_per_frame,
+                        tokens_per_frame=tokens_in_single_frame,
                         num_frames=num_frames,
                         q=self.video_pruning_rate,
                     )
