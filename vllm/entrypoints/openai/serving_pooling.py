@@ -17,8 +17,6 @@ from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-
-# yapf: disable
 from vllm.entrypoints.openai.protocol import (
     ErrorResponse,
     IOProcessorRequest,
@@ -30,8 +28,6 @@ from vllm.entrypoints.openai.protocol import (
     PoolingResponseData,
     UsageInfo,
 )
-
-# yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig

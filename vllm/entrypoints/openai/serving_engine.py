@@ -16,7 +16,6 @@ from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
 from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.processor import Processor
 
@@ -28,9 +27,6 @@ else:
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -72,8 +68,6 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
-
-# yapf: enable
 from vllm.inputs.data import PromptType
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import PromptComponents, get_prompt_components
@@ -277,11 +271,8 @@ class OpenAIServing:
     async def _get_processor(self) -> Processor:
         if not hasattr(self, "_processor"):
             vllm_config = await self.engine_client.get_vllm_config()
-            if self.model_config.skip_tokenizer_init:
-                tokenizer = None
-            else:
-                tokenizer = init_tokenizer_from_configs(self.model_config)
-            self._processor = Processor(vllm_config, tokenizer)
+            self._processor = Processor(vllm_config)
+
         return self._processor
 
     def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:
