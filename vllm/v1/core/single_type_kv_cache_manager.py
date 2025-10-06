@@ -601,6 +601,8 @@ class MambaManager(SingleTypeKVCacheManager):
             if cached_block := block_pool.get_cached_block(
                 block_hashes[i], kv_cache_group_ids
             ):
+                if (i + 1) % alignment != 0:
+                    continue
                 for computed, cached in zip(computed_blocks, cached_block):
                     # the hit length logic later assumes:
                     #  hit_length = len(hit_blocks_other_attn[0])
