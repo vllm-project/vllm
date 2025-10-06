@@ -523,7 +523,9 @@ async def async_request_openai_embeddings(
     _validate_api_url(api_url, "OpenAI Embeddings API", "embeddings")
 
     payload = {
-        "model": request_func_input.model,
+        "model": request_func_input.model_name
+        if request_func_input.model_name
+        else request_func_input.model,
         "input": request_func_input.prompt,
     }
     _update_payload_common(payload, request_func_input)
