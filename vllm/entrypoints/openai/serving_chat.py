@@ -825,7 +825,7 @@ class OpenAIServingChat(OpenAIServing):
                                 harmony_parser.current_recipient,
                                 token_delta
                             ))
-                        delta_text = "".join(state for _, _ state in token_states)
+                        delta_text = "".join(state for _, _, state in token_states)
                     else:
                         delta_text = output.text
 
