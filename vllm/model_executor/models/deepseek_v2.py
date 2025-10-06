@@ -654,8 +654,8 @@ def sparse_attn_indexer(
                                       device=logits.device)
             torch.ops._C.top_k_per_row(logits, chunk.cu_seqlen_ks,
                                        chunk.cu_seqlen_ke, topk_indices,
-                                       topk_values, num_rows,
-                                       logits.stride(0), logits.stride(1))
+                                       topk_values, num_rows, logits.stride(0),
+                                       logits.stride(1))
 
             topk_indices -= chunk.cu_seqlen_ks[:, None]
             topk_indices_buffer[
