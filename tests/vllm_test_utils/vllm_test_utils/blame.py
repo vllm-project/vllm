@@ -26,7 +26,7 @@ def blame(func: Callable) -> Generator[BlameResult, None, None]:
     ```python
     with blame(lambda: some_condition()) as result:
         # do something
-    
+
     if result.found:
         print(result.trace_stack)
     """
@@ -34,7 +34,7 @@ def blame(func: Callable) -> Generator[BlameResult, None, None]:
 
     def _trace_calls(frame, event, arg=None):
         nonlocal result
-        if event in ['call', 'return']:
+        if event in ["call", "return"]:
             # for every function call or return
             try:
                 # Temporarily disable the trace function

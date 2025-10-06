@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from vllm._bc_linter import bc_linter_include
 
@@ -13,8 +13,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-        KVConnectorMetadata)
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
@@ -25,16 +24,15 @@ if TYPE_CHECKING:
 @bc_linter_include
 @dataclass
 class NewRequestData:
-
     req_id: str
-    prompt_token_ids: Optional[list[int]]
+    prompt_token_ids: list[int] | None
     mm_features: list[MultiModalFeatureSpec]
-    sampling_params: Optional[SamplingParams]
-    pooling_params: Optional[PoolingParams]
+    sampling_params: SamplingParams | None
+    pooling_params: PoolingParams | None
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
-    lora_request: Optional[LoRARequest]
-    prompt_embeds: Optional[torch.Tensor] = None
+    lora_request: LoRARequest | None
+    prompt_embeds: torch.Tensor | None = None
 
     @classmethod
     def from_request(
@@ -55,42 +53,43 @@ class NewRequestData:
         )
 
     def __repr__(self) -> str:
-        prompt_embeds_shape = (self.prompt_embeds.shape
-                               if self.prompt_embeds else None)
-        return (f"NewRequestData("
-                f"req_id={self.req_id},"
-                f"prompt_token_ids={self.prompt_token_ids},"
-                f"mm_features={self.mm_features},"
-                f"sampling_params={self.sampling_params},"
-                f"block_ids={self.block_ids},"
-                f"num_computed_tokens={self.num_computed_tokens},"
-                f"lora_request={self.lora_request},"
-                f"prompt_embeds_shape={prompt_embeds_shape}"
-                ")")
+        prompt_embeds_shape = self.prompt_embeds.shape if self.prompt_embeds else None
+        return (
+            f"NewRequestData("
+            f"req_id={self.req_id},"
+            f"prompt_token_ids={self.prompt_token_ids},"
+            f"mm_features={self.mm_features},"
+            f"sampling_params={self.sampling_params},"
+            f"block_ids={self.block_ids},"
+            f"num_computed_tokens={self.num_computed_tokens},"
+            f"lora_request={self.lora_request},"
+            f"prompt_embeds_shape={prompt_embeds_shape}"
+            ")"
+        )
 
     # Version of __repr__ with the prompt data obfuscated
     def anon_repr(self) -> str:
-        prompt_token_ids_len = len(
-            self.prompt_token_ids
-        ) if self.prompt_token_ids is not None else None
-        prompt_embeds_shape = (self.prompt_embeds.shape
-                               if self.prompt_embeds else None)
-        return (f"NewRequestData("
-                f"req_id={self.req_id},"
-                f"prompt_token_ids_len={prompt_token_ids_len},"
-                f"mm_features={self.mm_features},"
-                f"sampling_params={self.sampling_params},"
-                f"block_ids={self.block_ids},"
-                f"num_computed_tokens={self.num_computed_tokens},"
-                f"lora_request={self.lora_request},"
-                f"prompt_embeds_shape={prompt_embeds_shape}"
-                ")")
+        prompt_token_ids_len = (
+            len(self.prompt_token_ids) if self.prompt_token_ids is not None else None
+        )
+        prompt_embeds_shape = self.prompt_embeds.shape if self.prompt_embeds else None
+        return (
+            f"NewRequestData("
+            f"req_id={self.req_id},"
+            f"prompt_token_ids_len={prompt_token_ids_len},"
+            f"mm_features={self.mm_features},"
+            f"sampling_params={self.sampling_params},"
+            f"block_ids={self.block_ids},"
+            f"num_computed_tokens={self.num_computed_tokens},"
+            f"lora_request={self.lora_request},"
+            f"prompt_embeds_shape={prompt_embeds_shape}"
+            ")"
+        )
 
 
 @bc_linter_include
 @dataclass
 class CachedRequestData:
-
     req_ids: list[str]
     # If resumed_from_preemption is False, new_block_ids will be appended to
     # the request's block IDs. If True, new_block_ids will be used as the
@@ -99,7 +98,7 @@ class CachedRequestData:
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
-    new_block_ids: list[Optional[tuple[list[int], ...]]]
+    new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
 
@@ -122,7 +121,6 @@ class CachedRequestData:
 @bc_linter_include
 @dataclass
 class SchedulerOutput:
-
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
     # need to re-send it every scheduling step.
@@ -162,7 +160,7 @@ class SchedulerOutput:
     # for filling the next token bitmask
     structured_output_request_ids: dict[str, int]
     # the bitmask for the whole batch
-    grammar_bitmask: Optional[npt.NDArray[np.int32]]
+    grammar_bitmask: npt.NDArray[np.int32] | None
 
     # KV Cache Connector metadata.
-    kv_connector_metadata: Optional[KVConnectorMetadata] = None
+    kv_connector_metadata: KVConnectorMetadata | None = None
