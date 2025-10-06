@@ -210,7 +210,9 @@ def test_splitting_ops_dynamic():
                 cudagraph_mode=CUDAGraphMode.PIECEWISE,
             )
         )
-        assert config.compilation_config.splitting_ops == []
+        # With inductor graph partition, attn_fusion and splitting_ops
+        # work together. Default splitting_ops include attention ops.
+        assert config.compilation_config.splitting_ops_contain_attention()
         # enable_attn_fusion is directly supported under
         # use_inductor_graph_partition=True, and cudagraph_mode
         # is unchanged.
@@ -219,12 +221,13 @@ def test_splitting_ops_dynamic():
 
 def test_resolve_operator_overload():
     import torch
+    from torch._library.utils import parse_namespace
 
-    from vllm.config.compilation import _parse_operator_name, _resolve_operator_overload
+    from vllm.config.compilation import _resolve_operator_overload
 
     assert _resolve_operator_overload("aten.mm.default") is torch.ops.aten.mm.default
     with pytest.raises(ValueError):
-        _parse_operator_name("flash_attention")
+        parse_namespace("flash_attention")
     assert (
         _resolve_operator_overload("aten.addmm.default") is torch.ops.aten.addmm.default
     )

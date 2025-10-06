@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 
 import torch
+from torch._library.utils import parse_namespace
 from torch._ops import OpOverload, OpOverloadPacket
 
 from vllm.logger import init_logger
@@ -13,32 +14,8 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def _parse_operator_name(op_name: str) -> tuple[str, str, str]:
-    if not op_name:
-        raise ValueError("Operator name must be non-empty")
-
-    parts = op_name.split(".")
-    if len(parts) < 2:
-        raise ValueError(
-            f"Operator name '{op_name}' must include a namespace and operator"
-        )
-
-    namespace, remainder = parts[0], ".".join(parts[1:])
-    if not remainder:
-        raise ValueError(
-            f"Operator name '{op_name}' must include an operator identifier"
-        )
-
-    if "." in remainder:
-        operator, overload = remainder.split(".", 1)
-    else:
-        operator, overload = remainder, "default"
-    overload = overload or "default"
-    return namespace, operator, overload
-
-
 def _resolve_operator_overload(op_name: str):
-    namespace, operator, overload = _parse_operator_name(op_name)
+    namespace, operator, overload = parse_namespace(op_name)
     target_overload = overload or "default"
 
     try:
