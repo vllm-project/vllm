@@ -8,7 +8,6 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
-from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import cdiv, next_power_of_2
@@ -87,7 +86,7 @@ class PallasAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "PALLAS_VLLM_V1"
+        return "PALLAS"
 
     @staticmethod
     def get_impl_cls() -> type["PallasAttentionBackendImpl"]:
@@ -98,15 +97,12 @@ class PallasAttentionBackend(AttentionBackend):
         return PallasMetadata
 
     @staticmethod
-    def get_state_cls() -> type["CommonAttentionState"]:
-        return CommonAttentionState
-
-    @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         padded_head_size = cdiv(
             head_size, TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT

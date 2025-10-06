@@ -18,14 +18,64 @@ import torch
 
 from vllm import LLM
 from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorStats)
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+    MultiKVConnectorStats)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
-    NixlConnectorWorker)
+    NixlConnectorWorker, NixlKVConnectorStats)
+from vllm.distributed.kv_transfer.kv_transfer_state import (
+    ensure_kv_transfer_shutdown, has_kv_transfer_group)
 from vllm.forward_context import ForwardContext
+from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
+
+
+@pytest.fixture(scope="module", autouse=True)
+def clear_kv_transfer():
+    """
+    The test cases in this file use `VLLM_ENABLE_V1_MULTIPROCESSING=0`,
+    causing the global variable `_KV_CONNECTOR_AGENT` 
+    to be assigned but never deleted.
+
+    Since the current pytest process does not terminate and instead 
+    continues running tests from other files,
+    this global variable remains in memory and interferes 
+    with test cases in other modules.
+    
+    So we use this fixture to ensure that the global variable
+    `_KV_CONNECTOR_AGENT` is properly cleaned up after each test.
+    """
+    yield
+    if has_kv_transfer_group():
+        ensure_kv_transfer_shutdown()
+
+
+def get_default_xfer_telemetry(xferDurationS: float = 1,
+                               postDurationS: float = 1,
+                               totalBytes: int = 1,
+                               descCount: int = 1) -> dict:
+
+    class AttributeDict(dict):
+        __slots__ = ()
+        __getattr__ = dict.__getitem__
+        __setattr__ = dict.__setitem__  # type: ignore[assignment]
+
+    # We can't instantiate nixlXferTelemetry because it's read only and
+    # ray env does not have NIXL, so we must fake it
+    return AttributeDict(
+        xferDuration=xferDurationS * 1e6,  # in us
+        postDuration=postDurationS * 1e6,  # in us
+        totalBytes=totalBytes,
+        descCount=descCount,
+    )
 
 
 class FakeNixlWrapper:
@@ -50,7 +100,10 @@ class FakeNixlWrapper:
     def get_reg_descs(self, caches_data, memory_type: str) -> list:
         return [str(uuid.uuid4()) for _ in caches_data]
 
-    def register_memory(self, descs) -> None:
+    def register_memory(self, descs, backends) -> None:
+        pass
+
+    def deregister_memory(self, descs) -> None:
         pass
 
     def get_xfer_descs(self, blocks_data, memory_type: str) -> list:
@@ -79,6 +132,12 @@ class FakeNixlWrapper:
     def release_xfer_handle(self, handle: int) -> None:
         pass
 
+    def release_dlist_handle(self, handle: int) -> None:
+        pass
+
+    def remove_remote_agent(self, agent: str) -> None:
+        pass
+
     def send_notif(self, agent_name: str, notif_msg: bytes) -> None:
         pass
 
@@ -93,6 +152,9 @@ class FakeNixlWrapper:
 
     def transfer(self, handle: int) -> str:
         return "PROC"
+
+    def get_xfer_telemetry(self, handle: int) -> dict:
+        return get_default_xfer_telemetry()
 
     ############################################################
     # Follow are for changing the behavior during testing.
@@ -131,6 +193,11 @@ nixl_agent = FakeNixlWrapper
         with open(os.path.join(pkg_root, "__init__.py"), "w") as f:
             f.write(stub)
 
+        # Mock nixlXferTelemetry class
+        pkg_root2 = os.path.join(td, "nixl", "_bindings")
+        os.makedirs(pkg_root2, exist_ok=True)
+        with open(os.path.join(pkg_root2, "__init__.py"), "w") as f:
+            f.write("class nixlXferTelemetry: pass")
         # touch parent package
         open(os.path.join(td, "nixl", "__init__.py"), "w").close()
         yield td
@@ -217,8 +284,9 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         time.sleep(self._hand_shake_latency)
         # These should've been done in register_kv_caches(), called by
         # gpu_model_runner. Here we just hardcode some dummy values.
-        self.slot_size_bytes = 4096
-        self.block_len = self.slot_size_bytes * self.block_size
+        slot_size_bytes = 4096
+        self.slot_size_per_layer = [slot_size_bytes]
+        self.block_len_per_layer = [slot_size_bytes * self.block_size]
         self.num_blocks = 1
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
@@ -230,7 +298,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                 kv_caches_base_addr=[0],
                 num_blocks=1,
-                block_len=self.block_len,
+                block_lens=self.block_len_per_layer,
                 attn_backend_name=self.backend_name,
                 # `self.kv_cache_layout` is only forced to HND when vllm engine
                 # is started. We mock HND here.
@@ -447,8 +515,8 @@ class TestNixlHandshake:
             worker = connector.connector_worker
 
             # Minimal local registration params used by add_remote_agent
-            worker.slot_size_bytes = 4096
-            worker.block_len = worker.slot_size_bytes * worker.block_size
+            worker.slot_size_per_layer = [4096]
+            worker.block_len_per_layer = [4096 * worker.block_size]
             worker.num_blocks = 1
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
 
@@ -460,7 +528,7 @@ class TestNixlHandshake:
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                 kv_caches_base_addr=[0],
                 num_blocks=1,
-                block_len=worker.block_len,
+                block_lens=worker.block_len_per_layer,
                 attn_backend_name=worker.backend_name,
                 kv_cache_layout=mismatched_layout,
             )
@@ -475,6 +543,222 @@ class TestNixlHandshake:
 # NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
 # we put here is important. First run ray, it will clean up the resources, then
 # the rest of the tests.
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FakeNixlWrapper)
+def test_kv_connector_stats(dist_init):
+    """Test that KV transfer stats are properly recorded and retrieved."""
+    vllm_config = create_vllm_config()
+
+    # Test worker role in decode server.
+    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    connector.connector_worker = FakeNixlConnectorWorker(vllm_config,
+                                                         connector.engine_id,
+                                                         hand_shake_latency=0)
+
+    # Verify that xfer_stats starts empty
+    initial_stats = connector.get_kv_connector_stats()
+    assert initial_stats is None
+
+    # Create transfer metadata
+    request_id = "test_req_for_stats"
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req(request_id=request_id,
+                         local_block_ids=[1, 2, 3],
+                         kv_transfer_params={
+                             "remote_block_ids": [4, 5, 6],
+                             "remote_engine_id":
+                             FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                             "remote_host": "localhost",
+                             "remote_port": 1234,
+                             "remote_tp_size": 1,
+                         })
+    connector.bind_connector_metadata(metadata)
+
+    # Start the transfer
+    dummy_ctx = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        virtual_engine=0,
+    )
+    connector.start_load_kv(dummy_ctx)
+
+    # Verify stats are recorded after transfer is complete
+    max_iterations = 2
+    # Clear metadata before start_load_kv to prevent reprocessing same request
+    connector.bind_connector_metadata(NixlConnectorMetadata())
+    for _ in range(max_iterations):
+        # Need to call start_load_kv to process completed handshakes
+        connector.start_load_kv(dummy_ctx)
+        _, done_recving = connector.get_finished(finished_req_ids=set())
+        if len(done_recving) > 0 and request_id in done_recving:
+            break
+        time.sleep(
+            0.1)  # Small delay to allow background handshake to complete
+    else:
+        assert "Transfer did not complete within expected iterations"
+
+    # Now check that stats were recorded
+    stats_after_transfer = connector.get_kv_connector_stats()
+    assert isinstance(stats_after_transfer, NixlKVConnectorStats)
+
+    # Verify stats values are recorded
+    assert not stats_after_transfer.is_empty()
+    assert stats_after_transfer.num_successful_transfers == 1
+
+    # Verify stats are reset after retrieval
+    stats_after_reset = connector.get_kv_connector_stats()
+    assert stats_after_reset is None
+
+
+def test_kv_connector_stats_aggregation():
+    """
+    Test KV transfer stats aggregation across TP ranks using 
+    KVOutputAggregator (used by MultiprocExecutor).
+    """
+
+    # Create KVOutputAggregator for 3 workers (simulating TP=3), same thing
+    # done in MultiprocExecutor.execute_model
+    aggregator = KVOutputAggregator(world_size=3)
+
+    # Create stats for multiple workers with different transfer patterns
+    worker1_stats = NixlKVConnectorStats()
+    worker2_stats = NixlKVConnectorStats()
+    worker3_stats = NixlKVConnectorStats()
+
+    # Record different transfers on each worker
+    # Worker 1: 2 transfers
+    stats = get_default_xfer_telemetry()
+    worker1_stats.record_transfer(stats)
+    worker1_stats.record_transfer(stats)
+
+    # Worker 2: 1 transfer
+    worker2_stats.record_transfer(stats)
+
+    # Worker 3: 3 transfers
+    stats = get_default_xfer_telemetry(xferDurationS=2,
+                                       postDurationS=2,
+                                       totalBytes=2,
+                                       descCount=2)
+    worker3_stats.record_transfer(stats)
+    worker3_stats.record_transfer(stats)
+    worker3_stats.record_transfer(stats)
+
+    # Create ModelRunnerOutput instances for each worker
+    worker_outputs = []
+    for i, worker_stats in enumerate(
+        [worker1_stats, worker2_stats, worker3_stats]):
+        output = ModelRunnerOutput(
+            req_ids=[f"req_{i}"],
+            req_id_to_index={f"req_{i}": 0},
+            sampled_token_ids=[[123]],  # dummy token
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[None],
+            kv_connector_output=KVConnectorOutput(
+                finished_sending=set([f"req_{i}_send"])
+                if i < 2 else None,  # Workers 0,1 finished sending
+                finished_recving=set([f"req_{i}_recv"])
+                if i > 0 else None,  # Workers 1,2 finished receiving
+                kv_connector_stats=worker_stats,
+            ))
+        worker_outputs.append(output)
+
+    # Use the real aggregation mechanism (like MultiprocExecutor.execute_model)
+    aggregated_output = aggregator.aggregate(worker_outputs, output_rank=0)
+    kv_connector_stats = \
+        aggregated_output.kv_connector_output.kv_connector_stats
+    assert isinstance(kv_connector_stats, NixlKVConnectorStats)
+    # Number of total transfers across all workers.
+    assert kv_connector_stats.num_successful_transfers == 6
+    # Logging proc, call reduce() to get CLI-friendly stats.
+    cli_stats = kv_connector_stats.reduce()
+    assert cli_stats["Avg xfer time (ms)"] == 1500.0
+    assert cli_stats["Avg post time (ms)"] == 1500.0
+    assert cli_stats["Avg number of descriptors"] == 1.5
+
+
+def test_multi_kv_connector_stats_aggregation():
+    """
+    Test MultiKVConnectorStats aggregation across TP ranks using
+    KVOutputAggregator (used by MultiprocExecutor).
+    """
+
+    aggregator = KVOutputAggregator(world_size=3)
+
+    from dataclasses import dataclass
+
+    # Mock a KVConnectorStats class for testing aggregation over connectors.
+    @dataclass
+    class FooKVConnectorStats(KVConnectorStats):
+
+        def reset(self):
+            self.data = {"num_foo_transfers": 0}
+
+        def record_transfer(self):
+            if "num_foo_transfers" not in self.data:
+                self.data["num_foo_transfers"] = 0
+            self.data["num_foo_transfers"] += 1
+
+        def is_empty(self) -> bool:
+            return self.data["num_foo_transfers"] == 0
+
+        def aggregate(self,
+                      other: "FooKVConnectorStats") -> "FooKVConnectorStats":
+            if not other.is_empty():
+                self.data["num_foo_transfers"] += other.data[
+                    "num_foo_transfers"]
+            return self
+
+    def make_multi_stats(nixl_count: int,
+                         foo_count: int) -> MultiKVConnectorStats:
+        data: dict[str, KVConnectorStats] = {}
+        if nixl_count > 0:
+            nixl_stats = NixlKVConnectorStats()
+            for _ in range(nixl_count):
+                nixl_stats.record_transfer(get_default_xfer_telemetry())
+            data["NixlConnector"] = nixl_stats
+        if foo_count > 0:
+            foo_stats = FooKVConnectorStats()
+            for _ in range(foo_count):
+                foo_stats.record_transfer()
+            data["FooConnector"] = foo_stats
+        return MultiKVConnectorStats(data=data)
+
+    # Create heterogeneous stats across 3 workers
+    worker_patterns = [(2, 1), (3, 0), (0, 5)]  # (Nixl, Foo)
+
+    worker_outputs: list[ModelRunnerOutput] = []
+    for i, (nixl, foo) in enumerate(worker_patterns):
+        stats = make_multi_stats(nixl, foo)
+        output = ModelRunnerOutput(
+            req_ids=[f"req_{i}"],
+            req_id_to_index={f"req_{i}": 0},
+            sampled_token_ids=[[123]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[None],
+            kv_connector_output=KVConnectorOutput(
+                finished_sending=set([f"req_{i}_send"]) if i < 2 else None,
+                finished_recving=set([f"req_{i}_recv"]) if i > 0 else None,
+                kv_connector_stats=stats,
+            ),
+        )
+        worker_outputs.append(output)
+
+    aggregated_output = aggregator.aggregate(worker_outputs, output_rank=0)
+    kv_connector_stats = \
+        aggregated_output.kv_connector_output.kv_connector_stats
+    assert isinstance(kv_connector_stats, MultiKVConnectorStats)
+
+    # Validate per-connector totals across workers
+    assert isinstance(kv_connector_stats["NixlConnector"],
+                      NixlKVConnectorStats)
+    assert kv_connector_stats["NixlConnector"].num_successful_transfers == 5
+    assert isinstance(kv_connector_stats["FooConnector"], FooKVConnectorStats)
+    assert kv_connector_stats["FooConnector"].data["num_foo_transfers"] == 6
+
+
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
@@ -513,6 +797,8 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
                 "working_dir": working_dir,  # ship fake nixl package
                 "env_vars": {
                     "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": str(timeout),
+                    # TODO: for ray to carry over, remove once we set
+                    "NIXL_TELEMETRY_ENABLE": "1",
                 },
             }
             ray.init(runtime_env=runtime_env)
@@ -646,3 +932,160 @@ def test_register_kv_caches(dist_init):
             assert block_len == expected_block_len, \
                 f"Block entry {i}: Expected block len {expected_block_len}, " \
                 f"got {block_len}"
+
+
+class FakePlatform(Platform):
+    device_type: str = "oot"
+
+    @classmethod
+    def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
+        """
+        Returns a mapping from device_type to a tuple of supported 
+        kv_buffer_device for nixl.
+        """
+        return {'oot': ('oot', )}
+
+    @classmethod
+    def get_nixl_memory_type(cls) -> Optional[str]:
+        """
+        Returns the nixl memory type for the current platform.
+        """
+        return 'VRAM'
+
+
+@pytest.mark.parametrize("kv_buffer_device, nixl_memory_type", [
+    ("oot", "VRAM"),
+])
+def test_kv_buffer_to_nixl_memory_types(dist_init, kv_buffer_device,
+                                        nixl_memory_type):
+    """
+    Test that register_kv_caches() passes the correct memory types from the
+    config to the nixl_wrapper.
+    """
+    vllm_config = create_vllm_config()
+    # Override the default memory types in the config
+    vllm_config.kv_transfer_config.kv_buffer_device = kv_buffer_device
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+        _NIXL_SUPPORTED_DEVICE)
+    _NIXL_SUPPORTED_DEVICE.update(FakePlatform.get_nixl_supported_devices())
+
+    with patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper"), \
+         patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.threading.Event"), \
+         patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.threading.Thread"), \
+         patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.current_platform", FakePlatform), \
+         patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector._NIXL_SUPPORTED_DEVICE", _NIXL_SUPPORTED_DEVICE):  # noqa: E501
+
+        # Create connector and replace its worker with a fake one for isolation
+        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+
+        # Verify get_reg_descs was called with the correct memory_type
+        assert connector.connector_worker.kv_buffer_device == kv_buffer_device
+        assert connector.connector_worker.nixl_memory_type == nixl_memory_type
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FakeNixlWrapper)
+def test_shutdown_cleans_up_resources(dist_init):
+    """Test that shutdown() properly cleans up all resources."""
+    vllm_config = create_vllm_config()
+
+    worker = NixlConnectorWorker(vllm_config,
+                                 vllm_config.kv_transfer_config.engine_id)
+    nixl_wrapper = worker.nixl_wrapper
+
+    with patch.object(worker, '_handshake_initiation_executor') as mock_exec, \
+         patch.object(worker, '_nixl_handshake_listener_t') as mock_listener, \
+         patch.object(nixl_wrapper, 'release_xfer_handle') as mock_rel_xfer, \
+         patch.object(nixl_wrapper, 'release_dlist_handle') as mock_rel_dlist, \
+         patch.object(nixl_wrapper, 'remove_remote_agent') as mock_rem_agent, \
+         patch.object(nixl_wrapper, 'deregister_memory') as mock_dereg:
+
+        worker._recving_transfers = {"req1": [(123, time.perf_counter())]}
+        worker.src_xfer_side_handle = 456
+        worker.dst_xfer_side_handles = {"engine1": 789}
+        worker._remote_agents = {"engine1": {0: "agent1"}}
+        worker._registered_descs = ["desc1", "desc2"]
+
+        worker.shutdown()
+
+        # Test idempotency
+        worker.shutdown()
+        worker.shutdown()
+
+        mock_exec.shutdown.assert_called_with(wait=False)
+        mock_listener.join.assert_called_once_with(timeout=0)
+
+        mock_rel_xfer.assert_called_once_with(123)
+        assert mock_rel_dlist.call_count == 2
+        mock_rel_dlist.assert_any_call(456)  # src handle
+        mock_rel_dlist.assert_any_call(789)  # dst handle
+        mock_rem_agent.assert_called_once_with("agent1")
+        assert mock_dereg.call_count == 2
+        mock_dereg.assert_any_call("desc1")
+        mock_dereg.assert_any_call("desc2")
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FakeNixlWrapper)
+def test_aborted_request_removed_from_worker_in_batch(dist_init):
+    """
+    Create and schedule a request so that P adds it to in-batch tracking via
+    the real scheduler, then simulate an abort (request not in next scheduler
+    iteration) and verify the worker no longer tracks it as in-batch.
+    """
+    vllm_config = create_vllm_config()
+
+    scheduler = create_scheduler(vllm_config)
+    # KVConnector Worker in P
+    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    connector.connector_worker = FakeNixlConnectorWorker(vllm_config,
+                                                         connector.engine_id,
+                                                         hand_shake_latency=0)
+
+    # Create a request that triggers do_remote_decode so that
+    # the scheduler adds it to reqs_in_batch
+    req = create_request(request_id=1, do_remote_decode=True, max_tokens=1)
+    scheduler.add_request(req)
+
+    # First scheduling pass - examinate build_connector_meta output
+    sched_out = scheduler.schedule()
+    kv_meta = sched_out.kv_connector_metadata
+    assert kv_meta is not None
+    assert isinstance(kv_meta, NixlConnectorMetadata)
+    assert req.request_id in kv_meta.reqs_in_batch
+
+    #### Model Runner start ####
+    # Bind scheduler-produced metadata and start worker processing.
+    connector.bind_connector_metadata(kv_meta)
+
+    dummy_ctx = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        virtual_engine=0,
+    )
+    connector.start_load_kv(dummy_ctx)
+
+    # Ensure it was tracked by the worker
+    assert req.request_id in connector.connector_worker._reqs_to_process
+
+    #### Model Runner end ####
+
+    # Abort request - request_finished call in connector scheduler
+    scheduler.finish_requests(req.request_id, RequestStatus.FINISHED_ABORTED)
+    # Second scheduling pass - build metadata with aborted request
+    sched_out2 = scheduler.schedule()
+    kv_meta2 = sched_out2.kv_connector_metadata
+    assert kv_meta2 is not None
+    assert isinstance(kv_meta2, NixlConnectorMetadata)
+    assert req.request_id not in kv_meta2.reqs_in_batch
+
+    # Bind empty/abort metadata and run worker step
+    #### Model Runner start ####
+    connector.bind_connector_metadata(kv_meta2)
+    connector.start_load_kv(dummy_ctx)
+
+    # After abort, the worker should not keep tracking it as "in-batch"
+    assert req.request_id not in connector.connector_worker._reqs_to_process
+    #### Model Runner end ####

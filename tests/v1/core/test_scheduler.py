@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 from typing import Optional
 from unittest.mock import Mock
 
@@ -10,7 +11,7 @@ from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.multimodal.inputs import (MultiModalFeatureSpec,
                                     MultiModalKwargsItem, PlaceholderRange)
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -21,6 +22,8 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.request import StructuredOutputRequest
 
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler
+
+pytestmark = pytest.mark.cpu_test
 
 
 def test_add_requests():
@@ -1796,11 +1799,11 @@ def test_schedule_skip_tokenizer_init():
 
 def test_schedule_skip_tokenizer_init_structured_output_request():
     scheduler = create_scheduler(skip_tokenizer_init=True)
-    guided_params = GuidedDecodingParams(regex="[0-9]+")
+    structured_outputs_params = StructuredOutputsParams(regex="[0-9]+")
     sampling_params = SamplingParams(
         ignore_eos=False,
         max_tokens=16,
-        guided_decoding=guided_params,
+        structured_outputs=structured_outputs_params,
     )
     request = Request(
         request_id="0",
@@ -1900,3 +1903,52 @@ def test_priority_scheduling_preemption_when_out_of_kv():
     assert output.scheduled_cached_reqs.req_ids[0] == request_high.request_id
     assert len(scheduler.waiting) == 1
     assert len(scheduler.running) == 1
+
+
+@pytest.mark.parametrize(
+    ("enable_chunked_prefill", "is_encoder_decoder", "expect_enabled"),
+    [
+        (True, False, True),
+        (False, False, False),
+        # Encoder-decoder models should always have it disabled
+        (False, True, False),
+        (True, True, False),
+    ])
+def test_chunked_prefill_disabled_for_encoder_decoder(
+        enable_chunked_prefill: bool, is_encoder_decoder: bool,
+        expect_enabled: bool) -> None:
+    """Validate that chunked prefill is appropriately disabled for
+    encoder-decoder models."""
+    scheduler_config = SchedulerConfig(
+        enable_chunked_prefill=enable_chunked_prefill,
+        is_encoder_decoder=is_encoder_decoder,
+    )
+
+    # `is_encoder_decoder` should only be used during construction
+    # of the config, and otherwise stored in the model config.
+    assert "is_encoder_decoder" not in vars(scheduler_config)
+    assert "is_encoder_decoder" not in [
+        f.name for f in dataclasses.fields(scheduler_config)
+    ]
+    _validate_chunked_prefill_settings_for_encoder_decoder(
+        scheduler_config, is_encoder_decoder, expect_enabled)
+
+    # Ensure it is retained in VllmConfig, even after its post-init.
+    vllm_config = VllmConfig(scheduler_config=scheduler_config)
+    _validate_chunked_prefill_settings_for_encoder_decoder(
+        vllm_config.scheduler_config, is_encoder_decoder, expect_enabled)
+
+
+def _validate_chunked_prefill_settings_for_encoder_decoder(
+        scheduler_config: SchedulerConfig, is_encoder_decoder: bool,
+        expect_enabled: bool) -> None:
+    """Validate chunked prefill settings in the scheduler config for
+    encoder-decoder models."""
+    assert scheduler_config.chunked_prefill_enabled is expect_enabled
+    assert scheduler_config.enable_chunked_prefill is expect_enabled
+    if is_encoder_decoder:
+        # Encoder-decoder models should automatically disable chunked multimodal
+        # inputs as well
+        assert scheduler_config.disable_chunked_mm_input is not expect_enabled
+    if is_encoder_decoder and not expect_enabled:
+        assert scheduler_config.long_prefill_token_threshold == 0

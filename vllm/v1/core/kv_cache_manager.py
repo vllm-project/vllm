@@ -24,10 +24,11 @@ class KVCacheBlocks:
     """
     blocks: tuple[list[KVCacheBlock], ...]
     """
-    blocks[i][j] refers to the i-th kv_cache_group and the j-th block of tokens.
-    We don't use block of tokens as the outer dimension because it assumes all
-    kv_cache_groups have the same number of blocks, which is true for now but 
-    will be broken if we want to give different block_size to different 
+    `blocks[i][j]` refers to the i-th kv_cache_group
+    and the j-th block of tokens.We don't use block of
+    tokens as the outer dimension because it assumes all
+    kv_cache_groups have the same number of blocks, which is true for now but
+    will be broken if we want to give different block_size to different
     kv_cache_groups in the future.
     """
 
@@ -169,9 +170,17 @@ class KVCacheManager:
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
-            self.prefix_cache_stats.requests += 1
-            self.prefix_cache_stats.queries += request.num_tokens
-            self.prefix_cache_stats.hits += num_new_computed_tokens
+            if request.num_preemptions > 0:
+                # Previously preempted request
+                self.prefix_cache_stats.preempted_requests += 1
+                self.prefix_cache_stats.preempted_queries += request.num_tokens
+                self.prefix_cache_stats.preempted_hits += (
+                    num_new_computed_tokens)
+            else:
+                # New request
+                self.prefix_cache_stats.requests += 1
+                self.prefix_cache_stats.queries += request.num_tokens
+                self.prefix_cache_stats.hits += num_new_computed_tokens
 
         return KVCacheBlocks(computed_blocks), num_new_computed_tokens
 
@@ -194,10 +203,10 @@ class KVCacheManager:
                 already been computed locally (i.e. new_computed_blocks).
             num_new_computed_tokens: The number of new computed tokens just
                 hitting the prefix caching, excluding external tokens.
-            new_computed_blocks: The cached blocks for the above new computed 
+            new_computed_blocks: The cached blocks for the above new computed
                 tokens.
             num_lookahead_tokens: The number of speculative tokens to allocate.
-                This is used by spec decode proposers with kv-cache such 
+                This is used by spec decode proposers with kv-cache such
                 as eagle.
             delay_cache_blocks: Whether to skip caching the blocks. This is
                 used by P/D when allocating blocks used in a KV transfer
@@ -350,7 +359,7 @@ class KVCacheManager:
                 requests in the current step.
 
         Returns:
-            list[int]: The number of common prefix blocks for each kv cache 
+            list[int]: The number of common prefix blocks for each kv cache
             group.
         """
         assert request.status == RequestStatus.RUNNING

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from vllm.config.pooler import PoolerConfig
 from vllm.platforms import current_platform
 
 
@@ -99,7 +100,7 @@ def test_gemma_multimodal(
                      convert="classify",
                      load_format="auto",
                      hf_overrides=update_config,
-                     override_pooler_config={"pooling_type": "LAST"},
+                     pooler_config=PoolerConfig(pooling_type="LAST"),
                      max_model_len=512,
                      enforce_eager=True,
                      tensor_parallel_size=1,

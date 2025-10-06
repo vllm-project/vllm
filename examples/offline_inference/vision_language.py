@@ -126,6 +126,23 @@ def run_chameleon(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Dots-OCR
+def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    prompts = [f"<|img|><|imgpad|><|endofimg|>{question}" for question in questions]
+    engine_args = EngineArgs(
+        model="rednote-hilab/dots.ocr",
+        limit_mm_per_prompt={modality: 1},
+        trust_remote_code=True,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 def run_command_a_vision(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
@@ -559,7 +576,7 @@ def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
 
 # Intern-S1
 def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "internlm/Intern-S1"
+    model_name = "internlm/Intern-S1-mini"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -1437,6 +1454,80 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
     )
 
 
+# Qwen3-VL-Dense
+def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "Qwen/Qwen3-VL-4B-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": 1,
+        },
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+
+    prompts = [
+        (
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Qwen3-VL-MOE
+def run_qwen3_vl_moe(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": 1,
+        },
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+
+    prompts = [
+        (
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # R-4B
 def run_r_vl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1602,6 +1693,7 @@ model_example_map = {
     "aya_vision": run_aya_vision,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
+    "dots_ocr": run_dots_ocr,
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
     "ernie45_vl": run_ernie45_vl,
@@ -1645,6 +1737,8 @@ model_example_map = {
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
     "qwen2_5_omni": run_qwen2_5_omni,
+    "qwen3_vl": run_qwen3_vl,
+    "qwen3_vl_moe": run_qwen3_vl_moe,
     "rvl": run_r_vl,
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
@@ -1658,6 +1752,8 @@ MODELS_NEED_VIDEO_METADATA = [
     "glm4_1v",
     "glm4_5v",
     "glm4_5v_fp8",
+    "qwen3_vl",
+    "qwen3_vl_moe",
 ]
 
 

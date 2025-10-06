@@ -7,7 +7,7 @@ import os
 from abc import abstractmethod
 from collections.abc import Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Union
 
 from vllm.logger import init_logger
 from vllm.utils import import_from_path, is_list_of
@@ -34,7 +34,7 @@ class ReasoningParser:
     It is used to extract reasoning content from the model output.
     """
 
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
         self.model_tokenizer = tokenizer
 
     @cached_property
@@ -77,7 +77,7 @@ class ReasoningParser:
         self,
         model_output: str,
         request: Union[ChatCompletionRequest, ResponsesRequest],
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from a complete model-generated string.
 
@@ -135,7 +135,7 @@ class ReasoningParserManager:
     def _register_module(
         cls,
         module: type,
-        module_name: Optional[Union[str, list[str]]] = None,
+        module_name: Union[str, list[str]] | None = None,
         force: bool = True,
     ) -> None:
         if not issubclass(module, ReasoningParser):
@@ -155,7 +155,7 @@ class ReasoningParserManager:
     @classmethod
     def register_module(
         cls,
-        name: Optional[Union[str, list[str]]] = None,
+        name: Union[str, list[str]] | None = None,
         force: bool = True,
         module: Union[type, None] = None,
     ) -> Union[type, Callable]:

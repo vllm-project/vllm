@@ -6,20 +6,20 @@ from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator, Iterable, Mapping, Optional, Union
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
-from vllm.config import DecodingConfig, ModelConfig, VllmConfig
-from vllm.core.scheduler import SchedulerOutputs
+from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.tasks import SupportedTask
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Device, collect_from_async_generator, random_uuid
+from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
 
@@ -50,12 +50,16 @@ class EngineClient(ABC):
     @abstractmethod
     def generate(
         self,
-        prompt: PromptType,
+        prompt: Union[EngineCoreRequest, PromptType],
         sampling_params: SamplingParams,
         request_id: str,
+        *,
+        prompt_text: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        data_parallel_rank: Optional[int] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...
@@ -76,8 +80,7 @@ class EngineClient(ABC):
         include_stop_str_in_output = params.include_stop_str_in_output
 
         preprocessor = await self.get_input_preprocessor()
-        tokenizer_group = preprocessor.get_tokenizer_group()
-        tokenizer = await tokenizer_group.get_lora_tokenizer_async()
+        tokenizer = preprocessor.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id
 
         if is_explicit_encoder_decoder_prompt(prompt):
@@ -96,10 +99,15 @@ class EngineClient(ABC):
         #    this happens again in generation, so the double expansion causes
         #    a mismatch.
         # TODO - would be ideal to handle this more gracefully.
-        prompt_token_ids = prompt.get("prompt_token_ids")
-        multi_modal_data = prompt.get("multi_modal_data")
+        if isinstance(prompt, str):
+            prompt_text = prompt
+            prompt_token_ids = []
+            multi_modal_data = None
+        else:
+            prompt_text = prompt.get("prompt")
+            prompt_token_ids = prompt.get("prompt_token_ids", [])
+            multi_modal_data = prompt.get("multi_modal_data")
 
-        prompt_text = processed_inputs.get("prompt")
         mm_processor_kwargs = processed_inputs.get("mm_processor_kwargs")
 
         tokenized_length = len(prompt_token_ids)
@@ -250,21 +258,13 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def get_decoding_config(self) -> DecodingConfig:
-        """Get the decoding configuration of the vLLM engine."""
-        ...
-
-    @abstractmethod
     async def get_input_preprocessor(self) -> InputPreprocessor:
         """Get the input processor of the vLLM engine."""
         ...
 
     @abstractmethod
-    async def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        """Get the appropriate tokenizer for the request"""
+    async def get_tokenizer(self) -> AnyTokenizer:
+        """Get the tokenizer"""
         ...
 
     async def get_io_processor(self) -> IOProcessor:
@@ -275,11 +275,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def do_log_stats(
-        self,
-        scheduler_outputs: Optional[SchedulerOutputs] = None,
-        model_output: Optional[list[SamplerOutput]] = None,
-    ) -> None:
+    async def do_log_stats(self) -> None:
         ...
 
     @abstractmethod
@@ -340,4 +336,8 @@ class EngineClient(ABC):
                              args: tuple = (),
                              kwargs: Optional[dict] = None):
         """Perform a collective RPC call to the given path."""
+        raise NotImplementedError
+
+    async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        """Get supported tasks"""
         raise NotImplementedError

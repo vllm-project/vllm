@@ -14,8 +14,7 @@ from vllm.entrypoints.openai.api_server import (run_server, run_server_worker,
                                                 setup_server)
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
-from vllm.entrypoints.utils import (VLLM_SUBCMD_PARSER_EPILOG,
-                                    show_filtered_argument_or_group_from_help)
+from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, decorate_logs, get_tcp_uri,
@@ -28,6 +27,14 @@ from vllm.v1.utils import (APIServerProcessManager,
                            wait_for_completion_or_failure)
 
 logger = init_logger(__name__)
+
+DESCRIPTION = """Launch a local OpenAI-compatible API server to serve LLM
+completions via HTTP. Defaults to Qwen/Qwen3-0.6B if no model is specified.
+
+Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
+--help=ModelConfig, --help=Frontend)
+  Use `--help=all` to show all available flags at once.
+"""
 
 
 class ServeSubcommand(CLISubcommand):
@@ -56,14 +63,13 @@ class ServeSubcommand(CLISubcommand):
             self,
             subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
         serve_parser = subparsers.add_parser(
-            "serve",
-            help="Start the vLLM OpenAI Compatible API server.",
-            description="Start the vLLM OpenAI Compatible API server.",
+            self.name,
+            description=DESCRIPTION,
             usage="vllm serve [model_tag] [options]")
 
         serve_parser = make_arg_parser(serve_parser)
-        show_filtered_argument_or_group_from_help(serve_parser, ["serve"])
-        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
+        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(
+            subcmd=self.name)
         return serve_parser
 
 
@@ -135,23 +141,20 @@ def run_headless(args: argparse.Namespace):
 def run_multi_api_server(args: argparse.Namespace):
 
     assert not args.headless
-    num_api_servers = args.api_server_count
+    num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
-
-    orig_mm_processor_cache_gb = args.mm_processor_cache_gb
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
 
-        # Not compatible with API server scale-out
-        args.mm_processor_cache_gb = 0
-
     listen_address, sock = setup_server(args)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
+    engine_args._api_process_count = num_api_servers
+    engine_args._api_process_rank = -1
+
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
-    model_config = vllm_config.model_config
 
     if num_api_servers > 1:
         if not envs.VLLM_USE_V1:
@@ -160,10 +163,6 @@ def run_multi_api_server(args: argparse.Namespace):
         if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
             raise ValueError("VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used "
                              "with api_server_count > 1")
-
-        if model_config.is_multimodal_model and orig_mm_processor_cache_gb > 0:
-            logger.warning("Multi-modal processor cache is disabled because "
-                           "it is not compatible with `api_server_count > 1`.")
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
@@ -221,9 +220,10 @@ def run_api_server_worker_proc(listen_address,
                                client_config=None,
                                **uvicorn_kwargs) -> None:
     """Entrypoint for individual API server worker processes."""
+    client_config = client_config or {}
+    server_index = client_config.get("client_index", 0)
 
     # Set process title and add process-specific prefix to stdout and stderr.
-    server_index = client_config.get("client_index", 0) if client_config else 0
     set_process_title("APIServer", str(server_index))
     decorate_logs()
 

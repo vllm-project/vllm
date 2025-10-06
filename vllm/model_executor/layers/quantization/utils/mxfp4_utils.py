@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -21,6 +21,10 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
     from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
     from triton_kernels.tensor_details import layout
     from triton_kernels.tensor_details.layout import StridedLayout
+
+    value_layout_opts: dict[str, Any] = {}
+    scale_layout_opts: dict[str, Any] = {}
+
     if (current_platform.is_cuda()
             and current_platform.is_device_capability(90)
             and not is_torch_equal_or_newer("2.8.1")):
@@ -28,8 +32,15 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
             "Mxfp4 on hopper is running on torch < 2.8.1, "
             "this cause swizling to be disabled, which may "
             "cause performance degradation. Please upgrade to torch nightly")
-        value_layout, value_layout_opts = StridedLayout, dict()
-        scale_layout, scale_layout_opts = StridedLayout, dict()
+        value_layout = StridedLayout
+        scale_layout = StridedLayout
+    elif current_platform.is_rocm():
+        from triton_kernels.tensor_details.layout import (GFX950MXScaleLayout,
+                                                          StridedLayout)
+
+        from vllm.platforms.rocm import on_gfx950
+        value_layout = StridedLayout
+        scale_layout = GFX950MXScaleLayout if on_gfx950() else StridedLayout
     else:
         value_layout, value_layout_opts = \
             layout.make_default_matmul_mxfp4_w_layout(mx_axis=1)
@@ -113,7 +124,6 @@ try:
     direct_register_custom_op(
         op_name="dequant_mxfp4",
         op_func=_dequant_mxfp4,
-        mutates_args=[],
         fake_impl=_dequant_mxfp4_fake,
     )
     dequant_mxfp4 = torch.ops.vllm.dequant_mxfp4
@@ -124,7 +134,6 @@ try:
     direct_register_custom_op(
         op_name="quant_dequant_mxfp4",
         op_func=_quant_dequant_mxfp4,
-        mutates_args=[],
         fake_impl=_quant_dequant_mxfp4_fake,
     )
     quant_dequant_mxfp4 = torch.ops.vllm.quant_dequant_mxfp4

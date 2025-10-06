@@ -18,16 +18,21 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash, FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
     estimate_max_model_len, generate_block_hash_extra_keys,
-    get_kv_cache_configs, get_max_concurrency_for_kv_cache_config,
-    get_request_block_hasher, hash_block_tokens, init_none_hash,
-    is_kv_cache_type_uniform, make_block_hash_with_group_id)
+    generate_scheduler_kv_cache_config, get_kv_cache_configs,
+    get_max_concurrency_for_kv_cache_config, get_request_block_hasher,
+    hash_block_tokens, init_none_hash, is_kv_cache_spec_uniform,
+    make_block_hash_with_group_id)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
-                                        KVCacheTensor, SlidingWindowSpec)
+                                        KVCacheTensor, MLAAttentionSpec,
+                                        SlidingWindowSpec,
+                                        UniformTypeKVCacheSpecs)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
 # yapf: enable
+
+pytestmark = pytest.mark.cpu_test
 
 
 @pytest.fixture(autouse=True)
@@ -75,13 +80,11 @@ def new_kv_cache_spec(block_size=16,
                       num_kv_heads=2,
                       head_size=64,
                       dtype=torch.float32,
-                      use_mla=False,
                       sliding_window=None):
     return FullAttentionSpec(block_size=block_size,
                              num_kv_heads=num_kv_heads,
                              head_size=head_size,
                              dtype=dtype,
-                             use_mla=use_mla,
                              sliding_window=sliding_window)
 
 
@@ -89,13 +92,11 @@ def new_sliding_window_spec(block_size=16,
                             num_kv_heads=2,
                             head_size=64,
                             dtype=torch.float32,
-                            use_mla=False,
                             sliding_window=1):
     return SlidingWindowSpec(block_size=block_size,
                              num_kv_heads=num_kv_heads,
                              head_size=head_size,
                              dtype=dtype,
-                             use_mla=use_mla,
                              sliding_window=sliding_window)
 
 
@@ -513,27 +514,27 @@ def test_hash_request_tokens_no_mm_inputs(hash_fn):
     assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), None))
 
 
+def _stats(requests: int, queries: int, hits: int) -> PrefixCacheStats:
+    return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
+
+
 def test_metrics():
     """
     Test the prefix caching metrics.
     """
-
-    def stats(requests, queries, hits):
-        return PrefixCacheStats(requests=requests, queries=queries, hits=hits)
-
     metrics = PrefixCachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
-    metrics.observe(stats(1, 20, 9))
+    metrics.observe(_stats(1, 20, 9))
     # 9 / 20 = 0.45
     assert metrics.hit_rate == 0.45
 
-    metrics.observe(stats(4, 80, 16))
+    metrics.observe(_stats(4, 80, 16))
 
     # 25 / 100 = 0.25
     assert metrics.hit_rate == 0.25
 
-    metrics.observe(stats(1, 10, 2))
+    metrics.observe(_stats(1, 10, 2))
 
     # Remove (20, 9) and add (10, 2): 18 / 90 = 0.2
     assert metrics.aggregated_requests == 5
@@ -547,6 +548,38 @@ def test_metrics():
     assert metrics.aggregated_query_total == 0
     assert metrics.aggregated_query_hit == 0
     assert not metrics.query_queue
+
+
+def test_metrics_empty_stats():
+    """
+    Test the prefix caching metrics with empty stats.
+    """
+    metrics = PrefixCachingMetrics(max_recent_requests=5)
+    metrics.observe(_stats(0, 0, 0))
+    metrics.observe(_stats(1, 20, 9))
+    metrics.observe(_stats(0, 0, 0))
+    metrics.observe(_stats(4, 80, 16))
+    metrics.observe(_stats(0, 0, 0))
+    metrics.observe(_stats(1, 10, 2))
+    # Remove (20, 9) and add (10, 2): 18 / 90 = 0.2
+    assert metrics.aggregated_requests == 5
+    assert metrics.aggregated_query_total == 90
+    assert metrics.aggregated_query_hit == 18
+    assert metrics.hit_rate == 0.2
+
+    # Only the latest added stats preserved 10 / 20 = 0.5
+    metrics.observe(_stats(11, 20, 10))
+    assert metrics.aggregated_requests == 11
+    assert metrics.aggregated_query_total == 20
+    assert metrics.aggregated_query_hit == 10
+    assert metrics.hit_rate == 0.5
+
+    # Only the latest added stats preserved 30 / 40 = 0.75
+    metrics.observe(_stats(22, 40, 30))
+    assert metrics.aggregated_requests == 22
+    assert metrics.aggregated_query_total == 40
+    assert metrics.aggregated_query_hit == 30
+    assert metrics.hit_rate == 0.75
 
 
 def test_get_kv_cache_configs_multiple_workers():
@@ -860,7 +893,6 @@ def test_merge_kv_cache_spec():
             num_kv_heads=full_spec.num_kv_heads,
             head_size=full_spec.head_size,
             dtype=full_spec.dtype,
-            use_mla=full_spec.use_mla,
             sliding_window=1,
         ),
     ]
@@ -895,36 +927,36 @@ def test_merge_kv_cache_spec():
     assert merged_layer_spec.sliding_window == 1
 
 
-def test_is_kv_cache_type_uniform():
+def test_is_kv_cache_spec_uniform():
     kv_cache_spec = {
         "layer_1": new_kv_cache_spec(num_kv_heads=32),
         "layer_2": new_kv_cache_spec(num_kv_heads=32),
     }
-    assert is_kv_cache_type_uniform(kv_cache_spec)
+    assert is_kv_cache_spec_uniform(kv_cache_spec)
 
     kv_cache_spec = {
         "layer_1": new_kv_cache_spec(num_kv_heads=32),
         "layer_2": new_kv_cache_spec(num_kv_heads=32, sliding_window=1),
     }
-    assert is_kv_cache_type_uniform(kv_cache_spec)
+    assert is_kv_cache_spec_uniform(kv_cache_spec)
 
     kv_cache_spec = {
         "layer_1": new_kv_cache_spec(num_kv_heads=32),
         "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
     }
-    assert not is_kv_cache_type_uniform(kv_cache_spec)
+    assert not is_kv_cache_spec_uniform(kv_cache_spec)
 
     kv_cache_spec = {
         "layer_1": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
         "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
     }
-    assert is_kv_cache_type_uniform(kv_cache_spec)
+    assert is_kv_cache_spec_uniform(kv_cache_spec)
 
     kv_cache_spec = {
         "layer_1": new_sliding_window_spec(num_kv_heads=32, sliding_window=1),
         "layer_2": new_sliding_window_spec(num_kv_heads=32, sliding_window=2),
     }
-    assert not is_kv_cache_type_uniform(kv_cache_spec)
+    assert not is_kv_cache_spec_uniform(kv_cache_spec)
 
 
 @pytest.mark.parametrize(
@@ -957,7 +989,6 @@ def test_estimate_max_model_len(model_id, max_model_len,
             num_kv_heads=32,
             head_size=128,
             dtype=torch.float16,
-            use_mla=False,
         )
     # Estimate the maximum model length, 16384 model_len need 8GB
     estimated_max_len = estimate_max_model_len(vllm_config, kv_cache_spec,
@@ -988,7 +1019,6 @@ def test_get_max_concurrency_for_kv_cache_config():
         num_kv_heads=32,
         head_size=128,
         dtype=torch.float16,
-        use_mla=False,
     )
 
     sliding_window_spec = SlidingWindowSpec(
@@ -996,7 +1026,6 @@ def test_get_max_concurrency_for_kv_cache_config():
         num_kv_heads=32,
         head_size=128,
         dtype=torch.float16,
-        use_mla=False,
         sliding_window=1024,
     )
 
@@ -1257,7 +1286,30 @@ def test_get_kv_cache_config_one_worker():
         ],
     )
 
-    # Different hidden size, align by using different block size
+    # different hidden size but same type, use UniformTypeKVCacheSpecs
+    kv_cache_specs_hybrid = {
+        'layer_1': new_kv_cache_spec(head_size=128),
+        'layer_2': new_kv_cache_spec(head_size=64),
+    }
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs_hybrid],
+        [mem_per_block_per_layer * 3 * 32])[0]
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(size=mem_per_block_per_layer * 32 * 2,
+                          shared_by=["layer_1"]),
+            KVCacheTensor(size=mem_per_block_per_layer * 32,
+                          shared_by=["layer_2"]),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1", "layer_2"],
+                             UniformTypeKVCacheSpecs(
+                                 block_size=16,
+                                 kv_cache_specs=kv_cache_specs_hybrid))
+        ])
+
+    # Different hidden size and different type, align by different block size
     kv_cache_specs_hybrid = {
         'layer_1': new_kv_cache_spec(head_size=64),
         'layer_2': new_sliding_window_spec(head_size=32),
@@ -1318,3 +1370,120 @@ def test_get_kv_cache_configs_attention_free():
             kv_cache_groups=[],
         )
     ]
+
+
+def test_generate_uniform_type_kv_cache_specs():
+    # All layers are full attention, can be merged
+    kv_cache_specs = {
+        'layer_1': new_kv_cache_spec(),
+        'layer_2': new_kv_cache_spec(head_size=128),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec == UniformTypeKVCacheSpecs(
+        block_size=16, kv_cache_specs=kv_cache_specs)
+
+    # Full attention + sliding window, cannot be merged
+    kv_cache_specs = {
+        'layer_1': new_kv_cache_spec(),
+        'layer_2': new_sliding_window_spec(sliding_window=1),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec is None
+
+    # different order of full attention + sliding window, cannot be merged
+    kv_cache_specs = {
+        'layer_1': new_sliding_window_spec(sliding_window=1),
+        'layer_2': new_kv_cache_spec(),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec is None
+
+    # Same-size sliding window, can be merged
+    kv_cache_specs = {
+        'layer_1': new_sliding_window_spec(sliding_window=1),
+        'layer_2': new_sliding_window_spec(sliding_window=1, head_size=128),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec == UniformTypeKVCacheSpecs(
+        block_size=16, kv_cache_specs=kv_cache_specs)
+
+    # different block sizes, cannot be merged
+    kv_cache_specs = {
+        'layer_1': new_kv_cache_spec(block_size=16),
+        'layer_2': new_kv_cache_spec(block_size=32),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec is None
+
+
+def test_generate_scheduler_kv_cache_config():
+    kv_cache_specs = {
+        'layer_1': new_kv_cache_spec(),
+        'layer_2': new_kv_cache_spec(head_size=128),
+    }
+    kv_cache_configs = [
+        KVCacheConfig(
+            num_blocks=10,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(['layer_1', 'layer_2'],
+                                 UniformTypeKVCacheSpecs(
+                                     block_size=16,
+                                     kv_cache_specs=kv_cache_specs)),
+            ],
+        )
+    ]
+    scheduler_kv_cache_config = generate_scheduler_kv_cache_config(
+        kv_cache_configs)
+    assert scheduler_kv_cache_config == KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(['layer_1', 'layer_2'], new_kv_cache_spec())
+        ],
+    )
+
+
+def new_mla_spec(cache_dtype_str=None):
+    return MLAAttentionSpec(block_size=16,
+                            num_kv_heads=16,
+                            head_size=64,
+                            dtype=torch.float32,
+                            cache_dtype_str=cache_dtype_str)
+
+
+def test_merge_mla_spec():
+    kv_cache_specs = [
+        new_mla_spec(),
+        new_mla_spec(),
+    ]
+    mla_spec = kv_cache_specs[0].merge(kv_cache_specs)
+    assert mla_spec == new_mla_spec()
+
+    kv_cache_specs = [
+        new_mla_spec(cache_dtype_str="fp8_ds_mla"),
+        new_mla_spec(cache_dtype_str="fp8_ds_mla"),
+    ]
+    mla_spec = kv_cache_specs[0].merge(kv_cache_specs)
+    assert mla_spec == new_mla_spec(cache_dtype_str="fp8_ds_mla")
+
+    kv_cache_specs = [
+        new_mla_spec(cache_dtype_str="fp8_ds_mla"),
+        new_mla_spec(cache_dtype_str=None),
+    ]
+    with pytest.raises(AssertionError):
+        kv_cache_specs[0].merge(kv_cache_specs)
+
+    kv_cache_specs = [
+        new_kv_cache_spec(),
+        new_mla_spec(),
+    ]
+    with pytest.raises(AssertionError):
+        kv_cache_specs[0].merge(kv_cache_specs)
+
+    kv_cache_specs = [
+        new_mla_spec(cache_dtype_str="fp8_ds_mla"),
+        new_kv_cache_spec(),
+    ]
+    with pytest.raises(AssertionError):
+        kv_cache_specs[0].merge(kv_cache_specs)

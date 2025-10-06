@@ -8,6 +8,8 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+    deep_gemm_block_shape)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
@@ -212,27 +214,20 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
 
 
 class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    # The Deep Gemm kernels only support block size of 128
-    DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
 
-    def __init__(self,
-                 max_num_tokens: int,
-                 num_dispatchers: int,
-                 block_shape: list[int],
-                 per_act_token_quant=False):
+    def __init__(
+        self,
+        max_num_tokens: int,
+        num_dispatchers: int,
+        quant_config: FusedMoEQuantConfig,
+    ):
         """
         max_num_tokens: Maximum number of tokens from a DP Rank
         num_dispatchers: The number of DP dispatchers.
-        block_shape: Block quantization block shape.
-        per_act_token_quant: Per activation token quantization flag.
+        quant_config: Quantization configuration
         """
-        super().__init__(
-            FusedMoEQuantConfig(
-                quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=per_act_token_quant,
-                block_shape=block_shape,
-            ))
-        assert self.block_shape == self.DEEPGEMM_BLOCK_SHAPE
+        super().__init__(quant_config)
+        assert self.block_shape == deep_gemm_block_shape()
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -290,10 +285,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
@@ -312,7 +303,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         assert w2.size(1) == K
 
-        E, max_num_tokens, N, K, top_k_num = mk._moe_problem_size(
+        E, max_num_tokens, N, K, top_k_num = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids)
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
@@ -321,11 +312,11 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # for the M expectation of each batch, correctly setting this value
         # may lead to better performance.
         expected_m = max_num_tokens
-        fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, w1_scale),
+        fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, self.w1_scale),
                                      workspace1, expert_num_tokens, expected_m)
 
         a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm_cuda(
             workspace1, expert_num_tokens)
 
-        fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, w2_scale), output,
-                                     expert_num_tokens, expected_m)
+        fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, self.w2_scale),
+                                     output, expert_num_tokens, expected_m)

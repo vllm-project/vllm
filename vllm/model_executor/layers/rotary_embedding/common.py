@@ -2,13 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from functools import cache
+from importlib.util import find_spec
+from typing import Callable, Optional
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
 
 if current_platform.is_cuda():
     from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+
+logger = init_logger(__name__)
 
 
 # common functions
@@ -64,6 +71,28 @@ def apply_rotary_emb_dispatch(x: torch.Tensor, cos: torch.Tensor,
         return apply_rotary_emb_torch(x, cos, sin, is_neox_style)
 
 
+@cache
+def dispatch_rotary_emb_function(
+    default: Optional[Callable[..., torch.Tensor]] = None
+) -> Callable[..., torch.Tensor]:
+    if current_platform.is_cuda():
+        return apply_rotary_emb
+
+    if current_platform.is_rocm():
+        if find_spec("flash_attn") is not None:
+            from flash_attn.ops.triton.rotary import apply_rotary
+            return apply_rotary
+        else:
+            logger.warning(
+                "flash_attn is not installed. Falling back to PyTorch "
+                "implementation for rotary embeddings.")
+
+    if default is not None:
+        return default
+    else:
+        return apply_rotary_emb_torch
+
+
 # yarn functions
 # Inverse dim formula to find dim based on number of rotations
 def yarn_find_correction_dim(num_rotations: int,
@@ -103,3 +132,47 @@ def yarn_get_mscale(scale: float = 1) -> float:
     if scale <= 1:
         return 1.0
     return 0.1 * math.log(scale) + 1.0
+
+
+def _flashinfer_rotary_embedding(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    """Custom op wrapper for flashinfer's rotary embedding.
+    
+    This is an in-place operation that modifies query and key tensors directly.
+    """
+    from flashinfer.rope import apply_rope_with_cos_sin_cache_inplace
+
+    apply_rope_with_cos_sin_cache_inplace(
+        positions=positions,
+        query=query,
+        key=key,
+        head_size=head_size,
+        cos_sin_cache=cos_sin_cache,
+        is_neox=is_neox,
+    )
+
+
+def _flashinfer_rotary_embedding_fake(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    return
+
+
+# Register flashinfer rotary embedding custom op
+direct_register_custom_op(
+    op_name="flashinfer_rotary_embedding",
+    op_func=_flashinfer_rotary_embedding,
+    mutates_args=["query", "key"],  # These tensors are modified in-place
+    fake_impl=_flashinfer_rotary_embedding_fake,
+)

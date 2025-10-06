@@ -25,12 +25,6 @@ TOKEN_IDS = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    """We can run both engines for this test."""
-    pass
-
-
 @pytest.fixture(scope="module")
 def llm():
     # pytest caches the fixture so we use weakref.proxy to
@@ -88,7 +82,21 @@ def test_max_model_len():
     for output in outputs:
         num_total_tokens = len(output.prompt_token_ids) + len(
             output.outputs[0].token_ids)
-        # Total tokens must not exceed max_model_len.
+        # Total tokens must not exceed max_model_len + 1 (the last token can be
+        # generated with the context length equal to the max model length)
         # It can be less if generation finishes due to other reasons (e.g., EOS)
         # before reaching the absolute model length limit.
-        assert num_total_tokens <= max_model_len
+        assert num_total_tokens <= max_model_len + 1
+
+
+def test_log_stats():
+    llm = LLM(
+        model=MODEL_NAME,
+        disable_log_stats=False,
+        gpu_memory_utilization=0.10,
+        enforce_eager=True,  # reduce test time
+    )
+    outputs = llm.generate(PROMPTS, sampling_params=None)
+
+    # disable_log_stats is False, every output should have metrics
+    assert all(output.metrics is not None for output in outputs)

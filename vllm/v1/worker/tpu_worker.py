@@ -3,7 +3,7 @@
 """A TPU worker class."""
 
 import os
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 import torch
 import torch.distributed
@@ -30,6 +30,8 @@ from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.utils import bind_kv_cache
 
 logger = init_logger(__name__)
+
+_R = TypeVar("_R")
 
 if not USE_TPU_COMMONS:
     logger.info("tpu_commons not found, using vLLM's TPUWorker.")
@@ -332,6 +334,10 @@ class TPUWorker:
 
     def shutdown(self) -> None:
         self.model_runner.ensure_kv_transfer_shutdown()
+
+    def apply_model(self, fn: Callable[[nn.Module], _R]) -> _R:
+        """Apply a function on the model inside this worker."""
+        return fn(self.get_model())
 
 
 if USE_TPU_COMMONS:

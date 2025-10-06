@@ -12,10 +12,10 @@ from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from vllm.assets.image import ImageAsset
+from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode, rescale_image_size
 from vllm.platforms import current_platform
-from vllm.sequence import SampleLogprobs
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptAudioInput,
                           PromptImageInput, VllmRunner)

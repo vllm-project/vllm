@@ -43,10 +43,6 @@ body:
       Any other things you would like to mention.
   validations:
     required: false
-- type: markdown
-  attributes:
-    value: >
-      Thanks for contributing 🎉! The vLLM core team hosts a biweekly RFC review session at 9:30AM Pacific Time, while most RFCs can be discussed online, you can optionally sign up for a slot to discuss your RFC online [here](https://docs.google.com/document/d/1CiLVBZeIVfR7_PNAKVSusxpceywkoOOB78qoWqHvSZc/edit).
 - type: checkboxes
   id: askllm
   attributes:

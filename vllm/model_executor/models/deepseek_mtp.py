@@ -15,7 +15,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import (DeepseekV2DecoderLayer,
@@ -29,13 +28,15 @@ class SharedHead(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        prefix: str,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.head = ParallelLMHead(config.vocab_size,
                                    config.hidden_size,
-                                   quant_config=quant_config)
+                                   quant_config=quant_config,
+                                   prefix=maybe_prefix(prefix, "head"))
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.norm(hidden_states)
@@ -54,8 +55,22 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.eh_proj = nn.Linear(config.hidden_size * 2,
                                  config.hidden_size,
                                  bias=False)
-        self.shared_head = SharedHead(config=config, quant_config=quant_config)
-        self.mtp_block = DeepseekV2DecoderLayer(vllm_config, prefix)
+
+        self.is_v32 = hasattr(config, "index_topk")
+        if self.is_v32:
+            topk_tokens = config.index_topk
+            topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                topk_tokens,
+                dtype=torch.int32,
+                device="cuda")
+        else:
+            topk_indices_buffer = None
+        self.shared_head = SharedHead(config=config,
+                                      prefix=prefix,
+                                      quant_config=quant_config)
+        self.mtp_block = DeepseekV2DecoderLayer(vllm_config, prefix,
+                                                topk_indices_buffer)
 
     def forward(
         self,
@@ -102,6 +117,9 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -124,15 +142,13 @@ class DeepSeekMultiTokenPredictor(nn.Module):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         current_step_idx = (spec_step_idx % self.num_mtp_layers)
         mtp_layer = self.layers[str(self.mtp_start_layer_idx +
                                     current_step_idx)]
         logits = self.logits_processor(mtp_layer.shared_head.head,
-                                       mtp_layer.shared_head(hidden_states),
-                                       sampling_metadata)
+                                       mtp_layer.shared_head(hidden_states))
         return logits
 
 
@@ -144,6 +160,9 @@ class DeepSeekMTP(nn.Module, SupportsPP):
         self.model = DeepSeekMultiTokenPredictor(vllm_config=vllm_config,
                                                  prefix=maybe_prefix(
                                                      prefix, "model"))
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -161,11 +180,9 @@ class DeepSeekMTP(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
         spec_step_idx: int = 0,
     ) -> Optional[torch.Tensor]:
-        return self.model.compute_logits(hidden_states, sampling_metadata,
-                                         spec_step_idx)
+        return self.model.compute_logits(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

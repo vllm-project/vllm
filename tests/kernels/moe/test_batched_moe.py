@@ -140,7 +140,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         in_dtype=act_dtype,
         quant_dtype=quant_dtype,
         block_shape=block_shape,
-        per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant,
     )
 
     out_shape = (num_experts, max_tokens_per_expert, N)
@@ -250,7 +250,7 @@ def test_fused_moe_batched_experts(
         block_shape=block_shape,
         in_dtype=act_dtype,
         quant_dtype=quant_dtype,
-        per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant,
     )
 
     if input_scales and quant_dtype is not None:

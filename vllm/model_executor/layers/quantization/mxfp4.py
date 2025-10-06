@@ -12,6 +12,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig, mxfp4_w4a4_moe_quant_config,
+    mxfp4_w4a16_moe_quant_config)
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import MarlinExperts
+from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
+    OAITritonExperts)
 from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
@@ -87,7 +93,7 @@ def get_mxfp4_backend():
                 "Please `pip install vllm[flashinfer]` for best results.")
 
         # If FlashInfer is not available, try either Marlin or Triton
-        if current_platform.get_device_capability(
+        if envs.VLLM_MXFP4_USE_MARLIN or current_platform.get_device_capability(
         )[0] < 9 or not has_triton_kernels() or not is_torch_equal_or_newer(
                 "2.8.0"):
             logger.info_once("Using Marlin backend")
@@ -207,12 +213,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 256)
             hidden_size = round_up(hidden_size, 256)
-        elif current_platform.is_rocm() or (
-                self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-                or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16):
+        elif (self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
+              or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16):
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 128)
             hidden_size = round_up(hidden_size, 128)
+        elif current_platform.is_rocm():
+            intermediate_size_per_partition_after_pad = round_up(
+                intermediate_size_per_partition, 256)
+            hidden_size = round_up(hidden_size, 256)
         else:
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 64)
@@ -576,9 +585,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w13_bias = Parameter(w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(w2_bias, requires_grad=False)
 
-            # FIXME warp need to be adjusted based on batch size
-            # only apply to  batched mode
-            if self.moe.use_ep:
+            # Ideally we'd use FusedMoEModularKernel.prepare_finalize object
+            # (stored in self.fused_experts) to determine if the MoE has a
+            # batched activation format. As self.fused_experts is not
+            # initialized at this point, we resort to checking the MoE config
+            # directly.
+            is_batched_moe = (self.moe.use_pplx_kernels
+                              or self.moe.use_deepep_ll_kernels)
+            if is_batched_moe:
                 num_warps = 4 if envs.VLLM_MOE_DP_CHUNK_SIZE <= 512 else 8
             else:
                 num_warps = 8
@@ -629,10 +643,38 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         return tile_tokens_dim
 
+    def get_fused_moe_quant_config(
+            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+
+        if self.mxfp4_backend == Mxfp4Backend.MARLIN:
+            return mxfp4_w4a16_moe_quant_config(
+                w1_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+            )
+        elif self.mxfp4_backend == Mxfp4Backend.TRITON:
+            w1_scale = self.w13_precision_config
+            w2_scale = self.w2_precision_config
+            return mxfp4_w4a16_moe_quant_config(
+                w1_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+            )
+        else:
+            w1_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
+            return mxfp4_w4a4_moe_quant_config(
+                w1_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+            )
+
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
-        moe: FusedMoEConfig,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         if (prepare_finalize.activation_format ==
@@ -640,6 +682,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError(
                 "Mxfp4 does not support batched experts format for EP")
         else:
+            assert self.moe_quant_config is not None
             if (self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
                     or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
                 # B200 code-path
@@ -647,15 +690,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     "gemm1_alpha": layer.gemm1_alpha,
                     "gemm1_beta": layer.gemm1_beta,
                     "gemm1_clamp_limit": layer.gemm1_clamp_limit,
-                    "w13_bias": layer.w13_bias,
-                    "w2_bias": layer.w2_bias,
+                    # TODO(bnell): part of quant_config
                     "max_capture_size": self.max_capture_size,
                 }
-                return TrtLlmGenExperts(moe, **kwargs)
+                return TrtLlmGenExperts(self.moe, self.moe_quant_config,
+                                        **kwargs)
+            elif (self.mxfp4_backend == Mxfp4Backend.MARLIN):
+                return MarlinExperts(self.moe_quant_config)
             else:
-                # Use matmul_ogs from triton_kernels here!
-                raise NotImplementedError(
-                    "Mxfp4 does not support non-batched experts format for EP")
+                return OAITritonExperts(self.moe_quant_config)
 
     def _route_and_experts(
             self,
@@ -682,7 +725,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         assert isinstance(self.fused_experts, mk.FusedMoEModularKernel)
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -700,18 +743,22 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count)
 
+        w13_weight = (self.w13_weight_triton_tensor
+                      if layer.w13_weight is None else layer.w13_weight)
+        w2_weight = (self.w2_weight_triton_tensor
+                     if layer.w2_weight is None else layer.w2_weight)
+        assert all([w is not None for w in [w13_weight, w2_weight]])
+
         return self.fused_experts(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=w13_weight,
+            w2=w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
             activation=activation,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
@@ -742,8 +789,31 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         if enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
+        if self.fused_experts is not None:
+            return self._route_and_experts(
+                layer,
+                x,
+                router_logits,
+                top_k,
+                renormalize,
+                use_grouped_topk,
+                topk_group,
+                num_expert_group,
+                global_num_experts,
+                expert_map,
+                custom_routing_function,
+                scoring_func,
+                e_score_correction_bias,
+                apply_router_weight_on_input,
+                activation,
+                enable_eplb,
+                expert_load_view,
+                logical_to_physical_map,
+                logical_replica_count,
+            )
+
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            topk_weights, topk_ids = FusedMoE.select_experts(
+            topk_weights, topk_ids, _ = FusedMoE.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
                 use_grouped_topk=use_grouped_topk,
@@ -774,29 +844,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 activation=activation,
                 expert_map=expert_map)
-
-        if self.fused_experts is not None:
-            return self._route_and_experts(
-                layer,
-                x,
-                router_logits,
-                top_k,
-                renormalize,
-                use_grouped_topk,
-                topk_group,
-                num_expert_group,
-                global_num_experts,
-                expert_map,
-                custom_routing_function,
-                scoring_func,
-                e_score_correction_bias,
-                apply_router_weight_on_input,
-                activation,
-                enable_eplb,
-                expert_load_view,
-                logical_to_physical_map,
-                logical_replica_count,
-            )
 
         assert _can_support_mxfp4(
             use_grouped_topk, topk_group, num_expert_group, expert_map,
@@ -854,7 +901,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
               or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16):
             from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
 
-            topk_weights, topk_ids = FusedMoE.select_experts(
+            topk_weights, topk_ids, _ = FusedMoE.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
                 use_grouped_topk=use_grouped_topk,
@@ -941,10 +988,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 renormalize=renormalize,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
-                w1_bias=layer.w13_bias,
-                w2_bias=layer.w2_bias,
-                w1_precision=self.w13_precision_config,
-                w2_precision=self.w2_precision_config,
+                quant_config=self.moe_quant_config,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
         else:

@@ -4,20 +4,24 @@
 import itertools
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Optional, Protocol, Union, overload
+from typing import Any, Literal, Optional, Protocol, Union, overload
 
 import torch
 import torch.nn as nn
 from torch.func import functional_call
 from transformers import PretrainedConfig
+from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
+from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
-from vllm.utils import (get_cuda_view_from_cpu_tensor, is_pin_memory_available,
+from vllm.utils import (cdiv, direct_register_custom_op,
+                        get_cuda_view_from_cpu_tensor, is_pin_memory_available,
                         is_uva_available)
 
 logger = init_logger(__name__)
@@ -109,6 +113,7 @@ class AutoWeightsLoader:
         skip_prefixes: Optional[list[str]] = None,
         skip_substrs: Optional[list[str]] = None,
         ignore_unexpected_prefixes: Optional[list[str]] = None,
+        ignore_unexpected_suffixes: Optional[list[str]] = None,
     ) -> None:
         super().__init__()
 
@@ -116,6 +121,7 @@ class AutoWeightsLoader:
         self.skip_prefixes = skip_prefixes or []
         self.skip_substrs = skip_substrs or []
         self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
+        self.ignore_unexpected_suffixes = ignore_unexpected_suffixes or []
         # update default skip_substrs
         self.skip_substrs += self.ROTARY_EMBEDS_UNUSED_WEIGHTS
 
@@ -149,8 +155,9 @@ class AutoWeightsLoader:
                 or any(substr in qualname for substr in self.skip_substrs))
 
     def _can_ignore_unexpected(self, qualname: str) -> bool:
-        return any(
-            qualname.startswith(p) for p in self.ignore_unexpected_prefixes)
+        iup = (qualname.startswith(p) for p in self.ignore_unexpected_prefixes)
+        ius = (qualname.endswith(s) for s in self.ignore_unexpected_suffixes)
+        return any(iup) or any(ius)
 
     def _load_param(
         self,
@@ -389,26 +396,10 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
         _embedding_count_expression(inner) for inner in embeddings)
 
 
-def merge_multimodal_embeddings_from_map(
-        inputs_embeds: torch.Tensor, multimodal_embeddings: NestedTensors,
-        placeholder_map: MultiModalPlaceholderMap.IndexMap) -> torch.Tensor:
-    """
-    Merge ``multimodal_embeddings`` into ``inputs_embeds`` using the provided
-    placeholder map .
-
-    Note:
-        This updates ``inputs_embeds`` in place.
-    """
-    flattened_embeddings = _flatten_embeddings(multimodal_embeddings)
-    inputs_embeds[placeholder_map.dest] = flattened_embeddings[
-        placeholder_map.src].to(dtype=inputs_embeds.dtype)
-    return inputs_embeds
-
-
 def _merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,
-    is_multimodal: torch.Tensor,
     multimodal_embeddings: NestedTensors,
+    is_multimodal: torch.Tensor,
 ) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
@@ -418,63 +409,40 @@ def _merge_multimodal_embeddings(
     Note:
         This updates ``inputs_embeds`` in place.
     """
-    flattened = _flatten_embeddings(multimodal_embeddings)
-    try:
-        # This is equivalent to: inputs_embeds[is_multimodal] = flattened.
-        inputs_embeds.masked_scatter_(is_multimodal.unsqueeze(-1),
-                                      flattened.to(dtype=inputs_embeds.dtype))
-    except RuntimeError as e:
-        num_expected_tokens = is_multimodal.sum().item()
-        assert isinstance(num_expected_tokens, int)
+    if len(multimodal_embeddings) == 0:
+        return inputs_embeds
 
-        if flattened.shape[0] != num_expected_tokens:
+    mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
+    input_dtype = inputs_embeds.dtype
+
+    try:
+        # For debugging
+        # inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
+
+        # NOTE: This can avoid D2H sync (#22105), but fails to
+        # raise an error if is_multimodal.sum() < len(mm_embeds_flat)
+        inputs_embeds.masked_scatter_(is_multimodal.unsqueeze(-1),
+                                      mm_embeds_flat.to(dtype=input_dtype))
+    except RuntimeError as e:
+        num_actual_tokens = len(mm_embeds_flat)
+        num_expected_tokens = is_multimodal.sum().item()
+
+        if num_actual_tokens != num_expected_tokens:
             expr = _embedding_count_expression(multimodal_embeddings)
+
             raise ValueError(
-                f"Attempted to assign {expr} = {flattened.shape[0]} "
+                f"Attempted to assign {expr} = {num_actual_tokens} "
                 f"multimodal tokens to {num_expected_tokens} placeholders"
             ) from e
-        else:
-            raise ValueError("Error during masked scatter operation") from e
+
+        raise ValueError("Error during masked scatter operation") from e
 
     return inputs_embeds
 
 
-def embed_multimodal(
-    input_ids: torch.Tensor,
-    multimodal_token_id: int,
-    get_text_embeds: Callable[[torch.Tensor], torch.Tensor],
-    multimodal_embeds: NestedTensors,
-) -> torch.Tensor:
-    """
-    Embed token IDs and multimodal inputs and combine their embeddings.
-
-    ``multimodal_token_id`` is used to determine whether a token ID should
-    be embedded using ``get_text_embeds`` or ``get_multimodal_embeds``.
-
-    Compared to ``merge_multimodal_embeddings`, this avoids running
-    ``get_text_embeds`` on ``input_ids[input_ids == multimodal_token_id]``
-    which causes issues when the placeholder token ID exceeds the
-    vocabulary size of the language model.
-    """
-    is_multimodal = input_ids == multimodal_token_id
-    is_text = ~is_multimodal
-
-    text_embeds = get_text_embeds(input_ids[is_text])
-    merged_embeds = torch.empty(
-        (input_ids.shape[0], text_embeds.shape[1]),
-        dtype=text_embeds.dtype,
-        device=text_embeds.device,
-    )
-
-    merged_embeds[is_text] = text_embeds
-
-    return _merge_multimodal_embeddings(
-        merged_embeds,
-        is_multimodal,
-        multimodal_embeds,
-    )
-
-
+@deprecated("`merge_multimodal_embeddings` has been replaced with "
+            "`SupportsMultiModal.get_input_embeddings` and will be "
+            "removed in v0.12.")
 def merge_multimodal_embeddings(
     input_ids: torch.Tensor,
     inputs_embeds: torch.Tensor,
@@ -507,21 +475,27 @@ def merge_multimodal_embeddings(
         This updates ``inputs_embeds`` in place.
     """
     if isinstance(placeholder_token_id, list):
-        placeholder_token_id = torch.tensor(
-            placeholder_token_id,
-            pin_memory=is_pin_memory_available()).to(device=input_ids.device,
-                                                     non_blocking=True)
-        return _merge_multimodal_embeddings(
-            inputs_embeds,
-            torch.isin(input_ids, placeholder_token_id),
-            multimodal_embeddings,
-        )
+        is_multimodal = isin_list(input_ids, placeholder_token_id)
+    else:
+        is_multimodal = (input_ids == placeholder_token_id)
 
     return _merge_multimodal_embeddings(
         inputs_embeds,
-        (input_ids == placeholder_token_id),
-        multimodal_embeddings,
+        multimodal_embeddings=multimodal_embeddings,
+        is_multimodal=is_multimodal,
     )
+
+
+def isin_list(
+    elements: torch.Tensor,
+    test_elements_list: list[int],
+) -> torch.Tensor:
+    test_elements = torch.tensor(
+        test_elements_list,
+        pin_memory=is_pin_memory_available(),
+    ).to(device=elements.device, non_blocking=True)
+
+    return torch.isin(elements, test_elements)
 
 
 class LayerFn(Protocol):
@@ -707,14 +681,14 @@ def maybe_prefix(prefix: str, name: str) -> str:
     return name if not prefix else f"{prefix}.{name}"
 
 
-def extract_layer_index(layer_name: str) -> int:
+def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
     """
     Extract the layer index from the module name.
     Examples:
     - "encoder.layers.0" -> 0
     - "encoder.layers.1.self_attn" -> 1
     - "2.self_attn" -> 2
-    - "model.encoder.layers.0.sub.1" -> ValueError
+    - "model.encoder.layers.0.sub.1" -> ValueError if num_attn_module == 1
     """
     subnames = layer_name.split(".")
     int_vals: list[int] = []
@@ -723,9 +697,17 @@ def extract_layer_index(layer_name: str) -> int:
             int_vals.append(int(subname))
         except ValueError:
             continue
-    assert len(int_vals) == 1, (f"layer name {layer_name} should"
-                                " only contain one integer")
-    return int_vals[0]
+    if num_attn_module == 1 or "attn" not in layer_name:
+        assert len(int_vals) == 1, (f"layer name {layer_name} should"
+                                    " only contain one integer")
+
+        return int_vals[0]
+    else:
+        assert len(int_vals) <= 2, (f"layer name {layer_name} should"
+                                    " contain most two integers")
+        layer_index = int_vals[0] * num_attn_module + int_vals[1] if len(
+            int_vals) == 2 else int_vals[0]
+        return layer_index
 
 
 def cast_overflow_tensors(
@@ -768,3 +750,46 @@ def get_model_hidden_size(hf_config: PretrainedConfig) -> int:
         return hf_config.hidden_size
     text_config = hf_config.get_text_config()
     return text_config.hidden_size
+
+
+# Chunk x along the num_tokens axis for sequence parallelism
+# NOTE: This is wrapped in a torch custom op to work around the following issue:
+# The output tensor can have a sequence length 0 at small input sequence lengths
+# even though we explicitly pad to avoid this.
+def sequence_parallel_chunk(x: torch.Tensor) -> torch.Tensor:
+    return torch.ops.vllm.sequence_parallel_chunk_impl(x)
+
+
+def sequence_parallel_chunk_impl(x: torch.Tensor) -> torch.Tensor:
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+
+    # all_gather needs the sequence length to be divisible by tp_size
+    seq_len = x.size(0)
+    remainder = seq_len % tp_size
+    if remainder != 0:
+        pad_len = tp_size - remainder
+        y = nn.functional.pad(x, (0, 0, 0, pad_len))
+    else:
+        y = x
+
+    chunk = y.shape[0] // tp_size
+    start = tp_rank * chunk
+    return torch.narrow(y, 0, start, chunk)
+
+
+def sequence_parallel_chunk_impl_fake(x: torch.Tensor) -> torch.Tensor:
+    tp_size = get_tensor_model_parallel_world_size()
+    seq_len = cdiv(x.size(0), tp_size)
+    shape = list(x.shape)
+    shape[0] = seq_len
+    out = torch.empty(shape, dtype=x.dtype, device=x.device)
+    return out
+
+
+direct_register_custom_op(
+    op_name="sequence_parallel_chunk_impl",
+    op_func=sequence_parallel_chunk_impl,
+    fake_impl=sequence_parallel_chunk_impl_fake,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
+)

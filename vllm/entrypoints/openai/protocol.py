@@ -17,11 +17,34 @@ from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio)
 from openai.types.chat.chat_completion_message import (
     Annotation as OpenAIAnnotation)
-# yapf: enable
-from openai.types.responses import (ResponseFunctionToolCall,
-                                    ResponseInputItemParam, ResponseOutputItem,
+from openai.types.responses import (
+    ResponseCodeInterpreterCallCodeDeltaEvent,
+    ResponseCodeInterpreterCallCodeDoneEvent,
+    ResponseCodeInterpreterCallCompletedEvent,
+    ResponseCodeInterpreterCallInProgressEvent,
+    ResponseCodeInterpreterCallInterpretingEvent)
+from openai.types.responses import (
+    ResponseCompletedEvent as OpenAIResponseCompletedEvent)
+from openai.types.responses import (ResponseContentPartAddedEvent,
+                                    ResponseContentPartDoneEvent)
+from openai.types.responses import (
+    ResponseCreatedEvent as OpenAIResponseCreatedEvent)
+from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import (
+    ResponseInProgressEvent as OpenAIResponseInProgressEvent)
+from openai.types.responses import (ResponseInputItemParam, ResponseOutputItem,
+                                    ResponseOutputItemAddedEvent,
+                                    ResponseOutputItemDoneEvent,
                                     ResponsePrompt, ResponseReasoningItem,
-                                    ResponseStatus)
+                                    ResponseReasoningTextDeltaEvent,
+                                    ResponseReasoningTextDoneEvent,
+                                    ResponseStatus,
+                                    ResponseWebSearchCallCompletedEvent,
+                                    ResponseWebSearchCallInProgressEvent,
+                                    ResponseWebSearchCallSearchingEvent)
+# yapf: enable
+from openai.types.responses.response_reasoning_item import (
+    Content as ResponseReasoningTextContent)
 
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
@@ -45,8 +68,8 @@ from vllm.entrypoints.score_utils import (ScoreContentPartParam,
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
-                                  RequestOutputKind, SamplingParams)
+from vllm.sampling_params import (BeamSearchParams, RequestOutputKind,
+                                  SamplingParams, StructuredOutputsParams)
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
@@ -317,6 +340,13 @@ class ResponsesRequest(OpenAIBaseModel):
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
             "to 256 bit). Not supported by vLLM engine V0."))
+
+    enable_response_messages: bool = Field(
+        default=False,
+        description=(
+            "Dictates whether or not to return messages as part of the "
+            "response object. Currently only supported for non-streaming "
+            "non-background and gpt-oss only. "))
     # --8<-- [end:responses-extra-params]
 
     _DEFAULT_SAMPLING_PARAMS = {
@@ -344,11 +374,12 @@ class ResponsesRequest(OpenAIBaseModel):
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
-        guided_decoding = None
+        structured_outputs = None
         if self.text is not None and self.text.format is not None:
             response_format = self.text.format
-            if response_format.type == "json_schema":
-                guided_decoding = GuidedDecodingParams.from_optional(
+            if (response_format.type == "json_schema"
+                    and response_format.schema_ is not None):
+                structured_outputs = StructuredOutputsParams(
                     json=response_format.schema_)
             elif response_format.type == "json_object":
                 raise NotImplementedError("json_object is not supported")
@@ -363,7 +394,7 @@ class ResponsesRequest(OpenAIBaseModel):
             stop_token_ids=stop_token_ids,
             output_kind=(RequestOutputKind.DELTA
                          if self.stream else RequestOutputKind.FINAL_ONLY),
-            guided_decoding=guided_decoding,
+            structured_outputs=structured_outputs,
         )
 
     def is_include_output_logprobs(self) -> bool:
@@ -518,42 +549,59 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
+    structured_outputs: Optional[StructuredOutputsParams] = Field(
+        default=None,
+        description="Additional kwargs for structured outputs",
+    )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
-        description=("If specified, the output will follow the JSON schema."),
+        description=(
+            "`guided_json` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `json` to `structured_outputs` instead."),
     )
     guided_regex: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, the output will follow the regex pattern."),
+            "`guided_regex` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `regex` to `structured_outputs` instead."),
     )
     guided_choice: Optional[list[str]] = Field(
         default=None,
         description=(
-            "If specified, the output will be exactly one of the choices."),
+            "`guided_choice` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `choice` to `structured_outputs` instead."),
     )
     guided_grammar: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, the output will follow the context free grammar."),
+            "`guided_grammar` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `grammar` to `structured_outputs` instead."),
     )
     structural_tag: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, the output will follow the structural tag schema."),
+            "`structural_tag` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `structural_tag` to `structured_outputs` instead."),
     )
     guided_decoding_backend: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be either "
-            "'outlines' / 'lm-format-enforcer'"),
+            "`guided_decoding_backend` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please remove it from your request."),
     )
     guided_whitespace_pattern: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, will override the default whitespace pattern "
-            "for guided json decoding."),
+            "`guided_whitespace_pattern` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `whitespace_pattern` to `structured_outputs` instead."
+        ),
     )
     priority: int = Field(
         default=0,
@@ -672,31 +720,47 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        guided_json_object = None
-        if self.response_format is not None:
-            if self.response_format.type == "json_object":
-                guided_json_object = True
-            elif self.response_format.type == "json_schema":
-                json_schema = self.response_format.json_schema
-                assert json_schema is not None
-                self.guided_json = json_schema.json_schema
-            elif self.response_format.type == "structural_tag":
-                structural_tag = self.response_format
-                assert structural_tag is not None and isinstance(
-                    structural_tag, StructuralTagResponseFormat)
-                s_tag_obj = structural_tag.model_dump(by_alias=True)
-                self.structural_tag = json.dumps(s_tag_obj)
+        # Forward deprecated guided_* parameters to structured_outputs
+        if self.structured_outputs is None:
+            kwargs = dict[str, Any](
+                json=self.guided_json,
+                regex=self.guided_regex,
+                choice=self.guided_choice,
+                grammar=self.guided_grammar,
+                whitespace_pattern=self.guided_whitespace_pattern,
+                structural_tag=self.structural_tag,
+            )
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            if len(kwargs) > 0:
+                self.structured_outputs = StructuredOutputsParams(**kwargs)
 
-        guided_decoding = GuidedDecodingParams.from_optional(
-            json=self._get_guided_json_from_tool() or self.guided_json,
-            regex=self.guided_regex,
-            choice=self.guided_choice,
-            grammar=self.guided_grammar,
-            json_object=guided_json_object,
-            backend=self.guided_decoding_backend,
-            whitespace_pattern=self.guided_whitespace_pattern,
-            structural_tag=self.structural_tag,
-        )
+        response_format = self.response_format
+        json_schema_from_tool = self._get_json_schema_from_tool()
+        if response_format is not None or json_schema_from_tool is not None:
+            # If structured outputs wasn't already enabled,
+            # we must enable it for these features to work
+            if self.structured_outputs is None:
+                self.structured_outputs = StructuredOutputsParams()
+
+            # Set structured output params for response format
+            if response_format is not None:
+                if response_format.type == "json_object":
+                    self.structured_outputs.json_object = True
+                elif response_format.type == "json_schema":
+                    json_schema = response_format.json_schema
+                    assert json_schema is not None
+                    self.structured_outputs.json = json_schema.json_schema
+                elif response_format.type == "structural_tag":
+                    structural_tag = response_format
+                    assert structural_tag is not None and isinstance(
+                        structural_tag, StructuralTagResponseFormat)
+                    s_tag_obj = structural_tag.model_dump(by_alias=True)
+                    self.structured_outputs.structural_tag = json.dumps(
+                        s_tag_obj)
+
+            # Set structured output params for tool calling
+            if json_schema_from_tool is not None:
+                self.structured_outputs.json = json_schema_from_tool
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -728,15 +792,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
-            guided_decoding=guided_decoding,
+            structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
-            bad_words= self.bad_words,
+            bad_words=self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
         )
 
-    def _get_guided_json_from_tool(
-            self) -> Optional[Union[str, dict, BaseModel]]:
+    def _get_json_schema_from_tool(self) -> Optional[Union[str, dict]]:
         # user has chosen to not use any tool
         if self.tool_choice == "none" or self.tools is None:
             return None
@@ -822,18 +885,24 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_logprobs(cls, data):
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
-            if data.get("stream") and prompt_logprobs > 0:
+            if data.get("stream") and (prompt_logprobs > 0
+                                       or prompt_logprobs == -1):
                 raise ValueError(
                     "`prompt_logprobs` are not available when `stream=True`.")
 
-            if prompt_logprobs < 0:
-                raise ValueError("`prompt_logprobs` must be a positive value.")
-
+            if prompt_logprobs < 0 and prompt_logprobs != -1:
+                raise ValueError(
+                    "`prompt_logprobs` must be a positive value or -1.")
+            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
+                raise ValueError("`prompt_logprobs=-1` is only supported with "
+                                 "vLLM engine V1.")
         if (top_logprobs := data.get("top_logprobs")) is not None:
-            if top_logprobs < 0:
-                raise ValueError("`top_logprobs` must be a positive value.")
+            if top_logprobs < 0 and top_logprobs != -1:
+                raise ValueError(
+                    "`top_logprobs` must be a positive value or -1.")
 
-            if top_logprobs > 0 and not data.get("logprobs"):
+            if (top_logprobs == -1
+                    or top_logprobs > 0) and not data.get("logprobs"):
                 raise ValueError(
                     "when using `top_logprobs`, `logprobs` must be set to true."
                 )
@@ -842,28 +911,31 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def check_guided_decoding_count(cls, data):
+    def check_structured_outputs_count(cls, data):
         if isinstance(data, ValueError):
             raise data
 
-        guide_count = sum([
-            "guided_json" in data and data["guided_json"] is not None,
-            "guided_regex" in data and data["guided_regex"] is not None,
-            "guided_choice" in data and data["guided_choice"] is not None
-        ])
-        # you can only use one kind of guided decoding
-        if guide_count > 1:
+        if data.get("structured_outputs", None) is None:
+            return data
+
+        structured_outputs_kwargs = data['structured_outputs']
+        count = sum(
+            structured_outputs_kwargs.get(k) is not None
+            for k in ("json", "regex", "choice"))
+        # you can only use one kind of constraints for structured outputs
+        if count > 1:
             raise ValueError(
-                "You can only use one kind of guided decoding "
-                "('guided_json', 'guided_regex' or 'guided_choice').")
-        # you can only either use guided decoding or tools, not both
-        if guide_count > 1 and data.get("tool_choice", "none") not in (
+                "You can only use one kind of constraints for structured "
+                "outputs ('json', 'regex' or 'choice').")
+        # you can only either use structured outputs or tools, not both
+        if count > 1 and data.get("tool_choice", "none") not in (
                 "none",
                 "auto",
                 "required",
         ):
             raise ValueError(
-                "You can only either use guided decoding or tools, not both.")
+                "You can only either use constraints for structured outputs "
+                "or tools, not both.")
         return data
 
     @model_validator(mode="before")
@@ -966,7 +1038,6 @@ class CompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/completions/create
     model: Optional[str] = None
     prompt: Optional[Union[list[int], list[list[int]], str, list[str]]] = None
-    prompt_embeds: Optional[Union[bytes, list[bytes]]] = None
     best_of: Optional[int] = None
     echo: Optional[bool] = False
     frequency_penalty: Optional[float] = 0.0
@@ -1002,6 +1073,7 @@ class CompletionRequest(OpenAIBaseModel):
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
+    prompt_embeds: Optional[Union[bytes, list[bytes]]] = None
     add_special_tokens: bool = Field(
         default=True,
         description=(
@@ -1016,37 +1088,52 @@ class CompletionRequest(OpenAIBaseModel):
             ", {'type': 'structural_tag'}, or {'type': 'text' } is supported."
         ),
     )
+    structured_outputs: Optional[StructuredOutputsParams] = Field(
+        default=None,
+        description="Additional kwargs for structured outputs",
+    )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
-        description="If specified, the output will follow the JSON schema.",
+        description=(
+            "`guided_json` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `json` to `structured_outputs` instead."),
     )
     guided_regex: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, the output will follow the regex pattern."),
+            "`guided_regex` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `regex` to `structured_outputs` instead."),
     )
     guided_choice: Optional[list[str]] = Field(
         default=None,
         description=(
-            "If specified, the output will be exactly one of the choices."),
+            "`guided_choice` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `choice` to `structured_outputs` instead."),
     )
     guided_grammar: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, the output will follow the context free grammar."),
+            "`guided_grammar` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `grammar` to `structured_outputs` instead."),
     )
     guided_decoding_backend: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be one of "
-            "'outlines' / 'lm-format-enforcer'"),
+            "`guided_decoding_backend` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please remove it from your request."),
     )
     guided_whitespace_pattern: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, will override the default whitespace pattern "
-            "for guided json decoding."),
+            "`guided_whitespace_pattern` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `whitespace_pattern` to `structured_outputs` instead."
+        ),
     )
     priority: int = Field(
         default=0,
@@ -1177,20 +1264,23 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
-        guided_json_object = None
-        if (self.response_format is not None
-                and self.response_format.type == "json_object"):
-            guided_json_object = True
+        # Forward deprecated guided_* parameters to structured_outputs
+        if self.structured_outputs is None:
+            kwargs = dict[str, Any](
+                json=self.guided_json,
+                regex=self.guided_regex,
+                choice=self.guided_choice,
+                grammar=self.guided_grammar,
+                whitespace_pattern=self.guided_whitespace_pattern,
+            )
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            if len(kwargs) > 0:
+                self.structured_outputs = StructuredOutputsParams(**kwargs)
 
-        guided_decoding = GuidedDecodingParams.from_optional(
-            json=self.guided_json,
-            regex=self.guided_regex,
-            choice=self.guided_choice,
-            grammar=self.guided_grammar,
-            json_object=guided_json_object,
-            backend=self.guided_decoding_backend,
-            whitespace_pattern=self.guided_whitespace_pattern,
-        )
+        if (self.structured_outputs is not None
+                and self.response_format is not None
+                and self.response_format.type == "json_object"):
+            self.structured_outputs.json_object = True
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -1222,7 +1312,7 @@ class CompletionRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA if self.stream \
                 else RequestOutputKind.FINAL_ONLY,
-            guided_decoding=guided_decoding,
+            structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
@@ -1230,29 +1320,35 @@ class CompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def check_guided_decoding_count(cls, data):
-        guide_count = sum([
-            "guided_json" in data and data["guided_json"] is not None,
-            "guided_regex" in data and data["guided_regex"] is not None,
-            "guided_choice" in data and data["guided_choice"] is not None
-        ])
-        if guide_count > 1:
+    def check_structured_outputs_count(cls, data):
+        if data.get("structured_outputs", None) is None:
+            return data
+
+        structured_outputs_kwargs = data['structured_outputs']
+        count = sum(
+            structured_outputs_kwargs.get(k) is not None
+            for k in ("json", "regex", "choice"))
+        if count > 1:
             raise ValueError(
-                "You can only use one kind of guided decoding "
-                "('guided_json', 'guided_regex' or 'guided_choice').")
+                "You can only use one kind of constraints for structured "
+                "outputs ('json', 'regex' or 'choice').")
         return data
 
     @model_validator(mode="before")
     @classmethod
     def check_logprobs(cls, data):
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
-            if data.get("stream") and prompt_logprobs > 0:
+            if data.get("stream") and (prompt_logprobs > 0
+                                       or prompt_logprobs == -1):
                 raise ValueError(
                     "`prompt_logprobs` are not available when `stream=True`.")
 
-            if prompt_logprobs < 0:
-                raise ValueError("`prompt_logprobs` must be a positive value.")
-
+            if prompt_logprobs < 0 and prompt_logprobs != -1:
+                raise ValueError(
+                    "`prompt_logprobs` must be a positive value or -1.")
+            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
+                raise ValueError("`prompt_logprobs=-1` is only supported with "
+                                 "vLLM engine V1.")
         if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
             raise ValueError("`logprobs` must be a positive value.")
 
@@ -1874,6 +1970,11 @@ class ResponsesResponse(OpenAIBaseModel):
     model: str
     object: Literal["response"] = "response"
     output: list[ResponseOutputItem]
+    # These are populated when enable_response_messages is set to True
+    # TODO: Currently an issue where content of harmony messages
+    # is not available when these are serialized. Metadata is available
+    input_messages: Optional[list[ChatCompletionMessageParam]] = None
+    output_messages: Optional[list[ChatCompletionMessageParam]] = None
     parallel_tool_calls: bool
     temperature: float
     tool_choice: ToolChoice
@@ -1903,6 +2004,8 @@ class ResponsesResponse(OpenAIBaseModel):
         output: list[ResponseOutputItem],
         status: ResponseStatus,
         usage: Optional[ResponseUsage] = None,
+        input_messages: Optional[list[ChatCompletionMessageParam]] = None,
+        output_messages: Optional[list[ChatCompletionMessageParam]] = None,
     ) -> "ResponsesResponse":
 
         incomplete_details: Optional[IncompleteDetails] = None
@@ -1911,7 +2014,6 @@ class ResponsesResponse(OpenAIBaseModel):
         # TODO: implement the other reason for incomplete_details,
         # which is content_filter
         # incomplete_details = IncompleteDetails(reason='content_filter')
-
         return cls(
             id=request.request_id,
             created_at=created_time,
@@ -1920,6 +2022,8 @@ class ResponsesResponse(OpenAIBaseModel):
             metadata=request.metadata,
             model=model_name,
             output=output,
+            input_messages=input_messages,
+            output_messages=output_messages,
             parallel_tool_calls=request.parallel_tool_calls,
             temperature=sampling_params.temperature,
             tool_choice=request.tool_choice,
@@ -1940,6 +2044,86 @@ class ResponsesResponse(OpenAIBaseModel):
             usage=usage,
         )
 
+
+# TODO: this code can be removed once
+# https://github.com/openai/openai-python/issues/2634 has been resolved
+class ResponseReasoningPartDoneEvent(OpenAIBaseModel):
+    content_index: int
+    """The index of the content part that is done."""
+
+    item_id: str
+    """The ID of the output item that the content part was added to."""
+
+    output_index: int
+    """The index of the output item that the content part was added to."""
+
+    part: ResponseReasoningTextContent
+    """The content part that is done."""
+
+    sequence_number: int
+    """The sequence number of this event."""
+
+    type: Literal["response.reasoning_part.done"]
+    """The type of the event. Always `response.reasoning_part.done`."""
+
+
+# TODO: this code can be removed once
+# https://github.com/openai/openai-python/issues/2634 has been resolved
+class ResponseReasoningPartAddedEvent(OpenAIBaseModel):
+    content_index: int
+    """The index of the content part that is done."""
+
+    item_id: str
+    """The ID of the output item that the content part was added to."""
+
+    output_index: int
+    """The index of the output item that the content part was added to."""
+
+    part: ResponseReasoningTextContent
+    """The content part that is done."""
+
+    sequence_number: int
+    """The sequence number of this event."""
+
+    type: Literal["response.reasoning_part.added"]
+    """The type of the event. Always `response.reasoning_part.added`."""
+
+
+# vLLM Streaming Events
+# Note: we override the response type with the vLLM ResponsesResponse type
+class ResponseCompletedEvent(OpenAIResponseCompletedEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+class ResponseCreatedEvent(OpenAIResponseCreatedEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+class ResponseInProgressEvent(OpenAIResponseInProgressEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+StreamingResponsesResponse: TypeAlias = Union[
+    "ResponseCreatedEvent",
+    "ResponseInProgressEvent",
+    "ResponseCompletedEvent",
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+    ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent,
+    ResponseReasoningTextDeltaEvent,
+    ResponseReasoningTextDoneEvent,
+    ResponseReasoningPartAddedEvent,
+    ResponseReasoningPartDoneEvent,
+    ResponseCodeInterpreterCallInProgressEvent,
+    ResponseCodeInterpreterCallCodeDeltaEvent,
+    ResponseWebSearchCallInProgressEvent,
+    ResponseWebSearchCallSearchingEvent,
+    ResponseWebSearchCallCompletedEvent,
+    ResponseCodeInterpreterCallCodeDoneEvent,
+    ResponseCodeInterpreterCallInterpretingEvent,
+    ResponseCodeInterpreterCallCompletedEvent,
+]
 
 BatchRequestInputBody = Union[ChatCompletionRequest, EmbeddingRequest,
                               ScoreRequest, RerankRequest]

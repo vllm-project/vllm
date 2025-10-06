@@ -36,7 +36,7 @@ def _extract_data_from_linear_base_module(
     assert m.quant_method.quant_config is not None
 
     w = m.weight
-    ws = m.weight_scale_inv
+    ws = m.weight_scale
     quant_block_size = m.quant_method.quant_config.weight_block_size
 
     assert isinstance(w, torch.Tensor)
@@ -53,9 +53,11 @@ def _extract_data_from_fused_moe_module(
     """
     assert isinstance(m, FusedMoE)
     w13 = m.w13_weight
-    w13_s = m.w13_weight_scale_inv
+    w13_s = m.w13_weight_scale_inv if hasattr(
+        m, "w13_weight_scale_inv") else m.w13_weight_scale
     w2 = m.w2_weight
-    w2_s = m.w2_weight_scale_inv
+    w2_s = m.w2_weight_scale_inv if hasattr(
+        m, "w2_weight_scale_inv") else m.w2_weight_scale
     num_topk = m.top_k
 
     assert isinstance(w13, torch.Tensor)
@@ -81,9 +83,14 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
 
 
 def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
-    if not (isinstance(module, FusedMoE)
-            and module.moe_config.quant_dtype == torch.float8_e4m3fn
-            and module.moe_config.block_shape == deep_gemm_block_shape()):
+    if not isinstance(module, FusedMoE):
+        return False
+
+    moe_quant_config = module.quant_method.get_fused_moe_quant_config(module)
+
+    if (moe_quant_config is None
+            or moe_quant_config.quant_dtype != torch.float8_e4m3fn
+            or moe_quant_config.block_shape != deep_gemm_block_shape()):
         return False
 
     if not isinstance(module.quant_method.fused_experts,

@@ -1,16 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 
-from vllm.adapter_commons.layers import AdapterMapping
-
 
 @dataclass
-class LoRAMapping(AdapterMapping):
+class LoRAMapping:
+    index_mapping: tuple[int, ...]
+    prompt_mapping: tuple[int, ...]
     is_prefill: bool = False
+
+    def __post_init__(self):
+        self.index_mapping = tuple(self.index_mapping)
+        self.prompt_mapping = tuple(self.prompt_mapping)
 
 
 def _get_lora_device(base_layer: nn.Module) -> torch.device:

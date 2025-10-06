@@ -49,6 +49,8 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+        KVConnectorStats)
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
@@ -227,11 +229,37 @@ class KVConnectorBase_V1(ABC):
         """
         return None, None
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """
+        Get the set of block IDs that failed to load.
+
+        Returns:
+            Set of block IDs that encountered load errors.
+            Empty set if no load errors occurred.
+
+        Notes:
+            - Applies to both sync- and async-loading requests.
+            - Async loading: failed blocks may be reported in any forward pass
+              up to and including the pass where the request ID is returned by
+              `get_finished()`. Even if failures occur, the request must still
+              be reported via `get_finished()`, and the failed block IDs must
+              appear here no later than that same pass.
+            - Sync loading: failed blocks should be reported in the forward
+              pass in which they are detected.
+        """
+        return set()
+
     def shutdown(self):
         """
         Shutdown the connector. This is called when the worker process
         is shutting down to ensure that all the async operations are
         completed and the connector is cleaned up properly.
+        """
+        return None
+
+    def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
+        """
+        Get the KV connector stats collected during the last interval.
         """
         return None
 
@@ -256,14 +284,21 @@ class KVConnectorBase_V1(ABC):
 
         Returns:
             A tuple with the following elements:
-                - An optional number of tokens that can be loaded from the 
-                  external KV cache beyond what is already computed. 
+                - An optional number of tokens that can be loaded from the
+                  external KV cache beyond what is already computed.
                   If None, it means that the connector needs more time to
                   determine the number of matched tokens, and the scheduler
                   should query for this request again later.
                 - `True` if external KV cache tokens will be loaded
                   asynchronously (between scheduler steps). Must be
                   'False' if the first element is 0.
+
+        Notes:
+            The connector should only consider the largest prefix of prompt-
+            tokens for which KV cache is actually available at the time of the
+            call. If the cache cannot be loaded for some tokens (e.g., due to
+            connectivity issues or eviction), those tokens must not be taken
+            into account.
         """
         pass
 
@@ -365,4 +400,16 @@ class KVConnectorBase_V1(ABC):
             int: expected sending or receiving completion count.
         """
 
+        return None
+
+    @classmethod
+    def build_kv_connector_stats(
+            cls,
+            data: Optional[dict[str,
+                                Any]] = None) -> Optional["KVConnectorStats"]:
+        """
+        KVConnectorStats resolution method. This method allows dynamically 
+        registered connectors to return their own KVConnectorStats object,
+        which can implement custom aggregation logic on the data dict.
+        """
         return None

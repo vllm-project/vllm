@@ -8,55 +8,37 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+    deep_gemm_block_shape)
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts)
 
 
 class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
-    def __init__(self,
-                 max_num_tokens: int,
-                 num_dispatchers: int,
-                 use_fp8_w8a8: bool = False,
-                 use_int8_w8a8: bool = False,
-                 use_int8_w8a16: bool = False,
-                 use_int4_w4a16: bool = False,
-                 block_shape: Optional[list[int]] = None,
-                 per_act_token_quant: bool = False,
-                 allow_deep_gemm: bool = False):
-        assert not use_int8_w8a8, "NYI"
-        assert not use_int8_w8a16, "NYI"
-        assert not use_int4_w4a16, "NYI"
-
-        super().__init__(
-            FusedMoEQuantConfig.make(
-                use_fp8_w8a8=use_fp8_w8a8,
-                use_int8_w8a8=use_int8_w8a8,
-                use_int8_w8a16=use_int8_w8a16,
-                use_int4_w4a16=use_int4_w4a16,
-                block_shape=block_shape,
-                per_act_token_quant=per_act_token_quant,
-            ))
+    def __init__(
+        self,
+        max_num_tokens: int,
+        num_dispatchers: int,
+        quant_config: FusedMoEQuantConfig,
+        allow_deep_gemm: bool = False,
+    ):
+        super().__init__(quant_config)
 
         self.batched_triton_experts = BatchedTritonExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a8=use_int8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            use_int4_w4a16=use_int4_w4a16,
-            per_act_token_quant=self.per_act_token_quant,
-            block_shape=self.block_shape,
+            quant_config=self.quant_config,
         )
 
-        self.allow_deep_gemm = (allow_deep_gemm and use_fp8_w8a8
-                                and self.block_shape
-                                == BatchedDeepGemmExperts.DEEPGEMM_BLOCK_SHAPE)
+        self.allow_deep_gemm = (allow_deep_gemm
+                                and self.quant_config.use_fp8_w8a8 and
+                                self.block_shape == deep_gemm_block_shape())
 
         self.batched_deep_gemm_experts = BatchedDeepGemmExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
-            block_shape=self.block_shape,  # type: ignore[arg-type]
+            quant_config=self.quant_config,
         ) if self.allow_deep_gemm else None
 
         assert (self.batched_deep_gemm_experts is not None
@@ -143,10 +125,6 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
@@ -158,7 +136,6 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                    if self.allow_deep_gemm else self.batched_triton_experts)
         assert experts is not None
         experts.apply(output, hidden_states, w1, w2, topk_weights, topk_ids,
-                      activation, global_num_experts, expert_map, w1_scale,
-                      w2_scale, w1_zp, w2_zp, a1q_scale, a2_scale, workspace13,
-                      workspace2, expert_tokens_meta,
+                      activation, global_num_experts, expert_map, a1q_scale,
+                      a2_scale, workspace13, workspace2, expert_tokens_meta,
                       apply_router_weight_on_input)

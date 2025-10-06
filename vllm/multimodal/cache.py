@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import operator
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -91,26 +92,15 @@ _V = TypeVar("_V", bound=MultiModalCacheValue)
 class MultiModalCache:
 
     @classmethod
-    def get_leaf_size(
-        cls,
-        leaf: object,
-        *,
-        debug: bool = False,
-    ) -> int:
+    def get_leaf_size(cls, leaf: object) -> int:
         if isinstance(leaf, MultiModalProcessorCacheItem):
             return cls.get_leaf_size(leaf.item)
         if isinstance(leaf, MultiModalProcessorCacheItemMetadata):
             return leaf.item_size
 
         # These are not subclasses of dict
-        if isinstance(leaf, MultiModalKwargsItems):
-            return cls.get_item_size(leaf.data)  # type: ignore
-        if isinstance(leaf, MultiModalKwargsItem):
-            return cls.get_item_size(leaf.data)  # type: ignore
-        if isinstance(leaf, MultiModalKwargs):
-            return cls.get_item_size(leaf.data)  # type: ignore
-
-        if isinstance(leaf, MultiModalFieldElem):
+        if isinstance(leaf, (MultiModalKwargs, MultiModalKwargsItems,
+                             MultiModalKwargsItem, MultiModalFieldElem)):
             return cls.get_item_size(leaf.data)  # type: ignore
 
         # sys.getsizeof doesn't work for tensors
@@ -126,11 +116,8 @@ class MultiModalCache:
         *,
         debug: bool = False,
     ) -> int:
-        size = json_reduce_leaves(
-            lambda a, b: a + b,
-            json_map_leaves(lambda x: cls.get_leaf_size(x, debug=debug),
-                            value),
-        )
+        size = json_reduce_leaves(operator.add,
+                                  json_map_leaves(cls.get_leaf_size, value))
 
         if debug:
             leaf_count = json_count_leaves(value)
@@ -507,7 +494,8 @@ def _enable_processor_cache(
 
 def _enable_ipc_cache(vllm_config: "VllmConfig") -> bool:
     parallel_config = vllm_config.parallel_config
-    supports_ipc_cache = (parallel_config.data_parallel_size == 1
+    supports_ipc_cache = ((parallel_config._api_process_count == 1
+                           and parallel_config.data_parallel_size == 1)
                           or parallel_config.data_parallel_external_lb)
 
     return supports_ipc_cache

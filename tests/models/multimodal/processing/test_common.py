@@ -12,11 +12,13 @@ from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 
 from vllm.config import ModelConfig
-from vllm.inputs import InputProcessingContext
+from vllm.config.multimodal import (AudioDummyOptions, BaseDummyOptions,
+                                    ImageDummyOptions, VideoDummyOptions)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs
-from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.processing import (BaseMultiModalProcessor,
+                                        InputProcessingContext)
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                cached_tokenizer_from_config,
                                                encode_tokens)
@@ -31,6 +33,7 @@ def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     """
     # Ensure video metadata is included
     if "video" in mm_data:
+        # GLM4.1V doesn't support multiple videos
         video = mm_data["video"]
         num_frames = len(video)
         mm_data["video"] = (video, {
@@ -41,6 +44,34 @@ def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
             "video_backend": "opencv",
             "do_sample_frames": True,
         })
+    return mm_data
+
+
+def qwen3_vl_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+    """
+    Patch the multimodal data for Qwen3-VL model.
+    """
+
+    def create_metadata(frames: np.ndarray):
+        num_frames = len(frames)
+        return {
+            "total_num_frames": num_frames,
+            "fps": 2.0,
+            "duration": num_frames / 2.0,
+            "video_backend": "opencv",
+            "frames_indices": list(range(num_frames)),
+            "do_sample_frames": True,
+        }
+
+    # Ensure video metadata is included
+    if "video" in mm_data:
+        video = mm_data["video"]
+        if isinstance(video, list):
+            # multiple videos
+            mm_data["video"] = [(vid, create_metadata(vid)) for vid in video]
+        else:
+            # single video
+            mm_data["video"] = (video, create_metadata(video))
     return mm_data
 
 
@@ -83,12 +114,26 @@ def _test_processing_correctness(
 
     processing_info = factories.info(ctx)
     supported_mm_limits = processing_info.get_supported_mm_limits()
-    limit_mm_per_prompt = {
+    # Keep integer limits for local data generation
+    limit_mm_per_prompt_ints = {
         modality: 3 if limit is None else limit
         for modality, limit in supported_mm_limits.items()
     }
 
-    model_config.get_multimodal_config().limit_per_prompt = limit_mm_per_prompt
+    def _to_dummy_options(modality: str, count: int) -> BaseDummyOptions:
+        if modality == "video":
+            return VideoDummyOptions(count=count)
+        if modality == "image":
+            return ImageDummyOptions(count=count)
+        if modality == "audio":
+            return AudioDummyOptions(count=count)
+        return BaseDummyOptions(count=count)
+
+    # Assign normalized DummyOptions to the model config
+    model_config.get_multimodal_config().limit_per_prompt = {
+        modality: _to_dummy_options(modality, count)
+        for modality, count in limit_mm_per_prompt_ints.items()
+    }
 
     baseline_processor = factories.build_processor(ctx, cache=None)
     cached_processor = factories.build_processor(ctx, cache=cache)
@@ -121,7 +166,7 @@ def _test_processing_correctness(
             k:
             [(input_to_hit[k] if rng.rand() < hit_rate else input_factory[k]())
              for _ in range(rng.randint(limit + 1))]
-            for k, limit in limit_mm_per_prompt.items()
+            for k, limit in limit_mm_per_prompt_ints.items()
         }
 
         mm_counts = {k: len(vs) for k, vs in mm_data.items()}
@@ -182,8 +227,11 @@ _IGNORE_MM_KEYS = {
 }
 
 MM_DATA_PATCHES = {
-    # GLM4.1V requires video metadata to be included in the input
+    # GLM4.1V and Qwen3-VL requires video metadata to be included in the input
     "glm4v": glm4_1v_patch_mm_data,
+    "glm4v_moe": glm4_1v_patch_mm_data,
+    "qwen3_vl": qwen3_vl_patch_mm_data,
+    "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
 
 
@@ -326,6 +374,8 @@ def _test_processing_correctness_one(
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
     "Qwen/Qwen2.5-Omni-3B",
+    "Qwen/Qwen3-VL-4B-Instruct",
+    "Qwen/Qwen3-VL-30B-A3B-Instruct",
     "YannQi/R-4B",
     "Skywork/Skywork-R1V-38B",
     "HuggingFaceTB/SmolVLM2-2.2B-Instruct",

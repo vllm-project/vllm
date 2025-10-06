@@ -30,7 +30,9 @@ from typing import Any, Optional
 import torch
 from torch.distributed import ReduceOp
 
+from vllm import envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import find_nccl_library
 
 logger = init_logger(__name__)
@@ -41,6 +43,7 @@ logger = init_logger(__name__)
 
 ncclResult_t = ctypes.c_int
 ncclComm_t = ctypes.c_void_p
+ncclWindow_t = ctypes.c_void_p
 
 
 class ncclUniqueId(ctypes.Structure):
@@ -222,6 +225,24 @@ class NCCLLibrary:
         Function("ncclGroupStart", ncclResult_t, []),
         # ncclResult_t ncclGroupEnd();
         Function("ncclGroupEnd", ncclResult_t, []),
+        # ncclResult_t ncclCommWindowRegister(
+        #   ncclComm_t comm, void* buff, size_t size,
+        #   ncclWindow_t* win, int winFlags);
+        Function(
+            "ncclCommWindowRegister",
+            ncclResult_t,
+            [
+                ncclComm_t,
+                buffer_type,
+                ctypes.c_size_t,
+                ctypes.POINTER(ncclWindow_t),
+                ctypes.c_int,
+            ],
+        ),
+        # ncclResult_t ncclCommWindowDeregister(
+        #   ncclComm_t comm, ncclWindow_t win);
+        Function("ncclCommWindowDeregister", ncclResult_t,
+                 [ncclComm_t, ncclWindow_t]),
     ]
 
     # class attribute to store the mapping from the path to the library
@@ -256,10 +277,27 @@ class NCCLLibrary:
         if so_file not in NCCLLibrary.path_to_dict_mapping:
             _funcs: dict[str, Any] = {}
             for func in NCCLLibrary.exported_functions:
-                f = getattr(self.lib, func.name)
-                f.restype = func.restype
-                f.argtypes = func.argtypes
-                _funcs[func.name] = f
+                try:
+                    f = getattr(self.lib, func.name)
+                    f.restype = func.restype
+                    f.argtypes = func.argtypes
+                    _funcs[func.name] = f
+                except AttributeError:
+                    if func.name in [
+                            "ncclCommWindowRegister",
+                            "ncclCommWindowDeregister"
+                    ]:
+                        if envs.VLLM_USE_NCCL_SYMM_MEM:
+                            logger.warning_once(
+                                "The symbol %s is not found in the NCCL "
+                                "library %s. To enable VLLM_USE_NCCL_SYMM_MEM "
+                                " please update your NCCL version to >= "
+                                "2.27.03.", func.name, so_file)
+                        if current_platform.is_rocm():
+                            # Having an exception here on ROCm platform is
+                            # not allowed during graph capturing
+                            continue
+                    raise
             NCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = NCCLLibrary.path_to_dict_mapping[so_file]
 
@@ -271,10 +309,14 @@ class NCCLLibrary:
             error_str = self.ncclGetErrorString(result)
             raise RuntimeError(f"NCCL error: {error_str}")
 
-    def ncclGetVersion(self) -> str:
+    def ncclGetRawVersion(self) -> int:
         version = ctypes.c_int()
         self.NCCL_CHECK(self._funcs["ncclGetVersion"](ctypes.byref(version)))
-        version_str = str(version.value)
+        # something like 21903
+        return version.value
+
+    def ncclGetVersion(self) -> str:
+        version_str = str(self.ncclGetRawVersion())
         # something like 21903 --> "2.19.3"
         major = version_str[0].lstrip("0")
         minor = version_str[1:3].lstrip("0")
@@ -374,6 +416,17 @@ class NCCLLibrary:
 
     def ncclGroupEnd(self) -> None:
         self.NCCL_CHECK(self._funcs["ncclGroupEnd"]())
+
+    def ncclCommWindowRegister(self, comm: ncclComm_t, buff: buffer_type,
+                               size: int, win_flags: int) -> ncclWindow_t:
+        window = ncclWindow_t()
+        self.NCCL_CHECK(self._funcs["ncclCommWindowRegister"](
+            comm, buff, size, ctypes.byref(window), win_flags))
+        return window
+
+    def ncclCommWindowDeregister(self, comm: ncclComm_t,
+                                 window: ncclWindow_t) -> None:
+        self.NCCL_CHECK(self._funcs["ncclCommWindowDeregister"](comm, window))
 
 
 __all__ = [

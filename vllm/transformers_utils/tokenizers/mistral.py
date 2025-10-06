@@ -122,15 +122,21 @@ def list_local_repo_files(repo_id: str, revision: Optional[str]) -> list[str]:
 
 
 def find_tokenizer_file(files: list[str]):
+    # Accept both versioned (tokenizer.model.v3) and unversioned
+    # (tokenizer.model) forms, plus tekken.json and tokenizer.mm.model
+    # variants. Previous pattern only matched the versioned variants.
     file_pattern = re.compile(
-        r"^tokenizer\.model\.v.*$|^tekken\.json$|^tokenizer\.mm\.model\.v.*$")
+        r"^tokenizer\.model(\.v.*)?|tekken\.json|tokenizer\.mm\.model(\.v.*)?$"
+    )
 
     matched_files = [file for file in files if file_pattern.match(file)]
     if len(matched_files) > 1:
-        raise OSError(
-            f"Found {len(matched_files)} files matching the "
-            f"pattern: `{file_pattern.pattern}`. Make sure only one Mistral "
-            f"tokenizer is present in {files}.")
+        logger.warning(
+            "Multiple files matched pattern `%s`: %s. Using %s.",
+            file_pattern.pattern,
+            matched_files,
+            matched_files[0],
+        )
     elif len(matched_files) == 0:
         raise OSError(
             f"Found {len(matched_files)} files matching the "
@@ -274,7 +280,7 @@ class MistralTokenizer(TokenizerBase):
         return tokenizer_file
 
     # the following attributes are set to fit vLLM's design and are used
-    # by the guided structured output backends.
+    # by the structured output backends.
     @property
     def all_special_tokens_extended(self) -> list[str]:
         from mistral_common.tokens.tokenizers.base import SpecialTokens
@@ -326,6 +332,10 @@ class MistralTokenizer(TokenizerBase):
     @property
     def max_token_id(self) -> int:
         return self._max_token_id
+
+    @property
+    def truncation_side(self) -> str:
+        raise NotImplementedError()
 
     def __len__(self) -> int:
         return self.vocab_size
@@ -459,9 +469,6 @@ class MistralTokenizer(TokenizerBase):
 
         return decoded
 
-    # WARN: Outlines logits processors can overwrite this method.
-    # See: guided_decoding/outlines_logits_processors.py::_adapt_tokenizer
-    # for more.
     def decode(self,
                ids: Union[list[int], int],
                skip_special_tokens: bool = True) -> str:

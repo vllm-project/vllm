@@ -13,11 +13,9 @@ from vllm.utils import supports_kw
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.pooler import Pooler
-    from vllm.model_executor.sampling_metadata import SamplingMetadata
 else:
     VllmConfig = Any
     Pooler = Any
-    SamplingMetadata = Any
 
 logger = init_logger(__name__)
 
@@ -43,6 +41,13 @@ class VllmModel(Protocol[T_co]):
     ) -> None:
         ...
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply token embeddings to `input_ids`."""
+        ...
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -54,6 +59,19 @@ class VllmModel(Protocol[T_co]):
 def _check_vllm_model_init(model: Union[type[object], object]) -> bool:
     model_init = model.__init__
     return supports_kw(model_init, "vllm_config")
+
+
+def _check_vllm_model_get_input_embeddings(
+        model: Union[type[object], object]) -> bool:
+    model_get_input_embeddings = getattr(model, "get_input_embeddings", None)
+    if not callable(model_get_input_embeddings):
+        logger.warning(
+            "The model (%s) is missing the `get_input_embeddings` method.",
+            model,
+        )
+        return False
+
+    return True
 
 
 def _check_vllm_model_forward(model: Union[type[object], object]) -> bool:
@@ -90,7 +108,9 @@ def is_vllm_model(model: object) -> TypeIs[VllmModel]:
 def is_vllm_model(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[VllmModel]], TypeIs[VllmModel]]:
-    return _check_vllm_model_init(model) and _check_vllm_model_forward(model)
+    return (_check_vllm_model_init(model)
+            and _check_vllm_model_get_input_embeddings(model)
+            and _check_vllm_model_forward(model))
 
 
 @runtime_checkable
@@ -100,7 +120,6 @@ class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
     def compute_logits(
         self,
         hidden_states: T,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[T]:
         """Return `None` if TP rank > 0."""
         ...

@@ -8,11 +8,12 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
+from vllm.config import ModelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA)
-from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.models import (LoRAMapping, LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager)
 from vllm.lora.peft_helper import PEFTHelper
@@ -62,9 +63,9 @@ def test_from_lora_tensors(sql_lora_files, device):
         assert lora.lora_b is not None
         assert lora.lora_a.device == torch.device(device)
         assert lora.lora_b.device == torch.device(device)
-        assert (lora.lora_a.shape[1] == lora.lora_b.shape[0]
+        assert (lora.lora_a.shape[0] == lora.lora_b.shape[1]
                 ), f"{lora.lora_a.shape=}, {lora.lora_b.shape=}"
-        assert lora.lora_a.shape[1] == 8
+        assert lora.lora_a.shape[0] == 8
         embeddings_module = next(
             (k for k in EMBEDDING_MODULES if k in module_name), None)
         if embeddings_module:
@@ -85,8 +86,8 @@ def create_lora(lora_id: int, model: nn.Module, sub_modules: list[str],
             name,
             8,
             16,
-            torch.rand([w.shape[1], 8], device=device),
-            torch.rand([8, w.shape[0]], device=device),
+            torch.rand([8, w.shape[1]], device=device),
+            torch.rand([w.shape[0], 8], device=device),
         )
     return LoRAModel(lora_id, 8, loras)
 
@@ -108,8 +109,8 @@ def create_packed_lora(
             replaced_module_name,
             8,
             16,
-            torch.rand([w.shape[1], 8], device=device),
-            torch.rand([8, w.shape[0] // len(replaced_module_names)],
+            torch.rand([8, w.shape[1]], device=device),
+            torch.rand([w.shape[0] // len(replaced_module_names), 8],
                        device=device),
         )
     return LoRAModel(lora_id, 8, loras)
@@ -435,10 +436,19 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device,
         target_modules=["layer1.dense1", "dense2"],
         lora_dtype=DEFAULT_DTYPE,
     )
+
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config,
+                             lora_config=lora_config)
+
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
     worker_adapter_manager = LRUCacheWorkerLoRAManager(
-        4, 2,
-        dummy_model.unpadded_vocab_size - lora_config.lora_extra_vocab_size,
-        lora_config, device, EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
+        vllm_config, device, EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
+
+    worker_adapter_manager.max_num_seqs = 4
+    worker_adapter_manager.max_num_batched_tokens = 2
+
     worker_adapter_manager.create_lora_manager(dummy_model)
 
     mapping = LoRAMapping([], [])
@@ -517,10 +527,20 @@ def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device,
                              max_cpu_loras=4,
                              max_loras=4,
                              lora_dtype=DEFAULT_DTYPE)
-    worker_adapter_manager = WorkerLoRAManager(
-        4, 2, dummy_model_gate_up.unpadded_vocab_size -
-        lora_config.lora_extra_vocab_size, lora_config, device,
-        EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES)
+
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config,
+                             lora_config=lora_config)
+
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
+
+    worker_adapter_manager = WorkerLoRAManager(vllm_config, device,
+                                               EMBEDDING_MODULES,
+                                               EMBEDDING_PADDING_MODULES)
+    worker_adapter_manager.vocab_size = (
+        dummy_model_gate_up.unpadded_vocab_size -
+        lora_config.lora_extra_vocab_size)
     worker_adapter_manager.create_lora_manager(dummy_model_gate_up)
 
     dummy_lora_files = f"{tmp_path}/lora_adapter"

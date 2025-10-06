@@ -9,19 +9,21 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
-from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorStats)
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.distributed.kv_events import KVCacheEvent
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -31,6 +33,43 @@ logger = init_logger(__name__)
 class MultiKVConnectorMetadata(KVConnectorMetadata):
     metadata: tuple[KVConnectorMetadata, ...]
     extra_async_saves: Optional[dict[str, int]] = None
+
+
+@dataclass
+class MultiKVConnectorStats(KVConnectorStats):
+    """
+    Maintain a dict of KVConnectorStats objects, one for each connector.
+    This is used to aggregate the stats from all connectors separately.
+    """
+
+    def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        for connector_id, stats in other.data.items():
+            if connector_id not in self.data:
+                self[connector_id] = stats
+            else:
+                assert isinstance(stats, type(self.data[connector_id]))
+                self[connector_id] = self[connector_id].aggregate(stats)
+        return self
+
+    def reset(self):
+        for stats in self.data.values():
+            stats.reset()
+
+    def reduce(self) -> dict[str, Any]:
+        # TODO (NickLucche) Adjust for logging on separate lines
+        return {
+            connector_id: stats.reduce()
+            for connector_id, stats in self.data.items()
+        }
+
+    def is_empty(self) -> bool:
+        return all(stats.is_empty() for stats in self.data.values())
+
+    def __getitem__(self, connector_id: str) -> KVConnectorStats:
+        return self.data[connector_id]
+
+    def __setitem__(self, connector_id: str, stats: KVConnectorStats):
+        self.data[connector_id] = stats
 
 
 class MultiConnector(KVConnectorBase_V1):
@@ -46,6 +85,7 @@ class MultiConnector(KVConnectorBase_V1):
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
         self._connectors: list[KVConnectorBase_V1] = []
+        self._ktc_kv_transfer_config = []
         ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "connectors")
         assert ktcs is not None
@@ -57,6 +97,7 @@ class MultiConnector(KVConnectorBase_V1):
                 **ktc, engine_id=engine_id)
             self._connectors.append(
                 KVConnectorFactory.create_connector(temp_config, role))
+            self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
 
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
@@ -148,6 +189,12 @@ class MultiConnector(KVConnectorBase_V1):
 
         return finished_sending or None, finished_recving or None
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        agg_block_ids: set[int] = set()
+        for c in self._connectors:
+            agg_block_ids |= c.get_block_ids_with_load_errors()
+        return agg_block_ids
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -227,7 +274,7 @@ class MultiConnector(KVConnectorBase_V1):
 
         return async_saves > 0, kv_txfer_params
 
-    def take_events(self) -> Iterable[KVCacheEvent]:
+    def take_events(self) -> Iterable["KVCacheEvent"]:
         for c in self._connectors:
             yield from c.take_events()
 
@@ -264,3 +311,24 @@ class MultiConnector(KVConnectorBase_V1):
                              f"({', '.join(layouts) })."
                              f"All connectors must use the same layout.")
         return next(iter(layouts), None)
+
+    @classmethod
+    def build_kv_connector_stats(
+            cls,
+            data: Optional[dict[str,
+                                Any]] = None) -> Optional[KVConnectorStats]:
+        return MultiKVConnectorStats(data=data) if data is not None \
+            else MultiKVConnectorStats()
+
+    def get_kv_connector_stats(self) -> Optional[MultiKVConnectorStats]:
+        # Group connector stats by connector type.
+        stats_by_connector: Optional[MultiKVConnectorStats] = None
+        for c in self._connectors:
+            stats = c.get_kv_connector_stats()
+            if stats is None:
+                continue
+            if stats_by_connector is None:
+                # Lazy init to allow optional return value.
+                stats_by_connector = MultiKVConnectorStats()
+            stats_by_connector[c.__class__.__name__] = stats
+        return stats_by_connector

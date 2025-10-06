@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
+import os
 import pickle
 import queue
 import signal
@@ -19,6 +20,7 @@ from threading import Thread
 from typing import Any, Callable, Optional, Union, cast
 
 import cloudpickle
+import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -28,20 +30,18 @@ from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_pp_group, get_tp_group)
-from vllm.executor.multiproc_worker_utils import (
-    set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import worker_receiver_cache_from_config
-from vllm.utils import (decorate_logs, get_distributed_init_method,
-                        get_loopback_ip, get_mp_context, get_open_port,
-                        set_process_title)
+from vllm.utils import (_maybe_force_spawn, decorate_logs,
+                        get_distributed_init_method, get_loopback_ip,
+                        get_mp_context, get_open_port, set_process_title)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.utils import get_and_update_mm_cache
 from vllm.v1.outputs import (AsyncModelRunnerOutput, DraftTokenIds,
                              ModelRunnerOutput)
-from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
@@ -67,8 +67,8 @@ class MultiprocExecutor(Executor):
             f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
             f"_parallel_size ({pp_parallel_size}). ")
 
-        # Set multiprocessing envs that are common to V0 and V1
-        set_multiprocessing_worker_envs(self.parallel_config)
+        # Set multiprocessing envs
+        set_multiprocessing_worker_envs()
 
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
@@ -653,7 +653,7 @@ class WorkerProc:
         """Main busy loop for Multiprocessing Workers"""
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
-                cancel=cancel)
+                cancel=cancel, indefinite=True)
             try:
                 if isinstance(method, str):
                     func = getattr(self.worker, method)
@@ -698,3 +698,29 @@ class WorkerProc:
             process_name += f"_EP{ep_rank}"
         set_process_title(name=process_name)
         decorate_logs(process_name)
+
+
+def set_multiprocessing_worker_envs():
+    """ Set up environment variables that should be used when there are workers
+    in a multiprocessing environment. This should be called by the parent
+    process before worker processes are created"""
+
+    _maybe_force_spawn()
+
+    # Configure thread parallelism if OMP_NUM_THREADS isn't set
+    #
+    # Helps to avoid CPU contention. The default of spawning a thread per
+    # core combined with multiprocessing for each GPU can have a negative
+    # impact on performance. The contention is amplified when running in a
+    # container where CPU limits can cause throttling.
+    default_omp_num_threads = 1
+    if "OMP_NUM_THREADS" not in os.environ and (
+            current_parallelism :=
+            torch.get_num_threads()) > default_omp_num_threads:
+        logger.warning(
+            "Reducing Torch parallelism from %d threads to %d to avoid "
+            "unnecessary CPU contention. Set OMP_NUM_THREADS in the "
+            "external environment to tune this value as needed.",
+            current_parallelism, default_omp_num_threads)
+        os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
+        torch.set_num_threads(default_omp_num_threads)

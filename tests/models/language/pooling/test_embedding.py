@@ -58,7 +58,7 @@ def test_models(
 
     vllm_extra_kwargs = {}
     if model == "ssmits/Qwen2-7B-Instruct-embed-base":
-        vllm_extra_kwargs["override_pooler_config"] = \
+        vllm_extra_kwargs["pooler_config"] = \
             PoolerConfig(pooling_type="MEAN", normalize=False)
 
     max_model_len: Optional[int] = 512

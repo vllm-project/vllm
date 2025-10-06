@@ -40,6 +40,7 @@ class OpenAIServingTokenization(OpenAIServing):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
+        trust_request_chat_template: bool = False,
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(engine_client=engine_client,
@@ -50,6 +51,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.trust_request_chat_template = trust_request_chat_template
 
     async def create_tokenize(
         self,
@@ -65,12 +67,20 @@ class OpenAIServingTokenization(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            tokenizer = await self.engine_client.get_tokenizer()
             renderer = self._get_renderer(tokenizer)
 
             if isinstance(request, TokenizeChatRequest):
                 tool_dicts = (None if request.tools is None else
                               [tool.model_dump() for tool in request.tools])
+                error_check_ret = self._validate_chat_template(
+                    request_chat_template=request.chat_template,
+                    chat_template_kwargs=request.chat_template_kwargs,
+                    trust_request_chat_template=self.
+                    trust_request_chat_template,
+                )
+                if error_check_ret is not None:
+                    return error_check_ret
                 (
                     _,
                     _,
@@ -130,7 +140,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        tokenizer = await self.engine_client.get_tokenizer(lora_request)
+        tokenizer = await self.engine_client.get_tokenizer()
 
         self._log_inputs(request_id,
                          request.tokens,

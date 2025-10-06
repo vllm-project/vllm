@@ -18,10 +18,10 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
-from transformers import (AutoModel, BatchEncoding, BatchFeature,
-                          PretrainedConfig, TensorType)
+from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -32,15 +32,13 @@ from vllm.model_executor.models.internvl import (calculate_internvl_targets,
                                                  get_internvl_target_ratios)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
+from vllm.model_executor.models.radio import RadioModel
 from vllm.model_executor.models.utils import (flatten_bn,
                                               init_vllm_registered_model,
-                                              maybe_prefix,
-                                              merge_multimodal_embeddings)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
+                                              maybe_prefix)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, MultiModalKwargsItems,
-                                    NestedTensors)
+                                    MultiModalKwargs, MultiModalKwargsItems)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -48,6 +46,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.radio import RadioConfig
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -120,11 +119,6 @@ class NanoNemotronVLVideoEmbeddingInputs(TensorSchema):
 
 NanoNemotronVLVideoInputs = Union[NanoNemotronVLVideoPixelInputs,
                                   NanoNemotronVLVideoEmbeddingInputs]
-
-
-def input_conditioner(x, norm_mean, norm_std):
-    y = (x - norm_mean) / norm_std
-    return y
 
 
 def dynamic_preprocess(image,
@@ -214,7 +208,7 @@ def video_to_pixel_values(
         )
         # dynamic_preprocess returns tensors already; take the single tile
         assert len(pil_frame) >= 1
-        frames_tensors.append(pil_frame[0])
+        frames_tensors.append(pil_frame[-1])
 
     return torch.stack(frames_tensors)
 
@@ -303,10 +297,9 @@ class BaseNanoNemotronVLProcessor(ABC):
         else:
             pixel_values_lst = self._images_to_pixel_values_lst(
                 images, max_num_tiles)
-            image_inputs: dict[str, NestedTensors] = {
+            image_inputs = {
                 "pixel_values_flat":
-                input_conditioner(torch.cat(pixel_values_lst), self.norm_mean,
-                                  self.norm_std),
+                torch.cat(pixel_values_lst),
                 "image_num_patches":
                 torch.tensor([len(item) for item in pixel_values_lst]),
             }
@@ -332,7 +325,7 @@ class BaseNanoNemotronVLProcessor(ABC):
         images: Optional[Union[Image.Image, list[Image.Image]]] = None,
         return_tensors: Optional[Union[str, TensorType]] = None,
         max_num_tiles: Optional[int] = None,
-    ) -> Mapping[str, NestedTensors]:
+    ) -> BatchFeature:
         # Use default if not provided
         if max_num_tiles is None:
             max_num_tiles = 12
@@ -347,10 +340,9 @@ class BaseNanoNemotronVLProcessor(ABC):
 
         text_inputs = self.tokenizer(text, add_special_tokens=False)
 
-        return {
-            **BatchEncoding(text_inputs, tensor_type=return_tensors),
-            **image_inputs,
-        }
+        combined_outputs = {**text_inputs, **image_inputs}
+
+        return BatchFeature(combined_outputs, tensor_type=return_tensors)
 
 
 class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
@@ -426,10 +418,9 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                 dynamic_image_size=dynamic_image_size,
             )
 
-            video_inputs: dict[str, NestedTensors] = {
+            video_inputs = {
                 "pixel_values_flat_video":
-                input_conditioner(torch.cat(pixel_values_lst_video),
-                                  self.norm_mean, self.norm_std),
+                torch.cat(pixel_values_lst_video),
                 "video_num_patches":
                 torch.tensor([len(item) for item in pixel_values_lst_video]),
             }
@@ -450,7 +441,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         return_tensors: Optional[Union[str, TensorType]] = None,
         max_num_tiles: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
-    ) -> Mapping[str, NestedTensors]:
+    ) -> BatchFeature:
         # Use default if not provided
         if max_num_tiles is None:
             max_num_tiles = 12
@@ -474,11 +465,9 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
         text_inputs = self.tokenizer(text, add_special_tokens=False)
 
-        return BatchFeature({
-            **BatchEncoding(text_inputs, tensor_type=return_tensors),
-            **image_inputs,
-            **video_inputs,
-        })
+        combined_outputs = {**text_inputs, **image_inputs, **video_inputs}
+
+        return BatchFeature(combined_outputs, tensor_type=return_tensors)
 
     def get_image_repl(
         self,
@@ -632,7 +621,7 @@ class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
-    ) -> Mapping[str, NestedTensors]:
+    ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
@@ -652,7 +641,7 @@ class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     def _get_mm_fields_config(
         self,
-        hf_inputs: Mapping[str, NestedTensors],
+        hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
@@ -731,7 +720,7 @@ class NanoNemotronVLMultiModalProcessor(
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
-    ) -> Mapping[str, NestedTensors]:
+    ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(prompt, mm_data,
                                                        mm_kwargs, tok_kwargs)
 
@@ -743,7 +732,7 @@ class NanoNemotronVLMultiModalProcessor(
 
     def _get_mm_fields_config(
         self,
-        hf_inputs: Mapping[str, NestedTensors],
+        hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_fields = super()._get_mm_fields_config(hf_inputs,
@@ -821,6 +810,7 @@ class NanoNemotronVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         # Use default max_num_tiles for dummy data generation
         max_num_tiles = 12
@@ -828,11 +818,14 @@ class NanoNemotronVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
             self.info.get_image_size_with_most_features(max_num_tiles))
         num_images = mm_counts.get("image", 0)
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images)
+                                   num_images=num_images,
+                                   overrides=image_overrides)
         }
 
 
@@ -849,21 +842,25 @@ class NanoNemotronVLDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         dummy_image = super().get_dummy_mm_data(seq_len=seq_len,
-                                                mm_counts=mm_counts)
+                                                mm_counts=mm_counts,
+                                                mm_options=mm_options)
         if self.info.supports_video:
             config = self.info.get_hf_config()
             image_size: int = config.force_image_size
             target_num_frames = \
                 self.info.get_num_frames_with_most_features(seq_len, mm_counts)
             num_videos = mm_counts.get("video", 0)
+            video_overrides = mm_options.get("video") if mm_options else None
             dummy_video = {
                 "video":
                 self._get_dummy_videos(width=image_size,
                                        height=image_size,
                                        num_frames=target_num_frames,
-                                       num_videos=num_videos)
+                                       num_videos=num_videos,
+                                       overrides=video_overrides)
             }
         else:
             dummy_video = {}
@@ -875,8 +872,8 @@ class NanoNemotronVLDummyInputsBuilder(
     info=NanoNemotronVLProcessingInfo,
     dummy_inputs=NanoNemotronVLDummyInputsBuilder,
 )
-class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
-                        SupportsMultiModal):
+class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid,
+                           SupportsMultiModal):
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -905,17 +902,8 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
-        self.vision_model = AutoModel.from_config(config.vision_config,
-                                                  trust_remote_code=True)
-        self.vision_model.model._initialize_weights = (
-            self.vision_model.model._init_weights)
-        # Move input normalization to processor to mirror original HF
-        # implementation where normalization is done in fp32
-        self.vision_model.radio_model.make_preprocessor_external()
-        self.vision_model = self.vision_model.to(
+        self.vision_model = self.get_vit_model_from_radio_config(config).to(
             self.language_model.config.torch_dtype)
-
-        self.drop_vision_class_token = True
 
         # Construct the vision projection.
         vit_hidden_size = config.vit_hidden_size
@@ -972,7 +960,7 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
         return x
 
     def extract_feature(self, pixel_values):
-        vit_embeds = self.vision_model(pixel_values).features
+        vit_embeds = self.vision_model(pixel_values)
         vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
         h = w = int(vit_embeds.shape[1]**0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
@@ -1111,8 +1099,8 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
 
         return modalities
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         # Validate the multimodal input keyword arguments
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if modalities is None:
@@ -1136,30 +1124,6 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
 
         return multimodal_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-
-        if (multimodal_embeddings is not None
-                and len(multimodal_embeddings) != 0):
-            context_token_ids = [
-                token_id for token_id in (self.img_context_token_id,
-                                          self.video_context_token_id)
-                if token_id is not None
-            ]
-            assert len(context_token_ids) >= 1
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                context_token_ids,
-            )
-
-        return inputs_embeds
-
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
@@ -1174,14 +1138,6 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
         if intermediate_tensors is not None:
             input_ids = None
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
-            input_ids = None
 
         hidden_states = self.language_model(
             input_ids=input_ids,
@@ -1206,53 +1162,43 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        adapter_dict = dict(self.mlp1.named_parameters())
 
-        def is_vision_model_weights(weight: tuple[str, torch.Tensor]):
-            return weight[0].startswith("vision_model")
+        def is_llm(name: str) -> bool:
+            return name.startswith("language_model")
 
         def is_adapter_weights(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith("mlp1")
 
-        # Get references to parameters for direct loading
-        vision_model_dict = dict(self.vision_model.named_parameters())
-        vision_model_buffers = dict(self.vision_model.named_buffers())
-        adapter_dict = dict(self.mlp1.named_parameters())
+        def is_vision_weights(name: str) -> bool:
+            return name.startswith("vision_model.radio_model.")
 
-        def llm_weights_generator():
-            # Single pass over weights
-            for name, w in weights:
-                if is_vision_model_weights((name, w)):
-                    # Load vision encoder weights directly
-                    trimmed_name = ".".join(name.split(".")[1:])
-                    if "input_conditioner" in trimmed_name:
-                        continue
-                    if trimmed_name in vision_model_buffers:
-                        param = vision_model_buffers[trimmed_name]
-                    else:
-                        param = vision_model_dict[trimmed_name]
-                    with torch.no_grad():
-                        default_weight_loader(param, w)
-                elif is_adapter_weights((name, w)):
-                    # Load vision-language adapter weights directly
-                    trimmed_name = ".".join(name.split(".")[1:])
-                    param = adapter_dict[trimmed_name]
-                    with torch.no_grad():
-                        default_weight_loader(param, w)
-                else:
-                    # LLM weights: yield them to be loaded
-                    # by language_model.load_weights
-                    assert name.startswith("language_model")
-                    trimmed_name = ".".join(name.split(".")[1:])
-                    yield (trimmed_name, w)
+        # Separate weights by component
+        llm_weights = []
+        vision_weights = []
 
-        # Now we call the language model load with the generator
-        self.language_model.load_weights(llm_weights_generator())
+        for name, w in weights:
+            if is_llm(name):
+                # Strip 'language_model.' prefix for LLM weights
+                llm_weights.append((".".join(name.split(".")[1:]), w))
+            elif is_adapter_weights((name, w)):
+                # Load vision-language adapter weights directly
+                trimmed_name = ".".join(name.split(".")[1:])
+                param = adapter_dict[trimmed_name]
+                with torch.no_grad():
+                    default_weight_loader(param, w)
+            elif is_vision_weights(name):
+                # Convert: vision_model.radio_model.* → radio_model.*
+                hf_key = name[len(
+                    "vision_model."):]  # Remove "vision_model." prefix
+                vision_weights.append((hf_key, w))
+
+        self.language_model.load_weights(llm_weights)
+        self.vision_model.load_weights(vision_weights)
 
     def print_architecture(self,
                            detailed: bool = True,
@@ -1274,7 +1220,7 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
 
         try:
             print("=" * 100)
-            print("NemotronH_Nano_VL Model Architecture")
+            print("NemotronH_Nano_VL_V2 Model Architecture")
             print("=" * 100)
 
             total_params = 0
@@ -1358,7 +1304,7 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
             component_info[component]["size"] += param.numel()
 
         return {
-            "model_name": "NemotronH_Nano_VL",
+            "model_name": "NemotronH_Nano_VL_V2",
             "total_parameters": total_params,
             "memory_estimate_mb": total_params * 2 / (1024**2),  # bfloat16
             "components": component_info,
@@ -1369,6 +1315,30 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid,
                 "downsample_ratio": self.downsample_ratio,
             },
         }
+
+    def get_vit_model_from_radio_config(self, hf_config):
+        hf_config_vision = hf_config.vision_config
+        model_name = hf_config_vision.args.get("model")
+        if model_name is None:
+            raise ValueError(f'Unsupported vit model type: {model_name}')
+
+        preferred_resolution = getattr(hf_config_vision,
+                                       "preferred_resolution", None)
+        image_size = preferred_resolution[0] if preferred_resolution else 224
+        patch_size = getattr(hf_config_vision, "patch_size", 16)
+
+        radio_config = RadioConfig(
+            model_name=model_name,
+            image_size=image_size,
+            patch_size=patch_size,
+            norm_mean=hf_config.norm_mean,
+            norm_std=hf_config.norm_std,
+            reg_tokens=(hf_config_vision.args.get("register_multiple")
+                        if hasattr(hf_config_vision, "args")
+                        and isinstance(hf_config_vision.args, dict) else None),
+        )
+
+        return RadioModel(config=radio_config)
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         return self.language_model.mamba_cache.copy_inputs_before_cuda_graphs(

@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
-from tests.v1.test_utils import check_request_balancing
+from tests.v1.utils import check_request_balancing
 
 MODEL_NAME = "ibm-research/PowerMoE-3b"
 
