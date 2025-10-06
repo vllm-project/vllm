@@ -70,7 +70,13 @@ async def test_fetch_image_http(image_url: str):
 async def test_fetch_image_base64(
     url_images: dict[str, Image.Image], raw_image_url: str, suffix: str
 ):
-    connector = MediaConnector()
+    connector = MediaConnector(
+        # Domain restriction should not apply to data URLs.
+        allowed_media_domains=[
+            "www.bogotobogo.com",
+            "github.com",
+        ]
+    )
     url_image = url_images[raw_image_url]
 
     try:
@@ -375,7 +381,6 @@ def test_allocate_gpu_mm_processors(case):
                 ("image", 0),
             ],
         ),
-
         # Two modalities
         ## Internally sorted
         dict(
@@ -387,7 +392,7 @@ def test_allocate_gpu_mm_processors(case):
                 "audio": [
                     PlaceholderRange(offset=0, length=2),
                     PlaceholderRange(offset=2, length=3),
-                ]
+                ],
             },
             expected_modality_idxs=[
                 ("audio", 0),
@@ -406,7 +411,7 @@ def test_allocate_gpu_mm_processors(case):
                 "audio": [
                     PlaceholderRange(offset=5, length=2),
                     PlaceholderRange(offset=11, length=4),
-                ]
+                ],
             },
             expected_modality_idxs=[
                 ("image", 0),
@@ -425,7 +430,7 @@ def test_allocate_gpu_mm_processors(case):
                 "audio": [
                     PlaceholderRange(offset=11, length=4),
                     PlaceholderRange(offset=5, length=2),
-                ]
+                ],
             },
             expected_modality_idxs=[
                 ("image", 1),
@@ -434,7 +439,6 @@ def test_allocate_gpu_mm_processors(case):
                 ("audio", 0),
             ],
         ),
-
         # Three modalities
         ## Internally sorted
         dict(
@@ -450,7 +454,7 @@ def test_allocate_gpu_mm_processors(case):
                     PlaceholderRange(offset=3, length=4),
                     PlaceholderRange(offset=7, length=5),
                     PlaceholderRange(offset=12, length=6),
-                ]
+                ],
             },
             expected_modality_idxs=[
                 ("audio", 0),
@@ -474,7 +478,7 @@ def test_allocate_gpu_mm_processors(case):
                 ],
                 "video": [
                     PlaceholderRange(offset=8, length=5),
-                ]
+                ],
             },
             expected_modality_idxs=[
                 ("image", 0),
@@ -497,7 +501,7 @@ def test_allocate_gpu_mm_processors(case):
                 ],
                 "video": [
                     PlaceholderRange(offset=8, length=5),
-                ]
+                ],
             },
             expected_modality_idxs=[
                 ("image", 0),
@@ -509,7 +513,6 @@ def test_allocate_gpu_mm_processors(case):
         ),
     ],
 )
-# yapf: enable
 def test_argsort_mm_positions(case):
     mm_positions = case["mm_positions"]
     expected_modality_idxs = case["expected_modality_idxs"]
@@ -517,3 +520,32 @@ def test_argsort_mm_positions(case):
     modality_idxs = argsort_mm_positions(mm_positions)
 
     assert modality_idxs == expected_modality_idxs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
+@pytest.mark.parametrize("num_frames", [-1, 32, 1800])
+async def test_allowed_media_domains(video_url: str, num_frames: int):
+    connector = MediaConnector(
+        media_io_kwargs={
+            "video": {
+                "num_frames": num_frames,
+            }
+        },
+        allowed_media_domains=[
+            "www.bogotobogo.com",
+            "github.com",
+        ],
+    )
+
+    video_sync, metadata_sync = connector.fetch_video(video_url)
+    video_async, metadata_async = await connector.fetch_video_async(video_url)
+    assert np.array_equal(video_sync, video_async)
+    assert metadata_sync == metadata_async
+
+    disallowed_url = "https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png"
+    with pytest.raises(ValueError):
+        _, _ = connector.fetch_video(disallowed_url)
+
+    with pytest.raises(ValueError):
+        _, _ = await connector.fetch_video_async(disallowed_url)

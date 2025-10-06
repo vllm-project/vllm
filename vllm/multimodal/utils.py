@@ -15,10 +15,10 @@ import numpy as np
 import numpy.typing as npt
 import torch
 from PIL import Image, UnidentifiedImageError
-from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
+from vllm.utils.jsontree import json_map_leaves
 
 from .audio import AudioMediaIO
 from .base import MediaIO
@@ -53,6 +53,7 @@ class MediaConnector:
         connection: HTTPConnection = global_http_connection,
         *,
         allowed_local_media_path: str = "",
+        allowed_media_domains: Optional[list[str]] = None,
     ) -> None:
         """
         Args:
@@ -88,6 +89,9 @@ class MediaConnector:
             allowed_local_media_path_ = None
 
         self.allowed_local_media_path = allowed_local_media_path_
+        if allowed_media_domains is None:
+            allowed_media_domains = []
+        self.allowed_media_domains = allowed_media_domains
 
     def _load_data_url(
         self,
@@ -123,6 +127,17 @@ class MediaConnector:
 
         return media_io.load_file(filepath)
 
+    def _assert_url_in_allowed_media_domains(self, url_spec) -> None:
+        if (
+            self.allowed_media_domains
+            and url_spec.hostname not in self.allowed_media_domains
+        ):
+            raise ValueError(
+                f"The URL must be from one of the allowed domains: "
+                f"{self.allowed_media_domains}. Input URL domain: "
+                f"{url_spec.hostname}"
+            )
+
     def load_from_url(
         self,
         url: str,
@@ -133,8 +148,14 @@ class MediaConnector:
         url_spec = urlparse(url)
 
         if url_spec.scheme.startswith("http"):
+            self._assert_url_in_allowed_media_domains(url_spec)
+
             connection = self.connection
-            data = connection.get_bytes(url, timeout=fetch_timeout)
+            data = connection.get_bytes(
+                url,
+                timeout=fetch_timeout,
+                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+            )
 
             return media_io.load_bytes(data)
 
@@ -158,8 +179,14 @@ class MediaConnector:
         loop = asyncio.get_running_loop()
 
         if url_spec.scheme.startswith("http"):
+            self._assert_url_in_allowed_media_domains(url_spec)
+
             connection = self.connection
-            data = await connection.async_get_bytes(url, timeout=fetch_timeout)
+            data = await connection.async_get_bytes(
+                url,
+                timeout=fetch_timeout,
+                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+            )
             future = loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
             return await future
 
@@ -401,37 +428,12 @@ def argsort_mm_positions(
     return [(modality, idx) for modality, idx, _ in sorted_flat_items]
 
 
-# Temporary back-compatibility for plugins that define model runner
-@deprecated(
-    "`group_mm_inputs_by_modality` is superseded by "
-    "`group_mm_kwargs_by_modality` and will be removed in v0.13. "
-    "Please use `group_mm_kwargs_by_modality` instead."
-)
-def group_mm_inputs_by_modality(
-    mm_inputs: list[MultiModalKwargsItems],
-) -> list[list[MultiModalKwargsItems]]:
-    if not mm_inputs:
-        return []
-
-    def modality_group_func(mm_input: MultiModalKwargsItems) -> Union[str, int]:
-        # If the input has multiple modalities, return an id as the unique key
-        # for the mm_input input.
-        if len(mm_input) > 1:
-            return id(mm_input)
-
-        elif len(mm_input) == 1:
-            return next(iter(mm_input.keys()))
-
-        raise AssertionError("This line should be unreachable.")
-
-    return [list(group) for _, group in groupby(mm_inputs, key=modality_group_func)]
-
-
 def group_mm_kwargs_by_modality(
     mm_kwargs: list[MultiModalKwargsItem],
     *,
     device: torch.types.Device = None,
     pin_memory: bool = False,
+    merge_by_field_config: Optional[bool] = None,
 ) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
     """Group consecutive `MultiModalKwargsItem`s from `mm_kwargs` with the same
     modality together into the same `MultiModalKwargs` instance.
@@ -444,34 +446,43 @@ def group_mm_kwargs_by_modality(
     Yields:
         A tuple `(modality, num_items, grouped_kwargs)`.
     """
+    if merge_by_field_config is None:
+        raise RuntimeError(
+            "`group_mm_kwargs_by_modality` now requires "
+            "`merge_by_field_config` arg, please update your model runner "
+            "according to https://github.com/vllm-project/vllm/pull/25676."
+        )
+
     from vllm.multimodal.inputs import MultiModalKwargs, MultiModalKwargsItems
 
     for modality, items in groupby(mm_kwargs, key=lambda item: item.modality):
         items_lst = list(items)
 
-        # mm_kwargs_group = MultiModalKwargsItems.from_items(items_lst) \
-        #    .get_data(pin_memory=pin_memory)
+        # TODO: Deprecate `merge_by_field_config` once
+        # we have migrated all in-tree models
+        if merge_by_field_config:
+            mm_kwargs_group: BatchedTensorInputs = dict(
+                MultiModalKwargsItems.from_seq(items_lst).get_data(
+                    pin_memory=pin_memory
+                )
+            )
 
-        # if device is not None:
-        #     mm_kwargs_group = json_map_leaves(
-        #         lambda x: x.to(device=device),
-        #         mm_kwargs_group,
-        #     )
-
-        # TODO: Once V0 is removed, we can use the merging logic above
-        # to avoid creating an extra batch dimension (except for fields
-        # that are meant to be stacked anyway).
-        # We will also need to update each model to remove `flatten_bn`.
-        mm_kwargs_group = MultiModalKwargs.as_kwargs(
-            MultiModalKwargs.batch(
-                [
-                    MultiModalKwargsItems.from_seq([item]).get_data()
-                    for item in items_lst
-                ],
-                pin_memory=pin_memory,
-            ),
-            device=device,
-        )
+            if device is not None:
+                mm_kwargs_group = json_map_leaves(
+                    lambda x: x.to(device=device),
+                    mm_kwargs_group,
+                )
+        else:
+            mm_kwargs_group = MultiModalKwargs.as_kwargs(
+                MultiModalKwargs.batch(
+                    [
+                        MultiModalKwargsItems.from_seq([item]).get_data()
+                        for item in items_lst
+                    ],
+                    pin_memory=pin_memory,
+                ),
+                device=device,
+            )
 
         yield modality, len(items_lst), mm_kwargs_group
 

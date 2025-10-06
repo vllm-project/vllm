@@ -59,6 +59,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
+from pathlib import Path
 from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
@@ -67,7 +68,6 @@ from typing import (
     Generic,
     Literal,
     NamedTuple,
-    Optional,
     TextIO,
     TypeVar,
     Union,
@@ -155,6 +155,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e5m2": torch.uint8,
     "int8": torch.int8,
     "fp8_inc": torch.float8_e4m3fn,
+    "fp8_ds_mla": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -245,9 +246,7 @@ class CacheInfo(NamedTuple):
 
 
 class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
-    def __init__(
-        self, capacity: float, getsizeof: Optional[Callable[[_V], float]] = None
-    ):
+    def __init__(self, capacity: float, getsizeof: Callable[[_V], float] | None = None):
         super().__init__(capacity, getsizeof)
 
         self.pinned_items = set[_K]()
@@ -322,15 +321,15 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
             self._LRUCache__order[key] = None  # type: ignore
 
     @overload
-    def get(self, key: _K, /) -> Optional[_V]: ...
+    def get(self, key: _K, /) -> _V | None: ...
 
     @overload
     def get(self, key: _K, /, default: Union[_V, _T]) -> Union[_V, _T]: ...
 
     def get(
-        self, key: _K, /, default: Optional[Union[_V, _T]] = None
-    ) -> Optional[Union[_V, _T]]:
-        value: Optional[Union[_V, _T]]
+        self, key: _K, /, default: Union[_V, _T] | None = None
+    ) -> Union[_V, _T] | None:
+        value: Union[_V, _T] | None
         if key in self:
             value = self.__getitem__(key, update_info=False)  # type: ignore[call-arg]
 
@@ -348,9 +347,9 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
     def pop(self, key: _K, default: Union[_V, _T]) -> Union[_V, _T]: ...
 
     def pop(
-        self, key: _K, default: Optional[Union[_V, _T]] = None
-    ) -> Optional[Union[_V, _T]]:
-        value: Optional[Union[_V, _T]]
+        self, key: _K, default: Union[_V, _T] | None = None
+    ) -> Union[_V, _T] | None:
+        value: Union[_V, _T] | None
         if key not in self:
             return default
 
@@ -377,7 +376,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         """
         self.pinned_items.remove(key)
 
-    def _on_remove(self, key: _K, value: Optional[_V]) -> None:
+    def _on_remove(self, key: _K, value: _V | None) -> None:
         pass
 
     def remove_oldest(self, *, remove_pinned: bool = False) -> None:
@@ -703,7 +702,7 @@ def in_loop(event_loop: AbstractEventLoop) -> bool:
 
 
 def make_async(
-    func: Callable[P, T], executor: Optional[concurrent.futures.Executor] = None
+    func: Callable[P, T], executor: concurrent.futures.Executor | None = None
 ) -> Callable[P, Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
 
@@ -938,7 +937,7 @@ def _get_open_port() -> int:
             return s.getsockname()[1]
 
 
-def find_process_using_port(port: int) -> Optional[psutil.Process]:
+def find_process_using_port(port: int) -> psutil.Process | None:
     # TODO: We can not check for running processes with network
     # port on macOS. Therefore, we can not have a full graceful shutdown
     # of vLLM. For now, let's not look for processes in this case.
@@ -1023,8 +1022,8 @@ def _generate_random_fp8(
 
 
 def get_kv_cache_torch_dtype(
-    cache_dtype: Optional[Union[str, torch.dtype]],
-    model_dtype: Optional[Union[str, torch.dtype]] = None,
+    cache_dtype: Union[str, torch.dtype] | None,
+    model_dtype: Union[str, torch.dtype] | None = None,
 ) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
@@ -1051,11 +1050,11 @@ def create_kv_caches_with_random_flash(
     num_layers: int,
     num_heads: int,
     head_size: int,
-    cache_dtype: Optional[Union[str, torch.dtype]],
-    model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: Optional[int] = None,
-    device: Optional[str] = "cuda",
-    cache_layout: Optional[str] = "NHD",
+    cache_dtype: Union[str, torch.dtype] | None,
+    model_dtype: Union[str, torch.dtype] | None = None,
+    seed: int | None = None,
+    device: str | None = "cuda",
+    cache_layout: str | None = "NHD",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     from vllm.platforms import current_platform
 
@@ -1093,10 +1092,10 @@ def create_kv_caches_with_random(
     num_layers: int,
     num_heads: int,
     head_size: int,
-    cache_dtype: Optional[Union[str, torch.dtype]],
-    model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: Optional[int] = None,
-    device: Optional[str] = "cuda",
+    cache_dtype: Union[str, torch.dtype] | None,
+    model_dtype: Union[str, torch.dtype] | None = None,
+    seed: int | None = None,
+    device: str | None = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     if cache_dtype == "fp8" and head_size % 16:
         raise ValueError(
@@ -1154,7 +1153,7 @@ def is_uva_available() -> bool:
 
 
 class DeviceMemoryProfiler:
-    def __init__(self, device: Optional[torch.types.Device] = None):
+    def __init__(self, device: torch.types.Device | None = None):
         self.device = device
 
     def current_memory_usage(self) -> float:
@@ -1182,7 +1181,7 @@ def make_ndarray_with_pad(
     pad: T,
     dtype: npt.DTypeLike,
     *,
-    max_len: Optional[int] = None,
+    max_len: int | None = None,
 ) -> npt.NDArray:
     """
     Make a padded array from 2D inputs.
@@ -1207,8 +1206,8 @@ def make_tensor_with_pad(
     pad: T,
     dtype: torch.dtype,
     *,
-    max_len: Optional[int] = None,
-    device: Optional[Union[str, torch.device]] = None,
+    max_len: int | None = None,
+    device: Union[str, torch.device] | None = None,
     pin_memory: bool = False,
 ) -> torch.Tensor:
     """
@@ -1403,7 +1402,7 @@ def find_nccl_library() -> str:
     return so_file
 
 
-def find_nccl_include_paths() -> Optional[list[str]]:
+def find_nccl_include_paths() -> list[str] | None:
     """
     We either use the nccl.h specified by the `VLLM_NCCL_INCLUDE_PATH`
     environment variable, or we find the library file brought by
@@ -1523,7 +1522,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 def deprecate_args(
     start_index: int,
     is_deprecated: Union[bool, Callable[[], bool]] = True,
-    additional_message: Optional[str] = None,
+    additional_message: str | None = None,
 ) -> Callable[[F], F]:
     if not callable(is_deprecated):
         is_deprecated = partial(identity, is_deprecated)
@@ -1563,7 +1562,7 @@ def deprecate_args(
 def deprecate_kwargs(
     *kws: str,
     is_deprecated: Union[bool, Callable[[], bool]] = True,
-    additional_message: Optional[str] = None,
+    additional_message: str | None = None,
 ) -> Callable[[F], F]:
     deprecated_kws = set(kws)
 
@@ -1596,7 +1595,7 @@ def deprecate_kwargs(
 
 
 @lru_cache(maxsize=8)
-def _cuda_device_count_stateless(cuda_visible_devices: Optional[str] = None) -> int:
+def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
     # Note: cuda_visible_devices is not used, but we keep it as an argument for
     # LRU Cache purposes.
 
@@ -1744,6 +1743,7 @@ class FlexibleArgumentParser(ArgumentParser):
         '   --json-arg \'{"key4": ["value3", "value4", "value5"]}\'\n'
         "   --json-arg.key4+ value3 --json-arg.key4+='value4,value5'\n\n"
     )
+    _search_keyword: str | None = None
 
     def __init__(self, *args, **kwargs):
         # Set the default "formatter_class" to SortedHelpFormatter
@@ -1794,14 +1794,79 @@ class FlexibleArgumentParser(ArgumentParser):
             self._action_groups.append(group)
             return group
 
-    def format_help(self) -> str:
-        # Add tip about JSON arguments to the epilog
-        epilog = self.epilog or ""
-        if self.add_json_tip and not epilog.startswith(
-            FlexibleArgumentParser._json_tip
-        ):
-            self.epilog = FlexibleArgumentParser._json_tip + epilog
-        return super().format_help()
+    def format_help(self):
+        # Only use custom help formatting for bottom level parsers
+        if self._subparsers is not None:
+            return super().format_help()
+
+        formatter = self._get_formatter()
+
+        # Handle keyword search of the args
+        if (search_keyword := self._search_keyword) is not None:
+            # Normalise the search keyword
+            search_keyword = search_keyword.lower().replace("_", "-")
+            # Return full help if searching for 'all'
+            if search_keyword == "all":
+                self.epilog = self._json_tip
+                return super().format_help()
+
+            # Return group help if searching for a group title
+            for group in self._action_groups:
+                if group.title and group.title.lower() == search_keyword:
+                    formatter.start_section(group.title)
+                    formatter.add_text(group.description)
+                    formatter.add_arguments(group._group_actions)
+                    formatter.end_section()
+                    formatter.add_text(self._json_tip)
+                    return formatter.format_help()
+
+            # Return matched args if searching for an arg name
+            matched_actions = []
+            for group in self._action_groups:
+                for action in group._group_actions:
+                    # search option name
+                    if any(
+                        search_keyword in opt.lower() for opt in action.option_strings
+                    ):
+                        matched_actions.append(action)
+            if matched_actions:
+                formatter.start_section(f"Arguments matching '{search_keyword}'")
+                formatter.add_arguments(matched_actions)
+                formatter.end_section()
+                formatter.add_text(self._json_tip)
+                return formatter.format_help()
+
+            # No match found
+            formatter.add_text(
+                f"No group or arguments matching '{search_keyword}'.\n"
+                "Use '--help' to see available groups or "
+                "'--help=all' to see all available parameters."
+            )
+            return formatter.format_help()
+
+        # usage
+        formatter.add_usage(self.usage, self._actions, self._mutually_exclusive_groups)
+
+        # description
+        formatter.add_text(self.description)
+
+        # positionals, optionals and user-defined groups
+        formatter.start_section("Config Groups")
+        config_groups = ""
+        for group in self._action_groups:
+            if not group._group_actions:
+                continue
+            title = group.title
+            description = group.description or ""
+            config_groups += f"{title: <24}{description}\n"
+        formatter.add_text(config_groups)
+        formatter.end_section()
+
+        # epilog
+        formatter.add_text(self.epilog)
+
+        # determine help from format above
+        return formatter.format_help()
 
     def parse_args(  # type: ignore[override]
         self,
@@ -1813,14 +1878,40 @@ class FlexibleArgumentParser(ArgumentParser):
 
         # Check for --model in command line arguments first
         if args and args[0] == "serve":
-            model_in_cli_args = any(arg == "--model" for arg in args)
-
-            if model_in_cli_args:
-                raise ValueError(
+            try:
+                model_idx = next(
+                    i
+                    for i, arg in enumerate(args)
+                    if arg == "--model" or arg.startswith("--model=")
+                )
+                logger.warning(
                     "With `vllm serve`, you should provide the model as a "
                     "positional argument or in a config file instead of via "
-                    "the `--model` option."
+                    "the `--model` option. "
+                    "The `--model` option will be removed in v0.13."
                 )
+
+                if args[model_idx] == "--model":
+                    model_tag = args[model_idx + 1]
+                    rest_start_idx = model_idx + 2
+                else:
+                    model_tag = args[model_idx].removeprefix("--model=")
+                    rest_start_idx = model_idx + 1
+
+                # Move <model> to the front, e,g:
+                # [Before]
+                # vllm serve -tp 2 --model <model> --enforce-eager --port 8001
+                # [After]
+                # vllm serve <model> -tp 2 --enforce-eager --port 8001
+                args = [
+                    "serve",
+                    model_tag,
+                    *args[1:model_idx],
+                    *args[rest_start_idx:],
+                ]
+                print("args", args)
+            except StopIteration:
+                pass
 
         if "--config" in args:
             args = self._pull_args_from_config(args)
@@ -1835,7 +1926,10 @@ class FlexibleArgumentParser(ArgumentParser):
         # Convert underscores to dashes and vice versa in argument names
         processed_args = list[str]()
         for i, arg in enumerate(args):
-            if arg.startswith("--"):
+            if arg.startswith("--help="):
+                FlexibleArgumentParser._search_keyword = arg.split("=", 1)[-1].lower()
+                processed_args.append("--help")
+            elif arg.startswith("--"):
                 if "=" in arg:
                     key, value = arg.split("=", 1)
                     key = pattern.sub(repl, key, count=1)
@@ -2148,7 +2242,7 @@ def supports_kw(
 
 def get_allowed_kwarg_only_overrides(
     callable: Callable[..., object],
-    overrides: Optional[Mapping[str, object]],
+    overrides: Mapping[str, object] | None,
     *,
     requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
@@ -2598,10 +2692,10 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 def direct_register_custom_op(
     op_name: str,
     op_func: Callable,
-    mutates_args: Optional[list[str]] = None,
-    fake_impl: Optional[Callable] = None,
-    target_lib: Optional[Library] = None,
-    dispatch_key: Optional[str] = None,
+    mutates_args: list[str] | None = None,
+    fake_impl: Callable | None = None,
+    target_lib: Library | None = None,
+    dispatch_key: str | None = None,
     tags: tuple[torch.Tag, ...] = (),
 ):
     """
@@ -2709,7 +2803,10 @@ class MemorySnapshot:
             self.measure()
 
     def measure(self) -> None:
+        from vllm.platforms import current_platform
+
         device = self.device
+        device_id = 0 if device is None else torch.device(device).index
 
         # we measure the torch peak memory usage via allocated_bytes,
         # rather than `torch.cuda.memory_reserved()` .
@@ -2721,6 +2818,25 @@ class MemorySnapshot:
         )
 
         self.free_memory, self.total_memory = torch.cuda.mem_get_info(device)
+        shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
+        if (
+            current_platform.is_cuda()
+            and current_platform.get_device_capability(device_id)
+            in shared_sysmem_device_mem_sms
+        ):
+            # On UMA (Orin, Thor and Spark) platform,
+            # where both CPU and GPU rely on system memory,
+            # the cudaMemGetInfo function shows the amount of free system memory
+            # rather than what’s actually available.
+            # In the case,
+            # torch.cuda.mem_get_info() only reports "free" memory,
+            # which can be lower than what is actually
+            # available due to not including cache memory.
+            # There’s also a comprehensive reference page
+            # that explains how you can compute the proper value yourself.
+            # https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
+            self.free_memory = psutil.virtual_memory().available
+
         self.cuda_memory = self.total_memory - self.free_memory
 
         # torch.cuda.memory_reserved() is how many bytes
@@ -2917,7 +3033,7 @@ def split_zmq_path(path: str) -> tuple[str, str, str]:
     return scheme, host, port
 
 
-def make_zmq_path(scheme: str, host: str, port: Optional[int] = None) -> str:
+def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
     """Make a ZMQ path from its parts.
 
     Args:
@@ -2940,9 +3056,9 @@ def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
     path: str,
     socket_type: Any,
-    bind: Optional[bool] = None,
-    identity: Optional[bytes] = None,
-    linger: Optional[int] = None,
+    bind: bool | None = None,
+    identity: bytes | None = None,
+    linger: int | None = None,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
@@ -2956,10 +3072,7 @@ def make_zmq_socket(
     # - Set a large 0.5GB buffer to improve throughput
     # For systems with less memory:
     # - Use system default (-1) to avoid excessive memory consumption
-    if total_mem > 32 and available_mem > 16:
-        buf_size = int(0.5 * 1024**3)  # 0.5GB in bytes
-    else:
-        buf_size = -1  # Use system default buffer size
+    buf_size = int(0.5 * 1024**3) if total_mem > 32 and available_mem > 16 else -1
 
     if bind is None:
         bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
@@ -2999,9 +3112,9 @@ def make_zmq_socket(
 def zmq_socket_ctx(
     path: str,
     socket_type: Any,
-    bind: Optional[bool] = None,
+    bind: bool | None = None,
     linger: int = 0,
-    identity: Optional[bytes] = None,
+    identity: bytes | None = None,
 ) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
@@ -3064,7 +3177,7 @@ def get_mp_context():
 def bind_kv_cache(
     ctx: dict[str, Any],
     kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
-    shared_kv_cache_layers: Optional[dict[str, str]] = None,
+    shared_kv_cache_layers: dict[str, str] | None = None,
 ) -> None:
     # Bind the kv_cache tensor to Attention modules, similar to
     # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
@@ -3280,7 +3393,7 @@ def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
 
 
 @contextlib.contextmanager
-def cprofile_context(save_file: Optional[str] = None):
+def cprofile_context(save_file: str | None = None):
     """Run a cprofile
 
     Args:
@@ -3302,7 +3415,7 @@ def cprofile_context(save_file: Optional[str] = None):
             prof.print_stats(sort="cumtime")
 
 
-def cprofile(save_file: Optional[str] = None, enabled: bool = True):
+def cprofile(save_file: str | None = None, enabled: bool = True):
     """Decorator to profile a Python method using cProfile.
 
     Args:
@@ -3459,6 +3572,12 @@ def has_triton_kernels() -> bool:
     return _has_module("triton_kernels")
 
 
+def has_tilelang() -> bool:
+    """Whether the optional `tilelang` package is available."""
+
+    return _has_module("tilelang")
+
+
 def set_process_title(
     name: str, suffix: str = "", prefix: str = envs.VLLM_PROCESS_NAME_PREFIX
 ) -> None:
@@ -3503,7 +3622,7 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     file.write = write_with_prefix  # type: ignore[method-assign]
 
 
-def decorate_logs(process_name: Optional[str] = None) -> None:
+def decorate_logs(process_name: str | None = None) -> None:
     """
     Adds a process-specific prefix to each line of output written to stdout and
     stderr.
@@ -3526,8 +3645,8 @@ def decorate_logs(process_name: Optional[str] = None) -> None:
 
 
 def length_from_prompt_token_ids_or_embeds(
-    prompt_token_ids: Optional[list[int]],
-    prompt_embeds: Optional[torch.Tensor],
+    prompt_token_ids: list[int] | None,
+    prompt_embeds: torch.Tensor | None,
 ) -> int:
     """Calculate the request length (in number of tokens) give either
     prompt_token_ids or prompt_embeds.
@@ -3560,3 +3679,23 @@ def set_env_var(key, value):
             del os.environ[key]
         else:
             os.environ[key] = old
+
+
+def unique_filepath(fn: Callable[[int], Path]) -> Path:
+    """
+    unique_filepath returns a unique path by trying
+    to include an integer in increasing order.
+
+    fn should be a callable that returns a path that
+    includes the passed int at a fixed location.
+
+    Note: This function has a TOCTOU race condition.
+    Caller should use atomic operations (e.g., open with 'x' mode)
+    when creating the file to ensure thread safety.
+    """
+    i = 0
+    while True:
+        p = fn(i)
+        if not p.exists():
+            return p
+        i += 1
