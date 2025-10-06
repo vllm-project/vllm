@@ -108,8 +108,7 @@ try:
         fake_impl=gemm_with_dynamic_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
-
-except ImportError:
+except (ImportError, AttributeError):
     dynamic_mxfp4_quant = gemm_afp4wfp4 = None
 
 
@@ -129,18 +128,18 @@ class QuarkOCP_MX(QuarkScheme):
             self.input_dtype, self.weight_dtype
         )
 
-        if self.weight_dtype == "fp4":
+        if self.weight_dtype == "mxfp4":
             self.packed_factor: Union[int, Fraction] = 2
             self.dequant_func = dequant_mxfp4
         else:
             self.packed_factor = Fraction(numerator=8, denominator=6)
-            self.dequant_func = partial(dequant_mxfp6, quant_dtype=self.weight_dtype)
+            self.dequant_func = partial(dequant_mxfp6, quant_dtype=self.weight_dtype.replace("mx", ""))
 
-        if self.input_dtype == "fp4":
+        if self.input_dtype == "mxfp4":
             self.quant_dequant_func = quant_dequant_mxfp4
         else:
             self.quant_dequant_func = partial(
-                quant_dequant_mxfp6, quant_dtype=self.input_dtype
+                quant_dequant_mxfp6, quant_dtype=self.input_dtype.replace("mx", "")
             )
 
         self.static_input_scales = not input_quant_spec.get("is_dynamic")
@@ -153,7 +152,7 @@ class QuarkOCP_MX(QuarkScheme):
 
         # TODO: integrate (or test) mixed-precision kernel.
         self.emulate = not current_platform.supports_mx() or (
-            self.input_dtype != "fp4" or self.weight_dtype != "fp4"
+            self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
         )
 
         self.rocm_use_aiter_fp4_asm_gemm = is_rocm_aiter_fp4_asm_gemm_enabled()
@@ -175,7 +174,7 @@ class QuarkOCP_MX(QuarkScheme):
             )
 
         if current_platform.supports_mx() and (
-            self.input_dtype != "fp4" or self.weight_dtype != "fp4"
+            self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
         ):
             logger.warning_once(
                 "The current platform supports native MXFP4/MXFP6 "
@@ -187,10 +186,10 @@ class QuarkOCP_MX(QuarkScheme):
             )
 
     def get_packed_dim(self, dim: int, quant_dtype: str):
-        if quant_dtype == "fp4":
+        if quant_dtype == "mxfp4":
             assert dim % 2 == 0
             return dim // 2
-        elif quant_dtype in {"fp6_e3m2", "fp6_e2m3"}:
+        elif quant_dtype in {"mxfp6_e3m2", "mxfp6_e2m3"}:
             # FP6 packs 4 * 6 = 24 bits on 3 bytes.
             assert (dim * 3) % 4 == 0
             return (dim * 3) // 4

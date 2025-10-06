@@ -201,7 +201,7 @@ def _mxfp8_e4m3_quantize(
     return mxfp8_e4m3_quantize(A)
 
 
-def _mxfp6_quantize(
+def _mxfp6_quantize_fp6_e3m2(
     A: torch.Tensor,
     quant_dtype: str,
     A_scale: Optional[torch.Tensor],
@@ -214,9 +214,27 @@ def _mxfp6_quantize(
     # so simulating even on devices supporting this data type natively.
     # Eventually, there should be a check based on
     # `current_platform.supports_mx()` here.
-    A = quant_dequant_mxfp6(A, quant_dtype=quant_dtype)
+    A = quant_dequant_mxfp6(A, quant_dtype="fp6_e3m2")
 
     return A, None
+
+def _mxfp6_quantize_fp6_e2m3(
+    A: torch.Tensor,
+    quant_dtype: str,
+    A_scale: Optional[torch.Tensor],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]] = None,
+) -> tuple[torch.Tensor, None]:
+    assert block_shape is None
+
+    # TODO: native mxfp6 is currently not integrated in vllm,
+    # so simulating even on devices supporting this data type natively.
+    # Eventually, there should be a check based on
+    # `current_platform.supports_mx()` here.
+    A = quant_dequant_mxfp6(A, quant_dtype="fp6_e2m3")
+
+    return A, None
+
 
 
 def moe_kernel_quantize_input(
@@ -239,9 +257,13 @@ def moe_kernel_quantize_input(
         # TODO: `quant_dtype == "fp8"` is ambiguous,
         # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
         return _mxfp8_e4m3_quantize(A, A_scale, per_act_token_quant, block_shape)
-    elif quant_dtype in {"fp6_e3m2", "fp6_e2m3"}:
-        return _mxfp6_quantize(
-            A, quant_dtype, A_scale, per_act_token_quant, block_shape
+    elif quant_dtype == "mxfp6_e3m2":
+        return _mxfp6_quantize_mxfp6_e3m2(
+            A, A_scale, per_act_token_quant, block_shape
+        )
+    elif quant_dtype == "mxfp6_e2m3":
+        return _mxfp6_quantize_mxfp6_e2m3(
+            A, A_scale, per_act_token_quant, block_shape
         )
     else:
         return A, A_scale

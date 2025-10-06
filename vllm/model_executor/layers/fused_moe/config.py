@@ -50,7 +50,7 @@ def _get_config_dtype_str(
     elif ocp_mx_scheme is not None:
         # The output of this function is passed to `try_get_optimal_moe_config`,
         # and as we only simulate OCP MX execution in fused_moe for now,
-        # we will NOT look for `*,dtype=w_fp4_a_fp4.json` for now.
+        # we will NOT look for `*,dtype=w_mxfp4_a_mxfp4.json` for now.
         return None
     elif dtype == torch.float:
         # avoiding cases where kernel fails when float32 MoE
@@ -396,8 +396,8 @@ class FusedMoEQuantConfig:
         """
         General builder function for a FusedMoEQuantConfig.
         - quant_dtype: Optional quantization type. None if activations are
-          unquantized or quantized prior to calling.  Note: "nvfp4", "fp4",
-          "fp6_e3m2", "fp6_e2m3" are the only valid string values
+          unquantized or quantized prior to calling.  Note: "nvfp4", "mxfp4",
+          "mxfp6_e3m2", "mxfp6_e2m3" are the only valid string values
           for quant_dtype.
         - per_act_token_quant: Activations have per token quantization.
         - per_out_ch_quant: Outputs have per channel quantization. (only
@@ -420,14 +420,14 @@ class FusedMoEQuantConfig:
         assert not isinstance(quant_dtype, str) or quant_dtype in {
             "nvfp4",
             "fp4",
-            "fp6_e3m2",
-            "fp6_e2m3",
+            "mxfp6_e3m2",
+            "mxfp6_e2m3",
         }
         assert not isinstance(weight_dtype, str) or weight_dtype in {
             "nvfp4",
             "fp4",
-            "fp6_e3m2",
-            "fp6_e2m3",
+            "mxfp6_e3m2",
+            "mxfp6_e2m3",
         }
 
         if weight_dtype is None:

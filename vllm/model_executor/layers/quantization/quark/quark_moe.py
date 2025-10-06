@@ -489,7 +489,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             )
 
     def get_packed_dim(self, dim: int, quant_dtype: str):
-        if quant_dtype == "fp4":
+        if quant_dtype == "mxfp4":
             assert dim % 2 == 0
             return dim // 2
         else:

@@ -9,16 +9,16 @@ logger = init_logger(__name__)
 
 OCP_MX_BLOCK_SIZE = 32
 
-OCP_MX_DTYPES = {"fp4", "fp6_e3m2", "fp6_e2m3", "fp8_e4m3", "fp8_e5m2", "int8"}
-SUPPORTED_OCP_MX_DTYPES = {"fp4", "fp6_e3m2", "fp6_e2m3"}
+OCP_MX_DTYPES = {"mxfp4", "mxfp6_e3m2", "mxfp6_e2m3", "mxfp8_e4m3", "mxfp8_e5m2", "mxint8"}
+SUPPORTED_OCP_MX_DTYPES = {"mxfp4", "mxfp6_e3m2", "mxfp6_e2m3"}
 
 
 class OCP_MX_Scheme(str, Enum):
-    w_fp4_a_fp4 = "w_fp4_a_fp4"
-    w_fp4_a_fp6_e3m2 = "w_fp4_a_fp6_e3m2"
-    w_fp4_a_fp6_e2m3 = "w_fp4_a_fp6_e2m3"
-    w_fp6_e3m2_a_fp6_e3m2 = "w_fp6_e3m2_a_fp6_e3m2"
-    w_fp6_e2m3_a_fp6_e2m3 = "w_fp6_e2m3_a_fp6_e2m3"
+    w_mxfp4_a_mxfp4 = "w_mxfp4_a_mxfp4"
+    w_mxfp4_a_mxfp6_e3m2 = "w_mxfp4_a_mxfp6_e3m2"
+    w_mxfp4_a_mxfp6_e2m3 = "w_mxfp4_a_mxfp6_e2m3"
+    w_mxfp6_e3m2_a_mxfp6_e3m2 = "w_mxfp6_e3m2_a_mxfp6_e3m2"
+    w_mxfp6_e2m3_a_mxfp6_e2m3 = "w_mxfp6_e2m3_a_mxfp6_e2m3"
 
     @classmethod
     def from_quant_dtype(
@@ -26,16 +26,16 @@ class OCP_MX_Scheme(str, Enum):
     ):
         if input_dtype not in OCP_MX_DTYPES or weight_dtype not in OCP_MX_DTYPES:
             return None
-        elif input_dtype == "fp4" and weight_dtype == "fp4":
-            return cls.w_fp4_a_fp4
-        elif input_dtype == "fp6_e3m2" and weight_dtype == "fp4":
-            return cls.w_fp4_a_fp6_e3m2
-        elif input_dtype == "fp6_e2m3" and weight_dtype == "fp4":
-            return cls.w_fp4_a_fp6_e2m3
-        elif input_dtype == "fp6_e3m2" and weight_dtype == "fp6_e3m2":
-            return cls.w_fp6_e3m2_a_fp6_e3m2
-        elif input_dtype == "fp6_e2m3" and weight_dtype == "fp6_e2m3":
-            return cls.w_fp6_e2m3_a_fp6_e2m3
+        elif input_dtype == "mxfp4" and weight_dtype == "mxfp4":
+            return cls.w_mxfp4_a_mxfp4
+        elif input_dtype == "mxfp6_e3m2" and weight_dtype == "mxfp4":
+            return cls.w_mxfp4_a_mxfp6_e3m2
+        elif input_dtype == "mxfp6_e2m3" and weight_dtype == "mxfp4":
+            return cls.w_mxfp4_a_mxfp6_e2m3
+        elif input_dtype == "mxfp6_e3m2" and weight_dtype == "mxfp6_e3m2":
+            return cls.w_mxfp6_e3m2_a_mxfp6_e3m2
+        elif input_dtype == "mxfp6_e2m3" and weight_dtype == "mxfp6_e2m3":
+            return cls.w_mxfp6_e2m3_a_mxfp6_e2m3
         else:
             logger.warning(
                 "input_dtype='%s' and"
