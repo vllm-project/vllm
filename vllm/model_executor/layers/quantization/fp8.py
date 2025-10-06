@@ -974,7 +974,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def maybe_make_prepare_finalize(self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
         if (
             self.use_marlin
-            or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM):
+            or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+        ):
             return None
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
@@ -991,10 +992,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         from vllm.model_executor.layers.fused_moe import (
-            AiterExperts, BatchedTritonOrDeepGemmExperts,
-            TritonOrDeepGemmExperts)
-        assert not self.use_marlin, (
-            "Marlin is not supported with all2all yet.")
+            AiterExperts,
+            BatchedTritonOrDeepGemmExperts,
+            TritonOrDeepGemmExperts,
+        )
+
+        assert not self.use_marlin, "Marlin is not supported with all2all yet."
 
         assert self.moe_quant_config is not None
 

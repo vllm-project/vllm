@@ -723,6 +723,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         )
         # aiter does not require intermediate workspace
         from vllm.model_executor.layers.fused_moe import AiterExperts
+
         if isinstance(self.fused_experts, AiterExperts):
             workspace2 = None
         else:

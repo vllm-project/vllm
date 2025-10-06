@@ -11,9 +11,11 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    rocm_aiter_fused_experts)
+    rocm_aiter_fused_experts,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceNoOP)
+    TopKWeightAndReduceNoOP,
+)
 
 
 class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -29,7 +31,9 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         max_num_tokens: int,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config=quant_config, )
+        super().__init__(
+            quant_config=quant_config,
+        )
         self.max_num_tokens = max_num_tokens
 
     @property

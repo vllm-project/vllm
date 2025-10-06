@@ -475,8 +475,7 @@ class MoriAll2AllManager(All2AllManagerBase):
     """
 
     def __init__(self, cpu_group):
-        assert has_mori(
-        ), "Please install mori from https://github.com/ROCm/mori."
+        assert has_mori(), "Please install mori from ROCm/mori github."
 
         super().__init__(cpu_group)
         self.handle_cache = Cache()
@@ -506,10 +505,14 @@ class MoriAll2AllManager(All2AllManagerBase):
 
             logger.debug(
                 "[rank %s] PyTorch distributed ready with backend: %s",
-                self.rank, backend)
+                self.rank,
+                backend
+            )
 
-            current_group = (self.cpu_group if self.cpu_group is not None else
-                             dist.group.WORLD)
+            current_group = (
+                self.cpu_group if self.cpu_group is not None
+                else dist.group.WORLD
+            )
 
             # TODO(inhyeok): make group_name more reasonable
             group_name = "default"
@@ -524,44 +527,56 @@ class MoriAll2AllManager(All2AllManagerBase):
 
                 # Register the current process group
                 c10d._register_process_group(group_name, current_group)
-                logger.debug("[rank %s] Registered process group '%s'",
-                             self.rank, group_name)
+                logger.debug(
+                    "[rank %s] Registered process group '%s'",
+                    self.rank,
+                    group_name
+                )
 
                 # Initialize mori shmem with the registered group
                 mori.shmem.shmem_torch_process_group_init(group_name)
                 logger.debug(
                     "[rank %s] torch process group shmem init success",
-                    self.rank)
+                    self.rank
+                )
                 self._shmem_initialized = True
                 return
 
             except Exception as torch_error:
                 logger.debug(
                     "[rank %s] torch process group shmem init failed: %s",
-                    self.rank, torch_error)
+                    self.rank,
+                    torch_error
+                )
                 self._shmem_initialized = True
                 logger.warning(
                     "[rank %s] Continuing without mori shmem optimization",
-                    self.rank)
+                    self.rank
+                )
 
         except Exception as e:
-            logger.error("[rank %s] mori shmem initialization failed: %s",
-                         self.rank, e)
+            logger.error(
+                "[rank %s] mori shmem initialization failed: %s",
+                self.rank, e
+            )
             # Don't fail completely - mark as initialized to avoid retry loops
             self._shmem_initialized = True
             logger.warning(
                 "[rank %s] Continuing without mori shmem optimization",
-                self.rank)
+                self.rank
+            )
 
-    def _make_mori_config(self,
-                          max_num_tokens: int,
-                          num_local_experts: int,
-                          experts_per_token: int,
-                          hidden_dim: int,
-                          scale_dim: int,
-                          scale_type_size: int,
-                          data_type: torch.dtype = torch.bfloat16,
-                          quant_dtype: torch.dtype = None):
+    def _make_mori_config(
+            self,
+            max_num_tokens: int,
+            num_local_experts: int,
+            experts_per_token: int,
+            hidden_dim: int,
+            scale_dim: int,
+            scale_type_size: int,
+            data_type: torch.dtype = torch.bfloat16,
+            quant_dtype: torch.dtype = None,
+        ):
         """Create mori EpDispatchCombineConfig"""
         import mori.ops.dispatch_combine as mori_ops
         from mori.ops.dispatch_combine import EpDispatchCombineKernelType
@@ -582,20 +597,20 @@ class MoriAll2AllManager(All2AllManagerBase):
             max_num_inp_token_per_rank=max_num_tokens,
             num_experts_per_rank=num_local_experts,
             num_experts_per_token=experts_per_token,
-
             # Performance tuning parameters
             # warp_num_per_block=8,
             # block_num=80,
             max_token_type_size=max_token_type_size,
-
             # Quantization support
             scale_dim=scale_dim,
             scale_type_size=scale_type_size,
-
             # Determine kernel type based on topology
-            kernel_type=(EpDispatchCombineKernelType.InterNode
-                         if self.internode else
-                         EpDispatchCombineKernelType.IntraNode))
+            kernel_type=(
+                EpDispatchCombineKernelType.InterNode
+                if self.internode else
+                EpDispatchCombineKernelType.IntraNode
+            ),
+        )
 
         return config
 
@@ -616,25 +631,36 @@ class MoriAll2AllManager(All2AllManagerBase):
         import mori.ops.dispatch_combine as mori_ops
 
         # Extract parameters
-        max_num_tokens = kwargs.get('max_num_tokens')
-        num_local_experts = kwargs.get('num_local_experts')
-        experts_per_token = kwargs.get('experts_per_token')
-        hidden_dim = kwargs.get('hidden_dim')
-        data_type = kwargs.get('data_type', torch.bfloat16)
-        scale_dim = kwargs.get('scale_dim')
-        scale_type_size = kwargs.get('scale_type_size')
+        max_num_tokens = kwargs.get("max_num_tokens")
+        num_local_experts = kwargs.get("num_local_experts")
+        experts_per_token = kwargs.get("experts_per_token")
+        hidden_dim = kwargs.get("hidden_dim")
+        data_type = kwargs.get("data_type", torch.bfloat16)
+        scale_dim = kwargs.get("scale_dim")
+        scale_type_size = kwargs.get("scale_type_size")
 
         # Validate required parameters
         if any(
-                param is None for param in
-            [max_num_tokens, num_local_experts, experts_per_token, hidden_dim
-             ]):
+            param is None
+            for param in [
+                max_num_tokens,
+                num_local_experts,
+                experts_per_token,
+                hidden_dim,
+            ]
+        ):
             raise ValueError(
-                "Missing required parameters for mori handle creation")
+                "Missing required parameters for mori handle creation"
+            )
 
         # Create cache key
-        cache_key = (max_num_tokens, num_local_experts, experts_per_token,
-                     hidden_dim, data_type)
+        cache_key = (
+            max_num_tokens,
+            num_local_experts,
+            experts_per_token,
+            hidden_dim,
+            data_type,
+        )
 
         # Check cache first
         if cache_key in self._op_handles:
@@ -659,20 +685,27 @@ class MoriAll2AllManager(All2AllManagerBase):
 
         logger.debug(
             "[rank %s] Created mori handle with config: tokens=%d, experts=%d,"
-            " topk=%d, hidden_dim=%d", self.dp_rank, max_num_tokens,
-            num_local_experts, experts_per_token, hidden_dim)
+            " topk=%d, hidden_dim=%d",
+            self.dp_rank,
+            max_num_tokens,
+            num_local_experts,
+            experts_per_token,
+            hidden_dim
+        )
 
         return op
 
     def dispatch(self,
-                 hidden_states: torch.Tensor,
-                 router_logits: torch.Tensor,
-                 is_sequence_parallel: bool = False):
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False,
+    ):
         raise NotImplementedError
 
     def combine(self,
-                hidden_states: torch.Tensor,
-                is_sequence_parallel: bool = False):
+        hidden_states: torch.Tensor,
+        is_sequence_parallel: bool = False,
+    ):
         raise NotImplementedError
 
     def destroy(self):
@@ -688,16 +721,21 @@ class MoriAll2AllManager(All2AllManagerBase):
 
                     # Check if shmem is actually active before finalizing
                     mori.shmem.shmem_finalize()
-                    logger.debug("[rank %s] mori shmem finalized",
-                                 self.dp_rank)
+                    logger.debug(
+                        "[rank %s] mori shmem finalized",
+                        self.dp_rank
+                    )
                 except Exception as shmem_error:
                     logger.debug(
                         "[rank %s] shmem finalize failed "
-                        "(may not have been active): %s", self.dp_rank,
-                        shmem_error)
+                        "(may not have been active): %s",
+                        self.dp_rank,
+                        shmem_error
+                    )
 
             logger.debug("[rank %s] mori resources cleaned up", self.dp_rank)
 
         except Exception as e:
-            logger.warning("[rank %s] Error during mori cleanup: %s",
-                           self.dp_rank, e)
+            logger.warning(
+                "[rank %s] Error during mori cleanup: %s", self.dp_rank, e
+            )

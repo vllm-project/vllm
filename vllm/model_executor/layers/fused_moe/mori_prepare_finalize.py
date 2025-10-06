@@ -76,11 +76,11 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> tuple[
-            torch.Tensor,
-            Optional[torch.Tensor],
-            Optional[mk.ExpertTokensMetadata],
-            Optional[torch.Tensor],
-            Optional[torch.Tensor],
+        torch.Tensor,
+        Optional[torch.Tensor],
+        Optional[mk.ExpertTokensMetadata],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
     ]:
         """
         Prepare inputs for mori dispatch operation.
@@ -110,7 +110,8 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 if block_shape is not None:
                     assert not apply_router_weight_on_input, (
                         "apply_router_weight_on_input is"
-                        " not supported for block scaled moe")
+                        " not supported for block scaled moe"
+                    )
                     quant_type = QuantType.per_1x128
                 else:
                     quant_type = QuantType.per_Token
@@ -184,14 +185,18 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 indices=topk_ids,
             )
 
-            output.copy_(combined_output[:num_original_tokens],
-                         non_blocking=True)
+            output.copy_(
+                combined_output[:num_original_tokens],
+                non_blocking=True,
+            )
 
         except Exception as e:
             logger.error("mori combine failed: %s", e)
             raise RuntimeError("mori combine failed: %s", e) from e
 
     def __repr__(self) -> str:
-        return (f"MoriPrepareAndFinalize(max_tokens={self.max_num_tokens}, "
-                f"num_local_experts={self.num_local_experts}, "
-                f"num_dispatchers={self.num_dispatchers_})")
+        return (
+            f"MoriPrepareAndFinalize(max_tokens={self.max_num_tokens}, "
+            f"num_local_experts={self.num_local_experts}, "
+            f"num_dispatchers={self.num_dispatchers_})"
+        )
