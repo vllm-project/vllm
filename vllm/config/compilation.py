@@ -27,7 +27,7 @@ logger = init_logger(__name__)
 class CompilationMode:
     # constants for the levels of the compilation process
     NO_COMPILATION = 0
-    DYNAMO_AS_IS = 1
+    STOCK_TORCH_COMPILE = 1
     DYNAMO_ONCE = 2
     PIECEWISE = 3
 
@@ -581,7 +581,7 @@ class CompilationConfig:
         from torch._dynamo.backends.registry import list_backends
 
         torch_backends = list_backends(exclude_tags=tuple())
-        if self.level in [CompilationMode.DYNAMO_AS_IS, CompilationMode.DYNAMO_ONCE]:
+        if self.level in [CompilationMode.STOCK_TORCH_COMPILE, CompilationMode.DYNAMO_ONCE]:
             if self.backend in torch_backends:
                 return self.backend
             return resolve_obj_by_qualname(self.backend)
@@ -745,7 +745,7 @@ class CompilationConfig:
         inductor_used = (
             self.level == CompilationMode.PIECEWISE and self.backend == "inductor"
         ) or (
-            self.level >= CompilationMode.DYNAMO_AS_IS and self.backend == "inductor"
+            self.level >= CompilationMode.STOCK_TORCH_COMPILE and self.backend == "inductor"
         )
         use_inductor_piecewise_compilation = (
             inductor_used
