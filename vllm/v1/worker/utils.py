@@ -240,9 +240,7 @@ def check_enough_init_memory(
     Calculate the amount of memory required by vLLM, then validate
     that the current amount of free memory is sufficient for that.
     """
-    requested_memory = init_snapshot.total_memory * (
-        cache_config.gpu_memory_utilization
-    )
+    requested_memory = init_snapshot.total_memory * cache_config.gpu_memory_utilization
 
     if init_snapshot.free_memory < requested_memory:
         GiB = lambda b: round(b / GiB_bytes, 2)
