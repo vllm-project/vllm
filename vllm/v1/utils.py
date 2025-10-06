@@ -345,13 +345,15 @@ def report_usage_stats(
 
     from vllm.model_executor.model_loader import get_architecture_class_name
 
+    parallel_config = vllm_config.parallel_config
+
     usage_message.report_usage(
         get_architecture_class_name(vllm_config.model_config),
         usage_context,
         extra_kvs={
             # Common configuration
             "dtype": str(vllm_config.model_config.dtype),
-            "tensor_parallel_size": vllm_config.parallel_config.tensor_parallel_size,
+            "tensor_parallel_size": parallel_config.tensor_parallel_size,
             "block_size": vllm_config.cache_config.block_size,
             "gpu_memory_utilization": vllm_config.cache_config.gpu_memory_utilization,
             "kv_cache_memory_bytes": vllm_config.cache_config.kv_cache_memory_bytes,
@@ -362,7 +364,7 @@ def report_usage_stats(
             "enable_lora": bool(vllm_config.lora_config),
             "enable_prefix_caching": vllm_config.cache_config.enable_prefix_caching,
             "enforce_eager": vllm_config.model_config.enforce_eager,
-            "disable_custom_all_reduce": vllm_config.parallel_config.disable_custom_all_reduce,
+            "disable_custom_all_reduce": parallel_config.disable_custom_all_reduce,
         },
     )
 

@@ -3391,7 +3391,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                 attn_metadata[ubid][layer_name] = attn_metadata_i
                     else:
                         assert type(attn_metadata) is dict
-                        attn_metadata_i = attn_group.get_metadata_builder().build_for_cudagraph_capture(
+                        metadata_builder = attn_group.get_metadata_builder()
+                        attn_metadata_i = metadata_builder.build_for_cudagraph_capture(
                             common_attn_metadata
                         )
                         for layer_name in attn_group.layer_names:
