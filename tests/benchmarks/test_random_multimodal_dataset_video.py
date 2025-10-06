@@ -26,7 +26,7 @@ def video_dataset() -> RandomMultiModalDataset:
 
 
 @pytest.mark.benchmark
-def test_generate_synthetic_video_different_seeds(self):
+def test_generate_synthetic_video_different_seeds():
     """Test that different seeds produce different videos."""
     dataset1 = RandomMultiModalDataset(random_seed=123)
     dataset2 = RandomMultiModalDataset(random_seed=456)
@@ -53,17 +53,15 @@ def test_map_config_to_modality(video_dataset: RandomMultiModalDataset):
     assert video_dataset.map_config_to_modality((64, 64, 32)) == "video"
 
     # Test invalid configurations
-    with pytest.raises(ValueError,
-                       match="Invalid multimodal item configuration"):
+    with pytest.raises(ValueError, match="Invalid multimodal item configuration"):
         video_dataset.map_config_to_modality((256, 256, 0))
 
-    with pytest.raises(ValueError,
-                       match="Invalid multimodal item configuration"):
+    with pytest.raises(ValueError, match="Invalid multimodal item configuration"):
         video_dataset.map_config_to_modality((256, 256, -1))
 
 
 @pytest.mark.benchmark
-def test_generate_mm_item_video( video_dataset: RandomMultiModalDataset):
+def test_generate_mm_item_video(video_dataset: RandomMultiModalDataset):
     """Test generating multimodal items for video configurations."""
     # Test video item generation
     video_config = (64, 48, 8)  # height, width, num_frames
@@ -85,7 +83,7 @@ def test_generate_mm_item_video( video_dataset: RandomMultiModalDataset):
     assert len(video_bytes) > 0
 
     # Verify the video can be decoded
-    with NamedTemporaryFile(suffix='.mp4', delete=False) as temp_file:
+    with NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
         temp_path = temp_file.name
         temp_file.write(video_bytes)
 
@@ -108,9 +106,7 @@ def test_generate_mm_item_video( video_dataset: RandomMultiModalDataset):
 
 
 @pytest.mark.benchmark
-def test_generate_mm_item_image(
-    video_dataset: RandomMultiModalDataset
-):
+def test_generate_mm_item_image(video_dataset: RandomMultiModalDataset):
     """Test generating multimodal items for image configurations."""
     # Test image item generation
     image_config = (64, 48, 1)  # height, width, num_frames=1
@@ -128,19 +124,15 @@ def test_generate_mm_item_image(
 
 
 @pytest.mark.benchmark
-def test_generate_mm_item_invalid_config(
-        video_dataset: RandomMultiModalDataset
-):
+def test_generate_mm_item_invalid_config(video_dataset: RandomMultiModalDataset):
     """Test error handling for invalid configurations."""
-    with pytest.raises(ValueError,
-                       match="Invalid multimodal item configuration"):
+    with pytest.raises(ValueError, match="Invalid multimodal item configuration"):
         video_dataset.generate_mm_item((256, 256, 0))
 
 
 @pytest.mark.benchmark
 def test_sample_with_video_buckets(
-    video_dataset: RandomMultiModalDataset,
-    hf_tokenizer: PreTrainedTokenizerBase
+    video_dataset: RandomMultiModalDataset, hf_tokenizer: PreTrainedTokenizerBase
 ):
     """Test sampling with video bucket configurations."""
     # Configure bucket with video probability > 0
@@ -195,8 +187,7 @@ def test_sample_with_video_buckets(
 
 @pytest.mark.benchmark
 def test_sample_video_only_buckets(
-        video_dataset: RandomMultiModalDataset,
-        hf_tokenizer: PreTrainedTokenizerBase
+    video_dataset: RandomMultiModalDataset, hf_tokenizer: PreTrainedTokenizerBase
 ):
     """Test sampling with only video buckets."""
     bucket_config = {
@@ -234,8 +225,7 @@ def test_sample_video_only_buckets(
 
 @pytest.mark.benchmark
 def test_sample_respects_video_limits(
-        video_dataset: RandomMultiModalDataset,
-        hf_tokenizer: PreTrainedTokenizerBase
+    video_dataset: RandomMultiModalDataset, hf_tokenizer: PreTrainedTokenizerBase
 ):
     """Test that sampling respects video limits per prompt."""
     bucket_config = {
@@ -265,8 +255,7 @@ def test_sample_respects_video_limits(
 
 @pytest.mark.benchmark
 def test_sample_mixed_buckets_with_zero_probability(
-    video_dataset: RandomMultiModalDataset,
-    hf_tokenizer: PreTrainedTokenizerBase
+    video_dataset: RandomMultiModalDataset, hf_tokenizer: PreTrainedTokenizerBase
 ):
     """Test sampling with mixed buckets including zero probability entries."""
     bucket_config = {
@@ -300,7 +289,7 @@ def test_sample_mixed_buckets_with_zero_probability(
                 base64_data = url.split(",")[1]
                 video_bytes = base64.b64decode(base64_data)
 
-                with NamedTemporaryFile(suffix='.mp4', delete=False) as temp_file:  # noqa
+                with NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:  # noqa
                     temp_path = temp_file.name
                     temp_file.write(video_bytes)
 
@@ -319,9 +308,7 @@ def test_sample_mixed_buckets_with_zero_probability(
 
 
 @pytest.mark.benchmark
-def test_sample_deterministic_with_videos(
-    hf_tokenizer: PreTrainedTokenizerBase
-):
+def test_sample_deterministic_with_videos(hf_tokenizer: PreTrainedTokenizerBase):
     """Test that sampling with videos is deterministic with same seed."""
     dataset1 = RandomMultiModalDataset(random_seed=123)
     dataset2 = RandomMultiModalDataset(random_seed=123)
@@ -364,7 +351,7 @@ def test_sample_deterministic_with_videos(
 
 @pytest.mark.benchmark
 def test_sample_different_seeds_produce_different_videos(
-    hf_tokenizer: PreTrainedTokenizerBase
+    hf_tokenizer: PreTrainedTokenizerBase,
 ):
     """Test that different seeds produce different video content."""
     dataset1 = RandomMultiModalDataset(random_seed=123)
