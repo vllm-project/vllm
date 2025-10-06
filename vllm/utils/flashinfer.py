@@ -507,8 +507,11 @@ def flashinfer_scaled_fp8_mm(
 
 @functools.cache
 def flashinfer_disable_q_quantization() -> bool:
-    """Cache result which only depends on the environment"""
-    return envs.VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION
+    """Cache result which only depends on the attention config"""
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    return vllm_config.attention_config.flashinfer_disable_q_quantization
 
 
 __all__ = [
