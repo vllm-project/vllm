@@ -140,8 +140,7 @@ def test_extract_tool_calls_multiple_json_with_surrounding_text(parser):
 
 def test_extract_tool_calls_whitespace_only(parser):
     # Test with whitespace-only prefix/suffix
-    model_output = (
-        '   {"name": "searchTool", "parameters": {"query": "test"}}   ')
+    model_output = '   {"name": "searchTool", "parameters": {"query": "test"}}   '
     result = parser.extract_tool_calls(model_output, None)
 
     assert result.tools_called is True

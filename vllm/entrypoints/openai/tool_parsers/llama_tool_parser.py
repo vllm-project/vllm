@@ -92,13 +92,12 @@ class Llama3JsonToolParser(ToolParser):
             json_str = match.group(0)
 
             # Extract surrounding text
-            prefix = model_output[:match.start()]
-            suffix = model_output[match.end():]
+            prefix = model_output[: match.start()]
+            suffix = model_output[match.end() :]
 
             # Combine and clean context
             context_parts = [prefix.strip(), suffix.strip()]
-            context: Union[str, None] = ' '.join(part for part in context_parts
-                                                 if part)
+            context: Union[str, None] = " ".join(part for part in context_parts if part)
 
             # Treat whitespace-only as empty
             if not context or context.isspace():
