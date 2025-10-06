@@ -112,6 +112,15 @@ class PrefixCacheStats(CacheStats):
     - `queries`: Refers to the number of tokens that were queried.
     """
 
+    preempted_requests: int = 0
+    """The number of previously preempted requests in this update."""
+
+    preempted_queries: int = 0
+    """The `queries` number for preempted requests."""
+
+    preempted_hits: int = 0
+    """The `hits` number for preempted requests."""
+
 
 @dataclass
 class MultiModalCacheStats(CacheStats):
