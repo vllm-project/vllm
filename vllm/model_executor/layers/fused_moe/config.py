@@ -591,7 +591,8 @@ class FusedMoEParallelConfig:
     @property
     def use_deepep_ll_kernels(self):
         return (self.use_all2all_kernels
-                and envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency")
+                # NOTE(yongji): NIXL DeepEP kernels maintains the same dispatch/combine logic as DeepEP,
+                and envs.VLLM_ALL2ALL_BACKEND in ["deepep_low_latency", "nixl_deepep_low_latency"])
 
     @staticmethod
     def make(tp_size_: int, dp_size_: int,

@@ -270,6 +270,10 @@ class DeviceCommunicatorBase:
         if not self.is_ep_communicator:
             return
 
+        from vllm.distributed.device_communicators.all2all import NIXLDeepEPLLAll2AllManager
+        if isinstance(self.all2all_manager, NIXLDeepEPLLAll2AllManager):
+            NIXLDeepEPLLAll2AllManager._ep_group_changed = True
+
         moe_modules = [
             module for module in model.modules()
             # TODO(bnell): Should use isinstance but can't.  Maybe search for

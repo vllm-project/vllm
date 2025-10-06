@@ -153,6 +153,7 @@ if TYPE_CHECKING:
     VLLM_ALL2ALL_BACKEND: Literal["naive", "pplx",
                                   "deepep_high_throughput",
                                   "deepep_low_latency",
+                                  "nixl_deepep_low_latency",
                                   "allgather_reducescatter"] = \
                                   "allgather_reducescatter"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
@@ -1135,6 +1136,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
                      ["naive", "pplx",
                      "deepep_high_throughput",
                      "deepep_low_latency",
+                     "nixl_deepep_low_latency",
                      "allgather_reducescatter"]),
 
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
@@ -1329,6 +1331,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME":
     lambda: os.getenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
                       "VLLM_OBJECT_STORAGE_SHM_BUFFER"),
+
+    # NOTE(yongji): NIXL EP env variables
+    # temporarily register here for Ray to pass to downstream EngineCore actors
+    "NIXL_DEEPEP_MAX_NUM_RANKS":
+    lambda: int(os.getenv("NIXL_DEEPEP_MAX_NUM_RANKS", None)),
+    "NIXL_ETCD_ENDPOINTS":
+    lambda: os.getenv("NIXL_ETCD_ENDPOINTS", None),
+    "NIXL_UCX_IB_DEVICES":
+    lambda: os.getenv("NIXL_UCX_IB_DEVICES", None),
+    "NIXL_UCX_TCP_DEVICES":
+    lambda: os.getenv("NIXL_UCX_TCP_DEVICES", None),
 }
 
 # --8<-- [end:env-vars-definition]

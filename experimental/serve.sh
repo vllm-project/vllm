@@ -23,8 +23,15 @@ export CUDA_HOME='/usr/local/cuda-12.8'
 export VLLM_USE_V1=1
 export VLLM_ALL2ALL_BACKEND="pplx"
 # export VLLM_ALL2ALL_BACKEND="deepep_low_latency"
+# export VLLM_ALL2ALL_BACKEND="nixl_deepep_low_latency"
 export VLLM_USE_DEEP_GEMM=1
 # export VLLM_ATTENTION_BACKEND="TRITON_MLA"
+
+# NIXL DeepEP env variables
+# export NIXL_ETCD_ENDPOINTS="http://127.0.0.1:2379"
+# export NIXL_DEEPEP_MAX_NUM_RANKS=32
+# export NIXL_UCX_IB_DEVICES="mlx5_0,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_9,mlx5_10,mlx5_11"
+# export NIXL_UCX_TCP_DEVICES="ibp154s0,ibp192s0,ibp206s0,ibp220s0,ibp94s0"
 
 # Launch the vLLM server
 vllm serve $MODEL_NAME --trust-remote-code \

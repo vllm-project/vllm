@@ -298,3 +298,129 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer)
         return handle
+
+
+class NIXLDeepEPLLAll2AllManager(All2AllManagerBase):
+    """
+    All2All communication based on NIXL DeepEP Low-Latency kernels.
+    """
+    _persistent_buffer = None
+    _buffer_kwargs = None
+    _current_ep_size = -1
+    _max_num_ep_ranks = -1
+    # NOTE(yongji): set in prepare_communication_buffer_for_model
+    _ep_group_changed = False
+
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
+        import os
+        max_num_ep_ranks = int(os.environ.get('NIXL_DEEPEP_MAX_NUM_RANKS', -1))
+        if max_num_ep_ranks == -1:
+            raise RuntimeError("NIXL_DEEPEP_MAX_NUM_RANKS is not set")
+        if NIXLDeepEPLLAll2AllManager._max_num_ep_ranks == -1:
+            NIXLDeepEPLLAll2AllManager._max_num_ep_ranks = max_num_ep_ranks
+        else:
+            assert NIXLDeepEPLLAll2AllManager._max_num_ep_ranks == max_num_ep_ranks
+        assert 'NIXL_ETCD_ENDPOINTS' in os.environ, "NIXL_ETCD_ENDPOINTS is not set"
+        assert 'NIXL_UCX_IB_DEVICES' in os.environ, "NIXL_UCX_IB_DEVICES is not set"
+        assert 'NIXL_UCX_TCP_DEVICES' in os.environ, "NIXL_UCX_TCP_DEVICES is not set"
+        ucx_ib_nics = os.environ['NIXL_UCX_IB_DEVICES'].split(',')
+
+        from vllm.distributed.parallel_state import get_tp_group, get_pp_group
+        from vllm import envs
+        # NOTE(yongji): # envs.LOCAL_RANK may not be set
+        # an ugly way to get current worker's device index under DPEngineCoreActor
+        cuda_visible_devices = os.environ['CUDA_VISIBLE_DEVICES'].split(',')
+        assert get_pp_group().world_size == 1
+        local_device_index = int(cuda_visible_devices[get_tp_group().rank_in_group])
+        pxb_ib_nic = ucx_ib_nics[local_device_index]
+        os.environ['UCX_NET_DEVICES'] = f'cuda0-{pxb_ib_nic}' + ',' + os.environ['NIXL_UCX_TCP_DEVICES']
+
+    def _init_buffer(
+        self,
+        max_num_tokens_per_dp_rank: int,
+        token_hidden_size: int,
+        num_experts_per_rank: int,
+    ):
+        import deep_ep
+
+        max_num_ep_ranks = NIXLDeepEPLLAll2AllManager._max_num_ep_ranks
+        max_num_global_experts = max_num_ep_ranks * num_experts_per_rank
+        num_nvl_bytes = 0
+        num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+            num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
+            hidden=token_hidden_size,
+            num_ranks=max_num_ep_ranks,
+            num_experts=max_num_global_experts)
+
+        assert NIXLDeepEPLLAll2AllManager._persistent_buffer is None, "NIXL EP buffer already initialized"
+        buffer = deep_ep.Buffer.nixl_buffer(
+            rank=self.rank,
+            low_latency_mode=True,
+            explicitly_destroy=True,
+            allow_nvlink_for_low_latency_mode=True,
+            allow_mnnvl=True,
+        )
+        buffer.update_memory_buffers(
+            num_ranks=max_num_ep_ranks,
+            num_experts_per_rank=num_experts_per_rank,
+            num_nvl_bytes=num_nvl_bytes,
+            num_rdma_bytes=num_rdma_bytes,
+        )
+        NIXLDeepEPLLAll2AllManager._persistent_buffer = buffer
+        ranks_to_connect = list(range(self.cpu_group.size()))
+        buffer.connect_ranks(ranks_to_connect)
+        NIXLDeepEPLLAll2AllManager._current_ep_size = self.cpu_group.size()
+        NIXLDeepEPLLAll2AllManager._ep_group_changed = False
+
+    def _update_buffer(self):
+        buffer = NIXLDeepEPLLAll2AllManager._persistent_buffer
+        assert buffer is not None
+        current_ranks = list(range(NIXLDeepEPLLAll2AllManager._current_ep_size))
+        new_ep_size = self.cpu_group.size()
+        if new_ep_size > len(current_ranks):
+            ranks_to_connect = list(range(len(current_ranks), new_ep_size))
+            buffer.connect_ranks(ranks_to_connect)
+        else:
+            ranks_to_remove = current_ranks[new_ep_size:]
+            buffer.remove_ranks(ranks_to_remove)
+        NIXLDeepEPLLAll2AllManager._current_ep_size = new_ep_size
+        NIXLDeepEPLLAll2AllManager._ep_group_changed = False
+
+    def get_handle(self, kwargs):
+        if not NIXLDeepEPLLAll2AllManager._ep_group_changed:
+            assert NIXLDeepEPLLAll2AllManager._persistent_buffer is not None
+            return NIXLDeepEPLLAll2AllManager._persistent_buffer
+        
+        # NOTE(yongji): kwargs passed by FusedMoEMethodBase is the same as DeepEPLL, which contains:
+        #   max_num_tokens_per_dp_rank, token_hidden_size, 
+        #   num_ep_ranks, num_global_experts, num_local_experts
+        num_experts_per_rank = kwargs['num_global_experts'] // kwargs['num_local_experts']
+        nixl_kwargs = dict(
+            max_num_tokens_per_dp_rank=kwargs['max_num_tokens_per_dp_rank'],
+            token_hidden_size=kwargs['token_hidden_size'],
+            num_experts_per_rank=num_experts_per_rank,
+        )
+        # kwargs = nixl_kwargs
+        
+        buffer_kwargs = sorted((k, v) for k, v in kwargs.items())
+        if NIXLDeepEPLLAll2AllManager._persistent_buffer is None:
+            self._init_buffer(**kwargs)
+            NIXLDeepEPLLAll2AllManager._buffer_kwargs = buffer_kwargs
+        else:
+            assert NIXLDeepEPLLAll2AllManager._buffer_kwargs == buffer_kwargs, "NIXL EP buffer kwargs changed"
+            self._update_buffer()
+        handle = NIXLDeepEPLLAll2AllManager._persistent_buffer
+        return handle
+
+    def dispatch(self, hidden_states: torch.Tensor,
+                 router_logits: torch.Tensor):
+        raise NotImplementedError
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def destroy(self):
+        # NOTE(yongji): NIXLDeepEPLLAll2AllManager instance is recreated during scale-up/down,
+        # so we cannot destroy the persistent buffer here.
+        pass
