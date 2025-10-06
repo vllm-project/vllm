@@ -4,7 +4,9 @@
 import enum
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from functools import partial
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import torch
@@ -25,6 +27,52 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
+
+
+class ErrorType(str, enum.Enum):
+    """categorizes request abort/failure reasons for programmatic handling"""
+
+    KV_TRANSFER_FAILURE = "kv_transfer_failure"
+
+
+@dataclass
+class RequestErrorContext:
+    """rich error context for request failures."""
+
+    error_type: Union[ErrorType, str]
+    message: str
+    http_status: Optional[HTTPStatus] = None
+    metadata: Optional[dict[str, Any]] = None
+    timestamp: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "error_type": (
+                self.error_type.value
+                if isinstance(self.error_type, ErrorType)
+                else self.error_type
+            ),
+            "message": self.message,
+            "http_status_code": self.http_status.value if self.http_status else None,
+            "metadata": self.metadata,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RequestErrorContext":
+        http_status_code = data.get("http_status_code")
+        error_type_str = data["error_type"]
+        try:
+            error_type = ErrorType(error_type_str)
+        except ValueError:
+            error_type = error_type_str
+        return cls(
+            error_type=error_type,
+            message=data["message"],
+            http_status=HTTPStatus(http_status_code) if http_status_code else None,
+            metadata=data.get("metadata"),
+            timestamp=data.get("timestamp", time.time()),
+        )
 
 
 class Request:
@@ -61,6 +109,7 @@ class Request:
         self.use_structured_output = False
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
+        self.error_context: Optional[RequestErrorContext] = None
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: Optional[dict[str, Any]] = None
@@ -209,6 +258,11 @@ class Request:
             return None
         events, self.events = self.events, []
         return events
+
+    def abort_with_error_context(self, error_context: RequestErrorContext) -> None:
+        """abort request with rich error context for better error handling."""
+        self.status = RequestStatus.FINISHED_ABORTED
+        self.error_context = error_context
 
 
 class RequestStatus(enum.IntEnum):

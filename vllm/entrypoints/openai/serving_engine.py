@@ -479,6 +479,7 @@ class OpenAIServing:
         message: str,
         err_type: str = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        error_context: Optional[dict] = None,
     ) -> ErrorResponse:
         if self.log_error_stack:
             exc_type, _, _ = sys.exc_info()
@@ -495,13 +496,70 @@ class OpenAIServing:
         message: str,
         err_type: str = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        error_context: Optional[dict] = None,
     ) -> str:
         json_str = json.dumps(
             self.create_error_response(
-                message=message, err_type=err_type, status_code=status_code
+                message=message,
+                err_type=err_type,
+                status_code=status_code,
+                error_context=error_context,
             ).model_dump()
         )
         return json_str
+
+    def handle_abort_if_needed(
+        self,
+        request_output: "RequestOutput",
+        streaming: bool = False,
+    ) -> Optional[Union[ErrorResponse, str]]:
+        """check if request was aborted and return appropriate error response."""
+
+        for output in request_output.outputs:
+            if output.finish_reason == "abort":
+                if request_output.error_context:
+                    from vllm.v1.request import ErrorType, RequestErrorContext
+
+                    error_ctx = RequestErrorContext.from_dict(
+                        request_output.error_context
+                    )
+                    message = error_ctx.message
+                    err_type = (
+                        error_ctx.error_type.value
+                        if isinstance(error_ctx.error_type, ErrorType)
+                        else error_ctx.error_type
+                    )
+
+                    if err_type == ErrorType.KV_TRANSFER_FAILURE.value:
+                        status_code = HTTPStatus.BAD_GATEWAY
+                        metadata = error_ctx.metadata or {}
+                        metadata_parts = [f"{k}: {v}" for k, v in metadata.items()]
+                        if metadata_parts:
+                            message = f"{message} ({', '.join(metadata_parts)})"
+                    else:
+                        status_code = (
+                            error_ctx.http_status or HTTPStatus.INTERNAL_SERVER_ERROR
+                        )
+                else:
+                    message = "Request aborted due to an internal error."
+                    err_type = "InternalServerError"
+                    status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+
+                if streaming:
+                    return self.create_streaming_error_response(
+                        message,
+                        err_type=err_type,
+                        status_code=status_code,
+                        error_context=request_output.error_context,
+                    )
+                else:
+                    return self.create_error_response(
+                        message,
+                        err_type=err_type,
+                        status_code=status_code,
+                        error_context=request_output.error_context,
+                    )
+        return None
 
     async def _check_model(
         self,
