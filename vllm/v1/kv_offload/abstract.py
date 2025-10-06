@@ -68,7 +68,6 @@ class OffloadingEvent:
 
 
 class OffloadingManager(ABC):
-
     @abstractmethod
     def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
         """
@@ -122,8 +121,8 @@ class OffloadingManager(ABC):
 
     @abstractmethod
     def prepare_store(
-            self,
-            block_hashes: Iterable[BlockHash]) -> Optional[PrepareStoreOutput]:
+        self, block_hashes: Iterable[BlockHash]
+    ) -> Optional[PrepareStoreOutput]:
         """
         Prepare the given blocks to be offloaded.
         The given blocks will be protected from eviction until
@@ -140,9 +139,7 @@ class OffloadingManager(ABC):
         """
         pass
 
-    def complete_store(self,
-                       block_hashes: Iterable[BlockHash],
-                       success: bool = True):
+    def complete_store(self, block_hashes: Iterable[BlockHash], success: bool = True):
         """
         Marks blocks which were previously prepared to be stored, as stored.
         Following this call, the blocks become loadable.
