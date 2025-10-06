@@ -62,17 +62,21 @@ class NsysIterationProfiler:
             start_iter, stop_iter = map(int, parts)
             if start_iter < 0 or stop_iter <= start_iter:
                 raise ValueError(
-                    "Start must be non-negative and stop must be greater "
-                    "than start.")
+                    "Start must be non-negative and stop must be greater than start."
+                )
             logger.info_once(
-                "NSYS profiling will start at iteration %d and stop at "
-                "iteration %d", start_iter, stop_iter)
-            return NsysIterationProfiler(start_iter=start_iter,
-                                         stop_iter=stop_iter)
+                "NSYS profiling will start at iteration %d and stop at iteration %d",
+                start_iter,
+                stop_iter,
+            )
+            return NsysIterationProfiler(start_iter=start_iter, stop_iter=stop_iter)
         except Exception as exc:  # noqa: BLE001 - preserve original reason
             logger.warning_once(
                 "Invalid VLLM_NSYS_PROFILE_START_STOP value: '%s'. "
-                "Reason: %s. Disabling profiling.", env_value, exc)
+                "Reason: %s. Disabling profiling.",
+                env_value,
+                exc,
+            )
             profiler = NsysIterationProfiler()
             profiler.maybe_profile_now = profiler._noop
             return profiler
@@ -112,6 +116,7 @@ class NsysIterationProfiler:
                 cuda_profiler.stop()
             except Exception as exc:  # noqa: BLE001
                 logger.warning_once(
-                    "Failed to stop NSYS profiler during shutdown: %s", exc)
+                    "Failed to stop NSYS profiler during shutdown: %s", exc
+                )
             finally:
                 self._profiler_running = False

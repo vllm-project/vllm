@@ -165,7 +165,8 @@ class EngineCore:
         # Nsight Systems CUDA profiler range (iteration-based)
         # Uses VLLM_NSYS_PROFILE_START_STOP env var parsed in helper class
         self._nsys_profiler = NsysIterationProfiler.from_env_string(
-            envs.VLLM_NSYS_PROFILE_START_STOP)
+            envs.VLLM_NSYS_PROFILE_START_STOP
+        )
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
