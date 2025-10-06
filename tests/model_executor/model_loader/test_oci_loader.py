@@ -59,25 +59,24 @@ class TestOciModelLoader:
         load_config = LoadConfig(load_format="oci")
         loader = OciModelLoader(load_config)
 
-        assert loader.SAFETENSORS_MEDIA_TYPE == \
-            "application/vnd.docker.ai.safetensors"
-        assert loader.CONFIG_TAR_MEDIA_TYPE == \
-            "application/vnd.docker.ai.vllm.config.tar"
+        assert loader.SAFETENSORS_MEDIA_TYPE == "application/vnd.docker.ai.safetensors"
+        assert (
+            loader.CONFIG_TAR_MEDIA_TYPE == "application/vnd.docker.ai.vllm.config.tar"
+        )
         assert loader.DEFAULT_REGISTRY == "docker.io"
 
 
-@pytest.mark.skip(
-    reason="Integration test - requires actual OCI registry access")
+@pytest.mark.skip(reason="Integration test - requires actual OCI registry access")
 class TestOciModelLoaderIntegration:
     """Integration tests for OCI model loader (requires network access)."""
 
     def test_download_model_from_public_registry(self):
         """Test downloading a model from a public OCI registry.
-        
+
         Note: This test is skipped by default as it requires:
         1. Network access to a public registry
         2. A real OCI model artifact to test with
-        
+
         To run this test, remove the skip decorator and ensure you have
         a valid test model available in a public registry.
         """
@@ -93,7 +92,7 @@ class TestOciModelLoaderIntegration:
 
     def test_load_weights_from_oci(self):
         """Test loading weights from OCI layers.
-        
+
         Note: This test is skipped by default as it requires:
         1. A downloaded OCI model
         2. An initialized model to load weights into
