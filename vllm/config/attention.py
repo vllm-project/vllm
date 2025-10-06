@@ -39,6 +39,9 @@ class AttentionConfig:
     use_cudnn_prefill: bool = False
     """Whether to use cudnn prefill."""
 
+    use_trtllm_ragged_deepseek_prefill: bool = False
+    """Whether to use TRTLLM ragged deepseek prefill."""
+
     use_trtllm_attention: Optional[bool] = None
     """If set to True/False, use or don't use the TRTLLM attention backend
     in flashinfer. If None, auto-detect the attention backend in flashinfer."""

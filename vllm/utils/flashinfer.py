@@ -281,7 +281,12 @@ def force_use_trtllm_attention() -> bool | None:
     return `True` if TRTLLM attention is forced to be used,
     return `False` if TRTLLM attention is forced to be not used.
     """
-    return _force_use_trtllm_attention(envs.VLLM_USE_TRTLLM_ATTENTION)
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    return _force_use_trtllm_attention(
+        vllm_config.attention_config.use_trtllm_attention
+    )
 
 
 def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:

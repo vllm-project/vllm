@@ -1363,6 +1363,7 @@ class EngineArgs:
         - VLLM_USE_AITER_UNIFIED_ATTENTION
         - VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
         - VLLM_USE_CUDNN_PREFILL
+        - VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
         - VLLM_USE_TRTLLM_ATTENTION
         - VLLM_DISABLE_FLASHINFER_PREFILL
         - VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION
@@ -1389,6 +1390,7 @@ class EngineArgs:
             use_aiter_unified_attention=envs.VLLM_USE_AITER_UNIFIED_ATTENTION,
             flash_attn_max_num_splits_for_cuda_graph=envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH,
             use_cudnn_prefill=envs.VLLM_USE_CUDNN_PREFILL,
+            use_trtllm_ragged_deepseek_prefill=envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL,
             use_trtllm_attention=envs.VLLM_USE_TRTLLM_ATTENTION,
             disable_flashinfer_prefill=envs.VLLM_DISABLE_FLASHINFER_PREFILL,
             flashinfer_disable_q_quantization=envs.VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION,
