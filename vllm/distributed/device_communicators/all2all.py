@@ -506,12 +506,13 @@ class MoriAll2AllManager(All2AllManagerBase):
             logger.debug(
                 "[rank %s] PyTorch distributed ready with backend: %s",
                 self.rank,
-                backend
+                backend,
             )
 
+            # just to make line fit into 80
+            world = dist.group.WORLD
             current_group = (
-                self.cpu_group if self.cpu_group is not None
-                else dist.group.WORLD
+                self.cpu_group if self.cpu_group is not None else world
             )
 
             # TODO(inhyeok): make group_name more reasonable
@@ -528,16 +529,13 @@ class MoriAll2AllManager(All2AllManagerBase):
                 # Register the current process group
                 c10d._register_process_group(group_name, current_group)
                 logger.debug(
-                    "[rank %s] Registered process group '%s'",
-                    self.rank,
-                    group_name
+                    "[rank %s] Registered proc group %s", self.rank, group_name
                 )
 
                 # Initialize mori shmem with the registered group
                 mori.shmem.shmem_torch_process_group_init(group_name)
                 logger.debug(
-                    "[rank %s] torch process group shmem init success",
-                    self.rank
+                    "[rank %s] torch proc group shmem init success", self.rank
                 )
                 self._shmem_initialized = True
                 return
@@ -546,37 +544,32 @@ class MoriAll2AllManager(All2AllManagerBase):
                 logger.debug(
                     "[rank %s] torch process group shmem init failed: %s",
                     self.rank,
-                    torch_error
+                    torch_error,
                 )
                 self._shmem_initialized = True
                 logger.warning(
-                    "[rank %s] Continuing without mori shmem optimization",
-                    self.rank
+                    "[rank %s] Continue without mori shmem optimize", self.rank
                 )
 
         except Exception as e:
-            logger.error(
-                "[rank %s] mori shmem initialization failed: %s",
-                self.rank, e
-            )
+            logger.error("[rank %s] mori shmem init failed: %s", self.rank, e)
             # Don't fail completely - mark as initialized to avoid retry loops
             self._shmem_initialized = True
             logger.warning(
-                "[rank %s] Continuing without mori shmem optimization",
-                self.rank
+                "[rank %s] Continuing without mori shmem optimize", self.rank
             )
 
     def _make_mori_config(
-            self,
-            max_num_tokens: int,
-            num_local_experts: int,
-            experts_per_token: int,
-            hidden_dim: int,
-            scale_dim: int,
-            scale_type_size: int,
-            data_type: torch.dtype = torch.bfloat16,
-            quant_dtype: torch.dtype = None,
-        ):
+        self,
+        max_num_tokens: int,
+        num_local_experts: int,
+        experts_per_token: int,
+        hidden_dim: int,
+        scale_dim: int,
+        scale_type_size: int,
+        data_type: torch.dtype = torch.bfloat16,
+        quant_dtype: torch.dtype = None,
+    ):
         """Create mori EpDispatchCombineConfig"""
         import mori.ops.dispatch_combine as mori_ops
         from mori.ops.dispatch_combine import EpDispatchCombineKernelType
@@ -607,8 +600,8 @@ class MoriAll2AllManager(All2AllManagerBase):
             # Determine kernel type based on topology
             kernel_type=(
                 EpDispatchCombineKernelType.InterNode
-                if self.internode else
-                EpDispatchCombineKernelType.IntraNode
+                if self.internode
+                else EpDispatchCombineKernelType.IntraNode
             ),
         )
 
@@ -649,9 +642,7 @@ class MoriAll2AllManager(All2AllManagerBase):
                 hidden_dim,
             ]
         ):
-            raise ValueError(
-                "Missing required parameters for mori handle creation"
-            )
+            raise ValueError("Require more parameters for mori handle init")
 
         # Create cache key
         cache_key = (
@@ -690,19 +681,21 @@ class MoriAll2AllManager(All2AllManagerBase):
             max_num_tokens,
             num_local_experts,
             experts_per_token,
-            hidden_dim
+            hidden_dim,
         )
 
         return op
 
-    def dispatch(self,
+    def dispatch(
+        self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
     ):
         raise NotImplementedError
 
-    def combine(self,
+    def combine(
+        self,
         hidden_states: torch.Tensor,
         is_sequence_parallel: bool = False,
     ):
@@ -721,21 +714,16 @@ class MoriAll2AllManager(All2AllManagerBase):
 
                     # Check if shmem is actually active before finalizing
                     mori.shmem.shmem_finalize()
-                    logger.debug(
-                        "[rank %s] mori shmem finalized",
-                        self.dp_rank
-                    )
+                    logger.debug("[rank %s] mori shmem finalize", self.dp_rank)
                 except Exception as shmem_error:
                     logger.debug(
                         "[rank %s] shmem finalize failed "
                         "(may not have been active): %s",
                         self.dp_rank,
-                        shmem_error
+                        shmem_error,
                     )
 
             logger.debug("[rank %s] mori resources cleaned up", self.dp_rank)
 
         except Exception as e:
-            logger.warning(
-                "[rank %s] Error during mori cleanup: %s", self.dp_rank, e
-            )
+            logger.warning("[rank %s] mori cleanup fail: %s", self.dp_rank, e)

@@ -432,8 +432,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         assert self.moe_quant_config is not None
         if self.moe.use_mori_kernels and is_rocm_aiter_moe_enabled():
             from vllm.model_executor.layers.fused_moe import AiterExperts
-            logger.debug("AiterExperts for Mori integration %s", self.moe)
 
+            logger.debug("AiterExperts for Mori integration %s", self.moe)
             return AiterExperts(
                 max_num_tokens=self.moe.max_num_tokens,
                 quant_config=self.moe_quant_config,

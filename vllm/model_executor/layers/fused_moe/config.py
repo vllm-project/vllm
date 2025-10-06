@@ -627,10 +627,7 @@ class FusedMoEParallelConfig:
 
     @property
     def use_mori_kernels(self):
-        return (
-            self.use_all2all_kernels
-            and envs.VLLM_ALL2ALL_BACKEND == "mori"
-        )
+        return self.use_all2all_kernels and envs.VLLM_ALL2ALL_BACKEND == "mori"
 
     @staticmethod
     def make(
