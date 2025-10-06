@@ -68,7 +68,7 @@ class CudagraphDispatcher:
         self, runtime_mode: CUDAGraphMode, batch_descriptor: BatchDescriptor
     ):
         assert runtime_mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL], (
-            f"Invalid cudagraph runtime mode: {runtime_mode}"
+            f"Invalid cudagraph runtime mode for keys: {runtime_mode}"
         )
         key = (batch_descriptor.num_tokens, batch_descriptor.uniform_decode)
         self.cudagraph_keys[runtime_mode][key] = batch_descriptor

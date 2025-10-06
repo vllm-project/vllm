@@ -1061,8 +1061,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 descriptor.num_reqs. Only needed when attention is in a
                 cudagraph, i.e. full-cudagraphs.
 
-        Returns:
-            tuple[attn_metadata: layer-to-attention_metadata mapping,
+        :return: tuple[
+            attn_metadata: layer-to-attention_metadata mapping,
             logits_indices, spec_decode_metadata,
             num_scheduled_tokens, spec_decode_common_attn_metadata,
             max_num_scheduled_tokens, ubatch_slices, use_cascade_attn
@@ -1193,12 +1193,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_scheduled_tokens,
             num_tokens_unpadded,
             num_tokens_padded,
-            uniform_decode,
-            self.vllm_config,
+            uniform_decode=uniform_decode,
+            vllm_config=self.vllm_config,
         )
+
+        if num_tokens_after_padding is not None:
+            padded_num_input_tokens = num_tokens_after_padding[0].item()
 
         num_computed_tokens = self.input_batch.num_computed_tokens_cpu[:num_reqs]
         self.seq_lens.np[:num_reqs] = num_computed_tokens + num_scheduled_tokens
+        # Fill unused with 0 for full cuda graph mode.
+        self.seq_lens.np[num_reqs:].fill(0)
         self.seq_lens.copy_to_gpu()
         max_seq_len = self.seq_lens.np[:num_reqs].max().item()
 
@@ -2553,6 +2558,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cudagraph_batch_descriptor = None
 
             try:
+                if not scheduler_output.total_num_scheduled_tokens:
+                    if not has_kv_transfer_group():
+                        # Return empty ModelRunnerOutput if no work to do.
+                        return EMPTY_MODEL_RUNNER_OUTPUT
+                    return self.kv_connector_no_forward(
+                        scheduler_output, self.vllm_config
+                    )
+                if self.cache_config.kv_sharing_fast_prefill:
+                    assert not self.input_batch.num_prompt_logprobs, (
+                        "--kv-sharing-fast-prefill produces incorrect "
+                        "logprobs for prompt tokens, tokens, please disable "
+                        "it when the requests need prompt logprobs"
+                    )
+
+                # Prepare the decoder inputs.
                 (
                     attn_metadata,
                     logits_indices,
@@ -2590,8 +2610,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_tokens_after_padding,
             )
 
-            if ubatch_slices is not None:
-                num_input_tokens = num_input_tokens // 2
+        # This is currently to get around the assert in the DPMetadata
+        # where it wants `num_tokens_across_dp` to align with `num_tokens`
+        if ubatch_slices is not None:
+            num_input_tokens = ubatch_slices[0].num_tokens
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
