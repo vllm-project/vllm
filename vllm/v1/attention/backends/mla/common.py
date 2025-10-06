@@ -255,8 +255,8 @@ def is_rocm_aiter_fp8bmm_enabled() -> bool:
 
 
 if is_rocm_aiter_fp8bmm_enabled():
-    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501 # isort: skip
-        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm,
+    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501
+        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm,  # noqa: E501
     )
 
     def dynamic_per_batched_tensor_quant(
@@ -1284,8 +1284,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             actual_seq_lens_q=prefill.query_seq_lens.view(-1, 1, 1, 1),
             actual_seq_lens_kv=prefill.query_seq_lens.view(-1, 1, 1, 1),
             causal=True,
-            return_lse=True,  # do not support False for now
-            is_cuda_graph_compatible=True,  # Indicates actual_seq_lens are on GPU or CPU.
+            # Do not support False for now
+            return_lse=True,
+            # Indicates actual_seq_lens are on GPU or CPU.
+            is_cuda_graph_compatible=True,
         )
         if return_softmax_lse:
             return output, lse
@@ -1342,7 +1344,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             ),
             causal=False,
             return_lse=True,
-            is_cuda_graph_compatible=True,  # Indicates actual_seq_lens are on GPU or CPU.
+            # Indicates actual_seq_lens are on GPU or CPU.
+            is_cuda_graph_compatible=True,
         )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
