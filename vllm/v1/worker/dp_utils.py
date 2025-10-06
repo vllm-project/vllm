@@ -35,22 +35,14 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     return device, group
 
 
-def get_dp_size() -> int:
-    return get_dp_group().world_size
-
-
-def get_dp_rank() -> int:
-    return get_dp_group().rank
-
-
 def _run_ar(
     should_ubatch: bool,
     orig_num_tokens_per_ubatch: int,
     padded_num_tokens_per_ubatch: int,
     parallel_config: ParallelConfig,
 ) -> torch.Tensor:
-    dp_size = get_dp_size()
-    dp_rank = get_dp_rank()
+    dp_size = parallel_config.data_parallel_size
+    dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
     tensor = torch.zeros(3, dp_size, device=device, dtype=torch.int32)
     tensor[0][dp_rank] = orig_num_tokens_per_ubatch
@@ -145,9 +137,7 @@ def coordinate_batch_across_dp(
     ]
 
     """
-    assert get_dp_rank() == parallel_config.data_parallel_rank
-    assert get_dp_size() == parallel_config.data_parallel_size
-    if get_dp_size() == 1:
+    if parallel_config.data_parallel_size == 1:
         # Early exit.
         return None, None
 
