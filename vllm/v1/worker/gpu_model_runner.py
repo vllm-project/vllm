@@ -1038,15 +1038,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _prepare_inputs(
         self,
+        num_scheduled_tokens: np.ndarray,
+        max_num_scheduled_tokens: int,
         scheduler_output: "SchedulerOutput",
-        pad_to_batch_descriptor: Optional["BatchDescriptor"] = None,
+        cudagraph_batch_descriptor: Optional["BatchDescriptor"] = None,
     ) -> tuple[
         PerLayerAttnMetadata,
         torch.Tensor,
         Optional[SpecDecodeMetadata],
-        np.ndarray,
         Optional[CommonAttentionMetadata],
-        int,
         Optional[UBatchSlices],
         Optional[torch.Tensor],
         bool,
@@ -1054,8 +1054,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """Prepare inputs for model execution.
 
         Args:
+            num_scheduled_tokens: Array of scheduled tokens per request.
+            max_num_scheduled_tokens: Maximum number of scheduled tokens.
             scheduler_output: Output from the scheduler.
-            pad_to_batch_descriptor: Optional descriptor specifying the target
+            cudagraph_batch_descriptor: Optional descriptor specifying the target
                 batch size for CUDA graph support. When provided, attention
                 metadata will be padded to match descriptor.num_tokens and
                 descriptor.num_reqs. Only needed when attention is in a
@@ -1064,8 +1066,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
             logits_indices, spec_decode_metadata,
-            num_scheduled_tokens, spec_decode_common_attn_metadata,
-            max_num_scheduled_tokens, ubatch_slices, use_cascade_attn
+            spec_decode_common_attn_metadata,
+            ubatch_slices, num_tokens_after_padding, use_cascade_attn
         ]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1077,12 +1079,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
-
-        # Get the number of scheduled tokens for each request.
-        req_ids = self.input_batch.req_ids
-        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
-        num_scheduled_tokens = np.array(tokens, dtype=np.int32)
-        max_num_scheduled_tokens = max(num_scheduled_tokens)
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -1182,10 +1178,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.query_start_loc.copy_to_gpu()
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
-        num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-        num_tokens_padded = num_tokens_unpadded + self.get_local_padding(
-            num_tokens_unpadded
+        num_tokens_unpadded = total_num_scheduled_tokens
+        num_tokens_padded = self.get_local_num_tokens_padded(
+            num_tokens_unpadded, cudagraph_batch_descriptor
         )
+
         uniform_decode = (
             max_num_scheduled_tokens == self.uniform_decode_query_len
         ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
@@ -1197,8 +1194,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             vllm_config=self.vllm_config,
         )
 
+        # Determine final padded size for slot mapping and attention metadata
         if num_tokens_after_padding is not None:
-            padded_num_input_tokens = num_tokens_after_padding[0].item()
+            final_num_tokens_padded = num_tokens_after_padding[0].item()
+        else:
+            final_num_tokens_padded = num_tokens_padded
 
         num_computed_tokens = self.input_batch.num_computed_tokens_cpu[:num_reqs]
         self.seq_lens.np[:num_reqs] = num_computed_tokens + num_scheduled_tokens
@@ -1295,13 +1295,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
 
-        # Apply padding for CUDA graph support if descriptor is provided.
-        # Padding is only needed for attention metadata building.
-        if pad_to_batch_descriptor is not None:
-            padded_num_input_tokens = pad_to_batch_descriptor.num_tokens
-            padded_num_reqs = pad_to_batch_descriptor.num_reqs
+        # Full cudagraphs need to pad out num_reqs too
+        if (
+            cudagraph_batch_descriptor is not None
+            and cudagraph_batch_descriptor.num_reqs is not None
+        ):
+            padded_num_reqs = cudagraph_batch_descriptor.num_reqs
         else:
-            padded_num_input_tokens = total_num_scheduled_tokens
             padded_num_reqs = num_reqs
 
         # Prepare the attention metadata for each KV cache group and make layers
@@ -1322,7 +1322,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     device=self.device,
                 )
                 slot_mapping = torch.zeros(
-                    (padded_num_input_tokens,),
+                    (final_num_tokens_padded,),
                     dtype=torch.int64,
                     device=self.device,
                 )
@@ -1330,7 +1330,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
                 blk_table_tensor = blk_table.get_device_tensor(padded_num_reqs)
-                slot_mapping = blk_table.slot_mapping.gpu[:padded_num_input_tokens]
+                slot_mapping = blk_table.slot_mapping.gpu[:final_num_tokens_padded]
 
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode.
@@ -1348,7 +1348,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     :padded_num_reqs
                 ],
                 num_reqs=padded_num_reqs,
-                num_actual_tokens=padded_num_input_tokens,
+                num_actual_tokens=final_num_tokens_padded,
                 max_query_len=max_num_scheduled_tokens,
                 max_seq_len=max_seq_len,
                 block_table_tensor=blk_table_tensor,
@@ -1429,9 +1429,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             attn_metadata,
             logits_indices,
             spec_decode_metadata,
-            num_scheduled_tokens,
             spec_decode_common_attn_metadata,
-            max_num_scheduled_tokens,
             ubatch_slices,
             num_tokens_after_padding,
             use_cascade_attn,
@@ -2049,16 +2047,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
 
-    def get_local_padding(self, num_tokens_unpadded: int) -> int:
-        num_tokens_padded = num_tokens_unpadded
-
-        if (
-            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and num_tokens_unpadded <= self.cudagraph_batch_sizes[-1]
-        ):
-            # Use piecewise CUDA graphs.
-            # Add padding to the batch size.
-            num_tokens_padded = self.vllm_config.pad_for_cudagraph(num_tokens_unpadded)
+    def get_local_num_tokens_padded(
+        self,
+        num_tokens_unpadded: int,
+        cudagraph_batch_descriptor: Optional["BatchDescriptor"] = None,
+    ) -> int:
+        if cudagraph_batch_descriptor is not None:
+            return cudagraph_batch_descriptor.num_tokens
         else:
             # Eager mode.
             # Pad tokens to multiple of tensor_parallel_size when
@@ -2068,10 +2063,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.vllm_config.compilation_config.pass_config.enable_sequence_parallelism
                 and tp_size > 1
             ):
-                num_tokens_padded = round_up(num_tokens_unpadded, tp_size)
+                return round_up(num_tokens_unpadded, tp_size)
 
-        num_pad_tokens = num_tokens_padded - num_tokens_unpadded
-        return num_pad_tokens
+        return num_tokens_unpadded
 
     # This is where the second ubatch is adjusted to account for the padding.
     # Should be called after attention metadata creation. This just pads
@@ -2523,9 +2517,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.prepare_inputs_event is not None:
                 self.prepare_inputs_event.synchronize()
 
-            preliminary_num_input_tokens = self._get_num_input_tokens(
+            num_input_tokens = self._get_num_input_tokens(
                 scheduler_output.total_num_scheduled_tokens
             )
+
+            # Get the number of scheduled tokens for each request.
+            req_ids = self.input_batch.req_ids
+            tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+            num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+            max_num_scheduled_tokens = max(num_scheduled_tokens_np)
 
             # Only do CUDA graph dispatch and padding when enabled
             if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
@@ -2545,7 +2545,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     uniform_decode = False
 
                 batch_descriptor = BatchDescriptor(
-                    num_tokens=preliminary_num_input_tokens,
+                    num_tokens=num_input_tokens,
                     uniform_decode=uniform_decode,
                     num_reqs=self.input_batch.num_reqs,
                 )
@@ -2577,17 +2577,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     attn_metadata,
                     logits_indices,
                     spec_decode_metadata,
-                    num_scheduled_tokens_np,
                     spec_decode_common_attn_metadata,
-                    max_query_len,
                     ubatch_slices,
                     num_tokens_after_padding,
                     use_cascade_attn,
                 ) = self._prepare_inputs(
+                    num_scheduled_tokens_np,
+                    max_num_scheduled_tokens,
                     scheduler_output,
-                    pad_to_batch_descriptor=cudagraph_batch_descriptor
-                    if cudagraph_runtime_mode == CUDAGraphMode.FULL
-                    else None,
+                    cudagraph_batch_descriptor=cudagraph_batch_descriptor,
                 )
 
             finally:
