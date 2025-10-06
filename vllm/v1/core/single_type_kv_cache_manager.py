@@ -584,8 +584,7 @@ class MambaManager(SingleTypeKVCacheManager):
                     #  hit_length = len(hit_blocks_other_attn[0])
                     #               * self.other_block_size
                     # so we insert dummy blocks at the beginning:
-                    if i > 0:
-                        computed.extend([block_pool.null_block] * i)
+                    computed.extend([block_pool.null_block] * i)
                     computed.append(cached)
                 break  # we just need the last match - early stopping
 
