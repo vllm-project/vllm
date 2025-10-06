@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class CacheStats:
+class BaseCacheStats:
     """Stores cache hit statistics."""
 
     reset: bool = False
@@ -49,7 +49,7 @@ class CachingMetrics:
         # A deque of (requests, queries, hits) for the most recent requests.
         self.query_queue = deque[tuple[int, int, int]]()
 
-    def observe(self, stats: CacheStats):
+    def observe(self, stats: BaseCacheStats):
         """Observe the prefix caching for a set of requests.
 
         This function is called with information gathered when new requests
@@ -105,7 +105,7 @@ class CachingMetrics:
 
 
 @dataclass
-class PrefixCacheStats(CacheStats):
+class PrefixCacheStats(BaseCacheStats):
     """
     Stores prefix cache hit statistics.
     - `reset`: Whether `reset_prefix_cache` was invoked.
@@ -123,7 +123,7 @@ class PrefixCacheStats(CacheStats):
 
 
 @dataclass
-class MultiModalCacheStats(CacheStats):
+class MultiModalCacheStats(BaseCacheStats):
     """
     Stores multi-modal cache hit statistics.
     - `reset`: Whether `reset_mm_cache` was invoked.
