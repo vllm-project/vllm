@@ -16,6 +16,7 @@ from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
 
+import vllm.envs as envs
 from vllm.benchmarks.datasets import (AIMODataset, BurstGPTDataset,
                                       ConversationDataset,
                                       InstructCoderDataset,
@@ -31,7 +32,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import merge_async_iterators
-from vllm.utils.lite_profiler import maybe_emit_lite_profiler_report
+from vllm.utils.lite_profiler import emit_lite_profiler_report
 
 
 def run_vllm(
@@ -717,4 +718,4 @@ def main(args: argparse.Namespace):
             json.dump(results, f, indent=4)
         save_to_pytorch_benchmark_format(args, results)
     
-    maybe_emit_lite_profiler_report()
+    emit_lite_profiler_report(envs.VLLM_LITE_PROFILER_LOG_PATH)

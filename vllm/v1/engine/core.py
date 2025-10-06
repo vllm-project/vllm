@@ -30,7 +30,6 @@ from vllm.transformers_utils.config import (
 from vllm.utils import (decorate_logs, get_hash_fn_by_name, make_zmq_socket,
                         resolve_obj_by_qualname, set_process_title)
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
-from vllm.utils.lite_profiler import context_logger
 from vllm.v1.core.kv_cache_utils import (BlockHash,
                                          generate_scheduler_kv_cache_config,
                                          get_kv_cache_configs,
@@ -283,18 +282,17 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        with context_logger("engine_core.step"):
-            with record_function_or_nullcontext("Step:Schedule"):
-                scheduler_output = self.scheduler.schedule()
+        with record_function_or_nullcontext("Step:Schedule"):
+            scheduler_output = self.scheduler.schedule()
 
-            with record_function_or_nullcontext("Step:Model"):
-                model_output = self.execute_model_with_error_logging(
-                    self.model_executor.execute_model,  # type: ignore
-                    scheduler_output)
+        with record_function_or_nullcontext("Step:Model"):
+            model_output = self.execute_model_with_error_logging(
+                self.model_executor.execute_model,  # type: ignore
+                scheduler_output)
 
-            with record_function_or_nullcontext("Step:Output"):
-                engine_core_outputs = self.scheduler.update_from_output(
-                    scheduler_output, model_output)  # type: ignore
+        with record_function_or_nullcontext("Step:Output"):
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, model_output)  # type: ignore
 
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
@@ -742,27 +740,25 @@ class EngineCoreProc(EngineCore):
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
 
-        with context_logger("engine_core.input_queue"):
-            waited = False
-            while (not self.engines_running
-                   and not self.scheduler.has_requests()
-                   and not self.batch_queue):
-                if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
-                    logger.debug("EngineCore waiting for work.")
-                    waited = True
-                with record_function_or_nullcontext("Input:Wait"):
-                    req = self.input_queue.get()
-                with record_function_or_nullcontext("Input:Process"):
-                    self._handle_client_request(*req)
+        waited = False
+        while (not self.engines_running and not self.scheduler.has_requests()
+               and not self.batch_queue):
+            if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
+                logger.debug("EngineCore waiting for work.")
+                waited = True
+            with record_function_or_nullcontext("Input:Wait"):
+                req = self.input_queue.get()
+            with record_function_or_nullcontext("Input:Process"):
+                self._handle_client_request(*req)
 
-            if waited:
-                logger.debug("EngineCore loop active.")
+        if waited:
+            logger.debug("EngineCore loop active.")
 
-            # Handle any more client requests.
-            while not self.input_queue.empty():
-                req = self.input_queue.get_nowait()
-                with record_function_or_nullcontext("Input:Process"):
-                    self._handle_client_request(*req)
+        # Handle any more client requests.
+        while not self.input_queue.empty():
+            req = self.input_queue.get_nowait()
+            with record_function_or_nullcontext("Input:Process"):
+                self._handle_client_request(*req)
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""

@@ -3,8 +3,8 @@
 """Summarize a single vLLM lite-profiler log in tabular form.
 
 The script consumes the JSONL records emitted by the script `vllm.lite_profiler`
-It expects log lines prefixed with ``===LITE`` where the payload contains a
-``metrics`` dictionary whose values are ``{"ns": int, "count": int}``.
+It expects log lines containing JSON payloads with a ``metrics`` dictionary
+whose values are ``{"ns": int}``.
 
 Usage examples::
 
@@ -17,15 +17,11 @@ Usage examples::
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
-import sys
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from typing import TextIO
-
-import vllm.envs as envs
 
 
 def _extract_event_ns(filenames: Sequence[str]) -> dict[str, list[int]]:
@@ -36,12 +32,11 @@ def _extract_event_ns(filenames: Sequence[str]) -> dict[str, list[int]]:
         try:
             with open(filename, encoding="utf-8") as f:
                 for raw_line in f:
-                    line = raw_line.lstrip()
-                    if not line.startswith("===LITE "):
+                    line = raw_line.strip()
+                    if not line:
                         continue
                     try:
-                        payload = json.loads(
-                            line.split("===LITE ", 1)[1].strip())
+                        payload = json.loads(line)
                     except json.JSONDecodeError:
                         continue
                     metrics = payload.get("metrics")
@@ -120,9 +115,11 @@ def _compute_table_rows(
 
 def _print_breakdown_tables(name: str, event_ns_sum: dict[str, int], *,
                             stream: TextIO) -> None:
-    for title, events in (("Top-level pipeline events", TOP_EVENTS), (
-            "Model events breakdown (only includes the main key events)",
-            MODEL_EVENTS)):
+    for title, events in (
+        ("Top-level pipeline events", TOP_EVENTS),
+        ("Model events breakdown (only includes the main key events)",
+         MODEL_EVENTS),
+    ):
         headers = ["Log", *events, "TOTAL"]
         rows = [_compute_table_rows(name, event_ns_sum, events)]
         _render_table(title, headers, rows, stream=stream)
@@ -134,29 +131,3 @@ def summarize_log(log_path: str, *, stream: TextIO) -> None:
     _print_breakdown_tables(os.path.basename(log_path),
                             event_ns_sum,
                             stream=stream)
-
-
-def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "log_path",
-        nargs="?",
-        help=("Lite-profiler log. Defaults to VLLM_LITE_PROFILER_LOG_PATH"
-              " when omitted."),
-    )
-    return parser.parse_args(argv)
-
-
-def main(argv: Sequence[str] | None = None) -> None:
-    args = parse_args(argv)
-
-    log_path = args.log_path or envs.VLLM_LITE_PROFILER_LOG_PATH
-    if not log_path:
-        raise SystemExit("No log file specified. Provide LOG_PATH or set "
-                         "VLLM_LITE_PROFILER_LOG_PATH")
-
-    summarize_log(log_path, stream=sys.stdout)
-
-
-if __name__ == "__main__":
-    main()

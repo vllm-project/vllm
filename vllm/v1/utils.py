@@ -21,7 +21,7 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import (get_open_port, get_open_zmq_ipc_path, get_tcp_uri,
                         kill_process_tree)
-from vllm.utils.lite_profiler import combine_contexts, lite_profiler
+from vllm.utils.lite_profiler import scope_function
 
 if TYPE_CHECKING:
     import numpy as np
@@ -382,27 +382,20 @@ _PROFILER_FUNC = None
 def record_function_or_nullcontext(name: str) -> AbstractContextManager:
     global _PROFILER_FUNC
 
-    # Check if the lite-profiler is enabled.
-    lite_ctx = None
-    if lite_profiler.is_enabled():
-        lite_ctx = lite_profiler.scope(name)
+    # fast path assume it is set
+    if _PROFILER_FUNC is not None:
+        return _PROFILER_FUNC(name)
 
-    func = _PROFILER_FUNC
-    if func is None:
-        func = contextlib.nullcontext
-        if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
-            func = record_function
-        elif envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
-            import nvtx
-            func = nvtx.annotate
-        _PROFILER_FUNC = func
+    func = contextlib.nullcontext
+    if envs.VLLM_LITE_PROFILER_LOG_PATH is not None:
+        func = scope_function
+    elif envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
+        func = record_function
+    elif envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
+        import nvtx
 
-    assert func is not None
+        func = nvtx.annotate
 
-    if lite_ctx is None:
-        return func(name)
-
-    if func is contextlib.nullcontext:
-        return lite_ctx
-
-    return combine_contexts((lite_ctx, func(name)))
+    _PROFILER_FUNC = func
+    print("Profiler function set to: ", _PROFILER_FUNC)
+    return func(name)
