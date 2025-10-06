@@ -224,7 +224,7 @@ class AsyncLLM(EngineClient):
         data_parallel_rank: Optional[int] = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
-
+        logger.info("[wxl debug] Request %s start add_request.", request_id)
         if self.errored:
             raise EngineDeadError()
 
@@ -301,6 +301,7 @@ class AsyncLLM(EngineClient):
         """
 
         try:
+            logger.info("[wxl debug] Request %s start generate.", request_id)
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.

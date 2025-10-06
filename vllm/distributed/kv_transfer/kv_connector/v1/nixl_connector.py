@@ -205,13 +205,13 @@ class NixlConnectorScheduler:
         """
         For remote prefill, pull all prompt blocks from remote
         asynchronously relative to engine execution.
-        
+
         Args:
             request (Request): the request object.
             num_computed_tokens (int): the number of locally
                 computed tokens for this request
         Returns:
-            * the number of tokens that can be loaded from the 
+            * the number of tokens that can be loaded from the
               external KV cache beyond what is already computed.
             * true if the external KV cache tokens will be loaded
               asynchronously (between scheduler steps).
@@ -687,14 +687,14 @@ class NixlConnectorWorker:
         blocks from remote.
 
         In particular, handle both homogeneous and heterogeneous TP. The former
-        requires local rank_i to read from remote rank_i. 
-        The latter, assuming D.world_size > P.world_size, requires that two or 
+        requires local rank_i to read from remote rank_i.
+        The latter, assuming D.world_size > P.world_size, requires that two or
         more local TP worker share the xfer from a single TP worker.
 
         Here's an example:
 
         rank_offset     p_remote_tp_rank
-        (kv split no)    
+        (kv split no)
         --------------------------------
             0                 0      Worker0  ---- 1st half of KV ----> Worker0  [ KV Cache ]
                                                                         /
@@ -707,14 +707,14 @@ class NixlConnectorWorker:
 
                                 Decoder TP workers                     Prefix TP workers
                                   (world_size=4)                         (world_size=2)
-                                                 tp_ratio = 4 // 2 = 2                  
-                                
-        Considering the KV Caches, if P-Worker_i has cache size [2, num_blocksP, kv_heads, block_size, head_dim]  
+                                                 tp_ratio = 4 // 2 = 2
+
+        Considering the KV Caches, if P-Worker_i has cache size [2, num_blocksP, kv_heads, block_size, head_dim]
         then D-Worker_j has [2, num_blocksD, kv_heads//tp_ratio, block_size, head_dim]. Mind the "HND" layout format.
-        Assuming num_blocksD >= num_blocksP, D-Worker0 reads from P-Worker0 by preparing the kv_heads//tp_ratio 
+        Assuming num_blocksD >= num_blocksP, D-Worker0 reads from P-Worker0 by preparing the kv_heads//tp_ratio
         first heads from all the slots of all the blocks. D-Worker1 will do the same, but reading the second split
-        along the kv_heads dimension, and so forth until "tp_ratio" D TP workers have pulled from P-Worker0.   
-        
+        along the kv_heads dimension, and so forth until "tp_ratio" D TP workers have pulled from P-Worker0.
+
         Note that the above will also hold true for the homogeneous TP case, where tp_ratio evaluates to 1.
 
         Regarding MLA case, the cache is replicated across TP workers so the rank_offset will just always be 0
@@ -904,8 +904,14 @@ class NixlConnectorWorker:
             for handle, _xfer_stime in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
+                    logger.info(
+                        "Transfer KVCache for req %s has completed with handle %s",
+                        req_id, handle)
                     self.nixl_wrapper.release_xfer_handle(handle)
                 elif xfer_state == "PROC":
+                    logger.info(
+                        "Transfer KVCache for req %s still in progress with handle %s",
+                        req_id, handle)
                     in_progress = True
                     continue
                 else:
@@ -923,7 +929,7 @@ class NixlConnectorWorker:
         """
         for req_id, meta in metadata.requests.items():
             remote_engine_id = meta.remote_engine_id
-            logger.debug(
+            logger.info(
                 "start_load_kv for request %s from remote engine %s. "
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
                 remote_engine_id, len(meta.local_block_ids),
