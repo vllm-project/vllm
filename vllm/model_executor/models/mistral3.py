@@ -52,7 +52,6 @@ from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -424,6 +423,8 @@ def init_vision_tower_for_llava(
 class Mistral3ForConditionalGeneration(
     nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
 ):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -510,15 +511,9 @@ class Mistral3ForConditionalGeneration(
         if pixel_values is None and image_embeds is None:
             return None
 
-        assert pixel_values is not None
-        if not isinstance(pixel_values, (torch.Tensor, list)):
-            raise ValueError(
-                f"Incorrect type of pixel values. Got type: {type(pixel_values)}"
-            )
-
         return Mistral3ImagePixelInputs(
             type="pixel_values_pixtral",
-            pixel_values=flatten_bn(pixel_values),
+            pixel_values=pixel_values,
         )
 
     def _process_image_input(

@@ -51,14 +51,13 @@ from .vision import get_vision_encoder_info
 class LlavaNextVideoPixelInputs(TensorSchema):
     """
     Dimensions:
-        - bs: Batch size
-        - nv: Number of videos
-        - nf: Number of frames
-        - nc: Number of channels (3)
+        - bn: Batch size * number of videos
+        - f: Number of frames
+        - c: Number of channels (3)
         - h: Height of each frame
         - w: Width of each frame
 
-    Note that `num_frames` may be different for each batch, in which case
+    Note that `f` may be different for each batch, in which case
     the data is passed as a list instead of a batched tensor.
 
     Note that it only supports one video input for one batch.
@@ -66,9 +65,9 @@ class LlavaNextVideoPixelInputs(TensorSchema):
 
     type: Literal["pixel_values_videos"] = "pixel_values_videos"
 
-    data: Annotated[
+    pixel_values_videos: Annotated[
         Union[torch.Tensor, list[torch.Tensor]],
-        TensorShape("bs", "nv", "nf", 3, "h", "w"),
+        TensorShape("bn", "f", 3, "h", "w", dynamic_dims={"f"}),
     ]
 
 
@@ -300,6 +299,8 @@ class LlavaNextMultiModalProjector(nn.Module):
     dummy_inputs=LlavaNextVideoDummyInputsBuilder,
 )
 class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    merge_by_field_config = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -371,7 +372,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         expected_h = expected_w = self.config.vision_config.image_size
         return LlavaNextVideoPixelInputs(
             type="pixel_values_videos",
-            data=pixel_values_videos,
+            pixel_values_videos=pixel_values_videos,
             resolve_bindings={
                 "h": expected_h,
                 "w": expected_w,
@@ -396,19 +397,15 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
     def _process_video_pixels(self, inputs: LlavaNextVideoPixelInputs):
         assert self.vision_tower is not None
 
-        video_pixels = inputs["data"]
+        video_pixels = inputs["pixel_values_videos"]
 
         if isinstance(video_pixels, torch.Tensor):
-            # TODO: support multiple videos per input
-            b, num_videos, num_frames, c, h, w = video_pixels.shape
-            assert num_videos == 1
-            stacked_pixels = video_pixels.view(b * num_videos * num_frames, c, h, w)
+            bn, f, c, h, w = video_pixels.shape
+            stacked_pixels = video_pixels.view(bn * f, c, h, w)
             stacked_embeddings = self._video_pixels_to_features(
                 self.vision_tower, stacked_pixels
             )
-            embeds = stacked_embeddings.view(
-                b, num_frames, *stacked_embeddings.shape[1:]
-            )
+            embeds = stacked_embeddings.view(bn, f, *stacked_embeddings.shape[1:])
 
         elif is_list_of(video_pixels, torch.Tensor):
             frames_per_videos = [v.shape[0] for v in video_pixels]
