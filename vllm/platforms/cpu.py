@@ -84,6 +84,31 @@ class CpuPlatform(Platform):
                     shell=True).strip() == b"1"):
                 return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
+        elif self.get_cpu_architecture() == CpuArchEnum.RISCV:
+            # Workaround for Issue #25655: RISC-V scheduler bug with float16
+            #
+            # Background:
+            # - RISC-V currently uses scalar code path
+            # - There is a latent bug in the vLLM scheduler that provides
+            # invalid
+            #   physical_block_idx values under certain conditions
+            # - This bug causes segmentation faults when using float16
+            # dtype on RISC-V
+            # - Testing shows that forcing float32 successfully bypasses
+            # this issue
+            #
+            # Technical details:
+            # - The bug manifests as out-of-bounds physical_block_idx in
+            # block_tables
+            # - Only occurs on RISC-V hardware
+            # tested on Sophgo SG2044
+            # - Does not reproduce on x86 or other architectures
+            # - Root cause is in Python-level scheduling logic,
+            # not C++ kernels
+            #
+            # This is a temporary workaround until the scheduler bug is fixed.
+            # See: https://github.com/vllm-project/vllm/issues/25655
+            return [torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
 
