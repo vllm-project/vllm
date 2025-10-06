@@ -113,7 +113,7 @@ def run_e5_v(query: Query) -> ModelRequestData:
 def _get_vlm2vec_prompt_image(query: Query, image_token: str):
     if query["modality"] == "text":
         text = query["text"]
-        prompt = f"Find me an everyday image that matches the given caption: {text}"  # noqa: E501
+        prompt = f"Find me an everyday image that matches the given caption: {text}"
         image = None
     elif query["modality"] == "image":
         prompt = f"{image_token} Find a day-to-day image that looks similar to the provided image."  # noqa: E501

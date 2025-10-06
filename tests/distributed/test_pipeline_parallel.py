@@ -104,7 +104,7 @@ TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     # Uses Llama
     # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
-    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(load_format="dummy"),  # noqa: E501
+    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(load_format="dummy"),
     "baichuan-inc/Baichuan-7B": PPTestSettings.fast(),
     "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(),
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
@@ -138,7 +138,7 @@ TEXT_GENERATION_MODELS = {
     # Uses Llama
     # "mistralai/Mistral-7B-Instruct-v0.1": PPTestSettings.fast(),
     "state-spaces/mamba-130m-hf": PPTestSettings.fast(),
-    "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(load_format="dummy"),  # noqa: E501
+    "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(load_format="dummy"),
     "mosaicml/mpt-7b": PPTestSettings.fast(),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
     "allenai/OLMo-1B-hf": PPTestSettings.fast(),
@@ -151,13 +151,13 @@ TEXT_GENERATION_MODELS = {
     "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(),
     "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(
         multi_node_only=True, load_format="dummy"
-    ),  # noqa: E501
+    ),
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2.5-0.5B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
-    "upstage/solar-pro-preview-instruct": PPTestSettings.fast(load_format="dummy"),  # noqa: E501
+    "upstage/solar-pro-preview-instruct": PPTestSettings.fast(load_format="dummy"),
     # FIXME: Cannot load tokenizer in latest transformers version.
     # Need to use tokenizer from `meta-llama/Llama-2-7b-chat-hf`
     # "xverse/XVERSE-7B-Chat": PPTestSettings.fast(),

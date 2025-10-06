@@ -132,10 +132,14 @@ def test_simple_piecewise_compile(use_inductor):
         splitting_ops=["silly.attention"],
         use_inductor_graph_partition=False,
         use_inductor=use_inductor,
-        expected_num_piecewise_graphs_seen=5,  # 2 * num_layers + 1
-        expected_num_piecewise_capturable_graphs_seen=3,  # 1 + num_layers
-        expected_num_backend_compilations=3,  # num_piecewise_capturable_graphs_seen
-        expected_num_cudagraph_captured=6,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        # 2 * num_layers + 1
+        expected_num_piecewise_graphs_seen=5,
+        # 1 + num_layers
+        expected_num_piecewise_capturable_graphs_seen=3,
+        # num_piecewise_capturable_graphs_seen
+        expected_num_backend_compilations=3,
+        # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        expected_num_cudagraph_captured=6,
     )
 
 
@@ -147,14 +151,16 @@ def test_simple_inductor_graph_partition(splitting_ops):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
     _run_simple_model(
-        # inductor graph partition automatically resets splitting_ops
-        # to be an empty list
+        # Inductor graph partition automatically resets splitting_ops to an empty list
         splitting_ops=splitting_ops,
         use_inductor_graph_partition=True,
         use_inductor=True,
-        expected_num_piecewise_graphs_seen=1,  # since not splitting at fx graph level
-        expected_num_piecewise_capturable_graphs_seen=1,  # since not splitting at fx graph level
-        expected_num_backend_compilations=1,  # since not splitting at fx graph level
-        expected_num_cudagraph_captured=6,  # inductor graph partition still captures 6
-        # graph, same as fx graph partition.
+        # Since not splitting at fx graph level
+        expected_num_piecewise_graphs_seen=1,
+        # Since not splitting at fx graph level
+        expected_num_piecewise_capturable_graphs_seen=1,
+        # Since not splitting at fx graph level
+        expected_num_backend_compilations=1,
+        # Inductor graph partition still captures 6 graph, same as fx graph partition
+        expected_num_cudagraph_captured=6,
     )

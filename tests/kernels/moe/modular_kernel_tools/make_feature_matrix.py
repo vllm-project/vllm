@@ -124,7 +124,7 @@ def make_feature_matrix(csv_file_path: str):
     results_df: Optional[pd.DataFrame] = None
     for m, k, n, e, topks, dtype, pf_type, experts_type, quant_config in tqdm(
         combinations
-    ):  # noqa: E501
+    ):
         config = Config(
             Ms=[m],
             K=k,

@@ -104,7 +104,7 @@ async def test_single_chat_session_image_base64encoded(
             "content": [
                 {
                     "type": "input_image",
-                    "image_url": f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}",
+                    "image_url": f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}",  # noqa: E501
                     "detail": "auto",
                 },
                 {"type": "input_text", "text": content_text},

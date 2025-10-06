@@ -127,7 +127,7 @@ class RequestRunner:
             kv_role="kv_both",
             kv_connector_extra_config={
                 "spec_name": "MockOffloadingSpec",
-                "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",
+                "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",  # noqa: E501
                 "block_size": offloaded_block_size,
             },
         )

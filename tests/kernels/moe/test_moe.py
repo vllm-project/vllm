@@ -483,8 +483,8 @@ def test_mixtral_moe(
     }
 
     if use_rocm_aiter:
-        # The values of rtol and atol are set based on the tests in ROCM AITER package. # noqa: E501
-        # https://github.com/ROCm/aiter/blob/dfed377f4be7da96ca2d75ac0761f569676f7240/op_tests/test_moe.py#L174  # noqa: E501
+        # The values of rtol and atol are set based on the tests in ROCM AITER package.
+        # https://github.com/ROCm/aiter/blob/dfed377f4be7da96ca2d75ac0761f569676f7240/op_tests/test_moe.py#L174
         torch.testing.assert_close(
             hf_states.flatten(0, 1), vllm_states, rtol=0.01, atol=100
         )

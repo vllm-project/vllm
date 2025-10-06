@@ -909,13 +909,13 @@ def create_argument_parser():
     parser.add_argument(
         "--tokenizer",
         type=str,
-        help="Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+        help="Name or path of the tokenizer, if not using the default tokenizer.",
     )
     parser.add_argument(
         "--tokenizer-mode",
         type=str,
         default="auto",
-        help="Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+        help="Name or path of the tokenizer, if not using the default tokenizer.",
     )
     parser.add_argument(
         "--num-prompts",

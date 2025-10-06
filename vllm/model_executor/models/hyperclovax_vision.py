@@ -825,10 +825,10 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # Run MM-Projector
         # len(num_grids) == len(num_queries_vis_abstractors) + 1
         grid_idx = 0
-        num_grids = [
-            grid_idx
-        ]  # e.g. [0, 9, 18, 19, 27, 28, 36, 37, 45, 46, 54, 55, 56]
-        num_queries_vis_abstractors = []  # e.g. [81, 81, 81, 9, 81, 9, 81, 9, 81, 9, 81, 9]
+        # e.g. [0, 9, 18, 19, 27, 28, 36, 37, 45, 46, 54, 55, 56]
+        num_grids = [grid_idx]
+        # e.g. [81, 81, 81, 9, 81, 9, 81, 9, 81, 9, 81, 9]
+        num_queries_vis_abstractors = []
         len_total_frames = video_forward_outs.shape[0]
 
         if self.config.first_last_frames_slow:

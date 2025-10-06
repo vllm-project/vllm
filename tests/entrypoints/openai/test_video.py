@@ -179,7 +179,7 @@ async def test_single_chat_session_video_base64encoded(
                 {
                     "type": "video_url",
                     "video_url": {
-                        "url": f"data:video/jpeg;base64,{base64_encoded_video[video_url]}"
+                        "url": f"data:video/jpeg;base64,{base64_encoded_video[video_url]}"  # noqa: E501
                     },
                 },
                 {"type": "text", "text": "What's in this video?"},
@@ -238,7 +238,7 @@ async def test_single_chat_session_video_base64encoded_beamsearch(
                 {
                     "type": "video_url",
                     "video_url": {
-                        "url": f"data:video/jpeg;base64,{base64_encoded_video[video_url]}"
+                        "url": f"data:video/jpeg;base64,{base64_encoded_video[video_url]}"  # noqa: E501
                     },
                 },
                 {"type": "text", "text": "What's in this video?"},

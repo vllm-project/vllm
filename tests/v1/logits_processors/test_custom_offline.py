@@ -260,15 +260,8 @@ def test_pooling_rejects_custom_logitsprocs(
             gpu_memory_utilization=0.1,
         )
         # Require that no logitsprocs have been loaded
-        assert (
-            sum(
-                [
-                    1
-                    for _ in llm.llm_engine.model_executor.driver_worker.worker.model_runner.input_batch.logitsprocs.all
-                ]
-            )
-            == 0
-        )
+        worker = llm.llm_engine.model_executor.driver_worker.worker
+        assert sum([1 for _ in worker.model_runner.input_batch.logitsprocs.all]) == 0
         return
 
     kwargs: dict[str, list[Union[str, type[LogitsProcessor]]]] = {}

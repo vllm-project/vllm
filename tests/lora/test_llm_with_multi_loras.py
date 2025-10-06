@@ -26,7 +26,7 @@ LORA_RANK = 8
 LORA_TEST_PROMPTS = ["What is GitHub?", "Hi, tell me about you"]
 LORA_TEST_EXPECTED = [
     "GitHub is an open-source platform that provides a way to manage and develop software projects. It allows developers to store and manage code, collaborate on projects, and automate tasks.",  # noqa: E501
-    "I am Alice, an AI assistant developed by GitHub/Charent.",  # noqa: E501
+    "I am Alice, an AI assistant developed by GitHub/Charent.",
 ]
 
 
