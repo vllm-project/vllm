@@ -28,21 +28,16 @@ def server():
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_single_input_classification(server: RemoteOpenAIServer,
-                                     model_name: str):
+def test_single_input_classification(server: RemoteOpenAIServer, model_name: str):
     input_text = "This product was excellent and exceeded my expectations"
 
     classification_response = requests.post(
         server.url_for("classify"),
-        json={
-            "model": model_name,
-            "input": input_text
-        },
+        json={"model": model_name, "input": input_text},
     )
 
     classification_response.raise_for_status()
-    output = ClassificationResponse.model_validate(
-        classification_response.json())
+    output = ClassificationResponse.model_validate(classification_response.json())
 
     assert output.object == "list"
     assert output.model == MODEL_NAME
@@ -52,8 +47,7 @@ def test_single_input_classification(server: RemoteOpenAIServer,
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_multiple_inputs_classification(server: RemoteOpenAIServer,
-                                        model_name: str):
+def test_multiple_inputs_classification(server: RemoteOpenAIServer, model_name: str):
     input_texts = [
         "The product arrived on time and works perfectly",
         "I'm very satisfied with my purchase, would buy again",
@@ -65,13 +59,9 @@ def test_multiple_inputs_classification(server: RemoteOpenAIServer,
 
     classification_response = requests.post(
         server.url_for("classify"),
-        json={
-            "model": model_name,
-            "input": input_texts
-        },
+        json={"model": model_name, "input": input_texts},
     )
-    output = ClassificationResponse.model_validate(
-        classification_response.json())
+    output = ClassificationResponse.model_validate(classification_response.json())
 
     assert len(output.data) == len(input_texts)
     for i, item in enumerate(output.data):
@@ -88,16 +78,11 @@ def test_truncate_prompt_tokens(server: RemoteOpenAIServer, model_name: str):
 
     classification_response = requests.post(
         server.url_for("classify"),
-        json={
-            "model": model_name,
-            "input": long_text,
-            "truncate_prompt_tokens": 5
-        },
+        json={"model": model_name, "input": long_text, "truncate_prompt_tokens": 5},
     )
 
     classification_response.raise_for_status()
-    output = ClassificationResponse.model_validate(
-        classification_response.json())
+    output = ClassificationResponse.model_validate(classification_response.json())
 
     assert len(output.data) == 1
     assert output.data[0].index == 0
@@ -107,15 +92,12 @@ def test_truncate_prompt_tokens(server: RemoteOpenAIServer, model_name: str):
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_invalid_truncate_prompt_tokens_error(server: RemoteOpenAIServer,
-                                              model_name: str):
+def test_invalid_truncate_prompt_tokens_error(
+    server: RemoteOpenAIServer, model_name: str
+):
     classification_response = requests.post(
         server.url_for("classify"),
-        json={
-            "model": model_name,
-            "input": "test",
-            "truncate_prompt_tokens": 513
-        },
+        json={"model": model_name, "input": "test", "truncate_prompt_tokens": 513},
     )
 
     error = classification_response.json()
@@ -127,10 +109,7 @@ def test_invalid_truncate_prompt_tokens_error(server: RemoteOpenAIServer,
 def test_empty_input_error(server: RemoteOpenAIServer, model_name: str):
     classification_response = requests.post(
         server.url_for("classify"),
-        json={
-            "model": model_name,
-            "input": ""
-        },
+        json={"model": model_name, "input": ""},
     )
 
     error = classification_response.json()
@@ -139,18 +118,13 @@ def test_empty_input_error(server: RemoteOpenAIServer, model_name: str):
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_batch_classification_empty_list(server: RemoteOpenAIServer,
-                                         model_name: str):
+def test_batch_classification_empty_list(server: RemoteOpenAIServer, model_name: str):
     classification_response = requests.post(
         server.url_for("classify"),
-        json={
-            "model": model_name,
-            "input": []
-        },
+        json={"model": model_name, "input": []},
     )
     classification_response.raise_for_status()
-    output = ClassificationResponse.model_validate(
-        classification_response.json())
+    output = ClassificationResponse.model_validate(classification_response.json())
 
     assert output.object == "list"
     assert isinstance(output.data, list)
@@ -161,15 +135,17 @@ def test_batch_classification_empty_list(server: RemoteOpenAIServer,
 async def test_invocations(server: RemoteOpenAIServer):
     request_args = {
         "model": MODEL_NAME,
-        "input": "This product was excellent and exceeded my expectations"
+        "input": "This product was excellent and exceeded my expectations",
     }
 
-    classification_response = requests.post(server.url_for("classify"),
-                                            json=request_args)
+    classification_response = requests.post(
+        server.url_for("classify"), json=request_args
+    )
     classification_response.raise_for_status()
 
-    invocation_response = requests.post(server.url_for("invocations"),
-                                        json=request_args)
+    invocation_response = requests.post(
+        server.url_for("invocations"), json=request_args
+    )
     invocation_response.raise_for_status()
 
     classification_output = classification_response.json()
@@ -177,10 +153,12 @@ async def test_invocations(server: RemoteOpenAIServer):
 
     assert classification_output.keys() == invocation_output.keys()
     for classification_data, invocation_data in zip(
-            classification_output["data"], invocation_output["data"]):
+        classification_output["data"], invocation_output["data"]
+    ):
         assert classification_data.keys() == invocation_data.keys()
         assert classification_data["probs"] == pytest.approx(
-            invocation_data["probs"], rel=0.01)
+            invocation_data["probs"], rel=0.01
+        )
 
 
 @pytest.mark.asyncio
@@ -189,27 +167,26 @@ async def test_activation(server: RemoteOpenAIServer, model_name: str):
     input_text = ["This product was excellent and exceeded my expectations"]
 
     async def get_outputs(activation):
-        response = requests.post(server.url_for("classify"),
-                                 json={
-                                     "model": model_name,
-                                     "input": input_text,
-                                     "activation": activation
-                                 })
+        response = requests.post(
+            server.url_for("classify"),
+            json={"model": model_name, "input": input_text, "activation": activation},
+        )
         outputs = response.json()
-        return torch.tensor([x['probs'] for x in outputs["data"]])
+        return torch.tensor([x["probs"] for x in outputs["data"]])
 
     default = await get_outputs(activation=None)
     w_activation = await get_outputs(activation=True)
     wo_activation = await get_outputs(activation=False)
 
-    assert torch.allclose(default, w_activation,
-                          atol=1e-2), "Default should use activation."
-    assert not torch.allclose(
-        w_activation, wo_activation,
-        atol=1e-2), "wo_activation should not use activation."
-    assert torch.allclose(
-        F.softmax(wo_activation, dim=-1), w_activation, atol=1e-2
-    ), "w_activation should be close to activation(wo_activation)."
+    assert torch.allclose(default, w_activation, atol=1e-2), (
+        "Default should use activation."
+    )
+    assert not torch.allclose(w_activation, wo_activation, atol=1e-2), (
+        "wo_activation should not use activation."
+    )
+    assert torch.allclose(F.softmax(wo_activation, dim=-1), w_activation, atol=1e-2), (
+        "w_activation should be close to activation(wo_activation)."
+    )
 
 
 @pytest.mark.asyncio
@@ -218,11 +195,7 @@ def test_pooling(server: RemoteOpenAIServer, model_name: str):
     # pooling api uses ALL pooling, which does not support chunked prefill.
     response = requests.post(
         server.url_for("pooling"),
-        json={
-            "model": model_name,
-            "input": "test",
-            "encoding_format": "float"
-        },
+        json={"model": model_name, "input": "test", "encoding_format": "float"},
     )
     assert response.json()["error"]["type"] == "BadRequestError"
 
