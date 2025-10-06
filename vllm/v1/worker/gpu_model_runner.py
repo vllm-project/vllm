@@ -41,7 +41,7 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
     prepare_communication_buffer_for_model,
 )
-from vllm.forward_context import BatchDescriptor, DPMetadata, set_forward_context
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -136,8 +136,11 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.ubatch_utils import (UBatchSlice, UBatchSlices,
-                                         check_ubatch_thresholds)
+from vllm.v1.worker.ubatch_utils import (
+    UBatchSlice,
+    UBatchSlices,
+    check_ubatch_thresholds,
+)
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 
 from .utils import (
@@ -1163,16 +1166,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
         num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
-        uniform_decode = \
-            (max_num_scheduled_tokens == self.uniform_decode_query_len) and \
-            (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
-        ubatch_slices, num_tokens_across_dp= \
-            coordinate_batch_across_dp(num_scheduled_tokens,
-                        num_tokens_unpadded,
-                        num_tokens_padded,
-                        self.parallel_config,
-                        True,
-                        uniform_decode)
+        uniform_decode = (
+            max_num_scheduled_tokens == self.uniform_decode_query_len
+        ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
+        ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
+            num_scheduled_tokens,
+            num_tokens_unpadded,
+            num_tokens_padded,
+            self.parallel_config,
+            True,
+            uniform_decode,
+        )
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
@@ -1396,10 +1400,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
-        return (attn_metadata, logits_indices, spec_decode_metadata,
-                num_scheduled_tokens, spec_decode_common_attn_metadata,
-                max_num_scheduled_tokens, ubatch_slices, num_tokens_across_dp,
-                use_cascade_attn)
+        return (
+            attn_metadata,
+            logits_indices,
+            spec_decode_metadata,
+            num_scheduled_tokens,
+            spec_decode_common_attn_metadata,
+            max_num_scheduled_tokens,
+            ubatch_slices,
+            num_tokens_across_dp,
+            use_cascade_attn,
+        )
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -2062,9 +2073,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         num_input_tokens: int,  # Padded
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> tuple[int, Optional[torch.Tensor], Optional[torch.Tensor],
-               torch.Tensor, Optional[IntermediateTensors], dict[str, Any]]:
-
+    ) -> tuple[
+        int,
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        torch.Tensor,
+        Optional[IntermediateTensors],
+        dict[str, Any],
+    ]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
         # _prepare_inputs may reorder the batch, so we must gather multi
@@ -2413,10 +2429,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     )
 
                 # Prepare the decoder inputs.
-                (attn_metadata, logits_indices, spec_decode_metadata,
-                 num_scheduled_tokens_np, spec_decode_common_attn_metadata,
-                 max_query_len, ubatch_slices, num_tokens_across_dp,
-                 use_cascade_attn) = self._prepare_inputs(scheduler_output)
+                (
+                    attn_metadata,
+                    logits_indices,
+                    spec_decode_metadata,
+                    num_scheduled_tokens_np,
+                    spec_decode_common_attn_metadata,
+                    max_query_len,
+                    ubatch_slices,
+                    num_tokens_across_dp,
+                    use_cascade_attn,
+                ) = self._prepare_inputs(scheduler_output)
 
             if ubatch_slices:
                 assert num_tokens_across_dp is not None
@@ -2426,7 +2449,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_input_tokens = int(num_tokens_across_dp[0].item())
             else:
                 num_input_tokens = self._get_num_input_tokens(
-                    scheduler_output.total_num_scheduled_tokens)
+                    scheduler_output.total_num_scheduled_tokens
+                )
 
             (
                 num_scheduled_tokens,
@@ -2435,8 +2459,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 positions,
                 intermediate_tensors,
                 model_kwargs,
-            ) = self._preprocess(scheduler_output, num_input_tokens,
-                                 intermediate_tensors)
+            ) = self._preprocess(
+                scheduler_output, num_input_tokens, intermediate_tensors
+            )
 
             uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
                 num_scheduled_tokens == self.input_batch.num_reqs * max_query_len

@@ -86,9 +86,11 @@ class DPMetadata:
     local_sizes: Optional[list[int]] = None
 
     @staticmethod
-    def make(parallel_config: ParallelConfig, num_tokens: int,
-             num_tokens_across_dp_cpu: torch.Tensor) -> "DPMetadata":
-
+    def make(
+        parallel_config: ParallelConfig,
+        num_tokens: int,
+        num_tokens_across_dp_cpu: torch.Tensor,
+    ) -> "DPMetadata":
         assert num_tokens_across_dp_cpu is not None
         assert parallel_config.data_parallel_size > 1
         dp_rank = parallel_config.data_parallel_rank
@@ -96,8 +98,9 @@ class DPMetadata:
 
         # If num_tokens_across_dp is None, it will be computed by all_reduce
         # Otherwise, num_tokens_across_dp[dp_rank] should be equal to batchsize
-        assert (num_tokens_across_dp_cpu[dp_rank] == batchsize
-                ), f"{num_tokens_across_dp_cpu[dp_rank]} {batchsize}"
+        assert num_tokens_across_dp_cpu[dp_rank] == batchsize, (
+            f"{num_tokens_across_dp_cpu[dp_rank]} {batchsize}"
+        )
         max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp_cpu)
         return DPMetadata(max_tokens_across_dp_cpu, num_tokens_across_dp_cpu)
 
@@ -262,10 +265,12 @@ def set_forward_context(
 
     dp_metadata: Optional[DPMetadata] = None
     if vllm_config.parallel_config.data_parallel_size > 1 and (
-            attn_metadata is not None or num_tokens is not None):
+        attn_metadata is not None or num_tokens is not None
+    ):
         assert num_tokens_across_dp is not None
-        dp_metadata = DPMetadata.make(vllm_config.parallel_config, num_tokens
-                                      or 0, num_tokens_across_dp)
+        dp_metadata = DPMetadata.make(
+            vllm_config.parallel_config, num_tokens or 0, num_tokens_across_dp
+        )
 
     forward_context = create_forward_context(
         attn_metadata,

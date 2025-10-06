@@ -10,9 +10,12 @@ from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.v1.worker.ubatch_utils import (UBatchSlices, check_ubatch_thresholds,
-                                         create_ubatch_slices,
-                                         is_second_ubatch_empty)
+from vllm.v1.worker.ubatch_utils import (
+    UBatchSlices,
+    check_ubatch_thresholds,
+    create_ubatch_slices,
+    is_second_ubatch_empty,
+)
 
 logger = init_logger(__name__)
 
@@ -26,8 +29,7 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     # scheduling. This environment variable exists to quickly disable
     # this optimization if we run into this case.
     if parallel_config.disable_nccl_for_dp_synchronization:
-        logger.info_once(
-            "Using CPU all reduce to syncronize DP padding between ranks.")
+        logger.info_once("Using CPU all reduce to syncronize DP padding between ranks.")
         device = "cpu"
         group = get_dp_group().cpu_group
     return device, group
@@ -71,8 +73,9 @@ def _post_process_ubatch(tensor: torch.Tensor) -> bool:
     orig_min_num_tokens = int(orig_num_tokens_tensor.min().item())
     padded_max_num_tokens = int(padded_num_tokens_tensor.max().item())
     if is_second_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens):
-        logger.debug("Aborting ubatching %s %s", orig_min_num_tokens,
-                     padded_max_num_tokens)
+        logger.debug(
+            "Aborting ubatching %s %s", orig_min_num_tokens, padded_max_num_tokens
+        )
         should_ubatch = False
     return should_ubatch
 
@@ -113,10 +116,9 @@ def _synchronize_dp_ranks(
     # Ensure that each rank is processing the same nuber of tokens
     num_tokens_across_dp = tensor[1, :]
     max_num_tokens = int(num_tokens_across_dp.max().item())
-    num_tokens_after_padding = torch.tensor([max_num_tokens] *
-                                            len(num_tokens_across_dp),
-                                            device="cpu",
-                                            dtype=torch.int32)
+    num_tokens_after_padding = torch.tensor(
+        [max_num_tokens] * len(num_tokens_across_dp), device="cpu", dtype=torch.int32
+    )
 
     should_ubatch = _post_process_ubatch(tensor)
 
@@ -136,7 +138,7 @@ def coordinate_batch_across_dp(
     should be split into microbatches.
 
     Returns: tuple[
-        ubatch_slices: if this is set then all DP ranks have agreed to 
+        ubatch_slices: if this is set then all DP ranks have agreed to
         microbatch
         num_tokens_after_padding: A tensor containing the total number of
         tokens per-microbatch for each DP rank including padding.
@@ -161,8 +163,11 @@ def coordinate_batch_across_dp(
         should_attempt_ubatching = False
 
     (should_ubatch, num_tokens_after_padding) = _synchronize_dp_ranks(
-        num_tokens_unpadded, num_tokens_padded, should_attempt_ubatching,
-        parallel_config)
+        num_tokens_unpadded,
+        num_tokens_padded,
+        should_attempt_ubatching,
+        parallel_config,
+    )
 
     # Don't microbatch unless every other DP worker is also microbatching
     if not should_ubatch:
@@ -175,7 +180,8 @@ def coordinate_batch_across_dp(
     assert num_tokens_after_padding is not None
     token_split_point = int(num_tokens_after_padding[0].item()) // 2
 
-    ubatch_slices = create_ubatch_slices(num_scheduled_tokens_per_request,
-                                         token_split_point)
+    ubatch_slices = create_ubatch_slices(
+        num_scheduled_tokens_per_request, token_split_point
+    )
 
     return (ubatch_slices, num_tokens_after_padding)

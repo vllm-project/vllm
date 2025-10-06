@@ -11,11 +11,13 @@ import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_ep_group
-from vllm.distributed.device_communicators.pynccl_allocator import (
-    set_graph_pool_id)
-from vllm.forward_context import (DPMetadata, create_forward_context,
-                                  get_forward_context,
-                                  override_forward_context)
+from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
+from vllm.forward_context import (
+    DPMetadata,
+    create_forward_context,
+    get_forward_context,
+    override_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -408,16 +410,18 @@ class UBatchWrapper:
 
         # We shouldn't be here unless we are running with multiple DP ranks
         assert dp_metadata is not None
-        num_tokens_per_ubatch = ubatch_slices[
-            0].token_slice.stop - ubatch_slices[0].token_slice.start
+        num_tokens_per_ubatch = (
+            ubatch_slices[0].token_slice.stop - ubatch_slices[0].token_slice.start
+        )
         dp_size = self.vllm_config.parallel_config.data_parallel_size
-        sliced_num_tokens_across_dp = torch.tensor([num_tokens_per_ubatch] *
-                                                   dp_size,
-                                                   device="cpu",
-                                                   dtype=torch.int32)
-        sliced_dp_metadata = DPMetadata.make(self.vllm_config.parallel_config,
-                                             num_tokens_per_ubatch,
-                                             sliced_num_tokens_across_dp)
+        sliced_num_tokens_across_dp = torch.tensor(
+            [num_tokens_per_ubatch] * dp_size, device="cpu", dtype=torch.int32
+        )
+        sliced_dp_metadata = DPMetadata.make(
+            self.vllm_config.parallel_config,
+            num_tokens_per_ubatch,
+            sliced_num_tokens_across_dp,
+        )
 
         if (
             num_tokens not in self.cudagraphs
