@@ -14,15 +14,12 @@ from vllm.v1.attention.backends.utils import (
     extend_all_queries_by_1,
     extend_flat_seqs,
 )
-from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.eagle import (
     PADDING_SLOT_ID,
     CudaGraphArgs,
     SpecDecodeBaseProposer,
-    num_rejected_tokens,
 )
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 
 class DraftModelProposer(SpecDecodeBaseProposer):
@@ -41,7 +38,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         )
         self._raise_if_multimodal()
         self._raise_if_mrope()
-        self._raise_if_disabled_padded_drafter_batch()
+        self._raise_if_padded_drafter_batch()
 
     def propose(
         self,
@@ -57,8 +54,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         cudagraph_args: "CudaGraphArgs",
-        sampler_output: SamplerOutput,
-        spec_decode_metadata: Optional[SpecDecodeMetadata],
         mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]] = None,
     ) -> torch.Tensor:
         """
@@ -71,11 +66,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             cad=common_attn_metadata,
             token_ids=target_token_ids,
             positions=target_positions,
-        )
-        inputs = trim_accepted_and_rejected_tokens(
-            inputs=inputs,
-            sampler_output=sampler_output,
-            spec_decode_metadata=spec_decode_metadata,
         )
         inputs = merge_next_token_ids_into_token_ids(
             inputs=inputs,
@@ -91,8 +81,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             common_attn_metadata=inputs.cad,
             cudagraph_args=cudagraph_args,
             sampling_metadata=sampling_metadata,
-            sampler_output=sampler_output,
-            spec_decode_metadata=spec_decode_metadata,
             # below are are not used by draft model
             target_hidden_states=None,
             next_token_ids=None,
@@ -114,11 +102,12 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 "Speculative Decoding with draft models does not support M-RoPE yet"
             )
 
-    def _raise_if_disabled_padded_drafter_batch(self):
-        if self.vllm_config.speculative_config.disable_padded_drafter_batch:
+    def _raise_if_padded_drafter_batch(self):
+        if not self.vllm_config.speculative_config.disable_padded_drafter_batch:
             raise NotImplementedError(
                 "Speculative Decoding with draft models does not support "
-                "disabled padded drafter batch yet"
+                "padded drafter batch yet. Please pass --disable-padded-drafter-batch "
+                "in the speculative config."
             )
 
     def _model_kwargs(self, num_tokens: int) -> dict[str, Any]:
@@ -183,75 +172,6 @@ class DraftModelInputs:
     token_ids: torch.Tensor
     positions: torch.Tensor
     cad: CommonAttentionMetadata
-
-
-def trim_accepted_and_rejected_tokens(
-    inputs: DraftModelInputs,
-    sampler_output: SamplerOutput,
-    spec_decode_metadata: Optional[SpecDecodeMetadata],
-) -> DraftModelInputs:
-    """
-    Removes from the input.token_ids any tokens that have already been processed
-    by the draft model, as well as tokens rejected by the sampler.
-    Adjusts the positions accordingly, the slot mapping,
-    and the common_attn_metadata.
-    """
-    cad: CommonAttentionMetadata = inputs.cad
-
-    # Compute the new token ids and positions
-    n_accepted_tokens = sampler_output.n_sampled_tokens() - 1
-    n_rejected_tokens = num_rejected_tokens(
-        spec_decode_metadata, sampler_output.n_sampled_tokens()
-    )
-    from_loc = cad.query_start_loc[:-1] + n_accepted_tokens
-    to_loc = cad.query_start_loc[1:] - 1 - n_rejected_tokens
-    idxs = compute_subrange_indices(from_loc, to_loc)
-    new_token_ids = inputs.token_ids[idxs]
-    new_positions = inputs.positions[idxs]
-
-    # The new slot mapping is a subset of the previous one,
-    # so no recomputation is needed.
-    new_slot_mapping = cad.slot_mapping[idxs]
-
-    # Update common_attn_metadata
-    new_query_lens = to_loc - from_loc + 1
-    new_query_start_loc = torch.zeros_like(cad.query_start_loc)
-    new_query_start_loc[1:] = new_query_lens.cumsum(0)
-
-    new_cad: CommonAttentionMetadata = cad.replace(
-        query_start_loc=new_query_start_loc,
-        query_start_loc_cpu=new_query_start_loc.to("cpu", non_blocking=True),
-        num_actual_tokens=new_token_ids.shape[0],
-        max_query_len=new_query_lens.max().item(),
-        slot_mapping=new_slot_mapping,
-    )
-    return DraftModelInputs(
-        token_ids=new_token_ids, positions=new_positions, cad=new_cad
-    )
-
-
-def compute_subrange_indices(start_locs: torch.Tensor, end_locs: torch.Tensor):
-    """
-    Given two tensor of the same length containing start and end locations,
-    returns a tensor of indices with each subrange. E.g.
-        start_locs = [s1, s2, s3, ...], and
-        end_locs = [e1, e2, e3, ...],
-        return [*s1:e1, *s2:e2, *s3:e3, ...] as a flat tensor
-    """
-    # Compute lengths of each subrange
-    lengths = end_locs - start_locs + 1
-    # Build an index for each subrange
-    # torch.arange(max_len) creates [0, 1, ..., max_len-1]
-    # broadcasting + masking ensures we only keep valid positions
-    max_len = lengths.max()
-    offsets = torch.arange(max_len, device=start_locs.device).unsqueeze(
-        0
-    )  # shape [1, max_len]
-    mask = offsets < lengths.unsqueeze(1)  # shape [n, max_len]
-    # Build all indices
-    all_indices = start_locs.unsqueeze(1) + offsets
-    all_indices = all_indices[mask]  # flatten valid indices only
-    return all_indices
 
 
 def merge_next_token_ids_into_token_ids(

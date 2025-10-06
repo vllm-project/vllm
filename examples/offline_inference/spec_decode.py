@@ -128,6 +128,7 @@ def main(args):
             "method": args.method,
             "model": args.draft_model,
             "num_speculative_tokens": args.num_spec_tokens,
+            "disable_padded_drafter_batch": True,
             "enforce_eager": args.enforce_eager,
             "max_model_len": args.max_model_len,
         }

@@ -4,7 +4,7 @@ import abc
 import enum
 import functools
 from abc import abstractmethod
-from dataclasses import dataclass, fields, make_dataclass, replace
+from dataclasses import dataclass, fields, make_dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -95,9 +95,6 @@ class CommonAttentionMetadata:
 
     def batch_size(self) -> int:
         return self.seq_lens_cpu.shape[0]
-
-    def replace(self, **kwargs) -> "CommonAttentionMetadata":
-        return replace(self, **kwargs)
 
     def query_lens(self) -> torch.Tensor:
         return self.query_start_loc[1:] - self.query_start_loc[:-1]

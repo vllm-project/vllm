@@ -2673,7 +2673,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_common_attn_metadata,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
-                    sampler_output=sampler_output,
                 )
 
         use_padded_batch = (
@@ -2775,7 +2774,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         common_attn_metadata: CommonAttentionMetadata,
         cudagraph_runtime_mode: CUDAGraphMode,
         batch_descriptor: BatchDescriptor,
-        sampler_output: SamplerOutput,
     ) -> Union[list[list[int]], torch.Tensor]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
@@ -2913,8 +2911,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
                 mm_embed_inputs=mm_embed_inputs,
                 cudagraph_args=cudagraph_args,
-                sampler_output=sampler_output,
-                spec_decode_metadata=spec_decode_metadata,
             )
         return draft_token_ids
 

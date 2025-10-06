@@ -76,9 +76,6 @@ class SamplerOutput:
     sampled_token_ids: torch.Tensor
     logprobs_tensors: Optional[LogprobsTensors]
 
-    def n_sampled_tokens(self) -> torch.Tensor:
-        return self.sampled_token_ids.ne(-1).sum(dim=1)
-
 
 @dataclass
 class KVConnectorOutput:

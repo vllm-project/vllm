@@ -33,7 +33,6 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
@@ -200,8 +199,6 @@ class SpecDecodeBaseProposer:
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         cudagraph_args: "CudaGraphArgs",
-        sampler_output: SamplerOutput,
-        spec_decode_metadata: Optional[SpecDecodeMetadata],
         mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
@@ -629,9 +626,20 @@ class SpecDecodeBaseProposer:
         used as padding and filtered out later by `token_indices_to_sample`.
         No blocking CPU operations should be introduced in this function.
         """
-        num_rejected_tokens_gpu = num_rejected_tokens(
-            spec_decode_metadata, valid_sampled_tokens_count
+        num_draft_tokens_gpu = torch.cat(
+            [
+                spec_decode_metadata.cu_num_draft_tokens[0:1],
+                spec_decode_metadata.cu_num_draft_tokens[1:]
+                - spec_decode_metadata.cu_num_draft_tokens[:-1],
+            ]
         )
+
+        num_rejected_tokens_gpu = torch.where(
+            num_draft_tokens_gpu > 0,
+            num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
+            torch.zeros_like(num_draft_tokens_gpu),
+        )
+
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
         new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
@@ -1195,29 +1203,6 @@ def compute_probs_and_sample_next_token(
             next_token_ids,
         )
     return next_token_ids, probs
-
-
-def num_rejected_tokens(
-    spec_decode_metadata: Optional[SpecDecodeMetadata],
-    valid_sampled_tokens_count: torch.Tensor,
-) -> torch.Tensor:
-    if spec_decode_metadata is None:
-        return torch.zeros_like(valid_sampled_tokens_count)
-
-    num_draft_tokens_gpu = torch.cat(
-        [
-            spec_decode_metadata.cu_num_draft_tokens[0:1],
-            spec_decode_metadata.cu_num_draft_tokens[1:]
-            - spec_decode_metadata.cu_num_draft_tokens[:-1],
-        ]
-    )
-
-    num_rejected_tokens_gpu = torch.where(
-        num_draft_tokens_gpu > 0,
-        num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
-        torch.zeros_like(num_draft_tokens_gpu),
-    )
-    return num_rejected_tokens_gpu
 
 
 def update_batch_descriptor(cudagraph_args: CudaGraphArgs, new_num_tokens: int) -> None:

@@ -16,7 +16,6 @@ from vllm.assets.image import VLM_IMAGES_DIR
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
-from vllm.v1.spec_decode.draft_model import compute_subrange_indices
 from vllm.v1.spec_decode.metrics import compute_acceptance_len, compute_acceptance_rate
 
 MTP_SIMILARITY_RATE = 0.8
@@ -422,6 +421,7 @@ def test_draft_model_correctness(
             "max_model_len": args.max_model_len,
             "enforce_eager": enforce_eager,
             "tensor_parallel_size": args.draft_tensor_parallel_size,
+            "disable_padded_drafter_batch": True,
         },
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
@@ -480,17 +480,3 @@ def compute_exact_matches(
             print(f"ref_output: {ref_output.outputs[0].text}")
             print(f"spec_output: {spec_output.outputs[0].text}")
     return matches / len(ref_outputs)
-
-
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_compute_subrange_indices(device: str):
-    start_locs = torch.tensor([3, 6, 12], device=device)
-    end_locs = torch.tensor([5, 6, 15], device=device)
-    # fmt: off
-    expected_indices = torch.tensor([3, 4, 5,
-                                     6,
-                                     12, 13, 14, 15],
-                                    device=device)
-    # fmt: on
-    indices = compute_subrange_indices(start_locs, end_locs)
-    assert torch.equal(indices, expected_indices)
