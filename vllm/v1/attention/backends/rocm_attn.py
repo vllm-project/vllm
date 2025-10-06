@@ -217,7 +217,13 @@ def use_aiter_unified_attention() -> bool:
     """Check if aiter unified attention should be used."""
     # VLLM_ROCM_USE_AITER_MHA needs to set to 0 as well as it is set
     # to 1 as default
-    return envs.VLLM_ROCM_USE_AITER and envs.VLLM_USE_AITER_UNIFIED_ATTENTION
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    return (
+        envs.VLLM_ROCM_USE_AITER
+        and vllm_config.attention_config.use_aiter_unified_attention
+    )
 
 
 class RocmAttentionImpl(AttentionImpl):
