@@ -134,6 +134,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "xlam_tool_parser",
         "xLAMToolParser",
     ),
+    "apertus": (
+        "apertus_tool_parser",
+        "ApertusToolParser"
+    )
 }
 
 
