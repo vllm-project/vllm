@@ -3,7 +3,7 @@
 !!! important
     Many decoder language models can now be automatically loaded using the [Transformers backend][transformers-backend] without having to implement them in vLLM. See if `vllm serve <model>` works first!
 
-vLLM models are specialized [PyTorch](https://pytorch.org/) models that take advantage of various [features](../../features/compatibility_matrix.md) to optimize their performance.
+vLLM models are specialized [PyTorch](https://pytorch.org/) models that take advantage of various [features](../../features/README.md#compatibility-matrix) to optimize their performance.
 
 The complexity of integrating a model into vLLM depends heavily on the model's architecture.
 The process is considerably straightforward if the model shares a similar architecture with an existing model in vLLM.
@@ -15,6 +15,7 @@ Read through these pages for a step-by-step guide:
 - [Registering a Model](registration.md)
 - [Unit Testing](tests.md)
 - [Multi-Modal Support](multimodal.md)
+- [Speech-to-Text Support](transcription.md)
 
 !!! tip
     If you are encountering issues while integrating your model into vLLM, feel free to open a [GitHub issue](https://github.com/vllm-project/vllm/issues)

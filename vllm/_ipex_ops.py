@@ -13,14 +13,14 @@ logger = init_logger(__name__)
 try:
     import intel_extension_for_pytorch as ipex
 except ImportError as e:
-    logger.warning("Import error msg: %s", e.msg)
+    logger.debug("Import error msg: %s", e.msg)
 
 
 class ipex_ops:
-
     @staticmethod
     def _reshape_activation_tensor(
-            x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         num = x.size(0)
         d = x.size(1) // 2
         x = x.reshape(num, 2, d)
@@ -144,31 +144,26 @@ class ipex_ops:
         is_neox: bool,
     ) -> None:
         rot_dim = cos_sin_cache.size(1)
-        ipex.llm.functional.rotary_embedding_batched(positions, query, key,
-                                                     head_size, cos_sin_cache,
-                                                     is_neox, rot_dim)
+        ipex.llm.functional.rotary_embedding_batched(
+            positions, query, key, head_size, cos_sin_cache, is_neox, rot_dim
+        )
 
     @staticmethod
-    def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
-                                 key: torch.Tensor, head_size: int,
-                                 cos_sin_cache: torch.Tensor, is_neox: bool,
-                                 rot_dim: int,
-                                 cos_sin_cache_offsets: torch.Tensor) -> None:
-        ipex.llm.functional.rotary_embedding_batched(positions, query, key,
-                                                     head_size, cos_sin_cache,
-                                                     is_neox, rot_dim,
-                                                     cos_sin_cache_offsets)
-
-    @staticmethod
-    def rms_norm(input: torch.Tensor, weight: torch.Tensor,
-                 epsilon: float) -> torch.Tensor:
+    def rms_norm(
+        input: torch.Tensor, weight: torch.Tensor, epsilon: float
+    ) -> torch.Tensor:
         return ipex.llm.functional.rms_norm(input, weight, epsilon)
 
     @staticmethod
-    def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
-                           weight: torch.Tensor, epsilon: float) -> None:
-        tmp = ipex.llm.functional.add_rms_norm(residual, input, weight, None,
-                                               epsilon, True)
+    def fused_add_rms_norm(
+        input: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        epsilon: float,
+    ) -> None:
+        tmp = ipex.llm.functional.add_rms_norm(
+            residual, input, weight, None, epsilon, True
+        )
         input.copy_(tmp)
 
     @staticmethod
@@ -197,22 +192,43 @@ class ipex_ops:
                 raise ValueError("IPEX CPU does not support logits_soft_cap")
             assert alibi_slopes is None
             assert window_size_left < 0 and window_size_right < 0
-            ipex.llm.functional.varlen_attention(query.contiguous(),
-                                                 key.contiguous(),
-                                                 value.contiguous(), out,
-                                                 seqlen_q.int(),
-                                                 seqlen_k.int(), max_seqlen_q,
-                                                 max_seqlen_k, pdropout,
-                                                 softmax_scale, zero_tensors,
-                                                 is_causal, return_softmax,
-                                                 gen_)
+            ipex.llm.functional.varlen_attention(
+                query.contiguous(),
+                key.contiguous(),
+                value.contiguous(),
+                out,
+                seqlen_q.int(),
+                seqlen_k.int(),
+                max_seqlen_q,
+                max_seqlen_k,
+                pdropout,
+                softmax_scale,
+                zero_tensors,
+                is_causal,
+                return_softmax,
+                gen_,
+            )
         else:  # XPU build
             ipex.llm.functional.varlen_attention(
-                query.contiguous(), key.contiguous(), value.contiguous(), out,
-                seqlen_q.int(), seqlen_k.int(), alibi_slopes, max_seqlen_q,
-                max_seqlen_k, pdropout, softmax_scale, zero_tensors, is_causal,
-                return_softmax, gen_, window_size_left, window_size_right,
-                logits_soft_cap)
+                query.contiguous(),
+                key.contiguous(),
+                value.contiguous(),
+                out,
+                seqlen_q.int(),
+                seqlen_k.int(),
+                alibi_slopes,
+                max_seqlen_q,
+                max_seqlen_k,
+                pdropout,
+                softmax_scale,
+                zero_tensors,
+                is_causal,
+                return_softmax,
+                gen_,
+                window_size_left,
+                window_size_right,
+                logits_soft_cap,
+            )
 
     @staticmethod
     def reshape_and_cache(
@@ -227,7 +243,8 @@ class ipex_ops:
     ) -> None:
         assert kv_cache_dtype == "auto"
         ipex.llm.modules.PagedAttention.reshape_and_cache(
-            key, value, key_cache, value_cache, slot_mapping)
+            key, value, key_cache, value_cache, slot_mapping
+        )
 
     @staticmethod
     def reshape_and_cache_flash(
@@ -243,8 +260,15 @@ class ipex_ops:
         v_scale_float: float = 1.0,
     ) -> None:
         ipex.llm.modules.PagedAttention.reshape_and_cache_flash(
-            key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
-            k_scale_float, v_scale_float)
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            kv_cache_dtype,
+            k_scale_float,
+            v_scale_float,
+        )
 
     @staticmethod
     def flash_attn_varlen_func(
@@ -276,10 +300,12 @@ class ipex_ops:
         if cu_seqlens_k is None:
             # cu_seqlens_k is not used in ipex kernel.
             cu_seqlens_k = torch.cumsum(seqused_k, dim=0)
-            cu_seqlens_k = torch.cat([
-                torch.tensor([0], device=seqused_k.device, dtype=torch.int32),
-                cu_seqlens_k
-            ]).to(torch.int32)
+            cu_seqlens_k = torch.cat(
+                [
+                    torch.tensor([0], device=seqused_k.device, dtype=torch.int32),
+                    cu_seqlens_k,
+                ]
+            ).to(torch.int32)
 
         real_window_size: tuple[int, int]
         if window_size is None:
@@ -309,36 +335,38 @@ class ipex_ops:
 
     @staticmethod
     def get_scheduler_metadata(
-            batch_size,
-            max_seqlen_q,
-            max_seqlen_k,
-            num_heads_q,
-            num_heads_kv,
-            headdim,
-            cache_seqlens: torch.Tensor,
-            qkv_dtype=torch.bfloat16,
-            headdim_v=None,
-            cu_seqlens_q: Optional[torch.Tensor] = None,
-            cu_seqlens_k_new: Optional[torch.Tensor] = None,
-            cache_leftpad: Optional[torch.Tensor] = None,
-            page_size: Optional[int] = None,
-            max_seqlen_k_new=0,
-            causal=False,
-            window_size=(-1, -1),  # -1 means infinite context window
-            has_softcap=False,
-            num_splits=0,  # Can be tuned for speed
-            pack_gqa=None,  # Can be tuned for speed
-            sm_margin=0,  # Can be tuned if some SMs are used for communication
+        batch_size,
+        max_seqlen_q,
+        max_seqlen_k,
+        num_heads_q,
+        num_heads_kv,
+        headdim,
+        cache_seqlens: torch.Tensor,
+        qkv_dtype=torch.bfloat16,
+        headdim_v=None,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens_k_new: Optional[torch.Tensor] = None,
+        cache_leftpad: Optional[torch.Tensor] = None,
+        page_size: Optional[int] = None,
+        max_seqlen_k_new=0,
+        causal=False,
+        window_size=(-1, -1),  # -1 means infinite context window
+        has_softcap=False,
+        num_splits=0,  # Can be tuned for speed
+        pack_gqa=None,  # Can be tuned for speed
+        sm_margin=0,  # Can be tuned if some SMs are used for communication
     ) -> None:
         logger.warning_once(
-            "get_scheduler_metadata is not implemented for ipex_ops, "
-            "returning None.")
+            "get_scheduler_metadata is not implemented for ipex_ops, returning None."
+        )
         return None
 
     @staticmethod
-    def copy_blocks(key_caches: list[torch.Tensor],
-                    value_caches: list[torch.Tensor],
-                    block_mapping: torch.Tensor) -> None:
+    def copy_blocks(
+        key_caches: list[torch.Tensor],
+        value_caches: list[torch.Tensor],
+        block_mapping: torch.Tensor,
+    ) -> None:
         torch.xpu.copy_blocks(  # type: ignore
             key_caches,
             value_caches,
@@ -346,8 +374,9 @@ class ipex_ops:
         )
 
     @staticmethod
-    def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
-                    block_mapping: torch.Tensor) -> None:
+    def swap_blocks(
+        src: torch.Tensor, dst: torch.Tensor, block_mapping: torch.Tensor
+    ) -> None:
         torch.xpu.swap_blocks(src, dst, block_mapping)  # type: ignore
 
     @staticmethod
@@ -361,7 +390,7 @@ class ipex_ops:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Quantize input tensor to FP8 and return quantized tensor and scale.
-        
+
         This function is designed for both static and dynamic quantization:
         If you provide the scale, it will use static scaling and if you omit
         it, the scale will be determined dynamically. Currently, XPU platform
@@ -378,13 +407,13 @@ class ipex_ops:
                 of the output to at least this value.
             use_per_token_if_dynamic: Whether to do per_tensor or per_token
                 in the dynamic quantization case.
-    
+
         Returns:
             tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
                 scaling factor.
         """
         # This code assumes batch_dim and num_tokens are flattened
-        assert (input.ndim == 2)
+        assert input.ndim == 2
         shape: Union[tuple[int, int], torch.Size] = input.shape
         out_dtype: torch.dtype = current_platform.fp8_dtype()
         if num_token_padding:
@@ -392,12 +421,14 @@ class ipex_ops:
         if output is None:
             output = torch.empty(shape, device=input.device, dtype=out_dtype)
         else:
-            assert num_token_padding is None, \
+            assert num_token_padding is None, (
                 "padding not supported if output passed in"
+            )
             assert output.dtype == out_dtype
         assert scale is None, "only dynamic fp8 quantization supported on XPU"
         assert not use_per_token_if_dynamic, (
-            "per token dynamic fp8 quantization not supported on XPU")
+            "per token dynamic fp8 quantization not supported on XPU"
+        )
         scale = torch.zeros(1, device=input.device, dtype=torch.float32)
         torch.ops.torch_ipex.dynamic_scaled_fp8_quant(output, input, scale)
 

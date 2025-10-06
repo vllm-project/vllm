@@ -14,9 +14,6 @@
 #include "cutlass/epilogue/dispatch_policy.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 
-#include "cutlass_extensions/gemm/dispatch_policy.hpp"
-#include "cutlass_extensions/gemm/collective/collective_builder.hpp"
-
 #include "cutlass_gemm_caller.cuh"
 
 namespace vllm {
@@ -128,6 +125,7 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
 
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
+  using ElementBlockScale = typename Gemm::ElementBlockScale;
 
   int32_t m = a.size(0), n = b.size(1), k = a.size(1);
 
@@ -146,17 +144,20 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
   LayoutSFB layout_SFB = 
       ScaleConfig::tile_atom_to_shape_SFB(make_shape(m, n, k, 1));
 
-  auto a_ptr = static_cast<ElementAB*>(a.data_ptr());
-  auto b_ptr = static_cast<ElementAB*>(b.data_ptr());
-  auto a_scales_ptr = static_cast<float*>(a_scales.data_ptr());
-  auto b_scales_ptr = static_cast<float*>(b_scales.data_ptr());
+  auto a_ptr = static_cast<ElementAB const*>(a.data_ptr());
+  auto b_ptr = static_cast<ElementAB const*>(b.data_ptr());
+  auto a_scales_ptr = static_cast<ElementBlockScale const*>(a_scales.data_ptr());
+  auto b_scales_ptr = static_cast<ElementBlockScale const*>(b_scales.data_ptr());
 
-  auto mainloop_args = [&](){
-    return typename GemmKernel::MainloopArguments{
-        a_ptr,        a_stride,   b_ptr,        b_stride,
-        a_scales_ptr, layout_SFA, b_scales_ptr, layout_SFB
-    };
-  }();
+  typename GemmKernel::MainloopArguments mainloop_args{};
+  mainloop_args.ptr_A = a_ptr;
+  mainloop_args.dA = a_stride;
+  mainloop_args.ptr_B = b_ptr;
+  mainloop_args.dB = b_stride;
+  mainloop_args.ptr_SFA = a_scales_ptr;
+  mainloop_args.layout_SFA = layout_SFA;
+  mainloop_args.ptr_SFB = b_scales_ptr;
+  mainloop_args.layout_SFB = layout_SFB;
   auto prob_shape = cute::make_shape(m, n, k, 1);
 
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());

@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import multiprocessing
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
-from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
-                                                     StructuredOutputGrammar)
+from vllm.v1.structured_output.backend_types import (
+    StructuredOutputBackend,
+    StructuredOutputGrammar,
+)
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
 if TYPE_CHECKING:
@@ -33,11 +35,11 @@ class StructuredOutputManager:
     """Engine-level manager for structured output requests."""
 
     def __init__(self, vllm_config: VllmConfig):
-        self.backend: Optional[StructuredOutputBackend] = None
-        self.reasoner: Optional[ReasoningParser] = None
+        self.backend: StructuredOutputBackend | None = None
+        self.reasoner: ReasoningParser | None = None
         self.vllm_config = vllm_config
 
-        self._grammar_bitmask: Optional[torch.Tensor] = None
+        self._grammar_bitmask: torch.Tensor | None = None
         self._full_mask = torch.tensor(-1, dtype=torch.int32)
 
         max_batch_size = self.vllm_config.scheduler_config.max_num_seqs
@@ -48,8 +50,7 @@ class StructuredOutputManager:
             # - at least 1 CPU
             # - at most half the number of CPUs or 8, whichever is less
             max_workers = max(1, min(multiprocessing.cpu_count() // 2, 8))
-            self.executor_for_fillmask = ThreadPoolExecutor(
-                max_workers=max_workers)
+            self.executor_for_fillmask = ThreadPoolExecutor(max_workers=max_workers)
 
         if not self.vllm_config.model_config.skip_tokenizer_init:
             # The default max_workers if not specified is the number of
@@ -60,15 +61,15 @@ class StructuredOutputManager:
             max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
             self.tokenizer = init_tokenizer_from_configs(
-                model_config=self.vllm_config.model_config,
-                scheduler_config=self.vllm_config.scheduler_config,
-                lora_config=self.vllm_config.lora_config,
-            ).get_lora_tokenizer(None)
-            reasoning_backend = \
-                    self.vllm_config.decoding_config.reasoning_backend
-            if reasoning_backend:
+                model_config=self.vllm_config.model_config
+            )
+            reasoning_parser = (
+                self.vllm_config.structured_outputs_config.reasoning_parser
+            )
+            if reasoning_parser:
                 reasoner_cls = ReasoningParserManager.get_reasoning_parser(
-                    reasoning_backend)
+                    reasoning_parser
+                )
                 self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
     def grammar_init(self, request: Request) -> None:
@@ -76,16 +77,19 @@ class StructuredOutputManager:
             return
 
         if TYPE_CHECKING:
-            assert request.sampling_params is not None and \
-                request.sampling_params.guided_decoding is not None
+            assert (
+                request.sampling_params is not None
+                and request.sampling_params.structured_outputs is not None
+            )
 
         # Initialize the backend the first time it is needed.
         #
         # NOTE: We only support a single backend. We do NOT support different
         # backends on a per-request basis in V1 (for now, anyway...).
+        # _backend is set in Processor._validate_structured_output
         if self.backend is None:
             assert request.sampling_params is not None
-            backend = request.sampling_params.guided_decoding.backend
+            backend = request.sampling_params.structured_outputs._backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
             if backend == "xgrammar":
                 self.backend = XgrammarBackend(
@@ -100,8 +104,7 @@ class StructuredOutputManager:
                     vocab_size=vocab_size,
                 )
             elif backend == "outlines":
-                from vllm.v1.structured_output.backend_outlines import (
-                    OutlinesBackend)
+                from vllm.v1.structured_output.backend_outlines import OutlinesBackend
 
                 self.backend = OutlinesBackend(
                     self.vllm_config,
@@ -110,15 +113,16 @@ class StructuredOutputManager:
                 )
             elif backend == "lm-format-enforcer":
                 from vllm.v1.structured_output.backend_lm_format_enforcer import (  # noqa: E501
-                    LMFormatEnforcerBackend)
+                    LMFormatEnforcerBackend,
+                )
+
                 self.backend = LMFormatEnforcerBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
                 )
             else:
-                raise ValueError(
-                    f"Unsupported structured output backend: {backend}")
+                raise ValueError(f"Unsupported structured output backend: {backend}")
 
         grammar = self.executor.submit(self._async_create_grammar, request)
         request.structured_output_request.grammar = grammar  # type: ignore[assignment]
@@ -164,15 +168,16 @@ class StructuredOutputManager:
         requests: dict[str, Request],
         structured_output_request_ids: dict[str, int],
         scheduled_spec_decode_tokens: dict[str, list[int]],
-    ) -> Optional[npt.NDArray[np.int32]]:
+    ) -> npt.NDArray[np.int32] | None:
         # Prepare the structured output bitmask for this batch.
         if not structured_output_request_ids:
             return None
 
         max_num_spec_tokens = 0
         if self.vllm_config.speculative_config is not None:
-            max_num_spec_tokens = \
+            max_num_spec_tokens = (
                 self.vllm_config.speculative_config.num_speculative_tokens
+            )
 
         if self._grammar_bitmask is None:
             assert self.backend is not None
@@ -181,22 +186,23 @@ class StructuredOutputManager:
             # Allocate a bitmask for each token needing to be checked:
             # one for each speculative position, and one more for the
             # bonus token / non-speculative token.
-            self._grammar_bitmask = \
-                self.backend.allocate_token_bitmask(
-                    max_batch_size * (1 + max_num_spec_tokens))
+            self._grammar_bitmask = self.backend.allocate_token_bitmask(
+                max_batch_size * (1 + max_num_spec_tokens)
+            )
 
         # Generate a batched bitmask for all structured output requests.
         # When speculative decoding is enabled, we need to include multiple
         # masks for each request, one for each possible bonus token position.
         # These are stored inline in the tensor and unpacked by the gpu runner.
         cumulative_index = 0
-        ordered_seq = sorted(structured_output_request_ids.items(),
-                             key=lambda x: x[1])
+        ordered_seq = sorted(structured_output_request_ids.items(), key=lambda x: x[1])
 
         # Optimized parallel filling of bitmasks for
         # non-spec, large-batch-size cases
-        if len(ordered_seq) > self.fill_bitmask_parallel_threshold and \
-                max_num_spec_tokens == 0:
+        if (
+            len(ordered_seq) > self.fill_bitmask_parallel_threshold
+            and max_num_spec_tokens == 0
+        ):
             promises = []
             batch = []
             for req_id, _ in ordered_seq:
@@ -207,8 +213,9 @@ class StructuredOutputManager:
                     assert structured_output_request.grammar is not None
 
                 apply_bitmask = self.should_fill_bitmask(request)
-                batch.append((structured_output_request.grammar,
-                              cumulative_index, apply_bitmask))
+                batch.append(
+                    (structured_output_request.grammar, cumulative_index, apply_bitmask)
+                )
                 if len(batch) == self.fill_bitmask_parallel_batch_size:
                     promises.append(self._async_submit_fill_bitmask(batch))
                     batch = []
@@ -234,18 +241,28 @@ class StructuredOutputManager:
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, [])
                 for i, token in enumerate(req_tokens + [None]):
-                    self._fill_bitmasks([(structured_output_request.grammar,
-                                          cumulative_index, apply_bitmask)])
+                    self._fill_bitmasks(
+                        [
+                            (
+                                structured_output_request.grammar,
+                                cumulative_index,
+                                apply_bitmask,
+                            )
+                        ]
+                    )
 
-                    if apply_bitmask and token is not None and \
-                        not structured_output_request.grammar.is_terminated():
+                    if (
+                        apply_bitmask
+                        and token is not None
+                        and not structured_output_request.grammar.is_terminated()
+                    ):
                         assert structured_output_request.grammar.accept_tokens(
-                            req_id, [token])
+                            req_id, [token]
+                        )
                         state_advancements += 1
                     cumulative_index += 1
                 if state_advancements > 0:
-                    structured_output_request.grammar.rollback(
-                        state_advancements)
+                    structured_output_request.grammar.rollback(state_advancements)
 
         bitmask_tensor = self._grammar_bitmask
         if cumulative_index < bitmask_tensor.shape[0]:
@@ -260,8 +277,9 @@ class StructuredOutputManager:
         if self.reasoner is not None:
             assert request.structured_output_request is not None
             if request.structured_output_request.reasoning_ended is None:
-                request.structured_output_request.reasoning_ended = \
+                request.structured_output_request.reasoning_ended = (
                     self.reasoner.is_reasoning_end(request.prompt_token_ids)
+                )
             return request.structured_output_request.reasoning_ended
         return True
 

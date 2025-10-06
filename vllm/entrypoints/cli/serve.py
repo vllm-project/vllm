@@ -10,34 +10,47 @@ import uvloop
 import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.openai.api_server import (run_server, run_server_worker,
-                                                setup_server)
-from vllm.entrypoints.openai.cli_args import (make_arg_parser,
-                                              validate_parsed_serve_args)
-from vllm.entrypoints.utils import (VLLM_SUBCMD_PARSER_EPILOG,
-                                    show_filtered_argument_or_group_from_help)
+from vllm.entrypoints.openai.api_server import (
+    run_server,
+    run_server_worker,
+    setup_server,
+)
+from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (FlexibleArgumentParser, decorate_logs, get_tcp_uri,
-                        set_process_title)
+from vllm.utils import (
+    FlexibleArgumentParser,
+    decorate_logs,
+    get_tcp_uri,
+    set_process_title,
+)
 from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
-from vllm.v1.utils import (APIServerProcessManager,
-                           wait_for_completion_or_failure)
+from vllm.v1.utils import APIServerProcessManager, wait_for_completion_or_failure
 
 logger = init_logger(__name__)
 
+DESCRIPTION = """Launch a local OpenAI-compatible API server to serve LLM
+completions via HTTP. Defaults to Qwen/Qwen3-0.6B if no model is specified.
+
+Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
+--help=ModelConfig, --help=Frontend)
+  Use `--help=all` to show all available flags at once.
+"""
+
 
 class ServeSubcommand(CLISubcommand):
-    """The `serve` subcommand for the vLLM CLI. """
+    """The `serve` subcommand for the vLLM CLI."""
+
     name = "serve"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         # If model is specified in CLI (as positional arg), it takes precedence
-        if hasattr(args, 'model_tag') and args.model_tag is not None:
+        if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
         if args.headless or args.api_server_count < 1:
@@ -53,17 +66,14 @@ class ServeSubcommand(CLISubcommand):
         validate_parsed_serve_args(args)
 
     def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+        self, subparsers: argparse._SubParsersAction
+    ) -> FlexibleArgumentParser:
         serve_parser = subparsers.add_parser(
-            "serve",
-            help="Start the vLLM OpenAI Compatible API server.",
-            description="Start the vLLM OpenAI Compatible API server.",
-            usage="vllm serve [model_tag] [options]")
+            self.name, description=DESCRIPTION, usage="vllm serve [model_tag] [options]"
+        )
 
         serve_parser = make_arg_parser(serve_parser)
-        show_filtered_argument_or_group_from_help(serve_parser, ["serve"])
-        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
+        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return serve_parser
 
 
@@ -72,29 +82,27 @@ def cmd_init() -> list[CLISubcommand]:
 
 
 def run_headless(args: argparse.Namespace):
-
     if args.api_server_count > 1:
         raise ValueError("api_server_count can't be set in headless mode")
 
     # Create the EngineConfig.
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     usage_context = UsageContext.OPENAI_API_SERVER
-    vllm_config = engine_args.create_engine_config(usage_context=usage_context,
-                                                   headless=True)
+    vllm_config = engine_args.create_engine_config(
+        usage_context=usage_context, headless=True
+    )
 
     if not envs.VLLM_USE_V1:
         raise ValueError("Headless mode is only supported for V1")
 
     if engine_args.data_parallel_hybrid_lb:
-        raise ValueError("data_parallel_hybrid_lb is not applicable in "
-                         "headless mode")
+        raise ValueError("data_parallel_hybrid_lb is not applicable in headless mode")
 
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
 
     if local_engine_count <= 0:
-        raise ValueError("data_parallel_size_local must be > 0 in "
-                         "headless mode")
+        raise ValueError("data_parallel_size_local must be > 0 in headless mode")
 
     host = parallel_config.data_parallel_master_ip
     port = engine_args.data_parallel_rpc_port  # add to config too
@@ -110,7 +118,10 @@ def run_headless(args: argparse.Namespace):
 
     logger.info(
         "Launching %d data parallel engine(s) in headless mode, "
-        "with head node address %s.", local_engine_count, handshake_address)
+        "with head node address %s.",
+        local_engine_count,
+        handshake_address,
+    )
 
     # Create the engines.
     engine_manager = CoreEngineProcManager(
@@ -133,37 +144,31 @@ def run_headless(args: argparse.Namespace):
 
 
 def run_multi_api_server(args: argparse.Namespace):
-
     assert not args.headless
-    num_api_servers = args.api_server_count
+    num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
-
-    orig_mm_processor_cache_gb = args.mm_processor_cache_gb
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
 
-        # Not compatible with API server scale-out
-        args.mm_processor_cache_gb = 0
-
     listen_address, sock = setup_server(args)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
+    engine_args._api_process_count = num_api_servers
+    engine_args._api_process_rank = -1
+
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
-    model_config = vllm_config.model_config
 
     if num_api_servers > 1:
         if not envs.VLLM_USE_V1:
             raise ValueError("api_server_count > 1 is only supported for V1")
 
         if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
-            raise ValueError("VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used "
-                             "with api_server_count > 1")
-
-        if model_config.is_multimodal_model and orig_mm_processor_cache_gb > 0:
-            logger.warning("Multi-modal processor cache is disabled because "
-                           "it is not compatible with `api_server_count > 1`.")
+            raise ValueError(
+                "VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used "
+                "with api_server_count > 1"
+            )
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
@@ -176,10 +181,9 @@ def run_multi_api_server(args: argparse.Namespace):
 
     api_server_manager: Optional[APIServerProcessManager] = None
 
-    with launch_core_engines(vllm_config, executor_class, log_stats,
-                             num_api_servers) as (local_engine_manager,
-                                                  coordinator, addresses):
-
+    with launch_core_engines(
+        vllm_config, executor_class, log_stats, num_api_servers
+    ) as (local_engine_manager, coordinator, addresses):
         # Construct common args for the APIServerProcessManager up-front.
         api_server_manager_kwargs = dict(
             target_server_fn=run_api_server_worker_proc,
@@ -190,7 +194,9 @@ def run_multi_api_server(args: argparse.Namespace):
             input_addresses=addresses.inputs,
             output_addresses=addresses.outputs,
             stats_update_address=coordinator.get_stats_publish_address()
-            if coordinator else None)
+            if coordinator
+            else None,
+        )
 
         # For dp ranks > 0 in external/hybrid DP LB modes, we must delay the
         # start of the API servers until the local engine is started
@@ -199,34 +205,34 @@ def run_multi_api_server(args: argparse.Namespace):
         # via the handshake with the local engine.
         if dp_rank == 0 or not (external_dp_lb or hybrid_dp_lb):
             # Start API servers using the manager.
-            api_server_manager = APIServerProcessManager(
-                **api_server_manager_kwargs)
+            api_server_manager = APIServerProcessManager(**api_server_manager_kwargs)
 
     # Start API servers now if they weren't already started.
     if api_server_manager is None:
         api_server_manager_kwargs["stats_update_address"] = (
-            addresses.frontend_stats_publish_address)
-        api_server_manager = APIServerProcessManager(
-            **api_server_manager_kwargs)
+            addresses.frontend_stats_publish_address
+        )
+        api_server_manager = APIServerProcessManager(**api_server_manager_kwargs)
 
     # Wait for API servers
-    wait_for_completion_or_failure(api_server_manager=api_server_manager,
-                                   engine_manager=local_engine_manager,
-                                   coordinator=coordinator)
+    wait_for_completion_or_failure(
+        api_server_manager=api_server_manager,
+        engine_manager=local_engine_manager,
+        coordinator=coordinator,
+    )
 
 
-def run_api_server_worker_proc(listen_address,
-                               sock,
-                               args,
-                               client_config=None,
-                               **uvicorn_kwargs) -> None:
+def run_api_server_worker_proc(
+    listen_address, sock, args, client_config=None, **uvicorn_kwargs
+) -> None:
     """Entrypoint for individual API server worker processes."""
+    client_config = client_config or {}
+    server_index = client_config.get("client_index", 0)
 
     # Set process title and add process-specific prefix to stdout and stderr.
-    server_index = client_config.get("client_index", 0) if client_config else 0
     set_process_title("APIServer", str(server_index))
     decorate_logs()
 
     uvloop.run(
-        run_server_worker(listen_address, sock, args, client_config,
-                          **uvicorn_kwargs))
+        run_server_worker(listen_address, sock, args, client_config, **uvicorn_kwargs)
+    )

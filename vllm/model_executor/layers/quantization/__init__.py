@@ -3,8 +3,7 @@
 
 from typing import Literal, get_args
 
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 QuantizationMethods = Literal[
     "awq",
@@ -26,7 +25,6 @@ QuantizationMethods = Literal[
     "bitsandbytes",
     "hqq",
     "experts_int8",
-    "neuron_quant",
     "ipex",
     "quark",
     "moe_wna16",
@@ -53,9 +51,13 @@ def register_quantization_config(quantization: str):
         quantization (str): The quantization method name.
 
     Examples:
-        >>> from vllm.model_executor.layers.quantization import register_quantization_config
+        >>> from vllm.model_executor.layers.quantization import (
+        ...     register_quantization_config,
+        ... )
         >>> from vllm.model_executor.layers.quantization import get_quantization_config
-        >>> from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+        >>> from vllm.model_executor.layers.quantization.base_config import (
+        ...     QuantizationConfig,
+        ... )
         >>>
         >>> @register_quantization_config("my_quant")
         ... class MyQuantConfig(QuantizationConfig):
@@ -68,10 +70,12 @@ def register_quantization_config(quantization: str):
     def _wrapper(quant_config_cls):
         if quantization in QUANTIZATION_METHODS:
             raise ValueError(
-                f"The quantization method `{quantization}` is already exists.")
+                f"The quantization method `{quantization}` is already exists."
+            )
         if not issubclass(quant_config_cls, QuantizationConfig):
-            raise ValueError("The quantization config must be a subclass of "
-                             "`QuantizationConfig`.")
+            raise ValueError(
+                "The quantization config must be a subclass of `QuantizationConfig`."
+            )
         _CUSTOMIZED_METHOD_TO_QUANT_CONFIG[quantization] = quant_config_cls
         QUANTIZATION_METHODS.append(quantization)
         return quant_config_cls
@@ -91,8 +95,9 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .awq_marlin import AWQMarlinConfig
     from .bitblas import BitBLASConfig
     from .bitsandbytes import BitsAndBytesConfig
-    from .compressed_tensors.compressed_tensors import (  # noqa: E501
-        CompressedTensorsConfig)
+    from .compressed_tensors.compressed_tensors import (
+        CompressedTensorsConfig,
+    )
     from .deepspeedfp import DeepSpeedFPConfig
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
@@ -108,7 +113,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
-    from .neuron_quant import NeuronQuantConfig
     from .petit import PetitNvFp4Config
     from .ptpc_fp8 import PTPCFp8Config
     from .rtn import RTNConfig
@@ -135,7 +139,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "ptpc_fp8": PTPCFp8Config,
         "hqq": HQQMarlinConfig,
         "experts_int8": ExpertsInt8Config,
-        "neuron_quant": NeuronQuantConfig,
         "ipex": IPEXConfig,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
