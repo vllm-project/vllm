@@ -3,7 +3,7 @@
 """Attention backend registry"""
 
 import enum
-from typing import Optional, Type
+from typing import Optional
 
 from vllm.utils import resolve_obj_by_qualname
 
@@ -53,17 +53,17 @@ def register_attn_backend(backend: _Backend, class_path: Optional[str] = None):
 
 def backend_to_class_str(backend: _Backend) -> str:
     """Get the backend class string
-    
+
     Args:
         backend: The backend enum value
-        
+
     Returns:
         The backend class string
     """
     return BACKEND_MAP[backend]
 
 
-def backend_to_class(backend: _Backend) -> Type:
+def backend_to_class(backend: _Backend) -> type:
     """Get the backend class.
 
     Args:
@@ -86,5 +86,4 @@ def backend_name_to_enum(backend_name: str) -> Optional[_Backend]:
               is loaded.
     """
     assert backend_name is not None
-    return _Backend[backend_name] if backend_name in _Backend.__members__ else \
-          None
+    return _Backend[backend_name] if backend_name in _Backend.__members__ else None
