@@ -973,9 +973,3 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
             return vision_embeddings
 
     get_input_embeddings = SupportsMultiModal.get_input_embeddings
-
-    def _get_text_embeddings(self, *args, **kwargs) -> torch.Tensor:
-        inputs_embeds = super()._get_text_embeddings(*args, **kwargs)
-        if self.embed_scale is not None:
-            inputs_embeds *= self.embed_scale
-        return inputs_embeds
