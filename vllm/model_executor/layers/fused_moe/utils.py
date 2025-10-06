@@ -217,6 +217,7 @@ def _mxfp6_e3m2_quantize(
 
     return A, None
 
+
 def _mxfp6_e2m3_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
@@ -232,7 +233,6 @@ def _mxfp6_e2m3_quantize(
     A = quant_dequant_mxfp6(A, quant_dtype="fp6_e2m3")
 
     return A, None
-
 
 
 def moe_kernel_quantize_input(
@@ -256,13 +256,9 @@ def moe_kernel_quantize_input(
         # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
         return _mxfp8_e4m3_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp6_e3m2":
-        return _mxfp6_e3m2_quantize(
-            A, A_scale, per_act_token_quant, block_shape
-        )
+        return _mxfp6_e3m2_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp6_e2m3":
-        return _mxfp6_e2m3_quantize(
-            A, A_scale, per_act_token_quant, block_shape
-        )
+        return _mxfp6_e2m3_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
         return A, A_scale
 

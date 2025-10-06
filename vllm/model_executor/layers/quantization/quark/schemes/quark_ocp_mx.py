@@ -133,7 +133,9 @@ class QuarkOCP_MX(QuarkScheme):
             self.dequant_func = dequant_mxfp4
         else:
             self.packed_factor = Fraction(numerator=8, denominator=6)
-            self.dequant_func = partial(dequant_mxfp6, quant_dtype=self.weight_dtype.replace("mx", ""))
+            self.dequant_func = partial(
+                dequant_mxfp6, quant_dtype=self.weight_dtype.replace("mx", "")
+            )
 
         if self.input_dtype == "mxfp4":
             self.quant_dequant_func = quant_dequant_mxfp4

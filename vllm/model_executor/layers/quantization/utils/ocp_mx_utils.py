@@ -9,7 +9,14 @@ logger = init_logger(__name__)
 
 OCP_MX_BLOCK_SIZE = 32
 
-OCP_MX_DTYPES = {"mxfp4", "mxfp6_e3m2", "mxfp6_e2m3", "mxfp8_e4m3", "mxfp8_e5m2", "mxint8"}
+OCP_MX_DTYPES = {
+    "mxfp4",
+    "mxfp6_e3m2",
+    "mxfp6_e2m3",
+    "mxfp8_e4m3",
+    "mxfp8_e5m2",
+    "mxint8",
+}
 SUPPORTED_OCP_MX_DTYPES = {"mxfp4", "mxfp6_e3m2", "mxfp6_e2m3"}
 
 

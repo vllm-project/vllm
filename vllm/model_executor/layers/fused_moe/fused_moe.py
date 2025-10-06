@@ -1677,10 +1677,17 @@ def fused_experts_impl(
     if use_int4_w4a16:
         assert hidden_states.size(1) // 2 == w1.size(2), "Hidden size mismatch"
     elif ocp_mx_scheme is not None:
-        if ocp_mx_scheme in {"w_mxfp4_a_mxfp4", "w_mxfp4_a_mxfp6_e3m2", "w_mxfp4_a_mxfp6_e2m3"}:
+        if ocp_mx_scheme in {
+            "w_mxfp4_a_mxfp4",
+            "w_mxfp4_a_mxfp6_e3m2",
+            "w_mxfp4_a_mxfp6_e2m3",
+        }:
             # 16bit activation and fp4x2 packed weight
             assert hidden_states.size(1) == w1.size(2) * 2, "hidden size mismatch"
-        elif ocp_mx_scheme in {"w_mxfp6_e3m2_a_mxfp6_e3m2", "w_mxfp6_e2m3_a_mxfp6_e2m3"}:
+        elif ocp_mx_scheme in {
+            "w_mxfp6_e3m2_a_mxfp6_e3m2",
+            "w_mxfp6_e2m3_a_mxfp6_e2m3",
+        }:
             assert hidden_states.size(1) == (w1.size(2) * 4) // 3, (
                 "hidden size mismatch"
             )
