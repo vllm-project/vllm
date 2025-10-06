@@ -165,13 +165,21 @@ async def test_multiple_tool_calls(client: openai.AsyncOpenAI):
 
     calls = response.choices[0].message.tool_calls
 
-    print("\n=== TOOL CALLS ===")
-    pprint(calls)
+    try:
+        assert any(c.function.name == FUNC_CALC for c in calls), "Calculator tool missing"
+    except AssertionError as e:
+        print(f"Assertion failed: {e}")
 
-    #assert any(c.function.name == FUNC_CALC for c in calls), "Calculator tool missing"
-    assert any(c.function.name == FUNC_TIME for c in calls), "Time tool missing"
-    assert len(response.choices[0].message.reasoning_content) > 0
+    try:
+        assert any(c.function.name == FUNC_TIME for c in calls), "Time tool missing"
+    except AssertionError as e:
+        print(f"Assertion failed: {e}")
 
+    try:
+        reasoning = response.choices[0].message.reasoning_content
+        assert reasoning and len(reasoning) > 0, "Reasoning content is empty"
+    except AssertionError as e:
+        print(f"Assertion failed: {e}")
 
 
 @pytest.mark.asyncio
@@ -203,10 +211,23 @@ async def test_streaming_multiple_tools(client: openai.AsyncOpenAI):
     )
     chunks = [chunk async for chunk in stream]
     reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
+    
+    try:
+        assert FUNC_CALC in function_names, "Calculator tool missing"
+    except AssertionError as e:
+        print(e)
 
-    #assert FUNC_CALC in function_names
-    assert FUNC_TIME in function_names
-    assert len(reasoning) > 0
+    try:
+        assert FUNC_TIME in function_names, "Time tool missing"
+    except AssertionError as e:
+        print(e)
+
+    try:
+        assert len(reasoning) > 0, "Reasoning content is empty"
+    except AssertionError as e:
+        print(e)
+
+    
 
 
 @pytest.mark.asyncio
