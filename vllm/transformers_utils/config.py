@@ -34,6 +34,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
 from vllm.transformers_utils.utils import (
     check_gguf_file,
+    is_oci_model_with_tag,
     parse_safetensors_file_metadata,
 )
 
@@ -485,65 +486,6 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
                 config.update({new_attr: getattr(config, old_attr)})
             logger.debug("Remapped config attribute '%s' to '%s'", old_attr, new_attr)
     return config
-
-
-def is_oci_model_with_tag(model: str) -> bool:
-    """
-    Detect if model name is an OCI reference with explicit tag or digest.
-
-    Returns True for OCI references with explicit tag/digest:
-    - username/model:tag
-    - username/model:v1.0
-    - registry.io/username/model:tag
-    - registry.io/username/model@sha256:digest
-
-    Returns False for:
-    - username/model (ambiguous - could be HuggingFace or OCI with implicit tag)
-    - local/path/to/model (local filesystem paths)
-    - model (single name without repository)
-
-    This allows automatic detection of OCI format when the reference is
-    unambiguous (has explicit tag/digest), while requiring explicit
-    load_format="oci" for ambiguous cases.
-
-    Args:
-        model: Model name or path to check
-
-    Returns:
-        True if the model name matches OCI reference pattern with tag/digest
-    """
-    import regex as re
-
-    # Return False for local paths that exist on filesystem
-    if os.path.exists(model):
-        return False
-
-    # Pattern explanation:
-    # ^                                    - Start of string
-    # (?:(?:[^/]+\.[^/]+|[^/]+:[0-9]+)/)? - Optional registry:
-    #                                        - either with domain (contains dot)
-    #                                        - or with port (hostname:port)
-    # [^/]+/                               - Repository owner/namespace (required slash)
-    # [^/:@]+                              - Repository name (no slashes, colons, or @)
-    # [:@]                                 - Tag separator (: or @)
-    # .+                                   - Tag or digest content
-    # $                                    - End of string
-    #
-    # This matches:
-    # - username/repo:tag
-    # - username/repo@sha256:abc
-    # - registry.io/username/repo:tag
-    # - registry.io:5000/username/repo:tag (registry with port)
-    # - localhost:8080/username/repo:tag (hostname with port)
-    #
-    # Does NOT match:
-    # - username/repo (no tag)
-    # - /path/to/model:tag (starts with /)
-    # - ./relative/path (starts with .)
-    # - model (no slash)
-    pattern = r"^(?:(?:[^/]+\.[^/]+|[^/]+:[0-9]+)/)?[^/]+/[^/:@]+[:@].+$"
-
-    return bool(re.match(pattern, model))
 
 
 def maybe_override_with_speculators(

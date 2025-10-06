@@ -163,7 +163,7 @@ class TestOciFormatAutoDetection:
 
     def test_auto_detect_oci_with_tag(self):
         """Should auto-detect OCI format when tag is present."""
-        from vllm.transformers_utils.config import is_oci_model_with_tag
+        from vllm.transformers_utils.utils import is_oci_model_with_tag
 
         # These should be detected as OCI
         test_cases = [
@@ -181,7 +181,7 @@ class TestOciFormatAutoDetection:
 
     def test_auto_detect_oci_with_registry(self):
         """Should auto-detect OCI format with explicit registry."""
-        from vllm.transformers_utils.config import is_oci_model_with_tag
+        from vllm.transformers_utils.utils import is_oci_model_with_tag
 
         test_cases = [
             "docker.io/username/model:tag",
@@ -197,7 +197,7 @@ class TestOciFormatAutoDetection:
 
     def test_auto_detect_oci_with_registry_port(self):
         """Should auto-detect OCI format with registry including port."""
-        from vllm.transformers_utils.config import is_oci_model_with_tag
+        from vllm.transformers_utils.utils import is_oci_model_with_tag
 
         test_cases = [
             "registry.example.com:5000/user/model:tag",
@@ -211,7 +211,7 @@ class TestOciFormatAutoDetection:
 
     def test_auto_detect_oci_with_digest(self):
         """Should auto-detect OCI format when digest is present."""
-        from vllm.transformers_utils.config import is_oci_model_with_tag
+        from vllm.transformers_utils.utils import is_oci_model_with_tag
 
         test_cases = [
             "username/model@sha256:abc123def456",
@@ -226,7 +226,7 @@ class TestOciFormatAutoDetection:
 
     def test_no_auto_detect_without_tag(self):
         """Should NOT auto-detect OCI format without tag (ambiguous)."""
-        from vllm.transformers_utils.config import is_oci_model_with_tag
+        from vllm.transformers_utils.utils import is_oci_model_with_tag
 
         # These should require explicit load_format="oci"
         test_cases = [
@@ -247,7 +247,7 @@ class TestOciFormatAutoDetection:
         import os
         import tempfile
 
-        from vllm.transformers_utils.config import is_oci_model_with_tag
+        from vllm.transformers_utils.utils import is_oci_model_with_tag
 
         # Test with actual existing path
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -276,7 +276,7 @@ class TestOciFormatAutoDetection:
 
     def test_no_auto_detect_huggingface_style(self):
         """Should NOT detect standard HuggingFace repos as OCI."""
-        from vllm.transformers_utils.config import is_oci_model_with_tag
+        from vllm.transformers_utils.utils import is_oci_model_with_tag
 
         test_cases = [
             "meta-llama/Llama-2-7b",  # No tag = HF format
@@ -293,7 +293,7 @@ class TestOciFormatAutoDetection:
 
     def test_edge_cases(self):
         """Test edge cases for OCI format detection."""
-        from vllm.transformers_utils.config import is_oci_model_with_tag
+        from vllm.transformers_utils.utils import is_oci_model_with_tag
 
         # Edge cases that should be detected
         should_detect = [
