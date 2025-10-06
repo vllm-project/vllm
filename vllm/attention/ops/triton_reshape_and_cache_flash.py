@@ -52,12 +52,9 @@ def reshape_and_cache_kernel_flash(
         key_ptr + src_key_idx + tile_pos, mask=tile_pos < (num_heads * head_size)
     )
     if FP8_KV_CACHE:
-        if key_load.dtype.is_fp8():
-            key_tile = key_load
-        else:
-            # tl.store will do the correct implicit cast to fp8,
-            #  based on the key_cache_ptr.dtype.element_ty
-            key_tile = key_load / tl.load(k_scale)
+        # tl.store will do the correct implicit cast to fp8,
+        # based on the key_cache_ptr.dtype.element_ty
+        key_tile = key_load if key_load.dtype.is_fp8() else key_load / tl.load(k_scale)
     else:
         key_tile = key_load
 

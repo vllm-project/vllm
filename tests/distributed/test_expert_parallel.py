@@ -107,10 +107,8 @@ class EPTestSettings:
 # NOTE: You can adjust tp_base locally to fit the model in GPU
 # The values displayed here are only a rough indicator of the size of the model
 
-# yapf: disable
 TEST_MODELS = {
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": EPTestSettings.fast(
-        trust_remote_code=True),
+    "deepseek-ai/DeepSeek-V2-Lite-Chat": EPTestSettings.fast(trust_remote_code=True),
     "mistralai/Mixtral-8x7B-Instruct-v0.1": EPTestSettings.fast(tp_base=4),
 }
 
@@ -192,22 +190,24 @@ def _compare_tp(
     ]
 
     try:
-        compare_two_settings(model_name,
-                             ep_args,
-                             tp_args,
-                             ep_env,
-                             tp_env,
-                             method=method,
-                             max_wait_seconds=360)
+        compare_two_settings(
+            model_name,
+            ep_args,
+            tp_args,
+            ep_env,
+            tp_env,
+            method=method,
+            max_wait_seconds=360,
+        )
     except Exception:
         raise
 
 
 @pytest.mark.parametrize(
-    ("model_name", "parallel_setup", "distributed_backend", "runner",
-     "test_options"),
+    ("model_name", "parallel_setup", "distributed_backend", "runner", "test_options"),
     [
-        params for model_name, settings in TEST_MODELS.items()
+        params
+        for model_name, settings in TEST_MODELS.items()
         for params in settings.iter_params(model_name)
     ],
 )
@@ -220,10 +220,12 @@ def test_ep(
     test_options: EPTestOptions,
     num_gpus_available,
 ):
-    _compare_tp(model_name,
-                parallel_setup,
-                distributed_backend,
-                runner,
-                test_options,
-                num_gpus_available,
-                method="generate")
+    _compare_tp(
+        model_name,
+        parallel_setup,
+        distributed_backend,
+        runner,
+        test_options,
+        num_gpus_available,
+        method="generate",
+    )

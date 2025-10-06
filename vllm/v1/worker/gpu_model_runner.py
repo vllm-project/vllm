@@ -48,9 +48,6 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     is_mixture_of_experts,
@@ -59,8 +56,6 @@ from vllm.model_executor.models.interfaces import (
     supports_multimodal_pruning,
     supports_transcription,
 )
-
-# yapf: enable
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling,
     is_pooling_model,
@@ -101,9 +96,6 @@ from vllm.v1.attention.backends.utils import (
     split_attn_metadata,
 )
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -118,8 +110,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-
-# yapf: enable
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -2955,15 +2945,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
             if self.use_aux_hidden_state_outputs:
-                if supports_eagle3(self.model):
-                    self.model.set_aux_hidden_state_layers(
-                        self.model.get_eagle3_aux_hidden_state_layers()
-                    )
-                else:
+                if not supports_eagle3(self.model):
                     raise RuntimeError(
                         "Model does not support EAGLE3 interface but "
                         "aux_hidden_state_outputs was requested"
                     )
+
+                # Try to get auxiliary layers from speculative config,
+                # otherwise use model's default layers
+                aux_layers = self._get_eagle3_aux_layers_from_config()
+                if aux_layers:
+                    logger.info(
+                        "Using auxiliary layers from speculative config: %s",
+                        aux_layers,
+                    )
+                else:
+                    aux_layers = self.model.get_eagle3_aux_hidden_state_layers()
+
+                self.model.set_aux_hidden_state_layers(aux_layers)
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
         logger.info(
@@ -3017,6 +3016,30 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.model = UBatchWrapper(
                     self.model, self.vllm_config, CUDAGraphMode.NONE, self.device
                 )
+
+    def _get_eagle3_aux_layers_from_config(self) -> Optional[tuple[int, ...]]:
+        """Extract Eagle3 auxiliary layer indices from speculative config.
+
+        These indices specify which hidden states from the base model should
+        be used as auxiliary inputs for the Eagle3 drafter model during
+        speculative decoding.
+
+        Returns:
+            Tuple of layer indices if found in draft model config,
+            None otherwise.
+        """
+        if not (self.speculative_config and self.speculative_config.draft_model_config):
+            return None
+
+        hf_config = self.speculative_config.draft_model_config.hf_config
+        if not hasattr(hf_config, "eagle_aux_hidden_state_layer_ids"):
+            return None
+
+        layer_ids = hf_config.eagle_aux_hidden_state_layer_ids
+        if layer_ids and isinstance(layer_ids, (list, tuple)):
+            return tuple(layer_ids)
+
+        return None
 
     def reload_weights(self) -> None:
         assert getattr(self, "model", None) is not None, (
@@ -3403,7 +3426,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                 attn_metadata[ubid][layer_name] = attn_metadata_i
                     else:
                         assert type(attn_metadata) is dict
-                        attn_metadata_i = attn_group.get_metadata_builder().build_for_cudagraph_capture(
+                        metadata_builder = attn_group.get_metadata_builder()
+                        attn_metadata_i = metadata_builder.build_for_cudagraph_capture(
                             common_attn_metadata
                         )
                         for layer_name in attn_group.layer_names:

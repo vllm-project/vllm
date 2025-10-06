@@ -7,8 +7,6 @@ from typing import Any, Union
 import pytest
 
 from tests.utils import create_new_process_for_each_test
-
-# yapf: disable
 from tests.v1.logits_processors.utils import (
     DUMMY_LOGITPROC_ARG,
     DUMMY_LOGITPROC_FQCN,
@@ -24,8 +22,6 @@ from tests.v1.logits_processors.utils import (
     prompts,
 )
 from tests.v1.logits_processors.utils import entry_points as fake_entry_points
-
-# yapf: enable
 from vllm import LLM, SamplingParams
 from vllm.v1.sample.logits_processor import (
     STR_POOLING_REJECTS_LOGITSPROCS,
@@ -287,15 +283,8 @@ def test_rejects_custom_logitsprocs(
 
         llm = LLM(**llm_kwargs)
         # Require that no logitsprocs have been loaded
-        assert (
-            sum(
-                [
-                    1
-                    for _ in llm.llm_engine.model_executor.driver_worker.worker.model_runner.input_batch.logitsprocs.all
-                ]
-            )
-            == 0
-        )
+        worker = llm.llm_engine.model_executor.driver_worker.worker
+        assert sum([1 for _ in worker.model_runner.input_batch.logitsprocs.all]) == 0
         return
 
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_FQCN:

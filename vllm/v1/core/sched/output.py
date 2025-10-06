@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from vllm._bc_linter import bc_linter_include
 
@@ -25,14 +25,14 @@ if TYPE_CHECKING:
 @dataclass
 class NewRequestData:
     req_id: str
-    prompt_token_ids: Optional[list[int]]
+    prompt_token_ids: list[int] | None
     mm_features: list[MultiModalFeatureSpec]
-    sampling_params: Optional[SamplingParams]
-    pooling_params: Optional[PoolingParams]
+    sampling_params: SamplingParams | None
+    pooling_params: PoolingParams | None
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
-    lora_request: Optional[LoRARequest]
-    prompt_embeds: Optional[torch.Tensor] = None
+    lora_request: LoRARequest | None
+    prompt_embeds: torch.Tensor | None = None
 
     @classmethod
     def from_request(
@@ -98,7 +98,7 @@ class CachedRequestData:
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
-    new_block_ids: list[Optional[tuple[list[int], ...]]]
+    new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
 
@@ -160,7 +160,7 @@ class SchedulerOutput:
     # for filling the next token bitmask
     structured_output_request_ids: dict[str, int]
     # the bitmask for the whole batch
-    grammar_bitmask: Optional[npt.NDArray[np.int32]]
+    grammar_bitmask: npt.NDArray[np.int32] | None
 
     # KV Cache Connector metadata.
-    kv_connector_metadata: Optional[KVConnectorMetadata] = None
+    kv_connector_metadata: KVConnectorMetadata | None = None
