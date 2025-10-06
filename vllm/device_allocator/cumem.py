@@ -223,7 +223,8 @@ class CuMemAllocator:
 
         assert isinstance(offload_tags, tuple)
 
-        # Handle CUDA graphs first if model_runner is provided and graphs are being offloaded
+        # Handle CUDA graphs if model_runner is provided and graphs are being
+        # offloaded
         has_graphs = CuMemAllocator.graphs_tag in offload_tags
         if model_runner is not None and has_graphs:
             self._save_cuda_graphs(model_runner)
@@ -253,7 +254,7 @@ class CuMemAllocator:
             "%.2f GiB is backed up in CPU and the rest %.2f GiB is discarded "
             "directly. %s", total_bytes / 1024**3, backup_bytes / 1024**3,
             (total_bytes - backup_bytes) / 1024**3,
-            f"CUDA graphs offloaded to CPU (tag: {CuMemAllocator.graphs_tag})" if has_graphs
+            f"Graph offloaded (tag: {CuMemAllocator.graphs_tag})" if has_graphs
             else "CUDA graphs not managed by CuMemAllocator")
 
         gc.collect()
@@ -365,20 +366,21 @@ class CuMemAllocator:
 
     def setup_graph_pool_for_sleep_mode(self) -> None:
         """
-        Set up custom graph pool for sleep mode after CUDA graph capture is complete.
-        This ensures graphs captured with the native pool can be properly managed
-        during sleep/wake cycles by initializing our custom pool context.
+        Set up custom graph pool for sleep mode after graph capture.
+        This ensures graphs captured with the native pool can be properly
+        mangaged during sleep/wake cycles.
         """
         try:
             # Initialize the custom graph pool context
             graph_pool_handle = self.get_graph_pool_handle()
 
-            logger.info("CuMemAllocator: Successfully set up custom graph pool for "
-                       f"sleep mode management (handle type: {type(graph_pool_handle).__name__})")
+            logger.info("CuMemAllocator: Successfully set up custom graph "
+                        "pool for sleep mode management "
+                        "(handle type: %s)", type(graph_pool_handle).__name__)
 
         except Exception as e:
-            logger.warning("CuMemAllocator: Failed to set up custom graph pool for sleep mode: %s. "
-                          "CUDA graphs will use native PyTorch pool during sleep/wake cycles.", e)
+            logger.warning("CuMemAllocator: Failed to set up custom graph "
+                           "pool for sleep mode: %s. Using global pool", e)
 
     def _save_cuda_graphs(self, model_runner) -> None:
         """Put CUDA graphs to sleep."""
@@ -387,13 +389,18 @@ class CuMemAllocator:
         # Check if model runner has cudagraph dispatcher
         if hasattr(model_runner, "cudagraph_dispatcher"):
             dispatcher = model_runner.cudagraph_dispatcher
-            self._sleep_saved_cudagraphs["dispatcher"] = dispatcher.get_sleep_state()
+            self._sleep_saved_cudagraphs["dispatcher"] = (
+                dispatcher.get_sleep_state()
+            )
             logger.info(
                 "Saved cudagraph dispatcher state for %d modes",
-                len(self._sleep_saved_cudagraphs["dispatcher"]["dispatcher_keys"]),
+                len(
+                    self._sleep_saved_cudagraphs["dispatcher"][
+                        "dispatcher_keys"
+                    ]
+                ),
             )
 
-        # Handle model sleep using clean interfaces
         cuda_graph_count = 0
         model = model_runner.model
         if hasattr(model, 'enter_sleep_mode'):
@@ -428,7 +435,8 @@ class CuMemAllocator:
         cuda_graph_count = 0
 
         # Verify dispatcher state
-        if hasattr(model_runner, "cudagraph_dispatcher") and "dispatcher" in self._sleep_saved_cudagraphs:
+        if (hasattr(model_runner, "cudagraph_dispatcher") and
+            "dispatcher" in self._sleep_saved_cudagraphs):
             dispatcher = model_runner.cudagraph_dispatcher
             if dispatcher.verify_wake_state(self._sleep_saved_cudagraphs["dispatcher"]):
                 logger.info("Cudagraph dispatcher state verified successfully.")
