@@ -495,8 +495,7 @@ class CudaPlatformBase(Platform):
                 hasattr(vllm_config.model_config, 'enable_sleep_mode') and
                 vllm_config.model_config.enable_sleep_mode):
 
-                logger.info("CUDA Platform: Using CuMemAllocator custom graph pool "
-                           "(sleep mode enabled)")
+                logger.debug("CUDA Platform: Using CuMemAllocator custom pool")
                 allocator = CuMemAllocator.get_instance()
                 return allocator.get_graph_pool_handle()
             else:
@@ -510,14 +509,13 @@ class CudaPlatformBase(Platform):
                         and hasattr(vllm_config.model_config, 'enable_sleep_mode')):
                     sleep_mode_status = str(vllm_config.model_config.enable_sleep_mode)
 
-                logger.debug("CUDA Platform: Using native PyTorch graph pool "
-                             "(config=%s, model_config=%s, sleep_mode=%s)",
+                logger.debug(("CUDA Platform: Using native PyTorch graph pool "
+                             "(config=%s, model_config=%s, sleep_mode=%s)"),
                              config_status, model_config_status,
                              sleep_mode_status)
         except Exception as e:
             # Fall back to native PyTorch graph pool if anything fails
-            logger.warning("CUDA Platform: Exception in graph_pool_handle, "
-                          "falling back to native pool.")
+            logger.warning("CUDA Platform: Exception in graph_pool_handle")
 
         # Default to native PyTorch graph pool handle
         return torch.cuda.graph_pool_handle()

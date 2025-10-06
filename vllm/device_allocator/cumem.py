@@ -350,8 +350,8 @@ class CuMemAllocator:
         mechanism as other tagged memory allocations.
         """
         if not hasattr(self, '_graph_pool_context'):
-            logger.info("CuMemAllocator: Creating custom graph pool with tag '%s' "
-                       "for sleep/wake management", CuMemAllocator.graphs_tag)
+            logger.info("CuMemAllocator: Creating graph pool with tag %s ",
+                        CuMemAllocator.graphs_tag)
 
             # Create a persistent memory pool context for graphs
             self._graph_pool_context = self.use_memory_pool(
@@ -374,13 +374,11 @@ class CuMemAllocator:
             # Initialize the custom graph pool context
             graph_pool_handle = self.get_graph_pool_handle()
 
-            logger.info("CuMemAllocator: Successfully set up custom graph "
-                        "pool for sleep mode management "
-                        "(handle type: %s)", type(graph_pool_handle).__name__)
+            logger.info("CuMemAllocator: Successfully set up graph pool %s",
+                        type(graph_pool_handle).__name__)
 
         except Exception as e:
-            logger.warning("CuMemAllocator: Failed to set up custom graph "
-                           "pool for sleep mode: %s. Using global pool", e)
+            logger.warning("CuMemAllocator: Failed to set up graph pool %s", e)
 
     def _save_cuda_graphs(self, model_runner) -> None:
         """Put CUDA graphs to sleep."""
