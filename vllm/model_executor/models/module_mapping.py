@@ -54,19 +54,22 @@ class MultiModelKeys(ModelKeys):
     generator: list[str] = field(default_factory=list)
 
     @staticmethod
-    def from_string_field(language_model: Union[str, list[str]] = None,
-                          connector: Union[str, list[str]] = None,
-                          tower_model: Union[str, list[str]] = None,
-                          generator: Union[str, list[str]] = None,
-                          **kwargs) -> 'MultiModelKeys':
-
+    def from_string_field(
+        language_model: Union[str, list[str]] = None,
+        connector: Union[str, list[str]] = None,
+        tower_model: Union[str, list[str]] = None,
+        generator: Union[str, list[str]] = None,
+        **kwargs,
+    ) -> "MultiModelKeys":
         def to_list(value):
             if value is None:
                 return []
             return [value] if isinstance(value, str) else list(value)
 
-        return MultiModelKeys(language_model=to_list(language_model),
-                              connector=to_list(connector),
-                              tower_model=to_list(tower_model),
-                              generator=to_list(generator),
-                              **kwargs)
+        return MultiModelKeys(
+            language_model=to_list(language_model),
+            connector=to_list(connector),
+            tower_model=to_list(tower_model),
+            generator=to_list(generator),
+            **kwargs,
+        )

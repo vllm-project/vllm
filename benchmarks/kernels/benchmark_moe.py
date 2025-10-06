@@ -584,8 +584,9 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
     elif config.architectures[0] in (
-        "DeepseekV3ForCausalLM",
         "DeepseekV2ForCausalLM",
+        "DeepseekV3ForCausalLM",
+        "DeepseekV32ForCausalLM",
         "Glm4MoeForCausalLM",
     ):
         E = config.n_routed_experts

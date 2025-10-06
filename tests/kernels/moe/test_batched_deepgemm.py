@@ -5,13 +5,14 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    BatchedDeepGemmExperts)
-from vllm.model_executor.layers.fused_moe.config import (
-    fp8_w8a8_moe_quant_config)
+    BatchedDeepGemmExperts,
+)
+from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedPrepareAndFinalize, BatchedTritonExperts)
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel)
+    BatchedPrepareAndFinalize,
+    BatchedTritonExperts,
+)
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.utils.deep_gemm import calc_diff, is_deep_gemm_supported
 
 from .test_deepgemm import make_block_quant_fp8_weights
@@ -19,15 +20,15 @@ from .test_deepgemm import make_block_quant_fp8_weights
 BLOCK_SIZE = [128, 128]
 
 
-@pytest.mark.skipif(not is_deep_gemm_supported(),
-                    reason="Requires deep_gemm kernels")
+@pytest.mark.skipif(not is_deep_gemm_supported(), reason="Requires deep_gemm kernels")
 @pytest.mark.parametrize("E", [16, 32])  # number of experts
 @pytest.mark.parametrize("T", [256, 512])  # tokens per expert
 @pytest.mark.parametrize("K", [128, 256])  # hidden dim
 @pytest.mark.parametrize("N", [512, 1024])  # intermediate dim per expert
 @pytest.mark.parametrize("topk", [2, 4])
-def test_batched_deepgemm_vs_triton(E: int, T: int, K: int, N: int, topk: int,
-                                    monkeypatch):
+def test_batched_deepgemm_vs_triton(
+    E: int, T: int, K: int, N: int, topk: int, monkeypatch
+):
     """Compare BatchedDeepGemmExperts to BatchedTritonExperts."""
 
     monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")

@@ -28,8 +28,8 @@ class KVTransferConfig:
     """The engine id for KV transfers."""
 
     kv_buffer_device: Optional[str] = "cuda"
-    """The device used by kv connector to buffer the KV cache.
-    Currently only support 'cuda'."""
+    """The device used by kv connector to buffer the KV cache. Choices are 
+    'cuda' and 'cpu'."""
 
     kv_buffer_size: float = 1e9
     """The buffer size for TorchDistributedConnector. Measured in number of
@@ -76,8 +76,7 @@ class KVTransferConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     def __post_init__(self) -> None:
@@ -85,27 +84,28 @@ class KVTransferConfig:
             self.engine_id = str(uuid.uuid4())
 
         if self.kv_role is not None and self.kv_role not in get_args(KVRole):
-            raise ValueError(f"Unsupported kv_role: {self.kv_role}. "
-                             f"Supported roles are {get_args(KVRole)}")
+            raise ValueError(
+                f"Unsupported kv_role: {self.kv_role}. "
+                f"Supported roles are {get_args(KVRole)}"
+            )
 
         if self.kv_connector is not None and self.kv_role is None:
-            raise ValueError("Please specify kv_disagg_role when kv_connector "
-                             f"is set, supported roles are {get_args(KVRole)}")
+            raise ValueError(
+                "Please specify kv_disagg_role when kv_connector "
+                f"is set, supported roles are {get_args(KVRole)}"
+            )
 
     @property
     def is_kv_transfer_instance(self) -> bool:
-        return self.kv_connector is not None and \
-            self.kv_role in get_args(KVRole)
+        return self.kv_connector is not None and self.kv_role in get_args(KVRole)
 
     @property
     def is_kv_producer(self) -> bool:
-        return self.kv_connector is not None and \
-            self.kv_role in get_args(KVProducer)
+        return self.kv_connector is not None and self.kv_role in get_args(KVProducer)
 
     @property
     def is_kv_consumer(self) -> bool:
-        return self.kv_connector is not None and \
-            self.kv_role in get_args(KVConsumer)
+        return self.kv_connector is not None and self.kv_role in get_args(KVConsumer)
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)

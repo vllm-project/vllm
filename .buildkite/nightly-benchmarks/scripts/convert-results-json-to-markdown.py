@@ -368,7 +368,7 @@ if __name__ == "__main__":
         # The GPUs sometimes come in format of "GPUTYPE\nGPUTYPE\n...",
         # we want to turn it into "8xGPUTYPE"
         df["GPU"] = df["GPU"].apply(
-            lambda x: f"{len(x.split('\n'))}x{x.split('\n')[0]}"
+            lambda x: f"{len(x.splitlines())}x{x.splitlines()[0]}"
         )
 
     # get markdown tables

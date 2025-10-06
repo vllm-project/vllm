@@ -12,33 +12,37 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 
 
-def cal_diff(x: torch.Tensor,
-             y: torch.Tensor,
-             name: str,
-             use_fp8: bool = False,
-             diff_threshold: Optional[float] = None) -> None:
+def cal_diff(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    name: str,
+    use_fp8: bool = False,
+    diff_threshold: Optional[float] = None,
+) -> None:
     x, y = x.double(), y.double()
-    cos_diff = 1 - 2 * (x * y).sum().item() / max(
-        (x * x + y * y).sum().item(), 1e-12)
+    cos_diff = 1 - 2 * (x * y).sum().item() / max((x * x + y * y).sum().item(), 1e-12)
     if diff_threshold is not None:
         # directly compare the cos_diff with the threshold
         assert cos_diff < diff_threshold
     else:
         # use the default threshold
-        if (use_fp8):
+        if use_fp8:
             assert cos_diff < 1e-4
         else:
             assert cos_diff < 1e-5
 
 
-CUTLASS_MLA_UNSUPPORTED_REASON = \
-    "Cutlass MLA Requires compute capability of 10 or above." \
-    if not current_platform.is_device_capability(100) \
+CUTLASS_MLA_UNSUPPORTED_REASON = (
+    "Cutlass MLA Requires compute capability of 10 or above."
+    if not current_platform.is_device_capability(100)
     else "Cutlass MLA is supported"
+)
 
 
-@pytest.mark.skipif(not current_platform.has_device_capability(100),
-                    reason=CUTLASS_MLA_UNSUPPORTED_REASON)
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason=CUTLASS_MLA_UNSUPPORTED_REASON,
+)
 @pytest.mark.parametrize("b", [128])
 @pytest.mark.parametrize("s_q", [1])
 @pytest.mark.parametrize("mean_sk", [4096, 8192, 16384])
@@ -54,40 +58,40 @@ CUTLASS_MLA_UNSUPPORTED_REASON = \
     [
         torch.bfloat16,
         # fp8 can have occasional precision-related failures.
-        pytest.param(torch.float8_e4m3fn, marks=pytest.mark.flaky(reruns=2))
-    ])
+        pytest.param(torch.float8_e4m3fn, marks=pytest.mark.flaky(reruns=2)),
+    ],
+)
 @torch.inference_mode()
-def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size,
-                            causal, varlen, torch_dtype):
+def test_cutlass_mla_decode(
+    b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal, varlen, torch_dtype
+):
     device = torch.device("cuda:0")
-    if torch_dtype == torch.float8_e4m3fn:
-        init_dtype = torch.bfloat16
-    else:
-        init_dtype = torch_dtype
+    init_dtype = torch.bfloat16 if torch_dtype == torch.float8_e4m3fn else torch_dtype
     torch.set_default_dtype(init_dtype)
     torch.set_default_device(device)
     torch.cuda.set_device(device)
     torch.manual_seed(42)
     random.seed(42)
 
-    print(f"{b=}, {s_q=}, {mean_sk=}, {h_q=}, {h_kv=}, "
-          f"{d=}, {dv=}, {causal=}, {varlen=}, {torch_dtype=}")
+    print(
+        f"{b=}, {s_q=}, {mean_sk=}, {h_q=}, {h_kv=}, "
+        f"{d=}, {dv=}, {causal=}, {varlen=}, {torch_dtype=}"
+    )
 
     use_fp8 = torch_dtype == torch.float8_e4m3fn
-    scale = math.sqrt(d)**(-1)
-    cache_seqlens = torch.full((b, ), mean_sk, dtype=torch.int32)
+    scale = math.sqrt(d) ** (-1)
+    cache_seqlens = torch.full((b,), mean_sk, dtype=torch.int32)
     if varlen:
         for i in range(b):
-            cache_seqlens[i] = max(random.normalvariate(mean_sk, mean_sk / 2),
-                                   s_q)
+            cache_seqlens[i] = max(random.normalvariate(mean_sk, mean_sk / 2), s_q)
     total_seqlens = cache_seqlens.sum().item()
     max_seqlen = cache_seqlens.max().item()
     max_seqlen_pad = triton.cdiv(max_seqlen, 256) * 256
 
     q = torch.randn(b, s_q, h_q, d)
-    block_table = torch.arange(b * max_seqlen_pad // block_size,
-                               dtype=torch.int32).view(
-                                   b, max_seqlen_pad // block_size)
+    block_table = torch.arange(
+        b * max_seqlen_pad // block_size, dtype=torch.int32
+    ).view(b, max_seqlen_pad // block_size)
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d)
     blocked_v = blocked_k[..., :dv]
 
@@ -121,22 +125,29 @@ def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size,
             q_pe = q_pe_padded
 
         kv_cache_flat = blocked_k.squeeze(2)
-        device_properties = torch.cuda.get_device_properties(
-            torch.device("cuda:0"))
+        device_properties = torch.cuda.get_device_properties(torch.device("cuda:0"))
         sm_count = device_properties.multi_processor_count
         workspace_size = ops.sm100_cutlass_mla_get_workspace_size(
-            max_seqlen * block_size, b, sm_count, num_kv_splits=1)
-        workspace = torch.empty(workspace_size,
-                                device="cuda",
-                                dtype=torch.uint8)
+            max_seqlen * block_size, b, sm_count, num_kv_splits=1
+        )
+        workspace = torch.empty(workspace_size, device="cuda", dtype=torch.uint8)
 
         out_ans = torch.empty(b, MAX_HEADS, dv, dtype=init_dtype)
-        output_lse = torch.empty((b, MAX_HEADS),
-                                 dtype=torch.float32,
-                                 device=q_nope.device)
-        ops.sm100_cutlass_mla_decode(out_ans, output_lse, q_nope, q_pe,
-                                     kv_cache_flat, cache_seqlens, block_table,
-                                     workspace, scale, 1)
+        output_lse = torch.empty(
+            (b, MAX_HEADS), dtype=torch.float32, device=q_nope.device
+        )
+        ops.sm100_cutlass_mla_decode(
+            out_ans,
+            output_lse,
+            q_nope,
+            q_pe,
+            kv_cache_flat,
+            cache_seqlens,
+            block_table,
+            workspace,
+            scale,
+            1,
+        )
         return out_ans[:, :h_q].contiguous(), output_lse[:, :h_q].contiguous()
 
     def scaled_dot_product_attention(query, key, value, is_causal=False):
@@ -150,8 +161,7 @@ def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size,
             s_q = query.shape[-2]
             s_k = key.shape[-2]
             attn_bias = torch.zeros(s_q, s_k, dtype=query.dtype)
-            temp_mask = torch.ones(s_q, s_k,
-                                   dtype=torch.bool).tril(diagonal=s_k - s_q)
+            temp_mask = torch.ones(s_q, s_k, dtype=torch.bool).tril(diagonal=s_k - s_q)
             attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
             attn_bias.to(query.dtype)
             attn_weight += attn_bias
@@ -161,10 +171,16 @@ def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size,
 
     def ref_mla():
         q_ = (q.to(torch.float) * descale_q).to(init_dtype) if use_fp8 else q
-        blocked_k_ = (blocked_k.to(torch.float) *
-                      descale_k).to(init_dtype) if use_fp8 else blocked_k
-        blocked_v_ = (blocked_v.to(torch.float) *
-                      descale_k).to(init_dtype) if use_fp8 else blocked_v
+        blocked_k_ = (
+            (blocked_k.to(torch.float) * descale_k).to(init_dtype)
+            if use_fp8
+            else blocked_k
+        )
+        blocked_v_ = (
+            (blocked_v.to(torch.float) * descale_k).to(init_dtype)
+            if use_fp8
+            else blocked_v
+        )
         out = torch.empty(b, s_q, h_q, dv, dtype=torch.float32)
         lse = torch.empty(b, h_q, s_q, dtype=torch.float32)
         for i in range(b):
@@ -191,8 +207,9 @@ def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size,
 
     t = triton.testing.do_bench(cutlass_mla)
     FLOPS = s_q * total_seqlens * h_q * (d + dv) * 2
-    bytes = (total_seqlens * h_kv * d +
-             b * s_q * h_q * d) * (torch.finfo(torch_dtype).bits // 8) + (
-                 b * s_q * h_q * dv) * (torch.finfo(init_dtype).bits // 8)
-    print(f"{t:.3f} ms, {FLOPS / 10 ** 9 / t:.0f} TFLOPS,",
-          f"{bytes / 10 ** 6 / t:.0f} GB/s")
+    bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d) * (
+        torch.finfo(torch_dtype).bits // 8
+    ) + (b * s_q * h_q * dv) * (torch.finfo(init_dtype).bits // 8)
+    print(
+        f"{t:.3f} ms, {FLOPS / 10**9 / t:.0f} TFLOPS,", f"{bytes / 10**6 / t:.0f} GB/s"
+    )

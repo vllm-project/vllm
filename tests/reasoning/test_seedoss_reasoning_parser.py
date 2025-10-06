@@ -57,14 +57,10 @@ MULTIPLE_LINES: dict[str, Any] = {
     "is_reasoning_end": True,
 }
 WITH_START_TOKEN: dict[str, Any] = {
-    "output": ("<seed:think>This is a reasoning section"
-               "</seed:think>This is the rest"),
-    "reasoning_content":
-    "This is a reasoning section",
-    "content":
-    "This is the rest",
-    "is_reasoning_end":
-    True,
+    "output": ("<seed:think>This is a reasoning section</seed:think>This is the rest"),
+    "reasoning_content": "This is a reasoning section",
+    "content": "This is the rest",
+    "is_reasoning_end": True,
 }
 ONLY_END_TOKEN: dict[str, Any] = {
     "output": "Some reasoning</seed:think>This is the rest",
@@ -96,7 +92,8 @@ def test_simple_reasoning(seedoss_tokenizer, streaming):
     parser = parser_cls(seedoss_tokenizer)
 
     reasoning, content = run_reasoning_extraction(
-        parser, [cast(str, SIMPLE_REASONING["output"])], streaming=streaming)
+        parser, [cast(str, SIMPLE_REASONING["output"])], streaming=streaming
+    )
 
     assert reasoning == SIMPLE_REASONING["reasoning_content"]
     assert content == SIMPLE_REASONING["content"]
@@ -109,7 +106,8 @@ def test_complete_reasoning(seedoss_tokenizer, streaming):
     parser = parser_cls(seedoss_tokenizer)
 
     reasoning, content = run_reasoning_extraction(
-        parser, [cast(str, COMPLETE_REASONING["output"])], streaming=streaming)
+        parser, [cast(str, COMPLETE_REASONING["output"])], streaming=streaming
+    )
 
     assert reasoning == COMPLETE_REASONING["reasoning_content"]
     assert content == COMPLETE_REASONING["content"]
@@ -122,7 +120,8 @@ def test_no_content(seedoss_tokenizer, streaming):
     parser = parser_cls(seedoss_tokenizer)
 
     reasoning, content = run_reasoning_extraction(
-        parser, [cast(str, NO_CONTENT["output"])], streaming=streaming)
+        parser, [cast(str, NO_CONTENT["output"])], streaming=streaming
+    )
 
     assert reasoning == NO_CONTENT["reasoning_content"]
     assert content == NO_CONTENT["content"]
@@ -135,7 +134,8 @@ def test_multiple_lines(seedoss_tokenizer, streaming):
     parser = parser_cls(seedoss_tokenizer)
 
     reasoning, content = run_reasoning_extraction(
-        parser, [cast(str, MULTIPLE_LINES["output"])], streaming=streaming)
+        parser, [cast(str, MULTIPLE_LINES["output"])], streaming=streaming
+    )
 
     assert reasoning == MULTIPLE_LINES["reasoning_content"]
     assert content == MULTIPLE_LINES["content"]
@@ -148,7 +148,8 @@ def test_with_start_token(seedoss_tokenizer, streaming):
     parser = parser_cls(seedoss_tokenizer)
 
     reasoning, content = run_reasoning_extraction(
-        parser, [cast(str, WITH_START_TOKEN["output"])], streaming=streaming)
+        parser, [cast(str, WITH_START_TOKEN["output"])], streaming=streaming
+    )
 
     assert reasoning == WITH_START_TOKEN["reasoning_content"]
     assert content == WITH_START_TOKEN["content"]
@@ -157,14 +158,15 @@ def test_with_start_token(seedoss_tokenizer, streaming):
 @pytest.mark.parametrize("streaming", [True, False])
 def test_only_end_token(seedoss_tokenizer, streaming):
     """
-        Test reasoning extraction with only end token
-        (SeedOSS typical behavior).
+    Test reasoning extraction with only end token
+    (SeedOSS typical behavior).
     """
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
     parser = parser_cls(seedoss_tokenizer)
 
     reasoning, content = run_reasoning_extraction(
-        parser, [cast(str, ONLY_END_TOKEN["output"])], streaming=streaming)
+        parser, [cast(str, ONLY_END_TOKEN["output"])], streaming=streaming
+    )
 
     assert reasoning == ONLY_END_TOKEN["reasoning_content"]
     assert content == ONLY_END_TOKEN["content"]
@@ -177,7 +179,8 @@ def test_no_tokens(seedoss_tokenizer, streaming):
     parser = parser_cls(seedoss_tokenizer)
 
     reasoning, content = run_reasoning_extraction(
-        parser, [cast(str, NO_TOKENS["output"])], streaming=streaming)
+        parser, [cast(str, NO_TOKENS["output"])], streaming=streaming
+    )
 
     assert reasoning == NO_TOKENS["reasoning_content"]
     assert content == NO_TOKENS["content"]
@@ -225,13 +228,9 @@ def test_streaming_delta_processing(seedoss_tokenizer):
     parser = parser_cls(seedoss_tokenizer)
 
     # Test streaming with incremental tokens
-    deltas = [
-        "Some ", "reasoning ", "content", "</seed:think>", "Final ", "answer"
-    ]
+    deltas = ["Some ", "reasoning ", "content", "</seed:think>", "Final ", "answer"]
 
-    reasoning, content = run_reasoning_extraction(parser,
-                                                  deltas,
-                                                  streaming=True)
+    reasoning, content = run_reasoning_extraction(parser, deltas, streaming=True)
 
     assert reasoning == "Some reasoning content"
     assert content == "Final answer"

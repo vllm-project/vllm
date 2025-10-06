@@ -14,8 +14,7 @@ from starlette.background import BackgroundTask, BackgroundTasks
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              CompletionRequest)
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
@@ -26,7 +25,8 @@ VLLM_SUBCMD_PARSER_EPILOG = (
     "For full list:            vllm {subcmd} --help=all\n"
     "For a section:            vllm {subcmd} --help=ModelConfig    (case-insensitive)\n"  # noqa: E501
     "For a flag:               vllm {subcmd} --help=max-model-len  (_ or - accepted)\n"  # noqa: E501
-    "Documentation:            https://docs.vllm.ai\n")
+    "Documentation:            https://docs.vllm.ai\n"
+)
 
 
 async def listen_for_disconnect(request: Request) -> None:
@@ -37,9 +37,9 @@ async def listen_for_disconnect(request: Request) -> None:
             # If load tracking is enabled *and* the counter exists, decrement
             # it. Combines the previous nested checks into a single condition
             # to satisfy the linter rule.
-            if (getattr(request.app.state, "enable_server_load_tracking",
-                        False)
-                    and hasattr(request.app.state, "server_load_metrics")):
+            if getattr(
+                request.app.state, "enable_server_load_tracking", False
+            ) and hasattr(request.app.state, "server_load_metrics"):
                 request.app.state.server_load_metrics -= 1
             break
 
@@ -70,15 +70,15 @@ def with_cancellation(handler_func):
     # normal route handler, with the correct request type hinting.
     @functools.wraps(handler_func)
     async def wrapper(*args, **kwargs):
-
         # The request is either the second positional arg or `raw_request`
         request = args[1] if len(args) > 1 else kwargs["raw_request"]
 
         handler_task = asyncio.create_task(handler_func(*args, **kwargs))
         cancellation_task = asyncio.create_task(listen_for_disconnect(request))
 
-        done, pending = await asyncio.wait([handler_task, cancellation_task],
-                                           return_when=asyncio.FIRST_COMPLETED)
+        done, pending = await asyncio.wait(
+            [handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED
+        )
         for task in pending:
             task.cancel()
 
@@ -94,18 +94,16 @@ def decrement_server_load(request: Request):
 
 
 def load_aware_call(func):
-
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
-        raw_request = kwargs.get("raw_request",
-                                 args[1] if len(args) > 1 else None)
+        raw_request = kwargs.get("raw_request", args[1] if len(args) > 1 else None)
 
         if raw_request is None:
             raise ValueError(
-                "raw_request required when server load tracking is enabled")
+                "raw_request required when server load tracking is enabled"
+            )
 
-        if not getattr(raw_request.app.state, "enable_server_load_tracking",
-                       False):
+        if not getattr(raw_request.app.state, "enable_server_load_tracking", False):
             return await func(*args, **kwargs)
 
         # ensure the counter exists
@@ -121,18 +119,18 @@ def load_aware_call(func):
 
         if isinstance(response, (JSONResponse, StreamingResponse)):
             if response.background is None:
-                response.background = BackgroundTask(decrement_server_load,
-                                                     raw_request)
+                response.background = BackgroundTask(decrement_server_load, raw_request)
             elif isinstance(response.background, BackgroundTasks):
-                response.background.add_task(decrement_server_load,
-                                             raw_request)
+                response.background.add_task(decrement_server_load, raw_request)
             elif isinstance(response.background, BackgroundTask):
                 # Convert the single BackgroundTask to BackgroundTasks
                 # and chain the decrement_server_load task to it
                 tasks = BackgroundTasks()
-                tasks.add_task(response.background.func,
-                               *response.background.args,
-                               **response.background.kwargs)
+                tasks.add_task(
+                    response.background.func,
+                    *response.background.args,
+                    **response.background.kwargs,
+                )
                 tasks.add_task(decrement_server_load, raw_request)
                 response.background = tasks
         else:
@@ -169,7 +167,6 @@ def _validate_truncation_size(
     truncate_prompt_tokens: Optional[int],
     tokenization_kwargs: Optional[dict[str, Any]] = None,
 ) -> Optional[int]:
-
     if truncate_prompt_tokens is not None:
         if truncate_prompt_tokens <= -1:
             truncate_prompt_tokens = max_model_len
@@ -178,7 +175,8 @@ def _validate_truncation_size(
             raise ValueError(
                 f"truncate_prompt_tokens value ({truncate_prompt_tokens}) "
                 f"is greater than max_model_len ({max_model_len})."
-                f" Please, select a smaller truncation size.")
+                f" Please, select a smaller truncation size."
+            )
 
         if tokenization_kwargs is not None:
             tokenization_kwargs["truncation"] = True
@@ -191,19 +189,26 @@ def _validate_truncation_size(
     return truncate_prompt_tokens
 
 
-def get_max_tokens(max_model_len: int, request: Union[ChatCompletionRequest,
-                                                      CompletionRequest],
-                   input_length: int, default_sampling_params: dict) -> int:
-
-    max_tokens = getattr(request, "max_completion_tokens",
-                         None) or request.max_tokens
+def get_max_tokens(
+    max_model_len: int,
+    request: Union[ChatCompletionRequest, CompletionRequest],
+    input_length: int,
+    default_sampling_params: dict,
+) -> int:
+    max_tokens = getattr(request, "max_completion_tokens", None) or request.max_tokens
     default_max_tokens = max_model_len - input_length
     max_output_tokens = current_platform.get_max_output_tokens(input_length)
 
-    return min(val
-               for val in (default_max_tokens, max_tokens, max_output_tokens,
-                           default_sampling_params.get("max_tokens"))
-               if val is not None)
+    return min(
+        val
+        for val in (
+            default_max_tokens,
+            max_tokens,
+            max_output_tokens,
+            default_sampling_params.get("max_tokens"),
+        )
+        if val is not None
+    )
 
 
 def log_non_default_args(args: Union[Namespace, EngineArgs]):
@@ -227,7 +232,8 @@ def log_non_default_args(args: Union[Namespace, EngineArgs]):
         if default_args.model != EngineArgs.model:
             non_default_args["model"] = default_args.model
     else:
-        raise TypeError("Unsupported argument type. " \
-        "Must be Namespace or EngineArgs instance.")
+        raise TypeError(
+            "Unsupported argument type. Must be Namespace or EngineArgs instance."
+        )
 
     logger.info("non-default args: %s", non_default_args)
