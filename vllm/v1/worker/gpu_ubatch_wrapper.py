@@ -414,13 +414,13 @@ class UBatchWrapper:
             ubatch_slices[0].token_slice.stop - ubatch_slices[0].token_slice.start
         )
         dp_size = self.vllm_config.parallel_config.data_parallel_size
-        sliced_num_tokens_across_dp = torch.tensor(
+        ubatch_num_tokens_across_dp = torch.tensor(
             [num_tokens_per_ubatch] * dp_size, device="cpu", dtype=torch.int32
         )
-        sliced_dp_metadata = DPMetadata.make(
+        ubatch_dp_metadata = DPMetadata.make(
             self.vllm_config.parallel_config,
             num_tokens_per_ubatch,
-            sliced_num_tokens_across_dp,
+            ubatch_num_tokens_across_dp,
         )
 
         if (
@@ -435,7 +435,7 @@ class UBatchWrapper:
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
                 compute_stream=compute_stream,
-                dp_metadata=sliced_dp_metadata,
+                dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )
