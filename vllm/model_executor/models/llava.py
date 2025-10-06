@@ -57,7 +57,6 @@ from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -507,6 +506,8 @@ def init_vision_tower_for_llava(
     dummy_inputs=LlavaDummyInputsBuilder,
 )
 class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -592,37 +593,26 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             return None
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError(
-                    f"Incorrect type of pixel values. Got type: {type(pixel_values)}"
-                )
-
             if self.config.vision_config.model_type == "pixtral":
                 return PixtralHFImagePixelInputs(
                     type="pixel_values_pixtral",
-                    pixel_values=flatten_bn(pixel_values),
+                    pixel_values=pixel_values,
                 )
 
             expected_h = expected_w = self.config.vision_config.image_size
             return LlavaImagePixelInputs(
                 type="pixel_values",
-                pixel_values=flatten_bn(pixel_values, concat=True),
+                pixel_values=pixel_values,
                 resolve_bindings={"h": expected_h, "w": expected_w},
             )
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError(
-                    "Incorrect type of image embeddings. "
-                    f"Got type: {type(image_embeds)}"
-                )
-
             if self.config.vision_config.model_type == "pixtral":
                 raise ValueError("Pixtral-HF does not support image_embeds.")
 
             return LlavaImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds, concat=True),
+                data=image_embeds,
             )
 
         raise AssertionError("This line should be unreachable.")

@@ -49,7 +49,6 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
-    flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -404,6 +403,8 @@ def init_vision_tower_for_tarsier(
     dummy_inputs=TarsierDummyInputsBuilder,
 )
 class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -467,25 +468,15 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             return None
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError(
-                    f"Incorrect type of pixel values. Got type: {type(pixel_values)}"
-                )
-
             return TarsierImagePixelInputs(
                 type="pixel_values",
-                pixel_values=flatten_bn(pixel_values, concat=True),
+                pixel_values=pixel_values,
             )
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError(
-                    "Incorrect type of image embeddings. "
-                    f"Got type: {type(image_embeds)}"
-                )
             return TarsierImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds, concat=True),
+                data=image_embeds,
             )
 
         raise AssertionError("This line should be unreachable.")

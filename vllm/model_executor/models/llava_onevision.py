@@ -44,7 +44,6 @@ from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -62,7 +61,7 @@ class LlavaOnevisionVideoPixelInputs(TensorSchema):
         - h: Height
         - w: Width
 
-        Note that `num_videos` may be different for each batch, and 'num_frames'
+        Note that `f` may be different for each batch, and 'num_frames'
         may be different for each video, in which case the data is passed as a
         list instead of a batched tensor.
     """
@@ -480,6 +479,8 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
     dummy_inputs=LlavaOnevisionDummyInputsBuilder,
 )
 class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    merge_by_field_config = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -539,20 +540,10 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             return None
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError(
-                    f"Incorrect type of pixel values. Got type: {type(pixel_values)}"
-                )
-
-            if not isinstance(image_sizes, (torch.Tensor, list)):
-                raise ValueError(
-                    f"Incorrect type of image sizes. Got type: {type(image_sizes)}"
-                )
-
             return LlavaOnevisionImagePixelInputs(
                 type="pixel_values",
-                pixel_values=flatten_bn(pixel_values),
-                image_sizes=flatten_bn(image_sizes, concat=True),
+                pixel_values=pixel_values,
+                image_sizes=image_sizes,
                 resolve_bindings={
                     "h": self.config.vision_config.image_size,
                     "w": self.config.vision_config.image_size,
@@ -560,14 +551,9 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
             )
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, torch.Tensor):
-                raise ValueError(
-                    f"Incorrect type of image embeds. Got type: {type(image_embeds)}"
-                )
-
             return LlavaOnevisionImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds),
+                data=image_embeds,
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -586,15 +572,9 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         if pixel_values_videos is None:
             return None
 
-        if not isinstance(pixel_values_videos, (torch.Tensor, list)):
-            raise ValueError(
-                "Incorrect type of pixel_values_videos. "
-                f"Got type: {type(pixel_values_videos)}"
-            )
-
         return LlavaOnevisionVideoPixelInputs(
             type="pixel_values_videos",
-            pixel_values_videos=flatten_bn(pixel_values_videos),
+            pixel_values_videos=pixel_values_videos,
             resolve_bindings={
                 "h": self.config.vision_config.image_size,
                 "w": self.config.vision_config.image_size,
