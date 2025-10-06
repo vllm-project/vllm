@@ -338,7 +338,9 @@ class OciModelLoader(BaseModelLoader):
 
         logger.info("Config extracted successfully")
 
-    def _download_oci_model_if_needed(self, model_ref: str) -> str:
+    def _download_oci_model_if_needed(
+        self, model_ref: str, download_weights: bool = True
+    ) -> str:
         """Download OCI model and its components if not already cached.
 
         This is the shared logic for both download_model and
@@ -346,6 +348,8 @@ class OciModelLoader(BaseModelLoader):
 
         Args:
             model_ref: OCI model reference
+            download_weights: If True, download safetensors weight layers.
+                            If False, only download config layer.
 
         Returns:
             Path to the extracted config directory
@@ -356,48 +360,111 @@ class OciModelLoader(BaseModelLoader):
         manifest_path = os.path.join(cache_dir, "manifest.json")
 
         # Check if config directory is already populated and manifest exists
-        if (
+        config_exists = (
             os.path.exists(config_dir)
             and os.listdir(config_dir)
             and os.path.exists(manifest_path)
-        ):
-            logger.info("OCI model already cached at %s", cache_dir)
-            return config_dir
-
-        logger.info("Downloading OCI model: %s -> %s", model_ref, normalized_ref)
-
-        # Pull manifest
-        manifest, safetensors_layers, config_layer = self._pull_oci_manifest(
-            normalized_ref, cache_dir
         )
 
-        # Save manifest
-        with open(manifest_path, "w") as f:
-            json.dump(manifest, f, indent=2)
+        if config_exists and not download_weights:
+            logger.info("OCI model config already cached at %s", cache_dir)
+            return config_dir
 
-        # Download safetensors layers
-        layers_dir = os.path.join(cache_dir, "layers")
-        os.makedirs(layers_dir, exist_ok=True)
+        # If weights are needed, check if all layers are downloaded
+        if config_exists and download_weights:
+            with open(manifest_path) as f:
+                manifest = json.load(f)
 
-        for i, layer in enumerate(safetensors_layers):
-            digest = layer.get("digest", "").replace("sha256:", "")
-            layer_path = os.path.join(layers_dir, f"{i:04d}_{digest}.safetensors")
-            self._download_layer(normalized_ref, layer, layer_path)
+            safetensors_layers = [
+                layer
+                for layer in manifest.get("layers", [])
+                if layer.get("mediaType") == self.SAFETENSORS_MEDIA_TYPE
+            ]
+
+            layers_dir = os.path.join(cache_dir, "layers")
+            all_weights_cached = True
+
+            if safetensors_layers and os.path.exists(layers_dir):
+                for i, layer in enumerate(safetensors_layers):
+                    digest = layer.get("digest", "").replace("sha256:", "")
+                    layer_path = os.path.join(
+                        layers_dir, f"{i:04d}_{digest}.safetensors"
+                    )
+                    if not os.path.exists(layer_path):
+                        all_weights_cached = False
+                        break
+            else:
+                all_weights_cached = False
+
+            if all_weights_cached:
+                logger.info("OCI model fully cached at %s", cache_dir)
+                return config_dir
+
+        logger.info(
+            "Downloading OCI model: %s -> %s (weights=%s)",
+            model_ref,
+            normalized_ref,
+            download_weights,
+        )
+
+        # Pull manifest (or reload if exists)
+        if os.path.exists(manifest_path):
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+
+            safetensors_layers = [
+                layer
+                for layer in manifest.get("layers", [])
+                if layer.get("mediaType") == self.SAFETENSORS_MEDIA_TYPE
+            ]
+            config_layer = next(
+                (
+                    layer
+                    for layer in manifest.get("layers", [])
+                    if layer.get("mediaType") == self.CONFIG_TAR_MEDIA_TYPE
+                ),
+                None,
+            )
+        else:
+            manifest, safetensors_layers, config_layer = self._pull_oci_manifest(
+                normalized_ref, cache_dir
+            )
+
+            # Save manifest
+            with open(manifest_path, "w") as f:
+                json.dump(manifest, f, indent=2)
+
+            # Save original OCI reference for later retrieval
+            metadata_path = os.path.join(cache_dir, "oci_metadata.json")
+            with open(metadata_path, "w") as f:
+                json.dump({"original_reference": model_ref}, f, indent=2)
+
+        # Download safetensors layers only if requested
+        if download_weights:
+            layers_dir = os.path.join(cache_dir, "layers")
+            os.makedirs(layers_dir, exist_ok=True)
+
+            for i, layer in enumerate(safetensors_layers):
+                digest = layer.get("digest", "").replace("sha256:", "")
+                layer_path = os.path.join(layers_dir, f"{i:04d}_{digest}.safetensors")
+                self._download_layer(normalized_ref, layer, layer_path)
 
         # Download and extract config layer if present
-        if config_layer:
+        if config_layer and not os.path.exists(config_dir):
             digest = config_layer.get("digest", "").replace("sha256:", "")
             tar_path = os.path.join(cache_dir, f"config_{digest}.tar")
             self._download_layer(normalized_ref, config_layer, tar_path)
             self._extract_config_tar(tar_path, config_dir)
 
-        logger.info("Model downloaded successfully to %s", cache_dir)
+        logger.info("Model download completed: %s", cache_dir)
         return config_dir
 
     def download_oci_model_simple(self, model_ref: str) -> str:
         """Download OCI model without requiring ModelConfig.
 
-        This is a simplified version for early config loading.
+        This is a simplified version for early config loading that only
+        downloads the config layer, not the weight files. Weights are
+        downloaded later during model initialization.
 
         Args:
             model_ref: OCI model reference
@@ -405,7 +472,7 @@ class OciModelLoader(BaseModelLoader):
         Returns:
             Path to extracted config directory
         """
-        return self._download_oci_model_if_needed(model_ref)
+        return self._download_oci_model_if_needed(model_ref, download_weights=False)
 
     def download_model(self, model_config: ModelConfig) -> None:
         """Download model from OCI registry.
@@ -413,12 +480,27 @@ class OciModelLoader(BaseModelLoader):
         Args:
             model_config: Model configuration
         """
-        self._download_oci_model_if_needed(model_config.model)
+        model_ref = model_config.model
+
+        # If model_ref is a local config path, read the original OCI reference
+        if os.path.isdir(model_ref) and model_ref.endswith("/config"):
+            cache_dir = os.path.dirname(model_ref)
+            metadata_path = os.path.join(cache_dir, "oci_metadata.json")
+
+            if os.path.exists(metadata_path):
+                with open(metadata_path) as f:
+                    metadata = json.load(f)
+                    model_ref = metadata.get("original_reference", model_ref)
+                    logger.info("Retrieved original OCI reference: %s", model_ref)
+
+        self._download_oci_model_if_needed(model_ref)
 
     def _get_weights_iterator(
         self, model_config: ModelConfig
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get iterator over model weights from safetensors layers.
+
+        Downloads weights if they haven't been downloaded yet.
 
         Args:
             model_config: Model configuration
@@ -427,15 +509,32 @@ class OciModelLoader(BaseModelLoader):
             Tuples of (parameter_name, tensor)
         """
         model_ref = model_config.model
+        original_oci_ref = None
 
         # Check if model_ref is already a local config path
         # (this happens when loading in worker processes)
         if os.path.isdir(model_ref) and model_ref.endswith("/config"):
             cache_dir = os.path.dirname(model_ref)
+            # Try to extract original OCI reference from attribute
+            original_oci_ref = getattr(model_config, "_original_model", None)
+
+            # If not available, try reading from metadata file
+            if not original_oci_ref:
+                metadata_path = os.path.join(cache_dir, "oci_metadata.json")
+                if os.path.exists(metadata_path):
+                    with open(metadata_path) as f:
+                        metadata = json.load(f)
+                        original_oci_ref = metadata.get("original_reference")
+                        if original_oci_ref:
+                            logger.info(
+                                "Retrieved original OCI reference from metadata: %s",
+                                original_oci_ref,
+                            )
         else:
             # It's an OCI reference, normalize and get cache dir
             normalized_ref = self._normalize_oci_reference(model_ref)
             cache_dir = self._get_cache_dir(normalized_ref)
+            original_oci_ref = model_ref
 
         # Load manifest
         manifest_path = os.path.join(cache_dir, "manifest.json")
@@ -451,15 +550,48 @@ class OciModelLoader(BaseModelLoader):
         # Get safetensors layers in order
         layers_dir = os.path.join(cache_dir, "layers")
         safetensors_files = []
+        safetensors_layers = [
+            layer
+            for layer in manifest.get("layers", [])
+            if layer.get("mediaType") == self.SAFETENSORS_MEDIA_TYPE
+        ]
 
-        for layer in manifest.get("layers", []):
-            if layer.get("mediaType") == self.SAFETENSORS_MEDIA_TYPE:
+        # Check if weights need to be downloaded
+        weights_missing = False
+        if not os.path.exists(layers_dir):
+            weights_missing = True
+        else:
+            for layer in safetensors_layers:
                 digest = layer.get("digest", "").replace("sha256:", "")
-                # Find matching file
-                for filename in sorted(os.listdir(layers_dir)):
+                # Check if any matching file exists
+                found = False
+                for filename in os.listdir(layers_dir):
                     if digest in filename and filename.endswith(".safetensors"):
-                        safetensors_files.append(os.path.join(layers_dir, filename))
+                        found = True
                         break
+                if not found:
+                    weights_missing = True
+                    break
+
+        # Download weights if missing and we have a valid OCI reference
+        if weights_missing:
+            if not original_oci_ref:
+                raise ValueError(
+                    f"Weights not found in cache at {layers_dir}, but cannot "
+                    f"download them because the original OCI reference is not "
+                    f"available. Model ref: {model_ref}"
+                )
+            logger.info("Weights not found in cache, downloading now...")
+            self._download_oci_model_if_needed(original_oci_ref, download_weights=True)
+
+        # Now collect safetensors files
+        for layer in safetensors_layers:
+            digest = layer.get("digest", "").replace("sha256:", "")
+            # Find matching file
+            for filename in sorted(os.listdir(layers_dir)):
+                if digest in filename and filename.endswith(".safetensors"):
+                    safetensors_files.append(os.path.join(layers_dir, filename))
+                    break
 
         if not safetensors_files:
             raise ValueError(f"No safetensors files found in {layers_dir}")

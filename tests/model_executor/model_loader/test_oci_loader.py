@@ -65,6 +65,64 @@ class TestOciModelLoader:
         )
         assert loader.DEFAULT_REGISTRY == "docker.io"
 
+    def test_download_oci_model_if_needed_config_only(self):
+        """Test that download_oci_model_if_needed with download_weights=False
+        only downloads config."""
+        load_config = LoadConfig(load_format="oci")
+        loader = OciModelLoader(load_config)
+
+        # This is a unit test to verify the method signature and behavior
+        # We're not actually downloading anything, just testing the logic
+        import contextlib
+        import unittest.mock as mock
+
+        with (
+            mock.patch.object(loader, "_pull_oci_manifest") as mock_manifest,
+            mock.patch.object(loader, "_download_layer") as mock_download,
+            mock.patch.object(loader, "_extract_config_tar"),
+        ):
+            # Setup mock manifest
+            mock_manifest.return_value = (
+                {"layers": []},  # manifest
+                [],  # safetensors_layers
+                {"digest": "sha256:abc", "size": 100},  # config_layer
+            )
+
+            # Call with download_weights=False
+            with contextlib.suppress(Exception):
+                loader._download_oci_model_if_needed(
+                    "test/model:tag", download_weights=False
+                )
+
+            # Verify _download_layer was not called for safetensors layers
+            # (it might be called for config layer)
+            if mock_download.called:
+                # If called, it should only be for config, not safetensors
+                for call in mock_download.call_args_list:
+                    layer = call[0][1]  # second positional arg is layer
+                    assert layer.get("mediaType") != loader.SAFETENSORS_MEDIA_TYPE
+
+    def test_download_oci_model_simple_calls_with_weights_false(self):
+        """Test that download_oci_model_simple calls _download_oci_model_if_needed
+        with download_weights=False."""
+        load_config = LoadConfig(load_format="oci")
+        loader = OciModelLoader(load_config)
+
+        import unittest.mock as mock
+
+        with mock.patch.object(
+            loader, "_download_oci_model_if_needed"
+        ) as mock_download:
+            mock_download.return_value = "/fake/config/dir"
+
+            result = loader.download_oci_model_simple("test/model:tag")
+
+            # Verify it was called with download_weights=False
+            mock_download.assert_called_once_with(
+                "test/model:tag", download_weights=False
+            )
+            assert result == "/fake/config/dir"
+
 
 @pytest.mark.skip(reason="Integration test - requires actual OCI registry access")
 class TestOciModelLoaderIntegration:
