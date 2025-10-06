@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
-from .interfaces import MixtureOfExperts
+from .interfaces import MixtureOfExperts, SupportsMultiModal
 from .transformers import (
     TransformersBase,
     TransformersForCausalLM,
@@ -335,7 +335,5 @@ class TransformersMoEForCausalLM(TransformersMoEBase, TransformersForCausalLM):
     },
     enable_if=can_enable_torch_compile,
 )
-class TransformersMoEForMultimodalLM(
-    TransformersMoEForCausalLM, TransformersForMultimodalLM
-):
-    pass
+class TransformersMoEForMultimodalLM(TransformersMoEBase, TransformersForMultimodalLM):
+    get_input_embeddings = SupportsMultiModal.get_input_embeddings
