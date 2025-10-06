@@ -15,22 +15,15 @@ MODEL_NAME = "openai/gpt-oss-20b"
 
 
 @pytest.fixture(scope="module")
-def monkeypatch_module():
-    from _pytest.monkeypatch import MonkeyPatch
-
-    mpatch = MonkeyPatch()
-    yield mpatch
-    mpatch.undo()
-
-
-@pytest.fixture(scope="module")
-def server(monkeypatch_module: pytest.MonkeyPatch):
+def server():
     args = ["--enforce-eager", "--tool-server", "demo"]
+    env_dict = dict(
+        VLLM_ENABLE_RESPONSES_API_STORE="1",
+        PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
+    )
 
-    with monkeypatch_module.context() as m:
-        m.setenv("VLLM_ENABLE_RESPONSES_API_STORE", "1")
-        with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-            yield remote_server
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
+        yield remote_server
 
 
 @pytest_asyncio.fixture
@@ -316,7 +309,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
     # TODO: Add back when web search and code interpreter are available in CI
     prompts = [
         "tell me a story about a cat in 20 words",
-        # "What is 13 * 24? Use python to calculate the result.",
+        "What is 13 * 24? Use python to calculate the result.",
         # "When did Jensen found NVIDIA? Search it and answer the year only.",
     ]
 
@@ -329,12 +322,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                 # {
                 #     "type": "web_search_preview"
                 # },
-                # {
-                #     "type": "code_interpreter",
-                #     "container": {
-                #         "type": "auto"
-                #     }
-                # },
+                {"type": "code_interpreter", "container": {"type": "auto"}},
             ],
             stream=True,
             background=background,
@@ -412,6 +400,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                 async for event in stream:
                     counter += 1
                     assert event == events[counter]
+            assert counter == len(events) - 1
 
 
 @pytest.mark.asyncio
@@ -429,7 +418,6 @@ async def test_web_search(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.skip(reason="Code interpreter tool is not available in CI yet.")
 async def test_code_interpreter(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
@@ -443,10 +431,16 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
             "and you must print to see the output."
         ),
         tools=[{"type": "code_interpreter", "container": {"type": "auto"}}],
+        temperature=0.0,  # More deterministic output in response
     )
     assert response is not None
     assert response.status == "completed"
     assert response.usage.output_tokens_details.tool_output_tokens > 0
+    for item in response.output:
+        if item.type == "message":
+            output_string = item.content[0].text
+            print("output_string: ", output_string, flush=True)
+            assert "5846" in output_string
 
 
 def get_weather(latitude, longitude):
