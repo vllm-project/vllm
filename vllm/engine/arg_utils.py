@@ -1057,7 +1057,9 @@ class EngineArgs:
         )
         return engine_args
 
-    def create_model_config(self) -> ModelConfig:
+    def create_model_config(
+        self, attention_config: Optional[AttentionConfig] = None
+    ) -> ModelConfig:
         # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
@@ -1149,6 +1151,7 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
+            attention_config=attention_config,
         )
 
     def validate_tensorizer_args(self):
@@ -1283,7 +1286,10 @@ class EngineArgs:
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 
-        model_config = self.create_model_config()
+        # Create AttentionConfig first so ModelConfig can use it
+        attention_config = self.create_attention_config()
+
+        model_config = self.create_model_config(attention_config=attention_config)
         self.model = model_config.model
         self.tokenizer = model_config.tokenizer
 
@@ -1603,7 +1609,8 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
-        attention_config = self.create_attention_config()
+        # Note: attention_config was already created earlier in this method
+        # (before creating model_config) so that ModelConfig can use it
 
         config = VllmConfig(
             model_config=model_config,

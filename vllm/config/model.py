@@ -29,6 +29,9 @@ from vllm.config.scheduler import RunnerType
 from vllm.config.utils import assert_hashable, config, getattr_iter
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.config.attention import AttentionConfig
 from vllm.transformers_utils.config import (
     ConfigFormat,
     get_config,
@@ -280,6 +283,9 @@ class ModelConfig:
     """
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    attention_config: Optional["AttentionConfig"] = None
+    """Attention configuration. If not specified, will be read from environment
+    variables."""
     logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
     """One or more logits processors' fully-qualified class names or class
     definitions"""
@@ -444,16 +450,11 @@ class ModelConfig:
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
-        # Note: We read from envs here because ModelConfig is created before
-        # AttentionConfig, so we can't use get_current_vllm_config() yet.
-        # This is just for early validation.
-        if (
-            (backend := envs.VLLM_ATTENTION_BACKEND)
-            and backend == "FLASHINFER"
-            and find_spec("flashinfer") is None
-        ):
+        # Early validation for FLASHINFER backend
+        backend = self.attention_config.backend if self.attention_config else None
+        if backend == "FLASHINFER" and find_spec("flashinfer") is None:
             raise ValueError(
-                "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
+                "attention_backend is set to FLASHINFER, but flashinfer "
                 "module was not found. See "
                 "https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile "  # noqa: E501
                 "for instructions on how to install it."
@@ -636,13 +637,12 @@ class ModelConfig:
         )
 
         # Interleaved attention is not supported by some backends in V0
-        # Note: We read from envs here because ModelConfig is created before
-        # AttentionConfig, so we can't use get_current_vllm_config() yet.
         if (
             not self.disable_sliding_window
             and is_interleaved(self.hf_text_config)
             and not envs.VLLM_USE_V1
-            and (backend := envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER")
+            and backend is not None
+            and backend in ("XFORMERS", "FLASHINFER")
         ):
             logger.warning_once(
                 "%s has interleaved attention, which is currently not "
