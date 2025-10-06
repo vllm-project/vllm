@@ -13,7 +13,6 @@ from pydantic.dataclasses import dataclass
 
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.compilation.partition_rules import (  # noqa: F401 re-exported for tests
-    _parse_operator_name,
     _resolve_operator_overload,
     inductor_partition_rule_context,
 )
