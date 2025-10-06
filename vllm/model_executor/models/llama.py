@@ -604,6 +604,11 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         self.model.aux_hidden_state_layers = layers
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        """Override to return default layers for Llama
+
+        Note: The GPU model runner will override this with layers from
+        the speculative config if available, providing dynamic configuration.
+        """
         num_layers = len(self.model.layers)
         return (2, num_layers // 2, num_layers - 3)
 
