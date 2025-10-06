@@ -3,8 +3,7 @@
 
 from typing import Literal, get_args
 
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
 QuantizationMethods = Literal[
     "awq",
@@ -52,9 +51,13 @@ def register_quantization_config(quantization: str):
         quantization (str): The quantization method name.
 
     Examples:
-        >>> from vllm.model_executor.layers.quantization import register_quantization_config
+        >>> from vllm.model_executor.layers.quantization import (
+        ...     register_quantization_config,
+        ... )
         >>> from vllm.model_executor.layers.quantization import get_quantization_config
-        >>> from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+        >>> from vllm.model_executor.layers.quantization.base_config import (
+        ...     QuantizationConfig,
+        ... )
         >>>
         >>> @register_quantization_config("my_quant")
         ... class MyQuantConfig(QuantizationConfig):
@@ -67,10 +70,12 @@ def register_quantization_config(quantization: str):
     def _wrapper(quant_config_cls):
         if quantization in QUANTIZATION_METHODS:
             raise ValueError(
-                f"The quantization method `{quantization}` is already exists.")
+                f"The quantization method `{quantization}` is already exists."
+            )
         if not issubclass(quant_config_cls, QuantizationConfig):
-            raise ValueError("The quantization config must be a subclass of "
-                             "`QuantizationConfig`.")
+            raise ValueError(
+                "The quantization config must be a subclass of `QuantizationConfig`."
+            )
         _CUSTOMIZED_METHOD_TO_QUANT_CONFIG[quantization] = quant_config_cls
         QUANTIZATION_METHODS.append(quantization)
         return quant_config_cls
@@ -90,8 +95,9 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .awq_marlin import AWQMarlinConfig
     from .bitblas import BitBLASConfig
     from .bitsandbytes import BitsAndBytesConfig
-    from .compressed_tensors.compressed_tensors import (  # noqa: E501
-        CompressedTensorsConfig)
+    from .compressed_tensors.compressed_tensors import (
+        CompressedTensorsConfig,
+    )
     from .deepspeedfp import DeepSpeedFPConfig
     from .experts_int8 import ExpertsInt8Config
     from .fbgemm_fp8 import FBGEMMFp8Config
