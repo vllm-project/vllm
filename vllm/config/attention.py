@@ -55,6 +55,8 @@ class AttentionConfig:
         # use VLLM_ATTENTION_BACKEND environment variable.
         # This ensures backward compatibility with existing deployments
         # that rely on environment variables.
+        # Note: Deprecation warning is emitted in create_attention_config()
+        # to avoid duplicate warnings.
         if self.backend is None and envs.VLLM_ATTENTION_BACKEND is not None:
             self.backend = envs.VLLM_ATTENTION_BACKEND
 
