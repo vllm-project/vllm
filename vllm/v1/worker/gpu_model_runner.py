@@ -756,8 +756,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mask.int().argmax(dim=1),
             output_token_ids.size(1),
         )
-        buf = self.input_batch.num_accepted_tokens_cpu[:num_accepted_tokens.
-                                                       size(0)]
+        buf = self.input_batch.num_accepted_tokens_cpu_tensor[:
+                                                              num_accepted_tokens
+                                                              .size(0)]
         buf.copy_(num_accepted_tokens, non_blocking=True)
         self.input_batch.num_accepted_tokens_event.record()
 
@@ -1184,9 +1185,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         spec_decode_common_attn_metadata = None
         if use_spec_decode:
             self.input_batch.num_accepted_tokens_event.synchronize()
-            self.num_accepted_tokens.cpu[:num_reqs].copy_(
+            self.num_accepted_tokens.np[:num_reqs].copy_(
                 self.input_batch.num_accepted_tokens_cpu[:num_reqs])
-            self.num_accepted_tokens.cpu[num_reqs:].fill_(1)
+            self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
 
         # Prepare the attention metadata for each KV cache group and make layers
