@@ -3,6 +3,7 @@
 """Minimal helpers for opt-in lightweight timing collection."""
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -41,8 +42,15 @@ class LiteProfiler:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._logger = init_logger("vllm.lite_profiler")
-        self._log_path: Optional[str] = None
+        self._handler: Optional[logging.FileHandler] = None
         self._initialize_log_handler()
+
+        # We use a buffer to avoid frequent writes to the log file.
+        self._buffer: list[str] = []
+        self._buffer_limit = 64
+        self._flush_interval_s = 0.5
+        self._last_flush_time = time.monotonic()
+        atexit.register(self._flush_buffer)
 
     def _initialize_log_handler(self) -> None:
         log_path = envs.VLLM_LITE_PROFILER_LOG_PATH
@@ -58,7 +66,7 @@ class LiteProfiler:
             handler.setFormatter(logging.Formatter("%(message)s"))
             self._logger.addHandler(handler)
             self._logger.propagate = False
-            self._log_path = log_path
+            self._handler = handler
 
     def scope(self, name: str):
         return LiteScope(self, name)
@@ -72,8 +80,34 @@ class LiteProfiler:
         }
 
         message = json.dumps(payload, separators=(",", ":"))
+        # Instead of directly writing to the log file, we add the message
+        # to a buffer and flush the buffer periodically. This avoids
+        # frequent writes to the log file, which can be expensive.
+        # We also limit the size of the buffer to avoid excessive memory
+        # usage.
         with self._lock:
-            self._logger.info("%s", message)
+            self._buffer.append(message)
+            if (len(self._buffer) >= self._buffer_limit
+                    or (time.monotonic() - self._last_flush_time)
+                    >= self._flush_interval_s):
+                self._flush_buffer_locked()
+
+    def _flush_buffer_locked(self) -> None:
+        if not self._buffer or self._handler is None:
+            return
+
+        stream = self._handler.stream
+        if stream is None:
+            return
+
+        stream.write("\n".join(self._buffer) + "\n")
+        stream.flush()
+        self._buffer.clear()
+        self._last_flush_time = time.monotonic()
+
+    def _flush_buffer(self) -> None:
+        with self._lock:
+            self._flush_buffer_locked()
 
 
 # Global variable to store the single LiteProfiler instance
