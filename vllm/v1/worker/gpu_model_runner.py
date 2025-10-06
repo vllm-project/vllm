@@ -814,7 +814,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             output_token_ids.size(1),
         )
         buf = self.input_batch.num_accepted_tokens_cpu_tensor
-        buf = buf[:num_accepted_tokens.size(0)]
+        buf = buf[: num_accepted_tokens.size(0)]
         buf.copy_(num_accepted_tokens, non_blocking=True)
         self.input_batch.num_accepted_tokens_event.record()
 
