@@ -10,13 +10,19 @@ import regex as re
 from partial_json_parser.core.options import Allow
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaFunctionCall, DeltaMessage,
-                                              DeltaToolCall,
-                                              ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+    ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
+)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser, ToolParserManager)
+    ToolParser,
+    ToolParserManager,
+)
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
@@ -25,7 +31,6 @@ logger = init_logger(__name__)
 
 @ToolParserManager.register_module("command")
 class CommandToolParser(ToolParser):
-
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
         # Streaming state
@@ -35,25 +40,25 @@ class CommandToolParser(ToolParser):
         self.tool_call_start_token = "<|START_ACTION|>"
         self.tool_call_end_token = "<|END_ACTION|>"
         self.tool_call_regex = re.compile(
-            r"<\|START_ACTION\|>(.*?)<\|END_ACTION\|>", re.DOTALL)
+            r"<\|START_ACTION\|>(.*?)<\|END_ACTION\|>", re.DOTALL
+        )
 
         # Precompute token ids
-        self.tool_call_start_token_id = self.vocab.get(
-            self.tool_call_start_token)
+        self.tool_call_start_token_id = self.vocab.get(self.tool_call_start_token)
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
-        if (self.tool_call_start_token_id is None
-                or self.tool_call_end_token_id is None):
+        if self.tool_call_start_token_id is None or self.tool_call_end_token_id is None:
             raise RuntimeError(
-                "CommandToolParser cannot find start/end tokens in vocab")
+                "CommandToolParser cannot find start/end tokens in vocab"
+            )
 
     def extract_tool_calls(
-            self, model_output: str,
-            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
+        self, model_output: str, request: ChatCompletionRequest
+    ) -> ExtractedToolCallInformation:
         # Synchronous parsing: look for full action block
         if self.tool_call_start_token not in model_output:
-            return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
-                                                content=model_output)
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
         try:
             match = self.tool_call_regex.search(model_output)
             if not match:
@@ -65,21 +70,23 @@ class CommandToolParser(ToolParser):
                 name = entry.get("tool_name")
                 params = entry.get("parameters", {})
                 tool_calls.append(
-                    ToolCall(type="function",
-                             function=FunctionCall(name=name,
-                                                   arguments=json.dumps(
-                                                       params,
-                                                       ensure_ascii=False))))
+                    ToolCall(
+                        type="function",
+                        function=FunctionCall(
+                            name=name, arguments=json.dumps(params, ensure_ascii=False)
+                        ),
+                    )
+                )
             # content before action
             prefix = model_output.split(self.tool_call_start_token, 1)[0]
-            return ExtractedToolCallInformation(tools_called=True,
-                                                tool_calls=tool_calls,
-                                                content=prefix or None)
+            return ExtractedToolCallInformation(
+                tools_called=True, tool_calls=tool_calls, content=prefix or None
+            )
         except Exception:
             logger.exception("Error extracting sync tool calls")
-            return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
-                                                content=model_output)
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
 
     def extract_tool_calls_streaming(
         self,
@@ -91,7 +98,6 @@ class CommandToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
-
         prev_start = previous_token_ids.count(self.tool_call_start_token_id)
         cur_start = current_token_ids.count(self.tool_call_start_token_id)
         cur_end = current_token_ids.count(self.tool_call_end_token_id)
@@ -113,8 +119,11 @@ class CommandToolParser(ToolParser):
         if cur_start == cur_end and self.tool_call_end_token in delta_text:
             full = current_text + delta_text
 
-            payload = full.split(self.tool_call_start_token, 1)[1] \
-                          .split(self.tool_call_end_token, 1)[0].strip()
+            payload = (
+                full.split(self.tool_call_start_token, 1)[1]
+                .split(self.tool_call_end_token, 1)[0]
+                .strip()
+            )
             try:
                 calls = partial_json_parser.loads(payload or "[]", Allow.ALL)
             except partial_json_parser.core.exceptions.MalformedJSON:
@@ -139,7 +148,8 @@ class CommandToolParser(ToolParser):
                             name=name,
                             arguments=args,
                         ).model_dump(exclude_none=True),
-                    ))
+                    )
+                )
 
                 self.current_tool_id += 1
 
