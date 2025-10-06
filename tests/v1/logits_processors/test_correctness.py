@@ -581,7 +581,7 @@ def _generate_fake_step_update(
     persistent_batch[:] = persistent_batch[0:condensed_batch_size]
 
     if condensed_batch_size > 1:
-        # Simulate arbitrary reorder_batch() in the kernel backend
+        # Simulate arbitrary batch ordering in the kernel backend
         # Generate a random number k of non-overlapping swap tuples
         k = random.randint(0, condensed_batch_size // 2)
         idxs = list(range(condensed_batch_size))

@@ -3,7 +3,7 @@
 """Attention layer with FlexAttention."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch._dynamo.decorators
@@ -37,10 +37,6 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
 
 create_block_mask_compiled = torch.compile(
     create_block_mask, fullgraph=True, mode="reduce-overhead"
@@ -599,11 +595,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.direct_build: bool = is_torch_equal_or_newer("2.9.0.dev0")
         self.q_block_size: int = 16 if is_torch_equal_or_newer("2.9.0.dev0") else 128
         self.kv_block_size: int = 16 if is_torch_equal_or_newer("2.9.0.dev0") else 128
-
-    def reorder_batch(
-        self, input_batch: "InputBatch", scheduler_output: "SchedulerOutput"
-    ) -> bool:
-        return False
 
     def build(
         self,
