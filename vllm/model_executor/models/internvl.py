@@ -1481,10 +1481,13 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
             else:
                 batch_breakdown = [pixel_values.shape[0]]
 
+            total_mb = len(batch_breakdown)
+            need_copy = total_mb > 1
+
             start_idx = 0
             vit_embeds_minibatches = []
 
-            for i in batch_breakdown:
+            for mb_idx, i in enumerate(batch_breakdown):
                 end_idx = start_idx + i
                 batch_sliced_pixel_values = \
                         pixel_values[start_idx:end_idx, ...]
@@ -1512,14 +1515,24 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                     vit_embeds_minibatch.shape[-1])
 
                 if is_lazy:
-                    vit_embeds_minibatches += [
-                        self.mlp1(vit_embeds_minibatch,
-                                  bypass_hpu_graphs=i
-                                  not in self.graphed_multimodal_buckets
-                                  and len(self.graphed_multimodal_buckets) > 0)
-                    ]
+                    proj = self.mlp1(
+                        vit_embeds_minibatch,
+                        bypass_hpu_graphs=i
+                        not in self.graphed_multimodal_buckets
+                        and len(self.graphed_multimodal_buckets) > 0)
                 else:
-                    vit_embeds_minibatches += [self.mlp1(vit_embeds_minibatch)]
+                    proj = self.mlp1(vit_embeds_minibatch)
+
+                if need_copy and (mb_idx < total_mb - 1):
+                    proj_safe = torch.empty_like(proj)
+                    proj_safe.copy_(proj)
+                    if is_lazy:
+                        import habana_frameworks.torch as htorch
+                        htorch.core.mark_step()
+                    vit_embeds_minibatches.append(proj_safe)
+                else:
+                    vit_embeds_minibatches.append(proj)
+
                 start_idx = end_idx
             vit_embeds = torch.cat(vit_embeds_minibatches, dim=0)
         else:
