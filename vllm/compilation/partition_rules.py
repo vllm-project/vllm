@@ -15,7 +15,11 @@ logger = init_logger(__name__)
 
 
 def _resolve_operator_overload(op_name: str):
-    namespace, operator, overload = parse_namespace(op_name)
+    # Convert vLLM's dot notation (e.g., "aten.addmm.default")
+    # to PyTorch's double-colon notation (e.g., "aten::addmm::default")
+    # that parse_namespace expects
+    pytorch_format = op_name.replace(".", "::")
+    namespace, operator, overload = parse_namespace(pytorch_format)
     target_overload = overload or "default"
 
     try:

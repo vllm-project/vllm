@@ -221,16 +221,20 @@ def test_splitting_ops_dynamic():
 
 def test_resolve_operator_overload():
     import torch
-    from torch._library.utils import parse_namespace
 
     from vllm.config.compilation import _resolve_operator_overload
 
+    # Test valid operator names in vLLM's dot notation
     assert _resolve_operator_overload("aten.mm.default") is torch.ops.aten.mm.default
-    with pytest.raises(ValueError):
-        parse_namespace("flash_attention")
     assert (
         _resolve_operator_overload("aten.addmm.default") is torch.ops.aten.addmm.default
     )
+    
+    # Test invalid operator names
+    with pytest.raises(ValueError):
+        # Single word without namespace
+        _resolve_operator_overload("flash_attention")
 
     with pytest.raises(ValueError):
+        # Non-existent operator
         _resolve_operator_overload("aten.nonexistent_op")
