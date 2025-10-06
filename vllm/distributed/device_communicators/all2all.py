@@ -511,9 +511,7 @@ class MoriAll2AllManager(All2AllManagerBase):
 
             # just to make line fit into 80
             world = dist.group.WORLD
-            current_group = (
-                self.cpu_group if self.cpu_group is not None else world
-            )
+            current_group = self.cpu_group if self.cpu_group is not None else world
 
             # TODO(inhyeok): make group_name more reasonable
             group_name = "default"
@@ -534,9 +532,7 @@ class MoriAll2AllManager(All2AllManagerBase):
 
                 # Initialize mori shmem with the registered group
                 mori.shmem.shmem_torch_process_group_init(group_name)
-                logger.debug(
-                    "[rank %s] torch proc group shmem init success", self.rank
-                )
+                logger.debug("[rank %s] torch proc group shmem init success", self.rank)
                 self._shmem_initialized = True
                 return
 
