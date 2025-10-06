@@ -445,7 +445,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-
+        print(quant_config)
         self.config: PretrainedConfig = config
         self.llm = init_vllm_registered_model(
             vllm_config=vllm_config.with_hf_config(config.text_config),
@@ -456,7 +456,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
             config=config.vit_config,
             visual_vocab_size=config.visual_vocab_size,
             quant_config=quant_config,
-            prefix=f"{prefix}.visual_tokenizer",
+            prefix=maybe_prefix(prefix, "visual_tokenizer"),
         )
 
         self.vte = VisualEmbedding(config.visual_vocab_size, config.hidden_size)
