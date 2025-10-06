@@ -9,17 +9,14 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 
 from ..openai.test_audio import TEST_AUDIO_URLS, dummy_messages_from_audio_url
-from ..openai.test_vision import (TEST_IMAGE_ASSETS,
-                                  dummy_messages_from_image_url)
+from ..openai.test_vision import TEST_IMAGE_ASSETS, dummy_messages_from_image_url
 
 
 @pytest.fixture(scope="function")
 def text_llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct",
-              enforce_eager=True,
-              seed=0)
+    llm = LLM(model="meta-llama/Llama-3.2-1B-Instruct", enforce_eager=True, seed=0)
 
     yield weakref.proxy(llm)
 
@@ -31,14 +28,8 @@ def text_llm():
 def test_chat(text_llm):
     prompt1 = "Explain the concept of entropy."
     messages = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": prompt1
-        },
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": prompt1},
     ]
     outputs = text_llm.chat(messages)
     assert len(outputs) == 1
@@ -49,25 +40,13 @@ def test_multi_chat(text_llm):
     prompt2 = "Explain what among us is."
 
     conversation1 = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": prompt1
-        },
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": prompt1},
     ]
 
     conversation2 = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": prompt2
-        },
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": prompt2},
     ]
 
     messages = [conversation1, conversation2]
@@ -97,26 +76,22 @@ def vision_llm():
     cleanup_dist_env_and_memory()
 
 
-@pytest.mark.parametrize("image_urls",
-                         [[TEST_IMAGE_ASSETS[0], TEST_IMAGE_ASSETS[1]]],
-                         indirect=True)
+@pytest.mark.parametrize(
+    "image_urls", [[TEST_IMAGE_ASSETS[0], TEST_IMAGE_ASSETS[1]]], indirect=True
+)
 def test_chat_multi_image(vision_llm, image_urls: list[str]):
-    messages = [{
-        "role":
-        "user",
-        "content": [
-            *({
-                "type": "image_url",
-                "image_url": {
-                    "url": image_url
-                }
-            } for image_url in image_urls),
-            {
-                "type": "text",
-                "text": "What's in this image?"
-            },
-        ],
-    }]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *(
+                    {"type": "image_url", "image_url": {"url": image_url}}
+                    for image_url in image_urls
+                ),
+                {"type": "text", "text": "What's in this image?"},
+            ],
+        }
+    ]
     outputs = vision_llm.chat(messages)
     assert len(outputs) >= 0
 
@@ -127,14 +102,8 @@ def test_llm_chat_tokenization_no_double_bos(text_llm):
     Check we get a single BOS token for llama chat.
     """
     messages = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": "Hello!"
-        },
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": "Hello!"},
     ]
     outputs = text_llm.chat(messages)
     assert len(outputs) == 1
@@ -170,14 +139,8 @@ def thinking_llm():
 @pytest.mark.parametrize("enable_thinking", [True, False])
 def test_chat_extra_kwargs(thinking_llm, enable_thinking):
     messages = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": "What is 1+1?"
-        },
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": "What is 1+1?"},
     ]
 
     outputs = thinking_llm.chat(
@@ -198,17 +161,17 @@ def test_chat_extra_kwargs(thinking_llm, enable_thinking):
         assert think_id in prompt_token_ids
 
 
-@pytest.mark.parametrize(("model_id", "modality", "mm_init_kwargs"), [
-    ("Qwen/Qwen2.5-VL-3B-Instruct", "image", {
-        "use_fast": True
-    }),
-    ("Qwen/Qwen2-Audio-7B-Instruct", "audio", {}),
-])
-@pytest.mark.parametrize("image_urls",
-                         [[TEST_IMAGE_ASSETS[0], TEST_IMAGE_ASSETS[1]]],
-                         indirect=True)
-def test_mm_processing_gpu(model_id, modality, mm_init_kwargs,
-                           image_urls: list[str]):
+@pytest.mark.parametrize(
+    ("model_id", "modality", "mm_init_kwargs"),
+    [
+        ("Qwen/Qwen2.5-VL-3B-Instruct", "image", {"use_fast": True}),
+        ("Qwen/Qwen2-Audio-7B-Instruct", "audio", {}),
+    ],
+)
+@pytest.mark.parametrize(
+    "image_urls", [[TEST_IMAGE_ASSETS[0], TEST_IMAGE_ASSETS[1]]], indirect=True
+)
+def test_mm_processing_gpu(model_id, modality, mm_init_kwargs, image_urls: list[str]):
     device = current_platform.device_name
 
     num_items = 2
@@ -233,15 +196,17 @@ def test_mm_processing_gpu(model_id, modality, mm_init_kwargs,
     assert len(outputs) == 1
 
 
-@pytest.mark.parametrize(("model_id", "modality", "mm_init_kwargs"), [
-    ("Qwen/Qwen2.5-VL-3B-Instruct", "image", {
-        "use_fast": True
-    }),
-    ("Qwen/Qwen2-Audio-7B-Instruct", "audio", {}),
-])
+@pytest.mark.parametrize(
+    ("model_id", "modality", "mm_init_kwargs"),
+    [
+        ("Qwen/Qwen2.5-VL-3B-Instruct", "image", {"use_fast": True}),
+        ("Qwen/Qwen2-Audio-7B-Instruct", "audio", {}),
+    ],
+)
 @pytest.mark.parametrize("image_urls", [[TEST_IMAGE_ASSETS[0]]], indirect=True)
-def test_mm_processing_gpu_bad_device(model_id, modality, mm_init_kwargs,
-                                      image_urls: list[str]):
+def test_mm_processing_gpu_bad_device(
+    model_id, modality, mm_init_kwargs, image_urls: list[str]
+):
     device = current_platform.device_name
     if device == "cpu":
         pytest.skip("Not applicable to CPU")

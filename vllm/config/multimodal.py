@@ -103,8 +103,7 @@ class MultiModalConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     def get_limit_per_prompt(self, modality: str) -> int:
@@ -139,6 +138,7 @@ class MultiModalConfig:
         if init_device != inference_device:
             raise ValueError(
                 "You cannot override the device for multi-modal preprocessing "
-                f"at runtime! Found: {init_device=} vs. {inference_device=}")
+                f"at runtime! Found: {init_device=} vs. {inference_device=}"
+            )
 
         return kwargs | dict(inference_kwargs)
