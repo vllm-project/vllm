@@ -521,8 +521,9 @@ class CudaPlatformBase(Platform):
         return torch.cuda.graph_pool_handle()
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
-                                    model_config: "ModelConfig") -> bool:
+    def is_kv_cache_dtype_supported(
+        cls, kv_cache_dtype: str, model_config: "ModelConfig"
+    ) -> bool:
         fp8_attention = kv_cache_dtype.startswith("fp8")
         attention_backend = envs.VLLM_ATTENTION_BACKEND
 
