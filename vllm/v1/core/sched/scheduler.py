@@ -19,7 +19,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorStats)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.utils.lite_profiler import context_logger, lite_profiler
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -179,10 +178,6 @@ class Scheduler(SchedulerInterface):
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
     def schedule(self) -> SchedulerOutput:
-        with context_logger("scheduler.schedule"):
-            return self._schedule_impl()
-
-    def _schedule_impl(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -387,11 +382,9 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    with lite_profiler.scoped("Scheduler:GetComputed"):
-                        (new_computed_blocks,
-                         num_new_local_computed_tokens) = \
-                            self.kv_cache_manager.get_computed_blocks(
-                                request)
+                    new_computed_blocks, num_new_local_computed_tokens = \
+                        self.kv_cache_manager.get_computed_blocks(
+                            request)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:

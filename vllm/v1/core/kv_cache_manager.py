@@ -6,7 +6,6 @@ from typing import Literal, Optional, overload
 
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
-from vllm.utils.lite_profiler import lite_profiler
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -291,13 +290,11 @@ class KVCacheManager:
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
-        with lite_profiler.scoped("Scheduler:AllocateSave"):
-            self.coordinator.save_new_computed_blocks(request.request_id,
-                                                      new_computed_block_list)
+        self.coordinator.save_new_computed_blocks(request.request_id,
+                                                  new_computed_block_list)
 
-        with lite_profiler.scoped("Scheduler:AllocateNew"):
-            new_blocks = self.coordinator.allocate_new_blocks(
-                request.request_id, num_tokens_need_slot, num_encoder_tokens)
+        new_blocks = self.coordinator.allocate_new_blocks(
+            request.request_id, num_tokens_need_slot, num_encoder_tokens)
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
@@ -310,8 +307,7 @@ class KVCacheManager:
         # at `request.num_tokens`, ensuring only "finalized" tokens are cached.
         num_tokens_to_cache = min(num_computed_tokens + num_new_tokens,
                                   request.num_tokens)
-        with lite_profiler.scoped("Scheduler:AllocateCache"):
-            self.coordinator.cache_blocks(request, num_tokens_to_cache)
+        self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return KVCacheBlocks(new_blocks)
 

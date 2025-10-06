@@ -382,7 +382,10 @@ _PROFILER_FUNC = None
 def record_function_or_nullcontext(name: str) -> AbstractContextManager:
     global _PROFILER_FUNC
 
-    lite_ctx = lite_profiler.scope(name)
+    # Check if the lite-profiler is enabled.
+    lite_ctx = None
+    if lite_profiler.is_enabled():
+        lite_ctx = lite_profiler.scope(name)
 
     func = _PROFILER_FUNC
     if func is None:

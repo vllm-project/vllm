@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Summarize a single vLLM lite-profiler log in tabular form.
 
-The script consumes the JSONL records emitted by :mod:`vllm.lite_profiler`
+The script consumes the JSONL records emitted by the script `vllm.lite_profiler`
 It expects log lines prefixed with ``===LITE`` where the payload contains a
 ``metrics`` dictionary whose values are ``{"ns": int, "count": int}``.
 
@@ -24,6 +24,8 @@ import sys
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from typing import TextIO
+
+import vllm.envs as envs
 
 
 def _extract_event_ns(filenames: Sequence[str]) -> dict[str, list[int]]:
@@ -82,42 +84,23 @@ def _render_table(title: str, headers: Sequence[str],
 
 
 TOP_EVENTS = [
+    # Input processing
     "Input:Process",
     "Step:Schedule",
+    # Model execution
     "Step:Model",
+    # Output processing
     "Step:Output",
-    "Model:Preprocess",
-    "Model:Sample",
-    "Model:Bookkeep",
-]
-
-SCHEDULE_EVENTS = [
-    "Scheduler:AllocateSave",
-    "Scheduler:AllocateNew",
-    "Scheduler:AllocateCache",
 ]
 
 MODEL_EVENTS = [
-    "Model:PrepareInput",
-    "Model:Preprocess",
-    "Model:Forward",
-    "Model:Postprocess",
-    "Model:Sample",
-    "Model:Bookkeep",
-]
-
-NON_FORWARD_EVENTS = [
-    "Input:Process",
-    "Step:Schedule",
-    "Model:PrepareInput",
     "Model:UpdateState",
-    "Model:Preprocess",
+    "Model:PrepareInput",
     "Model:Forward",
     "Model:Postprocess",
     "Model:Sample",
     "Model:Bookkeep",
-    "Step:Model",
-    "Step:Output",
+    "Model:EPLB",
 ]
 
 
@@ -137,12 +120,9 @@ def _compute_table_rows(
 
 def _print_breakdown_tables(name: str, event_ns_sum: dict[str, int], *,
                             stream: TextIO) -> None:
-    for title, events in (
-        ("Breakdown (non-forward events)", NON_FORWARD_EVENTS),
-        ("Schedule breakdown", SCHEDULE_EVENTS),
-        ("Model events breakdown", MODEL_EVENTS),
-        ("Topline events", TOP_EVENTS),
-    ):
+    for title, events in (("Top-level pipeline events", TOP_EVENTS), (
+            "Model events breakdown (only includes the main key events)",
+            MODEL_EVENTS)):
         headers = ["Log", *events, "TOTAL"]
         rows = [_compute_table_rows(name, event_ns_sum, events)]
         _render_table(title, headers, rows, stream=stream)
@@ -151,11 +131,6 @@ def _print_breakdown_tables(name: str, event_ns_sum: dict[str, int], *,
 def summarize_log(log_path: str, *, stream: TextIO) -> None:
     event_ns = _extract_event_ns([log_path])
     event_ns_sum = _sum_events(event_ns)
-
-    available_events = sorted(event_ns_sum)
-    if available_events:
-        print(", ".join(available_events), file=stream)
-
     _print_breakdown_tables(os.path.basename(log_path),
                             event_ns_sum,
                             stream=stream)
@@ -175,7 +150,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
 
-    log_path = args.log_path or os.getenv("VLLM_LITE_PROFILER_LOG_PATH")
+    log_path = args.log_path or envs.VLLM_LITE_PROFILER_LOG_PATH
     if not log_path:
         raise SystemExit("No log file specified. Provide LOG_PATH or set "
                          "VLLM_LITE_PROFILER_LOG_PATH")

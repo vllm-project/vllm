@@ -207,7 +207,6 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
-    VLLM_LITE_PROFILER: bool = False
     VLLM_LITE_PROFILER_LOG_PATH: Optional[str] = None
 
 
@@ -1492,10 +1491,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
 
-    # Enable the lightweight timing profiler and optional log destination
-    "VLLM_LITE_PROFILER":
-    lambda: bool(int(os.getenv("VLLM_LITE_PROFILER", "0"))),
-
+    # Log path for the lightweight timing profiler
     "VLLM_LITE_PROFILER_LOG_PATH":
     lambda: os.getenv("VLLM_LITE_PROFILER_LOG_PATH", None),
 }

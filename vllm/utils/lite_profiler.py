@@ -87,9 +87,8 @@ class _NullTransaction:
         return None
 
 
-# Create singleton sentinel objects to avoid repeated allocations
+# Create singleton sentinel object to avoid repeated allocations
 _NULL_TRANSACTION = _NullTransaction()
-_NULL_CONTEXT = nullcontext()
 
 
 class LiteProfiler:
@@ -99,22 +98,36 @@ class LiteProfiler:
         self._lock = threading.Lock()
         self._logger = init_logger("vllm.lite_profiler")
         self._log_path: Optional[str] = None
-        self._enabled = self._check_enabled()
 
-    def _check_enabled(self) -> bool:
-        """Check if profiling is enabled via environment variable."""
+        # Initialize log handler once if profiling is enabled
+        if self.is_enabled():
+            self._initialize_log_handler()
+
+    def is_enabled(self) -> bool:
+        """Check if profiling is enabled"""
         try:
-            return bool(envs.VLLM_LITE_PROFILER)
+            print("Lite profiler enabled value: ",
+                  envs.VLLM_LITE_PROFILER_LOG_PATH)
+            return envs.VLLM_LITE_PROFILER_LOG_PATH is not None
         except AttributeError:  # pragma: no cover - env not wired in tests
             return False
 
-    def is_enabled(self) -> bool:
-        """Return cached enabled state - no environment variable lookup."""
-        return self._enabled
+    def _initialize_log_handler(self) -> None:
+        log_path = envs.VLLM_LITE_PROFILER_LOG_PATH
+        with self._lock:
+            # Delete existing log file if it exists
+            if log_path and os.path.exists(log_path):
+                os.remove(log_path)
+
+            handler = logging.FileHandler(log_path)
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            self._logger.addHandler(handler)
+            self._logger.propagate = False
+            self._log_path = log_path
 
     # Transaction handling
     def transaction(self, tag: str):
-        if not self._enabled:
+        if not self.is_enabled():
             return _NULL_TRANSACTION
         return _LiteTransaction(self, tag)
 
@@ -131,60 +144,25 @@ class LiteProfiler:
             stack.pop()
 
     def _current(self) -> Optional[_LiteTransaction]:
-        if not self._enabled:
-            return None
         stack = getattr(self._local, "stack", None)
         if stack:
             return stack[-1]
         return None
 
-    def has_active_transaction(self) -> bool:
-        if not self._enabled:
-            return False
-        stack = getattr(self._local, "stack", None)
-        return bool(stack)
-
     # Scope helpers
     def scope(self, name: str):
-        if not self._enabled:
-            return None
         transaction = self._current()
         if transaction is None:
             return None
-        return transaction.scope(name)
-
-    def scoped(self, name: str):
-        if not self._enabled:
-            return _NULL_CONTEXT
-        transaction = self._current()
-        if transaction is None:
-            return _NULL_CONTEXT
         return transaction.scope(name)
 
     def record(self, name: str, elapsed_ns: int, *, count: int = 1) -> None:
-        if not self._enabled:
+        if not self.is_enabled():
             return
         transaction = self._current()
         if transaction is None:
             return
         transaction.record(name, elapsed_ns, count=count)
-
-    # Emission
-    def _ensure_log_handler(self) -> None:
-        log_path = getattr(envs, "VLLM_LITE_PROFILER_LOG_PATH", None)
-        if not log_path:
-            return
-        log_path = os.path.abspath(log_path)
-        if log_path == self._log_path:
-            return
-        with self._lock:
-            if log_path == self._log_path:
-                return
-            handler = logging.FileHandler(log_path)
-            handler.setFormatter(logging.Formatter("%(message)s"))
-            self._logger.addHandler(handler)
-            self._logger.propagate = False
-            self._log_path = log_path
 
     def _emit(self, transaction: _LiteTransaction) -> None:
         metrics = {
@@ -200,7 +178,6 @@ class LiteProfiler:
             "metrics": metrics,
         }
 
-        self._ensure_log_handler()
         message = json.dumps(payload, separators=(",", ":"))
         with self._lock:
             self._logger.info("%s %s", _PREFIX, message)
@@ -224,16 +201,14 @@ def combine_contexts(contexts: Iterable):
 def maybe_emit_lite_profiler_report(log_path: str | None = None) -> None:
     """Print a lite-profiler summary when profiling is enabled."""
 
-    if not envs.VLLM_LITE_PROFILER:
+    if envs.VLLM_LITE_PROFILER_LOG_PATH is None:
         return
 
     effective_log = log_path or envs.VLLM_LITE_PROFILER_LOG_PATH
-    if not effective_log:
-        return
     if not os.path.exists(effective_log):
         print(
             "Lite profiler log not found. Ensure the profiled process sets "
-            "VLLM_LITE_PROFILER and writes to the expected path.",
+            "the expected path.",
             file=sys.stderr,
         )
         return
