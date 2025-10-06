@@ -21,6 +21,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include "../cuda_compat.h"
 #include "../cub_helpers.h"
+#include "../core/batch_invariant.hpp"
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -405,7 +406,8 @@ void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, f
     using Constants = detail::TopkConstants<EXPERTS, BYTES_PER_LDG, WARP_SIZE_PARAM>;
     static constexpr int VPT = Constants::VPT;
     static constexpr int ROWS_PER_WARP = Constants::ROWS_PER_WARP;
-    const int num_warps = (num_rows + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
+    const bool batch_invariant_launch = vllm::vllm_kernel_override_batch_invariant();
+    const int num_warps = batch_invariant_launch ? 32 : (num_rows + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
     const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
 
     dim3 block_dim(WARP_SIZE_PARAM, WARPS_PER_TB);
