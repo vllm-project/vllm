@@ -741,8 +741,6 @@ class RandomMultiModalDataset(RandomDataset):
             dtype=np.uint8,
         )
 
-        logger.info("Generated random video %s", repr(random_pixels.shape))
-
         # Create a temporary video file in memory
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         fps = 30  # frames per second
