@@ -1687,11 +1687,12 @@ class EngineArgs:
             "XFORMERS",
             "ROCM_ATTN",
         ]
-        if (
-            envs.is_set("VLLM_ATTENTION_BACKEND")
-            and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS
-        ):
-            name = f"VLLM_ATTENTION_BACKEND={envs.VLLM_ATTENTION_BACKEND}"
+        # Get backend from CLI arg or env var
+        backend = self.attention_backend
+        if backend is None:
+            backend = envs.VLLM_ATTENTION_BACKEND
+        if backend is not None and backend not in V1_BACKENDS:
+            name = f"VLLM_ATTENTION_BACKEND={backend}"
             _raise_or_fallback(feature_name=name, recommend_to_remove=True)
             return False
 

@@ -444,6 +444,9 @@ class ModelConfig:
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
+        # Note: We read from envs here because ModelConfig is created before
+        # AttentionConfig, so we can't use get_current_vllm_config() yet.
+        # This is just for early validation.
         if (
             (backend := envs.VLLM_ATTENTION_BACKEND)
             and backend == "FLASHINFER"
@@ -633,6 +636,8 @@ class ModelConfig:
         )
 
         # Interleaved attention is not supported by some backends in V0
+        # Note: We read from envs here because ModelConfig is created before
+        # AttentionConfig, so we can't use get_current_vllm_config() yet.
         if (
             not self.disable_sliding_window
             and is_interleaved(self.hf_text_config)
