@@ -509,12 +509,13 @@ class CudaPlatformBase(Platform):
                     sleep_mode_status = str(vllm_config.model_config.enable_sleep_mode)
 
                 logger.debug("CUDA Platform: Using native PyTorch graph pool "
-                           f"(config={config_status}, model_config={model_config_status}, "
-                           f"sleep_mode={sleep_mode_status})")
+                             "(config=%s, model_config=%s, sleep_mode=%s)",
+                             config_status, model_config_status,
+                             sleep_mode_status)
         except Exception as e:
             # Fall back to native PyTorch graph pool if anything fails
             logger.warning("CUDA Platform: Exception in graph_pool_handle, "
-                          f"falling back to native pool: {e}")
+                          "falling back to native pool.")
 
         # Default to native PyTorch graph pool handle
         return torch.cuda.graph_pool_handle()
