@@ -6,18 +6,19 @@ The core motivation of the DBO system in vLLM is to overlap the sparse all-to-al
 
 ## Introduction
 
-The Dual Batch Overlap system works by splitting the batch up in the model runner, creating two worker threads, and then having each of these worker threads run the model. When DBO is enabled, there are yield points within the FusedMoEModularKernel that will allow the two worker threads to ping-pong between each other so that when one is running compute, the other is waiting on communication.
+The Dual Batch Overlap system works by splitting the batch up in the model runner, creating two worker threads, and then having each of these worker threads run the model. When DBO is enabled, there are yield points within the FusedMoEModularKernel that will allow the two worker threads to ping-pong between each other so that when one is running compute, the other is waiting on communication. Throughout the code you may see ubatch being used as a short form of microbatch; this is just an ASCII friendly version of the short form µ-batch.
 
-The DBO system modifies the `GpuModelRunner` and `ModularKernel` along with adding two new sub-systems: `UBatchWrapper` and `UBatchContext`. `UBatchWrapper` is a wrapper around the model that is responsible for all of the thread and cudagraph management. `UBatchContext` is a wrapper around `ForwardContext` that allows the two UBatch threads to synchronize with each other.
+The DBO system includes modifications to `GpuModelRunner` and `ModularKernel`, and defines two utility classes: `UBatchWrapper` and `UBatchContext`. `UBatchWrapper` manages thread lifecycle and CUDA graph execution of the model. `UBatchContext` wraps `ForwardContext` to coordinate synchronization between the two UBatch threads.
 
-Below are the two overlap schedules that are currently implemented in vLLM.
+Below is the overlap schedule that is currently implemented in vLLM.
 
 ```python
-# Comp: |-A0₀-A1₀-S₀-||-MLP₁-||-MLP₀-||-A0₁-A1₁-S₁-|
-# Comm: |-----D₁-----||--D₀--||--C₁--||-----C₀-----|
-# Order: D₁ send, A0₀, A1₀, S₀, D₁ recv, D₀ send, MLP₁, D₀ recv,
-#        C₁ send, MLP₀, C₁ recv, C₀ send, A0₁, A1₁, S₁, C₀ recv.
-# MLP_OVERLAP = "mlp_overlap"
+# Schedule notation legend:
+#    S = Shared expert
+#    A0 = MLA qkv pro,
+#    A1 = Core attn + out proj + MoE gate
+#    D = Dispatch
+#    C = Combine
 
 # Comp: |-A0₀-A1₀-||-MLP₁-||-S₁-MLP₀-||-S₀-A0₁-A1₁-|
 # Comm: |----D₁---||--D₀--||----C₁---||-----C₀-----|
@@ -34,6 +35,11 @@ To enable the DBO system pass in the `--enable-dbo` argument to your vllm serve 
 * `--dbo-prefill-token-threshold` the minimum number of tokens in a batch containing at least one prefill required to enable DBO for that batch
 
 Currently DBO is only supported with DeepEP so you’ll have to install that and set the `VLLM_ALL2ALL_BACKEND` environment variable to `deepep_low_latency` if your workload is primarily decode requests and `deepep_high_throughput` if your workload is primarily prefill requests.
+
+Below is a command that will spin up a two DP rank server with expert parallelism and DBO enabled.
+EX: `VLLM_ALL2ALL_BACKEND=deepep_low_latency vllm serve --model="deepseek-ai/DeepSeek-V2-Lite" --trust-remote-code --data-parallel-size 2 --enable-expert-parallel --enable-dbo`
+
+Note that you'll need to have DeepEp installed and at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
 
 ## DBO Components
 
