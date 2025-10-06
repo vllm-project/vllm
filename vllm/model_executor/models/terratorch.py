@@ -226,6 +226,7 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
     dummy_inputs=TerratorchInputBuilder,
 )
 class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
+    merge_by_field_config = True
     supports_multimodal_raw_input_only = True
     is_pooling_model = True
 

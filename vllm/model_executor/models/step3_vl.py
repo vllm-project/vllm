@@ -49,7 +49,6 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -895,6 +894,8 @@ class Step3VisionTransformer(nn.Module):
     dummy_inputs=Step3VLDummyInputsBuilder,
 )
 class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    merge_by_field_config = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.": "language_model.model.",
@@ -982,18 +983,21 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             return None
 
         if pixel_values is not None:
-            pixel_values = flatten_bn(pixel_values, concat=True)
             if pixel_values.dim() >= 3:
                 pixel_values = pixel_values.view(-1, *pixel_values.shape[-3:])
             if patch_pixel_values is not None:
-                patch_pixel_values = flatten_bn(patch_pixel_values, concat=True)
                 patch_pixel_values = patch_pixel_values.view(
                     -1, *patch_pixel_values.shape[-3:]
                 )
                 # Handle empty patch_pixel_values by setting to None
                 if patch_pixel_values.shape[0] == 0:
                     patch_pixel_values = None
-            num_patches = flatten_bn(num_patches, concat=True).tolist()
+            if isinstance(num_patches, torch.Tensor):
+                num_patches = num_patches.tolist()
+            elif isinstance(num_patches, list):
+                num_patches = [
+                    n.item() if isinstance(n, torch.Tensor) else n for n in num_patches
+                ]
 
             return Step3VLImagePixelInputs(
                 type="pixel_values",

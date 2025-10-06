@@ -47,11 +47,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
-from .utils import (
-    AutoWeightsLoader,
-    init_vllm_registered_model,
-    maybe_prefix,
-)
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 from .vision import (
     VisionEncoderInfo,
     get_num_selected_vision_tokens,
@@ -403,6 +399,8 @@ def init_vision_tower_for_tarsier(
     dummy_inputs=TarsierDummyInputsBuilder,
 )
 class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    merge_by_field_config = True
+
     merge_by_field_config = True
 
     packed_modules_mapping = {
