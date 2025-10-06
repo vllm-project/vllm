@@ -208,6 +208,10 @@ class LLMEngine:
     def tokenizer(self) -> Optional[AnyTokenizer]:
         return self.processor.tokenizer
 
+    @tokenizer.setter
+    def tokenizer(self, tokenizer: Optional[AnyTokenizer]) -> None:
+        self.processor.tokenizer = tokenizer
+
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
 

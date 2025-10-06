@@ -60,6 +60,10 @@ class Processor:
     def tokenizer(self) -> Optional[AnyTokenizer]:
         return self.input_preprocessor.tokenizer
 
+    @tokenizer.setter
+    def tokenizer(self, tokenizer: Optional[AnyTokenizer]) -> None:
+        self.input_preprocessor.tokenizer = tokenizer
+
     def _validate_logprobs(
         self,
         params: SamplingParams,
