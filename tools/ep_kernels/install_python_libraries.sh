@@ -19,9 +19,9 @@ mkdir -p nvshmem_src
 wget https://developer.download.nvidia.com/compute/redist/nvshmem/3.2.5/source/nvshmem_src_3.2.5-1.txz
 tar -xvf nvshmem_src_3.2.5-1.txz -C nvshmem_src --strip-components=1
 pushd nvshmem_src
-wget https://github.com/deepseek-ai/DeepEP/raw/main/third-party/nvshmem.patch
-git init
-git apply -vvv nvshmem.patch
+# wget https://github.com/deepseek-ai/DeepEP/raw/main/third-party/nvshmem.patch
+# git init
+# git apply -vvv nvshmem.patch
 
 # assume CUDA_HOME is set correctly
 if [ -z "$CUDA_HOME" ]; then
@@ -116,9 +116,9 @@ PIP_NO_BUILD_ISOLATION=0 pip install -vvv -e  .
 popd
 
 # build and install deepep, require pytorch installed
-pushd $WORKSPACE
-clone_repo "https://github.com/deepseek-ai/DeepEP" "DeepEP" "setup.py" "e3908bf"
-cd DeepEP
-export NVSHMEM_DIR=$WORKSPACE/nvshmem_install
-PIP_NO_BUILD_ISOLATION=0 pip install -vvv -e  .
-popd
+# pushd $WORKSPACE
+# clone_repo "https://github.com/deepseek-ai/DeepEP" "DeepEP" "setup.py" "e3908bf"
+# cd DeepEP
+# export NVSHMEM_DIR=$WORKSPACE/nvshmem_install
+# PIP_NO_BUILD_ISOLATION=0 pip install -vvv -e  .
+# popd

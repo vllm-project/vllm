@@ -33,22 +33,48 @@ import types
 import uuid
 import warnings
 import weakref
-from argparse import (Action, ArgumentDefaultsHelpFormatter, ArgumentParser,
-                      ArgumentTypeError, RawDescriptionHelpFormatter,
-                      _ArgumentGroup)
+from argparse import (
+    Action,
+    ArgumentDefaultsHelpFormatter,
+    ArgumentParser,
+    ArgumentTypeError,
+    RawDescriptionHelpFormatter,
+    _ArgumentGroup,
+)
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Task
 from collections import UserDict, defaultdict
-from collections.abc import (AsyncGenerator, Awaitable, Collection, Generator,
-                             Hashable, Iterable, Iterator, KeysView, Mapping,
-                             Sequence)
+from collections.abc import (
+    AsyncGenerator,
+    Awaitable,
+    Collection,
+    Generator,
+    Hashable,
+    Iterable,
+    Iterator,
+    KeysView,
+    Mapping,
+    Sequence,
+)
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from pathlib import Path
 from types import MappingProxyType
-from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, TextIO, TypeVar, Union, cast, overload)
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generic,
+    Literal,
+    NamedTuple,
+    Optional,
+    TextIO,
+    TypeVar,
+    Union,
+    cast,
+    overload,
+)
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -3538,6 +3564,58 @@ def set_env_var(key, value):
     old = os.environ.get(key)
     os.environ[key] = value
     try:
+        yield
+    finally:
+        if old is None:
+            del os.environ[key]
+        else:
+            os.environ[key] = old
+
+
+def unique_filepath(fn: Callable[[int], Path]) -> Path:
+    """
+    unique_filepath returns a unique path by trying
+    to include an integer in increasing order.
+
+    fn should be a callable that returns a path that
+    includes the passed int at a fixed location.
+
+    Note: This function has a TOCTOU race condition.
+    Caller should use atomic operations (e.g., open with 'x' mode)
+    when creating the file to ensure thread safety.
+    """
+    i = 0
+    while True:
+        p = fn(i)
+        if not p.exists():
+            return p
+        i += 1
+        yield
+    finally:
+        if old is None:
+            del os.environ[key]
+        else:
+            os.environ[key] = old
+
+
+def unique_filepath(fn: Callable[[int], Path]) -> Path:
+    """
+    unique_filepath returns a unique path by trying
+    to include an integer in increasing order.
+
+    fn should be a callable that returns a path that
+    includes the passed int at a fixed location.
+
+    Note: This function has a TOCTOU race condition.
+    Caller should use atomic operations (e.g., open with 'x' mode)
+    when creating the file to ensure thread safety.
+    """
+    i = 0
+    while True:
+        p = fn(i)
+        if not p.exists():
+            return p
+        i += 1
         yield
     finally:
         if old is None:

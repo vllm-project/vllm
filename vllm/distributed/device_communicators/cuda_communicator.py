@@ -8,11 +8,12 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.all_reduce_utils import (
-    should_nccl_symm_mem_allreduce)
-from vllm.distributed.device_communicators.pynccl import (
-    register_nccl_symmetric_ops)
+    should_nccl_symm_mem_allreduce,
+)
+from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric_ops
 from vllm.distributed.device_communicators.pynccl_allocator import (
-    is_symmetric_memory_enabled)
+    is_symmetric_memory_enabled,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -34,8 +35,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_custom_allreduce = False
             use_torch_symm_mem = False
         else:
-            from vllm.distributed.parallel_state import (
-                _ENABLE_CUSTOM_ALL_REDUCE)
+            from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
 
@@ -44,13 +44,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
-            CustomAllreduce)
-        from vllm.distributed.device_communicators.pynccl import (
-            PyNcclCommunicator)
+            CustomAllreduce,
+        )
+        from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
         from vllm.distributed.device_communicators.quick_all_reduce import (
-            QuickAllReduce)
-        from vllm.distributed.device_communicators.symm_mem import (
-            SymmMemCommunicator)
+            QuickAllReduce,
+        )
+        from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if self.world_size > 1:
@@ -102,14 +102,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import PPLXAll2AllManager
                 self.all2all_manager = PPLXAll2AllManager(self.cpu_group)
                 logger.info("Using PPLX all2all manager.")
-            elif all2all_backend == "deepep_high_throughput":
-                from .all2all import DeepEPHTAll2AllManager
-                self.all2all_manager = DeepEPHTAll2AllManager(self.cpu_group)
-                logger.info("Using DeepEP High-Throughput all2all manager.")
-            elif all2all_backend == "deepep_low_latency":
-                from .all2all import DeepEPLLAll2AllManager
-                self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
-                logger.info("Using DeepEP Low-Latency all2all manager.")
+            # elif all2all_backend == "deepep_high_throughput":
+            #     from .all2all import DeepEPHTAll2AllManager
+            #     self.all2all_manager = DeepEPHTAll2AllManager(self.cpu_group)
+            #     logger.info("Using DeepEP High-Throughput all2all manager.")
+            # elif all2all_backend == "deepep_low_latency":
+            #     from .all2all import DeepEPLLAll2AllManager
+            #     self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
+            #     logger.info("Using DeepEP Low-Latency all2all manager.")
             elif all2all_backend == "flashinfer_all2allv":
                 from .all2all import FlashInferAllToAllManager
                 self.all2all_manager = FlashInferAllToAllManager(
@@ -313,6 +313,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
         hidden_states, router_logits = self.all2all_manager.dispatch(
             hidden_states, router_logits, is_sequence_parallel)
         return hidden_states, router_logits
+
+    def combine(self,
+                hidden_states: torch.Tensor,
+                is_sequence_parallel: bool = False) -> torch.Tensor:
+        assert self.all2all_manager is not None
+        hidden_states = self.all2all_manager.combine(hidden_states,
+                                                     is_sequence_parallel)
+        return hidden_states
 
     def combine(self,
                 hidden_states: torch.Tensor,

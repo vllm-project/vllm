@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
 
-import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.utils import has_deep_ep, has_pplx
+from vllm.utils import has_pplx
 from vllm.utils.flashinfer import has_flashinfer_all2all
 
 from .base_device_communicator import All2AllManagerBase, Cache
@@ -156,9 +154,11 @@ class PPLXAll2AllManager(All2AllManagerBase):
         if self.internode:
             # inter-node communication needs nvshmem,
             # intra-node communication uses p2p mapping directly
-            from pplx_kernels.nvshmem import (nvshmem_alloc_empty_unique_id,
-                                              nvshmem_get_unique_id,
-                                              nvshmem_init)
+            from pplx_kernels.nvshmem import (
+                nvshmem_alloc_empty_unique_id,
+                nvshmem_get_unique_id,
+                nvshmem_init,
+            )
             logger.debug(
                 "Initialize NVSHMEM for pplx_kernels: "
                 "rank=%d, world size=%d", self.rank, self.world_size)
@@ -202,151 +202,151 @@ class PPLXAll2AllManager(All2AllManagerBase):
             nvshmem_finalize()
 
 
-class DeepEPAll2AllManagerBase(All2AllManagerBase):
-    """
-    All2All communication based on DeepEP High-Throughput kernels.
-    """
+# class DeepEPAll2AllManagerBase(All2AllManagerBase):
+#     """
+#     All2All communication based on DeepEP High-Throughput kernels.
+#     """
 
-    def __init__(self, cpu_group):
-        assert has_deep_ep(
-        ), "DeepEP kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install DeepEP kernels."  # noqa
-        super().__init__(cpu_group)
-        self.handle_cache = Cache()
+#     def __init__(self, cpu_group):
+#         assert has_deep_ep(
+#         ), "DeepEP kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install DeepEP kernels."  # noqa
+#         super().__init__(cpu_group)
+#         self.handle_cache = Cache()
 
-        # This is the DeepEP default. Stick to it till we can establish
-        # reasonable defaults based on profiling.
-        self.num_sms = 20
+#         # This is the DeepEP default. Stick to it till we can establish
+#         # reasonable defaults based on profiling.
+#         self.num_sms = 20
 
-    def get_handle(self, kwargs):
-        raise NotImplementedError
+#     def get_handle(self, kwargs):
+#         raise NotImplementedError
 
-    def dispatch(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        is_sequence_parallel: bool = False
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError
+#     def dispatch(
+#         self,
+#         hidden_states: torch.Tensor,
+#         router_logits: torch.Tensor,
+#         is_sequence_parallel: bool = False
+#     ) -> tuple[torch.Tensor, torch.Tensor]:
+#         raise NotImplementedError
 
-    def combine(self,
-                hidden_states: torch.Tensor,
-                is_sequence_parallel: bool = False) -> torch.Tensor:
-        raise NotImplementedError
+#     def combine(self,
+#                 hidden_states: torch.Tensor,
+#                 is_sequence_parallel: bool = False) -> torch.Tensor:
+#         raise NotImplementedError
 
-    def destroy(self):
-        pass
-
-
-class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
-    """
-    All2All communication based on DeepEP High-Throughput kernels.
-    """
-
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
-
-    def _make_all2all_kwargs(self) -> dict[Any, Any]:
-        # Defaults for internode and intranode are taken from DeepEP tests.
-        num_nvl_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
-        num_rdma_bytes = None
-        num_qps_per_rank = None
-
-        if self.internode:
-            num_rdma_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
-            num_qps_per_rank = self.num_sms // 2
-        else:
-            num_rdma_bytes = 0
-            num_qps_per_rank = 1
-
-        assert num_rdma_bytes is not None
-        assert num_qps_per_rank is not None
-        return dict(group=self.cpu_group,
-                    num_nvl_bytes=num_nvl_bytes,
-                    num_rdma_bytes=num_rdma_bytes,
-                    low_latency_mode=False,
-                    num_qps_per_rank=num_qps_per_rank)
-
-    def get_handle(self, kwargs):
-
-        assert len(kwargs) == 0, (
-            "DeepEPHTAll2AllManager expects no arguments. All the required "
-            "args are computed in the Manager itself.")
-
-        import deep_ep
-        buffer_kwargs = self._make_all2all_kwargs()
-        logger.debug("DeepEP all2all args %s", buffer_kwargs)
-        handle: deep_ep.Buffer = self.handle_cache.get_or_create(
-            buffer_kwargs, deep_ep.Buffer)
-        return handle
-
-    def set_num_sms(self, num_sms: int):
-        import deep_ep
-
-        # Right now the buffers are sized for only what the kernels were
-        # created with. So we can only reduce the number of SMS used
-        # but not increase it.
-        if num_sms > self.num_sms:
-            num_sms = self.num_sms
-        deep_ep.Buffer.set_num_sms(num_sms)
+#     def destroy(self):
+#         pass
 
 
-class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
-    """
-    All2All communication based on DeepEP Low-Latency kernels.
-    """
+# class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
+#     """
+#     All2All communication based on DeepEP High-Throughput kernels.
+#     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+#     def __init__(self, cpu_group):
+#         super().__init__(cpu_group)
 
-    def _make_all2all_kwargs(
-        self,
-        max_num_tokens_per_dp_rank: int,
-        token_hidden_size: int,
-        num_ep_ranks: int,
-        num_global_experts: int,
-        num_local_experts: int,
-    ) -> dict[Any, Any]:
-        """
-        max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
-          can dispatch all the ranks must hold the same value.
-        token_hidden_size: the hidden dimension of each token.
-        num_ep_ranks: the number of EP group ranks.
-        num_global_experts: Number of experts in the model.
-        num_local_experts: Number of experts in an EP rank.
-        """
-        import deep_ep
+#     def _make_all2all_kwargs(self) -> dict[Any, Any]:
+#         # Defaults for internode and intranode are taken from DeepEP tests.
+#         num_nvl_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
+#         num_rdma_bytes = None
+#         num_qps_per_rank = None
 
-        # Defaults for internode and intranode are taken from DeepEP tests.
-        num_nvl_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
-        num_qps_per_rank = num_local_experts
-        num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-            num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
-            hidden=token_hidden_size,
-            num_ranks=num_ep_ranks,
-            num_experts=num_global_experts)
+#         if self.internode:
+#             num_rdma_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
+#             num_qps_per_rank = self.num_sms // 2
+#         else:
+#             num_rdma_bytes = 0
+#             num_qps_per_rank = 1
 
-        assert num_rdma_bytes is not None
-        return dict(group=self.cpu_group,
-                    num_nvl_bytes=num_nvl_bytes,
-                    num_rdma_bytes=num_rdma_bytes,
-                    low_latency_mode=True,
-                    num_qps_per_rank=num_qps_per_rank)
+#         assert num_rdma_bytes is not None
+#         assert num_qps_per_rank is not None
+#         return dict(group=self.cpu_group,
+#                     num_nvl_bytes=num_nvl_bytes,
+#                     num_rdma_bytes=num_rdma_bytes,
+#                     low_latency_mode=False,
+#                     num_qps_per_rank=num_qps_per_rank)
 
-    def get_handle(self, kwargs):
-        """
-        The kwargs for DeepEPLLAll2AllManager is dictated by
-        _make_all2all_kwargs.
-        """
-        import deep_ep
-        buffer_kwargs = self._make_all2all_kwargs(**kwargs)
-        logger.debug("DeepEP all2all args %s", buffer_kwargs)
-        handle: deep_ep.Buffer = self.handle_cache.get_or_create(
-            buffer_kwargs, deep_ep.Buffer)
-        return handle
+#     def get_handle(self, kwargs):
 
-    # DeepEP LL uses RDMA so no SMs are used for communication
-    def max_sms_used(self) -> Optional[int]:
-        return 0
+#         assert len(kwargs) == 0, (
+#             "DeepEPHTAll2AllManager expects no arguments. All the required "
+#             "args are computed in the Manager itself.")
+
+#         import deep_ep
+#         buffer_kwargs = self._make_all2all_kwargs()
+#         logger.debug("DeepEP all2all args %s", buffer_kwargs)
+#         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
+#             buffer_kwargs, deep_ep.Buffer)
+#         return handle
+
+#     def set_num_sms(self, num_sms: int):
+#         import deep_ep
+
+#         # Right now the buffers are sized for only what the kernels were
+#         # created with. So we can only reduce the number of SMS used
+#         # but not increase it.
+#         if num_sms > self.num_sms:
+#             num_sms = self.num_sms
+#         deep_ep.Buffer.set_num_sms(num_sms)
+
+
+# class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
+#     """
+#     All2All communication based on DeepEP Low-Latency kernels.
+#     """
+
+#     def __init__(self, cpu_group):
+#         super().__init__(cpu_group)
+
+#     def _make_all2all_kwargs(
+#         self,
+#         max_num_tokens_per_dp_rank: int,
+#         token_hidden_size: int,
+#         num_ep_ranks: int,
+#         num_global_experts: int,
+#         num_local_experts: int,
+#     ) -> dict[Any, Any]:
+#         """
+#         max_num_tokens_per_dp_rank : the maximum number of tokens a DP rank
+#           can dispatch all the ranks must hold the same value.
+#         token_hidden_size: the hidden dimension of each token.
+#         num_ep_ranks: the number of EP group ranks.
+#         num_global_experts: Number of experts in the model.
+#         num_local_experts: Number of experts in an EP rank.
+#         """
+#         import deep_ep
+
+#         # Defaults for internode and intranode are taken from DeepEP tests.
+#         num_nvl_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
+#         num_qps_per_rank = num_local_experts
+#         num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(
+#             num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
+#             hidden=token_hidden_size,
+#             num_ranks=num_ep_ranks,
+#             num_experts=num_global_experts)
+
+#         assert num_rdma_bytes is not None
+#         return dict(group=self.cpu_group,
+#                     num_nvl_bytes=num_nvl_bytes,
+#                     num_rdma_bytes=num_rdma_bytes,
+#                     low_latency_mode=True,
+#                     num_qps_per_rank=num_qps_per_rank)
+
+#     def get_handle(self, kwargs):
+#         """
+#         The kwargs for DeepEPLLAll2AllManager is dictated by
+#         _make_all2all_kwargs.
+#         """
+#         import deep_ep
+#         buffer_kwargs = self._make_all2all_kwargs(**kwargs)
+#         logger.debug("DeepEP all2all args %s", buffer_kwargs)
+#         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
+#             buffer_kwargs, deep_ep.Buffer)
+#         return handle
+
+#     # DeepEP LL uses RDMA so no SMs are used for communication
+#     def max_sms_used(self) -> Optional[int]:
+#         return 0
 
 
 class FlashInferAllToAllManager(All2AllManagerBase):
@@ -385,7 +385,8 @@ class FlashInferAllToAllManager(All2AllManagerBase):
         )
 
         from vllm.distributed.device_communicators.mnnvl_compat import (
-            CustomCommunicator)
+            CustomCommunicator,
+        )
         dp_config = MnnvlConfig(
             comm_backend=CustomCommunicator(get_dp_group().cpu_group),
             fabric_page_size=1 << 29,  # 512MB
@@ -435,6 +436,12 @@ class FlashInferAllToAllManager(All2AllManagerBase):
                 logger.warning("Failed to cleanup FlashInfer workspace: %s", e)
             finally:
                 self.workspace_tensor = None
+                self.prepare_workspace_tensor = None
+                self.mapping = None
+                self.initialized = False
+                self.prepare_workspace_tensor = None
+                self.mapping = None
+                self.initialized = False
                 self.prepare_workspace_tensor = None
                 self.mapping = None
                 self.initialized = False

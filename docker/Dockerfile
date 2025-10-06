@@ -432,11 +432,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/build.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
+# NOTE: DeepGEMM from DeepSeek has been removed due to national security concerns
 # Install DeepGEMM from source
-ARG DEEPGEMM_GIT_REF
-COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
-RUN --mount=type=cache,target=/root/.cache/uv \
-    VLLM_DOCKER_BUILD_CONTEXT=1 /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"} 
+# ARG DEEPGEMM_GIT_REF
+# COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
+# RUN --mount=type=cache,target=/root/.cache/uv \
+#     VLLM_DOCKER_BUILD_CONTEXT=1 /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"} 
 
 COPY tools/install_gdrcopy.sh install_gdrcopy.sh
 RUN set -eux; \
@@ -448,7 +449,8 @@ RUN set -eux; \
     ./install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"; \
     rm ./install_gdrcopy.sh
 
-# Install EP kernels(pplx-kernels and DeepEP)
+# Install EP kernels from perplexity(pplx-kernels)
+# NOTE: DeepEP from DeepSeek has been removed due to national security concerns
 COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
 ENV CUDA_HOME=/usr/local/cuda
 RUN export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-9.0a+PTX}" \
