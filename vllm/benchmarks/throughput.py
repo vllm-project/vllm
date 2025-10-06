@@ -459,14 +459,14 @@ def validate_args(args):
         ):
             assert args.backend == "vllm-chat", (
                 f"{args.dataset_path} needs to use vllm-chat as the backend."
-            )  # noqa: E501
+            )
         elif args.dataset_path in (
             InstructCoderDataset.SUPPORTED_DATASET_PATHS
             | AIMODataset.SUPPORTED_DATASET_PATHS
         ):
             assert args.backend == "vllm", (
                 f"{args.dataset_path} needs to use vllm as the backend."
-            )  # noqa: E501
+            )
         else:
             raise ValueError(f"{args.dataset_path} is not supported by hf dataset.")
 

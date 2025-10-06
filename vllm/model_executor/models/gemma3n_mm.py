@@ -176,7 +176,7 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
         processor = self.info.get_hf_processor()
         audio_feature_extractor: Gemma3nAudioFeatureExtractor = (
             processor.feature_extractor
-        )  # noqa: E501
+        )
         audio_len = audio_feature_extractor.fft_length
         image_processor: SiglipImageProcessorFast = processor.image_processor
         img_width = image_processor.size.get("width", 224)
