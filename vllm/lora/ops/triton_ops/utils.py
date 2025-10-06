@@ -212,10 +212,8 @@ def get_v1_op_configs(
     m = batch
     if op_type == "shrink":
         k, n = (hidden_size, rank)
-    elif op_type == "expand":
-        k, n = (rank, hidden_size)
     else:
-        k, n, r = (hidden_size, out_dim, rank)
+        k, n = (rank, hidden_size)
 
     config_data: Any
     config_data = load_v1_op_config(op_type, add_inputs)
