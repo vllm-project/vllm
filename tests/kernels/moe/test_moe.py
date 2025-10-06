@@ -919,6 +919,7 @@ def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("with_bias", [False, True])
 @pytest.mark.parametrize("activation", ["silu"])
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only test")
 def test_cpu_fused_moe_basic(m, n, k, e, topk, dtype, with_bias, activation):
     device = "cpu"
     torch.manual_seed(7)
