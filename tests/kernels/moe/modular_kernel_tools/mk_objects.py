@@ -274,17 +274,15 @@ if has_deep_gemm() and is_deep_gemm_supported():
         needs_matching_quant=False,
         needs_deep_gemm=True,
     )
-    (
-        register_experts(
-            DeepGemmExperts,
-            standard_format,
-            fp8_types,
-            blocked_quantization_support=True,
-            supports_chunking=True,
-            supports_expert_map=True,
-            needs_matching_quant=False,
-            needs_deep_gemm=True,
-        ),
+    register_experts(
+        DeepGemmExperts,
+        standard_format,
+        fp8_types,
+        blocked_quantization_support=True,
+        supports_chunking=True,
+        supports_expert_map=True,
+        needs_matching_quant=False,
+        needs_deep_gemm=True,
     )
     register_experts(
         BatchedTritonOrDeepGemmExperts,
