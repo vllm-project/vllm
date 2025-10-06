@@ -23,7 +23,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tracing import init_tracer
-from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device
 from vllm.v1.engine import EngineCoreRequest
@@ -95,18 +95,8 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
-        if self.model_config.skip_tokenizer_init:
-            self.tokenizer = None
-        else:
-            # Tokenizer (+ ensure liveness if running in another process).
-            self.tokenizer = init_tokenizer_from_configs(
-                model_config=vllm_config.model_config
-            )
-
         # Processor (convert Inputs --> EngineCoreRequests)
-        self.processor = Processor(
-            vllm_config=vllm_config, tokenizer=self.tokenizer, mm_registry=mm_registry
-        )
+        self.processor = Processor(vllm_config, mm_registry=mm_registry)
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(
@@ -213,6 +203,14 @@ class LLMEngine:
     @classmethod
     def validate_outputs(cls, outputs, output_type):
         return outputs
+
+    @property
+    def tokenizer(self) -> Optional[AnyTokenizer]:
+        return self.processor.tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, tokenizer: Optional[AnyTokenizer]) -> None:
+        self.processor.tokenizer = tokenizer
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
