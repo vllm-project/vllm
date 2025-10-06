@@ -325,13 +325,18 @@ class VllmConfig:
 
         # If user does not set custom ops via none or all set it here based on
         # compilation level and backend.
-        if self.compilation_config.custom_ops.count(
-                "none") + self.compilation_config.custom_ops.count("all") == 0:
-            if self.compilation_config.level > 0 \
-                and self.compilation_config.backend != "eager":
-                self.compilation_config.custom_ops.insert(0, "none")
+        if (
+            self.compilation_config.custom_ops.count("none")
+            + self.compilation_config.custom_ops.count("all")
+            == 0
+        ):
+            if (
+                self.compilation_config.level > 0
+                and self.compilation_config.backend != "eager"
+            ):
+                self.compilation_config.custom_ops.append("none")
             else:
-                self.compilation_config.custom_ops.insert(0, "all")
+                self.compilation_config.custom_ops.append("all")
 
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
