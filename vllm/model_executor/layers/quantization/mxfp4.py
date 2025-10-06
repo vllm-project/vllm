@@ -777,7 +777,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w1_scale = layer.w13_weight_scale
             w2_scale = layer.w2_weight_scale
             return ocp_mx_moe_quant_config(
-                quant_dtype="fp4",
+                quant_dtype="mxfp4",
                 w1_bias=layer.w13_bias,
                 w2_bias=layer.w2_bias,
                 w1_scale=w1_scale,
