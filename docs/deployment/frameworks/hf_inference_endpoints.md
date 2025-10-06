@@ -128,7 +128,7 @@ Some models require manual deployment because they:
 
 These models cannot be deployed using the **Deploy** button on the model card.
 
-In this guide, we demonstrate manual deployment using the [rednote-hilab/dots.ocr](https://huggingface.co/rednote-hilab/dots.ocr) model, an OCR model integrated with vLLM (see vLLM [PR](https://github.com/vllm-project/vllm/pull/24645)).
+In this guide, we demonstrate manual deployment using the [`rednote-hilab/dots.ocr`](https://huggingface.co/rednote-hilab/dots.ocr) model, an OCR model integrated with vLLM (see vLLM [PR](https://github.com/vllm-project/vllm/pull/24645)).
 
 1. Start a new deployment. Go to [Inference Endpoints](https://endpoints.huggingface.co/) and click `New`.
 
