@@ -1322,7 +1322,8 @@ class EngineArgs:
 
             ray_runtime_env = ray.get_runtime_context().runtime_env
             # Avoid logging sensitive environment variables
-            sanitized_env = dict(ray_runtime_env) if ray_runtime_env else {}
+            sanitized_env = ray_runtime_env.to_dict(
+            ) if ray_runtime_env else {}
             if "env_vars" in sanitized_env:
                 sanitized_env["env_vars"] = {
                     k: "***"
