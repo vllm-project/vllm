@@ -56,8 +56,7 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
             return InductorAdaptor()
     else:
         assert compilation_config.backend == "eager", (
-            "Custom backends not \
-            supported with CompilationLevel.PIECEWISE"
+            "Custom backends not supported with CompilationLevel.PIECEWISE"
         )
 
         logger.debug("Using EagerAdaptor")
