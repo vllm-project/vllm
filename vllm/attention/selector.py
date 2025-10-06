@@ -44,32 +44,9 @@ def get_env_variable_attn_backend() -> AttentionBackendEnum | None:
 # a backend based on system & workload configuration
 # (default behavior if this variable is None)
 #
-# THIS SELECTION TAKES PRECEDENCE OVER THE
-# VLLM_ATTENTION_BACKEND ENVIRONMENT VARIABLE
-forced_attn_backend: AttentionBackendEnum | None = None
-
-
-def global_force_attn_backend(attn_backend: AttentionBackendEnum | None) -> None:
-    """
-    Force all attention operations to use a specified backend.
-
-    Passing `None` for the argument re-enables automatic
-    backend selection.,
-
-    Arguments:
-
-    * attn_backend: backend selection (None to revert to auto)
-    """
-    global forced_attn_backend
-    forced_attn_backend = attn_backend
-
-
-def get_global_forced_attn_backend() -> AttentionBackendEnum | None:
-    """
-    Get the currently-forced choice of attention backend,
-    or None if auto-selection is currently enabled.
-    """
-    return forced_attn_backend
+# NOTE: The global forced backend mechanism has been removed.
+# To override the attention backend, modify vllm_config.attention_config.backend
+# using get_current_vllm_config().attention_config.backend = "BACKEND_NAME"
 
 
 def get_attn_backend(
@@ -116,38 +93,22 @@ def _cached_get_attn_backend(
 ) -> type[AttentionBackend]:
     # Check whether a particular choice of backend was
     # previously forced.
-    #
-    # THIS SELECTION OVERRIDES THE VLLM_ATTENTION_BACKEND
-    # ENVIRONMENT VARIABLE.
-    selected_backend = None
-    backend_by_global_setting: AttentionBackendEnum | None = (
-        get_global_forced_attn_backend()
-    )
-    if backend_by_global_setting is not None:
-        selected_backend = backend_by_global_setting
-    else:
-        # Check the config and override if specified
-        from vllm.config import get_current_vllm_config
+    # Check the config (which may come from CLI arg, env var, or runtime override)
+    from vllm.config import get_current_vllm_config
 
-        vllm_config = get_current_vllm_config()
-        backend_by_env_var: str | None = vllm_config.attention_config.backend
-        if backend_by_env_var is not None:
-            if backend_by_env_var.endswith("_VLLM_V1"):
-                logger.warning(
-                    "The suffix '_VLLM_V1' in the environment variable "
-                    "%s is no longer necessary as V0 backends have been "
-                    "deprecated. Please remove this suffix from your "
-                    "environment variable setting.",
-                    STR_BACKEND_ENV_VAR,
-                )
-                backend_by_env_var = backend_by_env_var.removesuffix("_VLLM_V1")
-            try:
-                selected_backend = AttentionBackendEnum[backend_by_env_var]
-            except KeyError as e:
-                raise ValueError(
-                    f"Invalid attention backend: '{backend_by_env_var}'. Valid "
-                    f"backends are: {list(AttentionBackendEnum.__members__.keys())}"
-                ) from e
+    selected_backend = None
+    vllm_config = get_current_vllm_config()
+    backend_by_config: str | None = vllm_config.attention_config.backend
+    if backend_by_config is not None:
+        if backend_by_config.endswith("_VLLM_V1"):
+            logger.warning(
+                "The suffix '_VLLM_V1' in the attention backend "
+                "is no longer necessary as V0 backends have been "
+                "deprecated. Please remove this suffix from your "
+                "backend setting."
+            )
+            backend_by_config = backend_by_config.removesuffix("_VLLM_V1")
+        selected_backend = AttentionBackendEnum[backend_by_config]
 
     # get device-specific attn_backend
     from vllm.platforms import current_platform
@@ -236,30 +197,29 @@ def global_force_attn_backend_context_manager(
     attn_backend: AttentionBackendEnum,
 ) -> Generator[None, None, None]:
     """
-    Globally force a vLLM attention backend override within a
-    context manager, reverting the global attention backend
-    override to its prior state upon exiting the context
-    manager.
+    Temporarily override the attention backend within a context manager,
+    reverting to the original backend upon exiting.
 
     Arguments:
 
-    * attn_backend: attention backend to force
+    * attn_backend: attention backend to use
 
     Returns:
 
     * Generator
     """
+    from vllm.config import get_current_vllm_config
 
-    # Save the current state of the global backend override (if any)
-    original_value = get_global_forced_attn_backend()
+    # Save the current backend from config
+    vllm_config = get_current_vllm_config()
+    original_value = vllm_config.attention_config.backend
 
-    # Globally force the new backend override
-    global_force_attn_backend(attn_backend)
+    # Override the backend in config
+    vllm_config.attention_config.backend = str(attn_backend.name)
 
     # Yield control back to the enclosed code block
     try:
         yield
     finally:
-        # Revert the original global backend override, if any
-        global_force_attn_backend(original_value)
-        _cached_get_attn_backend.cache_clear()
+        # Revert the original backend
+        vllm_config.attention_config.backend = original_value

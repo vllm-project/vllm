@@ -187,9 +187,8 @@ class CudaPlatformBase(Platform):
                 if cls.is_device_capability(100):
                     # Blackwell => Force CutlassMLA.
                     use_cutlass_mla = True
-                    # TODO: This does not work, because the
-                    # global_force_attn_backend_context_manager is not set.
-                    # See vllm/attention/selector.py:_cached_get_attn_backend
+                    # Set the backend in AttentionConfig so it's used during
+                    # backend selection
                     vllm_config.attention_config.backend = "CUTLASS_MLA"
                 else:
                     # Not Blackwell
