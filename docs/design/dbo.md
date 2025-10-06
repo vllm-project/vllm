@@ -6,7 +6,7 @@ The core motivation of the DBO system in vLLM is to overlap the sparse all-to-al
 
 ## Introduction
 
-The Dual Batch Overlap system works by splitting the batch up in the model runner, creating two worker threads, and then having each of these worker threads run the model. When DBO is enabled, there are yield points within the FusedMoEModularKernel that will allow the two worker threads to ping-pong between each other so that when one is running compute, the other is waiting on communication. Throughout the code you may see ubatch being used as a short form of microbatch; this is just an ASCII friendly version of the short form µ-batch.
+The Dual Batch Overlap system works by splitting the batch in the model runner, creating two worker threads, and then running the model on each of these worker threads. When DBO is enabled, yield points within the `FusedMoEModularKernel` allow the two CPU worker threads (also called UBatch threads) to ping-pong between each other so that when one is running compute, the other is waiting on communication. Throughout the code, ubatch may be used as a short form of microbatch; this is an ASCII-friendly version of the short form µ-batch.
 
 The DBO system includes modifications to `GpuModelRunner` and `ModularKernel`, and defines two utility classes: `UBatchWrapper` and `UBatchContext`. `UBatchWrapper` manages thread lifecycle and CUDA graph execution of the model. `UBatchContext` wraps `ForwardContext` to coordinate synchronization between the two UBatch threads.
 
@@ -34,12 +34,12 @@ To enable the DBO system pass in the `--enable-dbo` argument to your vllm serve 
 * `--dbo-decode-token-threshold` the minimum number of tokens in a decode-only batch required to enable DBO for that batch.
 * `--dbo-prefill-token-threshold` the minimum number of tokens in a batch containing at least one prefill required to enable DBO for that batch
 
-Currently DBO is only supported with DeepEP so you’ll have to install that and set the `VLLM_ALL2ALL_BACKEND` environment variable to `deepep_low_latency` if your workload is primarily decode requests and `deepep_high_throughput` if your workload is primarily prefill requests.
+Currently, DBO is only supported with DeepEP, so DeepEP must be installed and the `VLLM_ALL2ALL_BACKEND` environment variable must be set to `deepep_low_latency` if your workload is primarily decode requests, or `deepep_high_throughput` if your workload is primarily prefill requests.
 
 Below is a command that will spin up a two DP rank server with expert parallelism and DBO enabled.
 EX: `VLLM_ALL2ALL_BACKEND=deepep_low_latency vllm serve --model="deepseek-ai/DeepSeek-V2-Lite" --trust-remote-code --data-parallel-size 2 --enable-expert-parallel --enable-dbo`
 
-Note that you'll need to have DeepEp installed and at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
+Note that there must be at least two GPUs visible in `CUDA_VISIBLE_DEVICES`
 
 ## DBO Components
 
@@ -55,17 +55,17 @@ The batch is split into microbatches by the `GPUModelRunner` class. This is acco
 
 gpu_ubatch_wrapper
 
-The `UBatchWrapper` class is a model wrapper that's responsible for all of the thread, UBatchContext, and cuda graph management for DBO. It's designed to be relatively transparent to the GPU Model Runner.
+The `UBatchWrapper` class is a model wrapper that's responsible for all of the thread, UBatchContext, and CUDA graph management for DBO. It's designed to be relatively transparent to the GPU Model Runner.
 
-The implementation revolves around running the model twice, once for each microbatch. Each invocation of the model will happen inside of a cpu thread. These threads are launched in parallel and are synchronized using the `UBatchContext`. Each thread is given a “sliced” version of the attention metadata that they will use to run their half of the batch.
+The implementation runs the model twice, once for each microbatch. Each invocation of the model will happen inside of a `UBatch` thread. These threads are launched in parallel and are synchronized using the `UBatchContext`. Each thread is given a “sliced” version of the attention metadata that they will use to run their half of the batch.
 
-Cudagraphs for DBO are entirely managed by the `UBatchWrapper` as well. Because of this, DBO only supports running with Full Cudagraphs. However, once we’ve captured a DBO cudagraph, we can replay it without any multithreading or CPU synchronization.
+CUDA graphs for DBO are entirely managed by the `UBatchWrapper`. Because of this, DBO only supports running with Full CUDA graphs. However, once a DBO CUDA graph has been captured, it can be replayed without any multithreading or CPU synchronization.
 
 #### Interfaces
 
-`__init__` method takes in the model, VllmConfig, CUDAGraphMode, and device.
+The `__init__` method takes in the model, VllmConfig, CUDAGraphMode, and device.
 
-`forward` method exclusively takes in model arguments. It determines whether or not to run with DBO if there's a `ubatch_slices` object in the `forward_context`. Otherwise it just naively runs the model.
+The `forward` method exclusively takes in model arguments. It determines whether or not to run with DBO based on whether a `ubatch_slices` object is present in the `forward_context`. Otherwise, the model is run without DBO.
 
 ### UBatchContext
 
@@ -79,10 +79,10 @@ The current implementation has all `dbo_yield` and `dbo_maybe_run_recv_hook` cal
 
 #### Interfaces
 
-`make_ubatch_context` function initializes two `UBatchContexts`, one for each UBatch thread. It takes two cuda streams, the preexisting `ForwardContexts` and a cpu thread barrier. You should exclusively use this function to instantiate `UBatchContexts`. It will handle all of the event initialization.
+The `make_ubatch_context` function initializes two `UBatchContexts`, one for each UBatch thread. It takes two CUDA streams, the preexisting `ForwardContexts` and a cpu thread barrier. This function should be used exclusively to instantiate `UBatchContexts`. It will handle all of the event initialization.
 
-`dbo_register_recv_hook` method registers a callback that can be returned by the `FusedMoEPrepareAndFinalize` class in the other UBatch thread’s `UBatchContext`. The callback will be run when the other thread calls `dbo_maybe_run_recv_hook`. This is typically used to “wait” on an all-to-all kernel
+The `dbo_register_recv_hook` method registers a callback that can be returned by the `FusedMoEPrepareAndFinalize` class in the other UBatch thread’s `UBatchContext`. The callback will be run when the other thread calls `dbo_maybe_run_recv_hook`. This is typically used to “wait” on an all-to-all kernel
 
-`dbo_maybe_run_recv_hook` method runs a callback that’s set by the `dbo_register_recv_hook` function if that callback exists.
+The `dbo_maybe_run_recv_hook` method runs a callback that’s set by the `dbo_register_recv_hook` function if that callback exists.
 
-`dbo_yield` method puts the current thread to sleep and wakes up the other UBatch thread
+The `dbo_yield` method puts the current thread to sleep and wakes up the other UBatch thread
