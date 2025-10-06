@@ -406,11 +406,11 @@ class HfRunner:
 
     def get_inputs(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[list[int]]],
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
-    ) -> list[Union[BatchFeature, BatchEncoding]]:
+    ) -> list[Union[BatchFeature, BatchEncoding, dict[str, torch.Tensor]]]:
         if images is not None:
             assert len(prompts) == len(images)
 
@@ -422,29 +422,37 @@ class HfRunner:
 
         all_inputs: list[Union[BatchFeature, BatchEncoding]] = []
         for i, prompt in enumerate(prompts):
-            processor_kwargs: dict[str, Any] = {
-                "text": prompt,
-                "return_tensors": "pt",
-            }
-            if images is not None and (image := images[i]) is not None:
-                processor_kwargs["images"] = image
-            if videos is not None and (video := videos[i]) is not None:
-                processor_kwargs["videos"] = video
-            if audios is not None and (audio_inputs := audios[i]) is not None:
-                # HACK - not all processors take sampling_rate; we should
-                # clean this up in the future.
-                if len(audio_inputs) == 2:
-                    audio, sr = audio_inputs
-                    processor_kwargs["audio"] = audio
-                    processor_kwargs["sampling_rate"] = sr
-                else:
-                    processor_kwargs["audio"] = audio_inputs
+            if isinstance(prompt, str):
+                processor_kwargs: dict[str, Any] = {
+                    "text": prompt,
+                    "return_tensors": "pt",
+                }
+                if images is not None and (image := images[i]) is not None:
+                    processor_kwargs["images"] = image
+                if videos is not None and (video := videos[i]) is not None:
+                    processor_kwargs["videos"] = video
+                if audios is not None and (audio_inputs := audios[i]) is not None:
+                    # HACK - not all processors take sampling_rate; we should
+                    # clean this up in the future.
+                    if len(audio_inputs) == 2:
+                        audio, sr = audio_inputs
+                        processor_kwargs["audio"] = audio
+                        processor_kwargs["sampling_rate"] = sr
+                    else:
+                        processor_kwargs["audio"] = audio_inputs
 
-            inputs = self.processor(**processor_kwargs)
-            if isinstance(inputs, BatchFeature):
-                inputs = inputs.to(dtype=self.dtype)
-
-            all_inputs.append(inputs)
+                inputs = self.processor(**processor_kwargs)
+                if isinstance(inputs, BatchFeature):
+                    inputs = inputs.to(dtype=self.dtype)
+                all_inputs.append(inputs)
+            else:
+                assert isinstance(prompt, list) and all(
+                    isinstance(x, int) for x in prompt
+                ), "prompt must be a list of ints corresponding to the prompt token ids"
+                input_dict: dict[str, torch.Tensor] = {
+                    "input_ids": torch.tensor(prompt, dtype=torch.long).unsqueeze(0),
+                }
+                all_inputs.append(input_dict)
 
         return all_inputs
 
@@ -477,7 +485,7 @@ class HfRunner:
 
     def generate(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[list[int]]],
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
@@ -505,7 +513,7 @@ class HfRunner:
 
     def generate_greedy(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[list[int]]],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,

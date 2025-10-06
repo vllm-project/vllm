@@ -23,10 +23,8 @@ the 1st will be sampled after the prefill and the 2nd after the first decode
 """
 
 import pytest
-import torch
-from transformers import AutoModelForCausalLM
 
-from tests.conftest import VllmRunner
+from tests.conftest import HfRunner, VllmRunner
 from tests.models.utils import check_outputs_equal
 from tests.utils import create_new_process_for_each_test
 
@@ -43,6 +41,7 @@ from tests.utils import create_new_process_for_each_test
 def test_max_context_length(
     model: str,
     vllm_runner: type[VllmRunner],
+    hf_runner: type[HfRunner],
     prompt_len: int,
     max_tokens: int,
 ) -> None:
@@ -68,25 +67,15 @@ def test_max_context_length(
         # Generate max_tokens new tokens deterministically.
         vllm_outputs = vllm_model.generate_greedy(prompt_ids, max_tokens)
 
-    vllm_output_ids = vllm_outputs[0][0][prompt_len:]
-
     # --- HuggingFace generation ---
-    with torch.no_grad():
-        hf_model = AutoModelForCausalLM.from_pretrained(model)
+    with hf_runner(
+        model_name=model,
+    ) as hf_model:
+        hf_outputs = hf_model.generate_greedy(prompt_ids, max_tokens)
 
-        # HF expects a tensor of input ids shaped (batch, seq_len).
-        hf_input_tokens = torch.tensor(prompt_ids[0]).unsqueeze(0)
-
-        # Generate max_tokens new tokens deterministically.
-        hf_generated = hf_model.generate(
-            hf_input_tokens,
-            do_sample=False,
-            min_new_tokens=max_tokens,
-            max_new_tokens=max_tokens,
-        )
-
-        # HF returns the prompt + generated tokens. Slice off the prompt.
-        hf_output_ids = hf_generated.cpu().tolist()[0][len(prompt_ids[0]) :]
+    # vLLM and HF runners return prompt + generated tokens. Slice off the prompt.
+    vllm_output_ids = vllm_outputs[0][0][prompt_len:]
+    hf_output_ids = hf_outputs[0][0][prompt_len:]
 
     # check that exactly max_tokens tokens were generated with vLLM and HF
     assert len(vllm_output_ids) == len(hf_output_ids) == max_tokens
