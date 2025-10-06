@@ -24,6 +24,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only MiniCPM3 model compatible with HuggingFace weights."""
+
 import math
 from collections.abc import Iterable
 from itertools import islice
@@ -39,27 +40,35 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+    DEFAULT_VOCAB_PADDING_SIZE,
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+from .utils import (
+    PPMissingLayer,
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+)
 
 
 class MiniCPM3MLP(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -70,18 +79,23 @@ class MiniCPM3MLP(nn.Module):
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
+            hidden_size,
+            [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj")
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           quant_config=quant_config,
-                                           prefix=f"{prefix}.down_proj")
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+        )
         if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+            )
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
@@ -124,46 +138,52 @@ class MiniCPM3Attention(nn.Module):
         self.scaling = self.qk_head_dim**-0.5
 
         if self.q_lora_rank is not None:
-            self.q_a_proj = ReplicatedLinear(self.hidden_size,
-                                             self.q_lora_rank,
-                                             bias=False,
-                                             quant_config=quant_config,
-                                             prefix=f"{prefix}.q_a_proj")
-            self.q_a_layernorm = RMSNorm(self.q_lora_rank,
-                                         eps=config.rms_norm_eps)
-            self.q_b_proj = ColumnParallelLinear(self.q_lora_rank,
-                                                 self.num_heads *
-                                                 self.qk_head_dim,
-                                                 bias=False,
-                                                 quant_config=quant_config,
-                                                 prefix=f"{prefix}.q_b_proj")
+            self.q_a_proj = ReplicatedLinear(
+                self.hidden_size,
+                self.q_lora_rank,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_a_proj",
+            )
+            self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
+            self.q_b_proj = ColumnParallelLinear(
+                self.q_lora_rank,
+                self.num_heads * self.qk_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_b_proj",
+            )
         else:
-            self.q_proj = ColumnParallelLinear(self.hidden_size,
-                                               self.num_heads *
-                                               self.qk_head_dim,
-                                               bias=False,
-                                               quant_config=quant_config,
-                                               prefix=f"{prefix}.q_proj")
+            self.q_proj = ColumnParallelLinear(
+                self.hidden_size,
+                self.num_heads * self.qk_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_proj",
+            )
 
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,
             self.kv_lora_rank + self.qk_rope_head_dim,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.kv_a_proj_with_mqa")
-        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
-                                      eps=config.rms_norm_eps)
+            prefix=f"{prefix}.kv_a_proj_with_mqa",
+        )
+        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.kv_b_proj")
-        self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
-                                        self.hidden_size,
-                                        bias=False,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.o_proj")
+            prefix=f"{prefix}.kv_b_proj",
+        )
+        self.o_proj = RowParallelLinear(
+            self.num_heads * self.v_head_dim,
+            self.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
         self.rotary_emb = get_rope(
             self.qk_rope_head_dim,
             rotary_dim=self.qk_rope_head_dim,
@@ -181,18 +201,18 @@ class MiniCPM3Attention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-    def forward(self, positions: torch.Tensor,
-                hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
         if self.q_lora_rank is not None:
             q = self.q_a_proj(hidden_states)[0]
             q = self.q_a_layernorm(q)
-            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads,
-                                         self.qk_head_dim)
+            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         else:
-            q = self.q_proj(hidden_states)[0].view(-1, self.num_local_heads,
-                                                   self.qk_head_dim)
-        _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
-                          dim=-1)
+            q = self.q_proj(hidden_states)[0].view(
+                -1, self.num_local_heads, self.qk_head_dim
+            )
+        _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         latent_cache, _ = self.kv_a_proj_with_mqa(hidden_states)
         kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         latent_cache = latent_cache.unsqueeze(1)
@@ -212,24 +232,22 @@ class MiniCPM3Attention(nn.Module):
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
         q[..., self.qk_nope_head_dim :] = q_pe
         k = torch.empty_like(q)
-        k[..., :self.qk_nope_head_dim] = k_nope
+        k[..., : self.qk_nope_head_dim] = k_nope
         k[..., self.qk_nope_head_dim :] = k_pe
         q = q.reshape(-1, self.num_local_heads * self.qk_head_dim)
         k = k.view(-1, self.num_local_heads * self.qk_head_dim)
         v = torch.nn.functional.pad(
-            v, [0, self.qk_head_dim - self.v_head_dim],
-            value=0).view(-1, self.num_local_heads * self.qk_head_dim)
+            v, [0, self.qk_head_dim - self.v_head_dim], value=0
+        ).view(-1, self.num_local_heads * self.qk_head_dim)
         attn_output = self.attn(q, k, v)
-        attn_output = attn_output.view(
-            -1, self.num_local_heads,
-            self.qk_head_dim)[..., :self.v_head_dim].reshape(
-                -1, self.num_local_heads * self.v_head_dim)
+        attn_output = attn_output.view(-1, self.num_local_heads, self.qk_head_dim)[
+            ..., : self.v_head_dim
+        ].reshape(-1, self.num_local_heads * self.v_head_dim)
         output, _ = self.o_proj(attn_output)
         return output
 
 
 class MiniCPM3MLAAttention(nn.Module):
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -268,7 +286,8 @@ class MiniCPM3MLAAttention(nn.Module):
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.fused_qkv_a_proj",
-                disable_tp=True)
+                disable_tp=True,
+            )
             self.kv_a_proj_with_mqa = None
         else:
             self.fused_qkv_a_proj = None
@@ -277,41 +296,45 @@ class MiniCPM3MLAAttention(nn.Module):
                 self.kv_lora_rank + self.qk_rope_head_dim,
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.kv_a_proj_with_mqa")
+                prefix=f"{prefix}.kv_a_proj_with_mqa",
+            )
 
         if self.q_lora_rank is not None:
-            self.q_a_layernorm = RMSNorm(self.q_lora_rank,
-                                         eps=config.rms_norm_eps)
-            self.q_b_proj = ColumnParallelLinear(self.q_lora_rank,
-                                                 self.num_heads *
-                                                 self.qk_head_dim,
-                                                 bias=False,
-                                                 quant_config=quant_config,
-                                                 prefix=f"{prefix}.q_b_proj")
+            self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
+            self.q_b_proj = ColumnParallelLinear(
+                self.q_lora_rank,
+                self.num_heads * self.qk_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_b_proj",
+            )
             self.q_proj = None
         else:
             self.q_a_layernorm = None
             self.q_b_proj = None
-            self.q_proj = ColumnParallelLinear(self.hidden_size,
-                                               self.num_heads *
-                                               self.qk_head_dim,
-                                               bias=False,
-                                               quant_config=quant_config,
-                                               prefix=f"{prefix}.q_proj")
+            self.q_proj = ColumnParallelLinear(
+                self.hidden_size,
+                self.num_heads * self.qk_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_proj",
+            )
 
-        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
-                                      eps=config.rms_norm_eps)
+        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.kv_b_proj")
-        self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
-                                        self.hidden_size,
-                                        bias=False,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.o_proj")
+            prefix=f"{prefix}.kv_b_proj",
+        )
+        self.o_proj = RowParallelLinear(
+            self.num_heads * self.v_head_dim,
+            self.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
         self.rotary_emb = get_rope(
             self.qk_rope_head_dim,
             rotary_dim=self.qk_rope_head_dim,
@@ -345,13 +368,13 @@ class MiniCPM3MLAAttention(nn.Module):
             prefix,
         )
 
-    def forward(self, positions: torch.Tensor,
-                hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, positions: torch.Tensor, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
         return self.mla_attn(positions, hidden_states)
 
 
 class MiniCPM3DecoderLayer(nn.Module):
-
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -360,14 +383,10 @@ class MiniCPM3DecoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.hidden_size = config.hidden_size
-        self.scaling_factor = (config.scale_depth /
-                               math.sqrt(config.num_hidden_layers))
+        self.scaling_factor = config.scale_depth / math.sqrt(config.num_hidden_layers)
         q_lora_rank = getattr(config, "q_lora_rank", None)
 
-        if model_config.use_mla:
-            attn_cls = MiniCPM3MLAAttention
-        else:
-            attn_cls = MiniCPM3Attention
+        attn_cls = MiniCPM3MLAAttention if model_config.use_mla else MiniCPM3Attention
 
         self.self_attn = attn_cls(
             config=config,
@@ -392,10 +411,10 @@ class MiniCPM3DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -419,15 +438,17 @@ class MiniCPM3DecoderLayer(nn.Module):
 
 @support_torch_compile
 class MiniCPM3Model(nn.Module):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         lora_config = vllm_config.lora_config
         self.config = config
 
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
+        lora_vocab = (
+            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
+            if lora_config
+            else 0
+        )
         self.vocab_size = config.vocab_size + lora_vocab
 
         if get_pp_group().is_first_rank:
@@ -443,16 +464,17 @@ class MiniCPM3Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MiniCPM3DecoderLayer(vllm_config, prefix),
-            prefix=f"{prefix}.layers")
+            prefix=f"{prefix}.layers",
+        )
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
 
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(["hidden_states"],
-                                                    self.config.hidden_size))
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], self.config.hidden_size
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids) * self.config.scale_emb
@@ -503,8 +525,9 @@ class MiniCPM3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 "kv_a_proj_with_mqa",
             ]
 
-        self.model = MiniCPM3Model(vllm_config=vllm_config,
-                                   prefix=maybe_prefix(prefix, "model"))
+        self.model = MiniCPM3Model(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
 
         if get_pp_group().is_last_rank:
             unpadded_vocab_size = self.config.vocab_size
@@ -515,7 +538,8 @@ class MiniCPM3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 unpadded_vocab_size,
                 self.config.hidden_size,
                 org_num_embeddings=self.config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE if not self.lora_config
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE
+                if not self.lora_config
                 else self.lora_config.lora_vocab_padding_size,
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
@@ -523,17 +547,18 @@ class MiniCPM3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if self.config.tie_word_embeddings:
                 self.lm_head.tie_weights(self.model.embed_tokens)
 
-            self.logits_processor = LogitsProcessor(unpadded_vocab_size,
-                                                    self.config.vocab_size)
-            self.scale_width = (self.config.hidden_size /
-                                self.config.dim_model_base)
+            self.logits_processor = LogitsProcessor(
+                unpadded_vocab_size, self.config.vocab_size
+            )
+            self.scale_width = self.config.hidden_size / self.config.dim_model_base
         else:
             self.lm_head = PPMissingLayer()
             self.logits_processor = None
             self.scale_width = None
 
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
+            self.model.make_empty_intermediate_tensors
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -545,18 +570,17 @@ class MiniCPM3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
         if get_pp_group().is_last_rank:
             hidden_states = hidden_states / self.scale_width
         return hidden_states
 
-    def compute_logits(self,
-                       hidden_states: torch.Tensor) -> Optional[torch.Tensor]:
+    def compute_logits(self, hidden_states: torch.Tensor) -> Optional[torch.Tensor]:
         return self.logits_processor(self.lm_head, hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -570,12 +594,13 @@ class MiniCPM3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
-                if ((param_name == "fused_qkv_a_proj")
-                        and name_mapped not in params_dict):
+                if (
+                    param_name == "fused_qkv_a_proj"
+                ) and name_mapped not in params_dict:
                     continue
                 name = name_mapped
                 if name.endswith(".bias") and name not in params_dict:
@@ -592,8 +617,7 @@ class MiniCPM3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
