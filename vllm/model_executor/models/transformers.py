@@ -921,7 +921,18 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
         return model_output
 
     def get_language_model(self) -> torch.nn.Module:
-        return self.model
+        """`TransformersForMultimodalLM` does not contain a vLLM language model class.
+        Therefore, in order to return a language model vLLM class, we use a wrapper to
+        give `self` the same interface as `TransformersForCausalLM`."""
+
+        class LanguageModelWrapper(TransformersForCausalLM):
+            def __init__(self, multimodal_model):
+                # Don't call super().__init__() to avoid re-initialization
+                self.__dict__.update(multimodal_model.__dict__)
+
+            model = getattr_iter(self.model, ("language_model", "text_model"), None)
+
+        return LanguageModelWrapper(self)
 
     def get_multimodal_embeddings(self, **kwargs):
         pixel_values: Optional[torch.Tensor] = kwargs.pop("pixel_values", None)
