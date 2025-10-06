@@ -977,8 +977,6 @@ class RandomMultiModalDataset(RandomDataset):
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
         **kwargs,
     ) -> list[SampleRequest]:
-        logger.info("bucket_config %s", repr(bucket_config))
-
         # Get the sampling parameters for the dataset
         input_lens, output_lens, offsets = self.get_sampling_params(
             num_requests, range_ratio, input_len, output_len, tokenizer
