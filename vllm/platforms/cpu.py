@@ -266,16 +266,14 @@ class CpuPlatform(Platform):
 
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
             compilation_config.backend = backend
-            compilation_config.inductor_compile_config.update({
-                "dce":
-                True,
-                "size_asserts":
-                False,
-                "nan_asserts":
-                False,
-                "epilogue_fusion":
-                True,
-            })
+            compilation_config.inductor_compile_config.update(
+                {
+                    "dce": True,
+                    "size_asserts": False,
+                    "nan_asserts": False,
+                    "epilogue_fusion": True,
+                }
+            )
 
         if vllm_config.lora_config is not None:
             compilation_config.level = CompilationLevel.NO_COMPILATION

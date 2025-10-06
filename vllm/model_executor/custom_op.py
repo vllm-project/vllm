@@ -130,10 +130,10 @@ class CustomOp(nn.Module):
     @staticmethod
     def default_on() -> bool:
         """
-       Behavior controlled by `CompilationConfig.custom_ops`: On by default if
-       'all', off by default if 'none'.
-       When PyTorch Inductor is used, 'none' is the default value,
-       otherwise 'all'.
+        Behavior controlled by `CompilationConfig.custom_ops`: On by default if
+        'all', off by default if 'none'.
+        When PyTorch Inductor is used, 'none' is the default value,
+        otherwise 'all'.
         """
         compilation_config = get_cached_compilation_config()
         count_none = compilation_config.custom_ops.count("none")
