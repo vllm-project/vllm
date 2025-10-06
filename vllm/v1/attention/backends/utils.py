@@ -446,7 +446,10 @@ def infer_global_hyperparameters(
     global_params = param_sets[0]
 
     # trtllm attention doesn't need global hyper params so disable the check
-    if not envs.VLLM_USE_TRTLLM_ATTENTION:
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    if not vllm_config.attention_config.use_trtllm_attention:
         for params in param_sets:
             if params.window_left != global_params.window_left:
                 raise ValueError(

@@ -79,6 +79,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         self.block_size = kv_cache_spec.block_size
+        self.attention_config = vllm_config.attention_config
 
         model_config = vllm_config.model_config
         self.num_heads_q = model_config.get_num_attention_heads(
@@ -96,7 +97,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         # slow, so here we set it to 1.
         attn_metadata.seq_lens.fill_(1)
 
-        if envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION:
+        if self.attention_config.v1_use_prefill_decode_attention:
             # Here we set the query start locs to 0. This is to
             # cover up an invalid memory access in the prefix_prefil kernel
             # that we run into during graph capture (#25985)
@@ -267,8 +268,13 @@ class RocmAttentionImpl(AttentionImpl):
                 "RocmAttentionImpl"
             )
 
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
         self.fp8_dtype = current_platform.fp8_dtype()
-        self.force_prefill_decode_attn = envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
+        self.force_prefill_decode_attn = (
+            vllm_config.attention_config.v1_use_prefill_decode_attention
+        )
 
         if not self.force_prefill_decode_attn:
             # If not using prefill decode attention, we use the Triton
