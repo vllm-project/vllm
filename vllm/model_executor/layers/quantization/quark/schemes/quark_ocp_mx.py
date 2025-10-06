@@ -121,8 +121,8 @@ class QuarkOCP_MX(QuarkScheme):
         self.weight_quant_spec = weight_quant_spec
         self.input_quant_spec = input_quant_spec
 
-        self.weight_dtype = weight_quant_spec["dtype"]
-        self.input_dtype = input_quant_spec["dtype"]
+        self.weight_dtype = weight_quant_spec["dtype"].replace("fp", "mxfp")
+        self.input_dtype = input_quant_spec["dtype"].replace("fp", "mxfp")
 
         self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
             self.input_dtype, self.weight_dtype

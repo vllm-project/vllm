@@ -457,8 +457,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         self.static_input_scales = not self.input_quant.get("is_dynamic")
 
-        self.weight_dtype = self.weight_quant["dtype"]
-        self.input_dtype = self.input_quant["dtype"]
+        self.weight_dtype = self.weight_quant["dtype"].replace("fp", "mxfp")
+        self.input_dtype = self.input_quant["dtype"].replace("fp", "mxfp")
 
         self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
             self.input_dtype, self.weight_dtype

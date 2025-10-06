@@ -419,13 +419,13 @@ class FusedMoEQuantConfig:
         """
         assert not isinstance(quant_dtype, str) or quant_dtype in {
             "nvfp4",
-            "fp4",
+            "mxfp4",
             "mxfp6_e3m2",
             "mxfp6_e2m3",
         }
         assert not isinstance(weight_dtype, str) or weight_dtype in {
             "nvfp4",
-            "fp4",
+            "mxfp4",
             "mxfp6_e3m2",
             "mxfp6_e2m3",
         }

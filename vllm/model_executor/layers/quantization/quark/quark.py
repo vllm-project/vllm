@@ -275,8 +275,8 @@ class QuarkConfig(QuantizationConfig):
         # Input and weight dtypes need to be any of fp4,
         # fp6_e3m2 or fp6_e3m2, possibly mixed.
         if (
-            weight_quant.get("dtype") not in SUPPORTED_OCP_MX_DTYPES
-            or input_quant.get("dtype") not in SUPPORTED_OCP_MX_DTYPES
+            weight_quant.get("dtype") not in {"fp4", "fp6_e3m2", "fp6_e2m3"}
+            or input_quant.get("dtype") not in {"fp4", "fp6_e3m2", "fp6_e2m3"}
         ):
             logger.debug(
                 "Quark model is not in OCP MX format: dtype not fp4, fp6_e3m2, fp6_e2m3"

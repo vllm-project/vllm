@@ -201,9 +201,8 @@ def _mxfp8_e4m3_quantize(
     return mxfp8_e4m3_quantize(A)
 
 
-def _mxfp6_quantize_fp6_e3m2(
+def _mxfp6_e3m2_quantize(
     A: torch.Tensor,
-    quant_dtype: str,
     A_scale: Optional[torch.Tensor],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
@@ -218,9 +217,8 @@ def _mxfp6_quantize_fp6_e3m2(
 
     return A, None
 
-def _mxfp6_quantize_fp6_e2m3(
+def _mxfp6_e2m3_quantize(
     A: torch.Tensor,
-    quant_dtype: str,
     A_scale: Optional[torch.Tensor],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
@@ -251,18 +249,18 @@ def moe_kernel_quantize_input(
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "nvfp4":
         return _nvfp4_quantize(A, A_scale, is_sf_swizzled_layout=is_fp4_scale_swizzled)
-    elif quant_dtype == "fp4":
+    elif quant_dtype == "mxfp4":
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "fp8":
         # TODO: `quant_dtype == "fp8"` is ambiguous,
         # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
         return _mxfp8_e4m3_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp6_e3m2":
-        return _mxfp6_quantize_mxfp6_e3m2(
+        return _mxfp6_e3m2_quantize(
             A, A_scale, per_act_token_quant, block_shape
         )
     elif quant_dtype == "mxfp6_e2m3":
-        return _mxfp6_quantize_mxfp6_e2m3(
+        return _mxfp6_e2m3_quantize(
             A, A_scale, per_act_token_quant, block_shape
         )
     else:
