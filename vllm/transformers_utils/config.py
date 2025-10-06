@@ -34,7 +34,6 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
 from vllm.transformers_utils.utils import (
     check_gguf_file,
-    is_oci_model_with_tag,
     parse_safetensors_file_metadata,
 )
 
@@ -502,9 +501,6 @@ def maybe_override_with_speculators(
     Checks if the provided model is a speculators model and if so, extracts
     the target model configuration and builds the speculative config.
 
-    Also handles automatic OCI format detection when the model name includes
-    an explicit tag or digest (e.g., username/model:tag).
-
     Args:
         model: Model name or path
         tokenizer: Tokenizer name or path
@@ -515,36 +511,7 @@ def maybe_override_with_speculators(
     Returns:
         Tuple of (resolved_model, resolved_tokenizer, speculative_config, load_format)
     """
-    # Auto-detect OCI format when model name has explicit tag/digest
     load_format = kwargs.get("load_format", "auto")
-    if load_format == "auto" and is_oci_model_with_tag(model):
-        logger.info(
-            "Auto-detected OCI format for model with explicit tag/digest: %s", model
-        )
-        kwargs["load_format"] = "oci"
-        load_format = "oci"
-
-    # Handle OCI models - download first before config loading
-    if load_format == "oci":
-        from vllm.config.load import LoadConfig
-        from vllm.model_executor.model_loader.oci_loader import OciModelLoader
-
-        # Create a LoadConfig for downloading
-        load_config = LoadConfig(
-            load_format="oci", download_dir=kwargs.get("download_dir")
-        )
-        loader = OciModelLoader(load_config)
-
-        # Download the model using simplified method (no ModelConfig needed)
-        original_model = model
-        config_dir = loader.download_oci_model_simple(model)
-
-        # Use extracted config directory for config loading
-        logger.info("Using OCI config from %s", config_dir)
-        model = config_dir
-        if not tokenizer or tokenizer == original_model:
-            tokenizer = config_dir
-
     is_gguf = check_gguf_file(model)
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
