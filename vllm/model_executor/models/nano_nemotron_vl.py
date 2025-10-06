@@ -30,6 +30,7 @@ from vllm.model_executor.models.interfaces import (
     IsHybrid,
     MultiModalEmbeddings,
     SupportsMultiModal,
+    SupportsMultiModalPruning,
 )
 from vllm.model_executor.models.internvl import (
     calculate_internvl_targets,
@@ -982,7 +983,9 @@ class NanoNemotronVLDummyInputsBuilder(
     info=NanoNemotronVLProcessingInfo,
     dummy_inputs=NanoNemotronVLDummyInputsBuilder,
 )
-class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal):
+class NemotronH_Nano_VL_V2(
+    nn.Module, HasInnerState, IsHybrid, SupportsMultiModal, SupportsMultiModalPruning
+):
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
