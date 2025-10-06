@@ -644,6 +644,7 @@ def sparse_attn_indexer(
                 chunk.cu_seqlen_ke,
             )
             num_rows = logits.shape[0]
+            assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
             topk_indices = torch.empty(
                 num_rows, topk_tokens, dtype=torch.int32, device=logits.device
             )
@@ -710,6 +711,7 @@ def sparse_attn_indexer(
             decode_metadata.seq_lens[row_indices] - next_n + next_n_offset + 1
         ).unsqueeze(1)
         num_rows = logits.shape[0]
+        assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
         topk_indices = torch.empty(
             num_rows, topk_tokens, dtype=torch.int32, device=logits.device
         )
