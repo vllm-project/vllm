@@ -26,7 +26,7 @@ else:
 logger = init_logger(__name__)
 
 
-class CompilationLevel:
+class CompilationMode:
     # constants for the levels of the compilation process
     NO_COMPILATION = 0
     DYNAMO_AS_IS = 1
@@ -312,7 +312,7 @@ class CompilationConfig:
         that all input buffers have fixed addresses, and all
         splitting ops write their outputs to input buffers.
     In the vLLM V1 Engine, this flag only applies for
-    CompilationLevel.PIECEWISE (aka -O3).
+    CompilationMode.PIECEWISE (aka -O3).
     Note that this is orthogonal to the cudagraph capture logic
     outside of compilation.
     Warning: This flag is deprecated and will be removed in the next major or
@@ -608,18 +608,18 @@ class CompilationConfig:
                 called via vllm config where the level is set if none is \
                 provided."
             )
-        if self.level == CompilationLevel.NO_COMPILATION:
+        if self.level == CompilationMode.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
         from torch._dynamo.backends.registry import list_backends
 
         torch_backends = list_backends(exclude_tags=tuple())
-        if self.level in [CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE]:
+        if self.level in [CompilationMode.DYNAMO_AS_IS, CompilationMode.DYNAMO_ONCE]:
             if self.backend in torch_backends:
                 return self.backend
             return resolve_obj_by_qualname(self.backend)
 
-        assert self.level == CompilationLevel.PIECEWISE
+        assert self.level == CompilationMode.PIECEWISE
         if self.backend not in ["eager", "inductor"]:
             raise ValueError(
                 f"Invalid backend for piecewise compilation: {self.backend}"
@@ -685,10 +685,10 @@ class CompilationConfig:
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called only when level is
-        # CompilationLevel.PIECEWISE
-        assert self.level == CompilationLevel.PIECEWISE, (
+        # CompilationMode.PIECEWISE
+        assert self.level == CompilationMode.PIECEWISE, (
             "set_splitting_ops_for_v1 should only be called when "
-            "level is CompilationLevel.PIECEWISE"
+            "level is CompilationMode.PIECEWISE"
         )
 
         if self.use_inductor_graph_partition:
@@ -769,7 +769,7 @@ class CompilationConfig:
 
         if not self.use_inductor_graph_partition:
             # Dynamo-level FX split case
-            return self.level == CompilationLevel.PIECEWISE
+            return self.level == CompilationMode.PIECEWISE
 
         # Inductor partition case
         return (

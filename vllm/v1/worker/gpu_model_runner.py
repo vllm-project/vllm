@@ -25,7 +25,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
@@ -2927,7 +2927,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         if (
-            self.vllm_config.compilation_config.level == CompilationLevel.DYNAMO_AS_IS
+            self.vllm_config.compilation_config.level == CompilationMode.DYNAMO_AS_IS
             and supports_dynamo()
         ):
             backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
@@ -4012,7 +4012,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f"with {min_cg_builder_name} backend (support: "
                 f"{min_cg_support})"
             )
-            if self.compilation_config.level == CompilationLevel.PIECEWISE and (
+            if self.compilation_config.level == CompilationMode.PIECEWISE and (
                 self.compilation_config.splitting_ops_contain_attention()
                 or self.compilation_config.use_inductor_graph_partition
             ):

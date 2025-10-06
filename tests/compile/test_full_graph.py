@@ -12,7 +12,7 @@ from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
 from vllm.attention.backends.registry import _Backend
 from vllm.attention.selector import global_force_attn_backend_context_manager
-from vllm.config import CompilationConfig, CompilationLevel, CUDAGraphMode, PassConfig
+from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer
 
@@ -81,7 +81,7 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
 
 @pytest.mark.parametrize(
     "optimization_level",
-    [CompilationLevel.DYNAMO_ONCE, CompilationLevel.PIECEWISE],
+    [CompilationMode.DYNAMO_ONCE, CompilationMode.PIECEWISE],
 )
 @pytest.mark.parametrize("model_info", models_list(all=True))
 @create_new_process_for_each_test()
@@ -104,7 +104,7 @@ def test_full_graph(
     [
         # additional compile sizes, only some of the models
         (
-            CompilationConfig(level=CompilationLevel.PIECEWISE, compile_sizes=[1, 2]),
+            CompilationConfig(level=CompilationMode.PIECEWISE, compile_sizes=[1, 2]),
             model,
         )
         for model in models_list(all=False)
@@ -113,7 +113,7 @@ def test_full_graph(
         # RMSNorm + quant fusion, only 8-bit quant models
         (
             CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                level=CompilationMode.PIECEWISE,
                 custom_ops=["+rms_norm"],
                 pass_config=PassConfig(enable_fusion=True, enable_noop=True),
             ),
@@ -125,7 +125,7 @@ def test_full_graph(
         # Test depyf integration works
         (
             CompilationConfig(
-                level=CompilationLevel.PIECEWISE, debug_dump_path=tempfile.gettempdir()
+                level=CompilationMode.PIECEWISE, debug_dump_path=tempfile.gettempdir()
             ),
             ("facebook/opt-125m", {}),
         ),
@@ -134,7 +134,7 @@ def test_full_graph(
         # graph inductor partition
         (
             CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                level=CompilationMode.PIECEWISE,
                 # inductor graph partition uses
                 # torch._C.Tag.cudagraph_unsafe to specify splitting ops
                 use_inductor_graph_partition=True,
@@ -165,7 +165,7 @@ def test_custom_compile_config(
 
 @pytest.mark.parametrize(
     "optimization_level",
-    [CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE],
+    [CompilationMode.NO_COMPILATION, CompilationMode.PIECEWISE],
 )
 def test_fp8_kv_scale_compile(optimization_level: int):
     model = "Qwen/Qwen2-0.5B"
@@ -184,7 +184,7 @@ def test_inductor_graph_partition_attn_fusion(caplog_vllm):
 
     model = "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8"
     compilation_config = CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
+        level=CompilationMode.PIECEWISE,
         use_inductor_graph_partition=True,
         cudagraph_mode=CUDAGraphMode.PIECEWISE,
         custom_ops=["+quant_fp8"],

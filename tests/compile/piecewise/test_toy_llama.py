@@ -21,7 +21,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     set_current_vllm_config,
@@ -458,14 +458,14 @@ def benchmark():
     for piecewise in [False, True]:
         if piecewise:
             compilation_config = CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                level=CompilationMode.PIECEWISE,
                 use_cudagraph=True,
                 splitting_ops=["silly::attention"],
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
         else:
             compilation_config = CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                level=CompilationMode.PIECEWISE,
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
 

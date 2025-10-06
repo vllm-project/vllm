@@ -481,7 +481,7 @@ def set_model_tag(tag: str):
 
 class VllmBackend:
     """The compilation backend for `torch.compile` with vLLM.
-    It is used for compilation level of `CompilationLevel.PIECEWISE`,
+    It is used for compilation level of `CompilationMode.PIECEWISE`,
     where we customize the compilation.
 
     The major work of this backend is to split the graph into

@@ -4,7 +4,7 @@ import dataclasses
 
 import pytest
 
-from vllm.config import CompilationLevel
+from vllm.config import CompilationMode
 from vllm.utils import cuda_device_count_stateless
 
 from ..utils import compare_all_settings
@@ -122,9 +122,9 @@ def test_compile_correctness(
         all_envs: list[dict[str, str] | None] = []
 
         for comp_level in [
-            CompilationLevel.DYNAMO_AS_IS,
-            CompilationLevel.DYNAMO_ONCE,
-            CompilationLevel.PIECEWISE,
+            CompilationMode.DYNAMO_AS_IS,
+            CompilationMode.DYNAMO_ONCE,
+            CompilationMode.PIECEWISE,
         ]:
             for level in [CompilationLevel.NO_COMPILATION, comp_level]:
                 all_args.append(
@@ -143,10 +143,10 @@ def test_compile_correctness(
             all_args.clear()
 
         for level in [
-            CompilationLevel.NO_COMPILATION,
-            CompilationLevel.DYNAMO_AS_IS,
-            CompilationLevel.DYNAMO_ONCE,
-            CompilationLevel.PIECEWISE,
+            CompilationMode.NO_COMPILATION,
+            CompilationMode.DYNAMO_AS_IS,
+            CompilationMode.DYNAMO_ONCE,
+            CompilationMode.PIECEWISE,
         ]:
             all_args.append(final_args + [f"-O.level={level}", "-O.backend=eager"])
             all_envs.append({})

@@ -22,7 +22,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 
 from .cache import CacheConfig
-from .compilation import CompilationConfig, CompilationLevel, CUDAGraphMode
+from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
@@ -314,24 +314,24 @@ class VllmConfig:
                     self.model_config is not None
                     and not self.model_config.enforce_eager
                 ):
-                    self.compilation_config.level = CompilationLevel.PIECEWISE
+                    self.compilation_config.level = CompilationMode.PIECEWISE
                 else:
-                    self.compilation_config.level = CompilationLevel.NO_COMPILATION
+                    self.compilation_config.level = CompilationMode.NO_COMPILATION
 
             else:
                 # NB: Passing both --enforce-eager and a compilation level
                 # in V0 means the compilation level wins out.
-                self.compilation_config.level = CompilationLevel.NO_COMPILATION
+                self.compilation_config.level = CompilationMode.NO_COMPILATION
         else:
-            assert self.compilation_config.level >= CompilationLevel.NO_COMPILATION
-            assert self.compilation_config.level <= CompilationLevel.PIECEWISE
+            assert self.compilation_config.level >= CompilationMode.NO_COMPILATION
+            assert self.compilation_config.level <= CompilationMode.PIECEWISE
 
         # If user does not set custom ops via none or all set it here based on
         # compilation level and backend.
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
             if (
                 self.compilation_config.backend == "inductor"
-                and self.compilation_config.level > CompilationLevel.NO_COMPILATION
+                and self.compilation_config.level > CompilationMode.NO_COMPILATION
             ):
                 self.compilation_config.custom_ops.append("none")
             else:
@@ -350,7 +350,7 @@ class VllmConfig:
             if self.compilation_config.cudagraph_mode is None:
                 if (
                     envs.VLLM_USE_V1
-                    and self.compilation_config.level == CompilationLevel.PIECEWISE
+                    and self.compilation_config.level == CompilationMode.PIECEWISE
                 ):
                     # default to full and piecewise for most models
                     self.compilation_config.cudagraph_mode = (
@@ -489,7 +489,7 @@ class VllmConfig:
         # Do this after all the updates to compilation_config.level
         if (
             envs.VLLM_USE_V1
-            and self.compilation_config.level == CompilationLevel.PIECEWISE
+            and self.compilation_config.level == CompilationMode.PIECEWISE
         ):
             self.compilation_config.set_splitting_ops_for_v1()
 
@@ -508,8 +508,8 @@ class VllmConfig:
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
-                assert self.compilation_config.level == CompilationLevel.PIECEWISE, (
-                    "Compilation level should be CompilationLevel.PIECEWISE "
+                assert self.compilation_config.level == CompilationMode.PIECEWISE, (
+                    "Compilation level should be CompilationMode.PIECEWISE "
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
@@ -837,7 +837,7 @@ def set_current_vllm_config(
 
         if (
             check_compile
-            and vllm_config.compilation_config.level == CompilationLevel.PIECEWISE
+            and vllm_config.compilation_config.level == CompilationMode.PIECEWISE
             and compilation_counter.num_models_seen == num_models_seen
         ):
             # If the model supports compilation,

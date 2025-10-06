@@ -14,7 +14,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import ignore_torch_compile, support_torch_compile
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     set_current_vllm_config,
@@ -202,7 +202,7 @@ def test_multi_graph_piecewise_compile(use_inductor_graph_partition: bool):
     # piecewise compile
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            level=CompilationMode.PIECEWISE,
             use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
@@ -251,7 +251,7 @@ def test_multi_graph_piecewise_compile(use_inductor_graph_partition: bool):
     # no compile or cudagraph
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.NO_COMPILATION,
+            level=CompilationMode.NO_COMPILATION,
         )
     )
     cudagraph_runtime_mode = CUDAGraphMode.NONE
@@ -280,7 +280,7 @@ def test_multi_graph_piecewise_compile(use_inductor_graph_partition: bool):
     # piecewise compile without CUDA graph
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            level=CompilationMode.PIECEWISE,
             use_cudagraph=False,
             splitting_ops=["silly::attention"],
             use_inductor_graph_partition=use_inductor_graph_partition,
