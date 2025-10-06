@@ -5,7 +5,6 @@
 import io
 import json
 import os
-import random
 import sys
 import time
 import traceback
@@ -14,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol, Union
 
 import aiohttp
+import regex as re
 from tqdm.asyncio import tqdm
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
@@ -602,14 +602,30 @@ async def async_request_openai_embeddings_clip(
     )
 
 
+def _try_extract_request_idx(request_func_input: RequestFuncInput):
+    if request_func_input.request_id:
+        match = re.search(r"(\d+)$", request_func_input.request_id)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                pass
+
+    return None
+
+
 async def async_request_openai_embeddings_vlm2vec(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     if request_func_input.multi_modal_content:
-        # Adjust this probability manually
-        if random.random() < 0.5:
+        request_idx = _try_extract_request_idx(request_func_input)
+
+        # Adjust the ratio manually if needed.
+        use_image_only_prompt = request_idx is None or request_idx % 2 == 0
+
+        if use_image_only_prompt:
             # Image input
             request_func_input.prompt = "Represent the given image."
         else:
