@@ -894,20 +894,6 @@ def _get_kv_cache_groups_uniform_spec(
     return create_kv_cache_group_specs(kv_cache_specs, [list(kv_cache_specs.keys())])
 
 
-def is_kv_cache_page_size_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
-    """
-    Whether all layers in the given KVCacheSpec have the same page size.
-    Args:
-        kv_cache_spec: The KVCacheSpec of each attention layer in the model
-
-    Returns:
-        True if all layers have the same page size, False otherwise.
-    """
-
-    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
-    return len(page_sizes) == 1
-
-
 def _get_kv_cache_groups_uniform_type(
     spec: UniformTypeKVCacheSpecs,
 ) -> list[KVCacheGroupSpec]:
@@ -923,6 +909,20 @@ def _get_kv_cache_groups_uniform_type(
     """
 
     return [KVCacheGroupSpec(list(spec.kv_cache_specs.keys()), spec)]
+
+
+def is_kv_cache_page_size_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
+    """
+    Whether all layers in the given KVCacheSpec have the same page size.
+    Args:
+        kv_cache_spec: The KVCacheSpec of each attention layer in the model
+
+    Returns:
+        True if all layers have the same page size, False otherwise.
+    """
+
+    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
+    return len(page_sizes) == 1
 
 
 def unify_kv_cache_spec_page_size(
