@@ -507,7 +507,7 @@ class CudaPlatformBase(Platform):
                     model_config_status = "available"
 
                 if (vllm_config and vllm_config.model_config
-                        and hasattr(vllm_config.model_config, 'enable_sleep_mode'):
+                        and hasattr(vllm_config.model_config, 'enable_sleep_mode')):
                     sleep_mode_status = str(vllm_config.model_config.enable_sleep_mode)
 
                 logger.debug("CUDA Platform: Using native PyTorch graph pool "
