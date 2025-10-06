@@ -235,12 +235,12 @@ class CUDAGraphWrapper:
             return cuda_graph_count
 
         for key, metadata in sleep_state["entries"].items():
-            if key in self.concrete_cudagraph_entries:
-                if "graph_ref" in metadata:
-                    self.concrete_cudagraph_entries[key].cudagraph = metadata[
-                        "graph_ref"
-                    ]
-                    cuda_graph_count += 1
+            if (key in self.concrete_cudagraph_entries and
+                    "graph_ref" in metadata):
+                self.concrete_cudagraph_entries[key].cudagraph = metadata[
+                    "graph_ref"
+                ]
+                cuda_graph_count += 1
 
         logger.info(
             "CUDAGraphWrapper: Restored %d CUDA graphs from sleep mode.",
