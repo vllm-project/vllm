@@ -71,48 +71,44 @@ async def client(server):
 _PROMPT = "Hello my name is Robert and I love magic"
 _IMAGE_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
-_NUM_REQUESTS = 10
-_NUM_GENERATION_TOKENS_PER_REQUEST = 10
 
-
-def _get_expected_values(prompt_ids: list[int]):
+def _get_expected_values(num_requests: int, prompt_ids: list[int], max_tokens: int):
     num_prompt_tokens = len(prompt_ids)
 
     # {metric_family: [(suffix, expected_value)]}
     return {
-        "vllm:time_to_first_token_seconds": [("_count", _NUM_REQUESTS)],
+        "vllm:time_to_first_token_seconds": [("_count", num_requests)],
         "vllm:time_per_output_token_seconds": [
-            ("_count", _NUM_REQUESTS * (_NUM_GENERATION_TOKENS_PER_REQUEST - 1))
+            ("_count", num_requests * (max_tokens - 1))
         ],
-        "vllm:e2e_request_latency_seconds": [("_count", _NUM_REQUESTS)],
-        "vllm:request_queue_time_seconds": [("_count", _NUM_REQUESTS)],
-        "vllm:request_inference_time_seconds": [("_count", _NUM_REQUESTS)],
-        "vllm:request_prefill_time_seconds": [("_count", _NUM_REQUESTS)],
-        "vllm:request_decode_time_seconds": [("_count", _NUM_REQUESTS)],
+        "vllm:e2e_request_latency_seconds": [("_count", num_requests)],
+        "vllm:request_queue_time_seconds": [("_count", num_requests)],
+        "vllm:request_inference_time_seconds": [("_count", num_requests)],
+        "vllm:request_prefill_time_seconds": [("_count", num_requests)],
+        "vllm:request_decode_time_seconds": [("_count", num_requests)],
         "vllm:request_prompt_tokens": [
-            ("_sum", _NUM_REQUESTS * num_prompt_tokens),
-            ("_count", _NUM_REQUESTS),
+            ("_sum", num_requests * num_prompt_tokens),
+            ("_count", num_requests),
         ],
         "vllm:request_generation_tokens": [
-            ("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
-            ("_count", _NUM_REQUESTS),
+            ("_sum", num_requests * max_tokens),
+            ("_count", num_requests),
         ],
-        "vllm:request_params_n": [("_count", _NUM_REQUESTS)],
+        "vllm:request_params_n": [("_count", num_requests)],
         "vllm:request_params_max_tokens": [
-            ("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
-            ("_count", _NUM_REQUESTS),
+            ("_sum", num_requests * max_tokens),
+            ("_count", num_requests),
         ],
         "vllm:iteration_tokens_total": [
             (
                 "_sum",
-                _NUM_REQUESTS
-                * (num_prompt_tokens + _NUM_GENERATION_TOKENS_PER_REQUEST),
+                num_requests * (num_prompt_tokens + max_tokens),
             ),
-            ("_count", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
+            ("_count", num_requests * max_tokens),
         ],
-        "vllm:prompt_tokens": [("_total", _NUM_REQUESTS * num_prompt_tokens)],
-        "vllm:generation_tokens": [("_total", _NUM_REQUESTS * num_prompt_tokens)],
-        "vllm:request_success": [("_total", _NUM_REQUESTS)],
+        "vllm:prompt_tokens": [("_total", num_requests * num_prompt_tokens)],
+        "vllm:generation_tokens": [("_total", num_requests * num_prompt_tokens)],
+        "vllm:request_success": [("_total", num_requests)],
     }
 
 
@@ -128,13 +124,15 @@ async def test_metrics_counts(
     model_name = MODELS[model_key]
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     prompt_ids = tokenizer.encode(_PROMPT)
+    num_requests = 10
+    max_tokens = 10
 
-    for _ in range(_NUM_REQUESTS):
+    for _ in range(num_requests):
         # sending a request triggers the metrics to be logged.
         await client.completions.create(
             model=model_name,
             prompt=prompt_ids,
-            max_tokens=_NUM_GENERATION_TOKENS_PER_REQUEST,
+            max_tokens=max_tokens,
         )
 
     response = requests.get(server.url_for("metrics"))
@@ -142,7 +140,7 @@ async def test_metrics_counts(
     assert response.status_code == HTTPStatus.OK
 
     # Loop over all expected metric_families
-    expected_values = _get_expected_values(prompt_ids)
+    expected_values = _get_expected_values(num_requests, prompt_ids, max_tokens)
     for metric_family, suffix_values_list in expected_values.items():
         if metric_family not in EXPECTED_METRICS_V1 or (
             not server.show_hidden_metrics
