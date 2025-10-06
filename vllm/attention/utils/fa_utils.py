@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
-from vllm import envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -42,10 +41,13 @@ def get_flash_attn_version(requires_alibi: bool = False) -> Optional[int]:
             3 if (device_capability.major == 9 and is_fa_version_supported(3)) else 2
         )
 
-        # 2. override if passed by environment
-        if envs.VLLM_FLASH_ATTN_VERSION is not None:
-            assert envs.VLLM_FLASH_ATTN_VERSION in [2, 3]
-            fa_version = envs.VLLM_FLASH_ATTN_VERSION
+        # 2. override if passed by environment or config
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+        if vllm_config.attention_config.flash_attn_version is not None:
+            assert vllm_config.attention_config.flash_attn_version in [2, 3]
+            fa_version = vllm_config.attention_config.flash_attn_version
 
         # 3. fallback for unsupported combinations
         if device_capability.major == 10 and fa_version == 3:

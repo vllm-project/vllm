@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from vllm.config.attention import AttentionConfig
 from vllm.config.cache import (
     BlockSize,
     CacheConfig,
@@ -57,6 +58,8 @@ from vllm.config.vllm import (
 )
 
 __all__ = [
+    # From vllm.config.attention
+    "AttentionConfig",
     # From vllm.config.cache
     "BlockSize",
     "CacheConfig",

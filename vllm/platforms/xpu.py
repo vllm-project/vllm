@@ -83,9 +83,12 @@ class XPUPlatform(Platform):
         Check if the kv_cache_dtype is supported.
         XPU only support fp8 kv cache with triton backend.
         """
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
         if (
             envs.is_set("VLLM_ATTENTION_BACKEND")
-            and envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN"
+            and vllm_config.attention_config.backend == "TRITON_ATTN"
         ):
             return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
 

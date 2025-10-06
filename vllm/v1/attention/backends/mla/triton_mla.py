@@ -5,7 +5,6 @@ from typing import Optional, Union
 
 import torch
 
-from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionLayer,
     AttentionType,
@@ -87,7 +86,10 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TritonMLA V1 with FP8 KV cache not yet supported"
             )
 
-        self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+        self.use_triton_flash_attn = vllm_config.attention_config.use_triton_flash_attn
         self.triton_fa_func = triton_attention if HAS_TRITON else None
 
     def _flash_attn_varlen_diff_headdims_rocm(

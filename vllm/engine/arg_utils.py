@@ -31,6 +31,7 @@ from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm.config import (
+    AttentionConfig,
     BlockSize,
     CacheConfig,
     CacheDType,
@@ -494,6 +495,7 @@ class EngineArgs:
     )
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str = ModelConfig.override_attention_dtype
+    attention_backend: Optional[str] = AttentionConfig.backend
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
@@ -653,6 +655,20 @@ class EngineArgs:
         load_group.add_argument("--use-tqdm-on-load", **load_kwargs["use_tqdm_on_load"])
         load_group.add_argument(
             "--pt-load-map-location", **load_kwargs["pt_load_map_location"]
+        )
+
+        # Attention arguments
+        attention_group = parser.add_argument_group(
+            title="AttentionConfig",
+            description=AttentionConfig.__doc__,
+        )
+        attention_group.add_argument(
+            "--attention-backend",
+            type=str,
+            default=EngineArgs.attention_backend,
+            help="Attention backend to use. If not specified, will be selected "
+            "automatically. Example options: FLASH_ATTN, XFORMERS, FLASHINFER, "
+            "FLASHMLA, etc.",
         )
 
         # Structured outputs arguments
@@ -1041,7 +1057,9 @@ class EngineArgs:
         )
         return engine_args
 
-    def create_model_config(self) -> ModelConfig:
+    def create_model_config(
+        self, attention_config: Optional[AttentionConfig] = None
+    ) -> ModelConfig:
         # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
@@ -1133,6 +1151,7 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
+            attention_config=attention_config,
         )
 
     def validate_tensorizer_args(self):
@@ -1201,6 +1220,50 @@ class EngineArgs:
         )
         return SpeculativeConfig(**self.speculative_config)
 
+    def create_attention_config(self) -> AttentionConfig:
+        """Create attention configuration.
+
+        This method reads from environment variables to maintain backward
+        compatibility with existing deployments. All attention-related
+        environment variables are respected:
+        - VLLM_ATTENTION_BACKEND (deprecated, use --attention-backend CLI arg)
+        - VLLM_USE_TRITON_FLASH_ATTN
+        - VLLM_FLASH_ATTN_VERSION
+        - VLLM_V1_USE_PREFILL_DECODE_ATTENTION
+        - VLLM_USE_AITER_UNIFIED_ATTENTION
+        - VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
+        - VLLM_USE_CUDNN_PREFILL
+        - VLLM_USE_TRTLLM_ATTENTION
+        - VLLM_DISABLE_FLASHINFER_PREFILL
+        - VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION
+        """
+
+        # Warn if VLLM_ATTENTION_BACKEND env var is used instead of CLI arg
+        if envs.is_set("VLLM_ATTENTION_BACKEND") and self.attention_backend is None:
+            logger.warning(
+                "Using VLLM_ATTENTION_BACKEND environment variable is deprecated "
+                "and will be removed in a future release. "
+                "Please use --attention-backend CLI argument instead."
+            )
+
+        # Handle backend: prefer CLI arg, fall back to env var
+        backend = self.attention_backend
+        if backend is None:
+            backend = envs.VLLM_ATTENTION_BACKEND
+
+        return AttentionConfig(
+            backend=backend,
+            use_triton_flash_attn=envs.VLLM_USE_TRITON_FLASH_ATTN,
+            flash_attn_version=envs.VLLM_FLASH_ATTN_VERSION,
+            v1_use_prefill_decode_attention=envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION,
+            use_aiter_unified_attention=envs.VLLM_USE_AITER_UNIFIED_ATTENTION,
+            flash_attn_max_num_splits_for_cuda_graph=envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH,
+            use_cudnn_prefill=envs.VLLM_USE_CUDNN_PREFILL,
+            use_trtllm_attention=envs.VLLM_USE_TRTLLM_ATTENTION,
+            disable_flashinfer_prefill=envs.VLLM_DISABLE_FLASHINFER_PREFILL,
+            flashinfer_disable_q_quantization=envs.VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION,
+        )
+
     def create_engine_config(
         self,
         usage_context: Optional[UsageContext] = None,
@@ -1223,7 +1286,10 @@ class EngineArgs:
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 
-        model_config = self.create_model_config()
+        # Create AttentionConfig first so ModelConfig can use it
+        attention_config = self.create_attention_config()
+
+        model_config = self.create_model_config(attention_config=attention_config)
         self.model = model_config.model
         self.tokenizer = model_config.tokenizer
 
@@ -1543,15 +1609,19 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
+        # Note: attention_config was already created earlier in this method
+        # (before creating model_config) so that ModelConfig can use it
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
             parallel_config=parallel_config,
             scheduler_config=scheduler_config,
             device_config=device_config,
+            load_config=load_config,
+            attention_config=attention_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
-            load_config=load_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
             compilation_config=self.compilation_config,
@@ -1624,11 +1694,12 @@ class EngineArgs:
             "XFORMERS",
             "ROCM_ATTN",
         ]
-        if (
-            envs.is_set("VLLM_ATTENTION_BACKEND")
-            and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS
-        ):
-            name = f"VLLM_ATTENTION_BACKEND={envs.VLLM_ATTENTION_BACKEND}"
+        # Get backend from CLI arg or env var
+        backend = self.attention_backend
+        if backend is None:
+            backend = envs.VLLM_ATTENTION_BACKEND
+        if backend is not None and backend not in V1_BACKENDS:
+            name = f"VLLM_ATTENTION_BACKEND={backend}"
             _raise_or_fallback(feature_name=name, recommend_to_remove=True)
             return False
 

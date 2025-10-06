@@ -276,6 +276,9 @@ class RocmPlatform(Platform):
             )
 
         if envs.VLLM_USE_V1:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
             if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
                 logger.info("Using Flash Attention backend on V1 engine.")
                 return (
@@ -283,8 +286,11 @@ class RocmPlatform(Platform):
                     "rocm_aiter_fa.AiterFlashAttentionBackend"
                 )
             elif (
-                (envs.VLLM_ROCM_USE_AITER and envs.VLLM_USE_AITER_UNIFIED_ATTENTION)
-                or envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
+                (
+                    envs.VLLM_ROCM_USE_AITER
+                    and vllm_config.attention_config.use_aiter_unified_attention
+                )
+                or vllm_config.attention_config.v1_use_prefill_decode_attention
                 or selected_backend == _Backend.ROCM_ATTN
             ):
                 # rocm specific backend, with aiter and/or

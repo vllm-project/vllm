@@ -215,7 +215,12 @@ def force_use_trtllm_attention() -> bool | None:
     return ``True`` if TRTLLM attention is forced to be used,
     return ``False`` if TRTLLM attention is forced to be not used.
     """
-    return _force_use_trtllm_attention(envs.VLLM_USE_TRTLLM_ATTENTION)
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    return _force_use_trtllm_attention(
+        vllm_config.attention_config.use_trtllm_attention
+    )
 
 
 def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:
@@ -434,8 +439,11 @@ def flashinfer_scaled_fp8_mm(
 
 @functools.cache
 def flashinfer_disable_q_quantization() -> bool:
-    """Cache result which only depends on the environment"""
-    return envs.VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION
+    """Cache result which only depends on the attention config"""
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    return vllm_config.attention_config.flashinfer_disable_q_quantization
 
 
 __all__ = [
