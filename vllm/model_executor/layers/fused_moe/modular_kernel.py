@@ -626,8 +626,9 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         raise NotImplementedError
 
 
-def _slice_scales(scales: Optional[torch.Tensor], start: int,
-                  end: int) -> Optional[torch.Tensor]:
+def _slice_scales(
+    scales: Optional[torch.Tensor], start: int, end: int
+) -> Optional[torch.Tensor]:
     if scales is not None:
         if scales.numel() == 1:
             return scales
@@ -640,8 +641,9 @@ class SharedResizableBuffer:
     def __init__(self):
         self.buffer = None
 
-    def get(self, shape: tuple[int, ...], device: torch.device,
-            dtype: torch.dtype) -> torch.Tensor:
+    def get(
+        self, shape: tuple[int, ...], device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
         assert shape != ()
         shape_numel = prod(shape)
         if (
@@ -717,8 +719,11 @@ class FusedMoEModularKernel(torch.nn.Module):
         get num_chunks == 1. Take max(M, 1) to avoid divide by zero.
         If there are no tokens to process, the number of chunks will be zero.
         """
-        CHUNK_SIZE = (max(M, 1) if not self.fused_experts.supports_chunking()
-                      else min(M, envs.VLLM_FUSED_MOE_CHUNK_SIZE))
+        CHUNK_SIZE = (
+            max(M, 1)
+            if not self.fused_experts.supports_chunking()
+            else min(M, envs.VLLM_FUSED_MOE_CHUNK_SIZE)
+        )
         num_chunks = cdiv(M, CHUNK_SIZE)
         # If there are no tokens, then there should be no loop iterations.
         assert M > 0 or num_chunks == 0
@@ -755,31 +760,37 @@ class FusedMoEModularKernel(torch.nn.Module):
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
         workspace13_shape, workspace2_shape, fused_out_shape = (
-            self.fused_experts.workspace_shapes(M_chunk, M_full, N, K, top_k,
-                                                global_num_experts,
-                                                local_num_experts,
-                                                expert_tokens_meta))
+            self.fused_experts.workspace_shapes(
+                M_chunk,
+                M_full,
+                N,
+                K,
+                top_k,
+                global_num_experts,
+                local_num_experts,
+                expert_tokens_meta,
+            )
+        )
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
-        workspace13 = buffers.workspace13.get(workspace13_shape,
-                                              device=device,
-                                              dtype=workspace_dtype)
-        workspace2 = buffers.workspace2.get(workspace2_shape,
-                                            device=device,
-                                            dtype=workspace_dtype)
+        workspace13 = buffers.workspace13.get(
+            workspace13_shape, device=device, dtype=workspace_dtype
+        )
+        workspace2 = buffers.workspace2.get(
+            workspace2_shape, device=device, dtype=workspace_dtype
+        )
 
         # Construct the entire output that can then be processed in chunks.
         # Reuse workspace13 for the output in the non-chunked case as long
         # as it is large enough. This will not always be the case for standard
         # format experts and with experts that have empty workspaces.
-        if num_chunks == 1 and prod(workspace13_shape) >= prod(
-                fused_out_shape):
+        if num_chunks == 1 and prod(workspace13_shape) >= prod(fused_out_shape):
             fused_out = _resize_cache(workspace13, fused_out_shape)
         else:
-            fused_out = buffers.fused_out.get(fused_out_shape,
-                                              device=device,
-                                              dtype=out_dtype)
+            fused_out = buffers.fused_out.get(
+                fused_out_shape, device=device, dtype=out_dtype
+            )
 
         return workspace13, workspace2, fused_out
 
@@ -794,8 +805,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         if num_chunks == 1:
             return fused_out
 
-        assert fused_out.size(0) % M == 0, (
-            f"fused_out shape {fused_out.shape} vs M {M}")
+        assert fused_out.size(0) % M == 0, f"fused_out shape {fused_out.shape} vs M {M}"
         factor = fused_out.size(0) // M
         out_chunk_size = CHUNK_SIZE * factor
         s = chunk_idx * out_chunk_size
@@ -816,23 +826,24 @@ class FusedMoEModularKernel(torch.nn.Module):
         # The existing expert_num_tokens is for the entire a1q
         # input. Chunking forces recomputation of the number
         # of tokens assigned to each expert.
-        c_expert_num_tokens = count_expert_num_tokens(chunk_topk_ids,
-                                                      local_num_experts,
-                                                      expert_map)
+        c_expert_num_tokens = count_expert_num_tokens(
+            chunk_topk_ids, local_num_experts, expert_map
+        )
 
         c_expert_num_tokens_cpu = None
         need_expert_num_tokens_cpu = (
-            full_expert_tokens_meta.expert_num_tokens_cpu is not None)
+            full_expert_tokens_meta.expert_num_tokens_cpu is not None
+        )
         if need_expert_num_tokens_cpu:
             # This is blocking as some implementations need the count
             # on the CPU to determine appropriate input/out fused-moe
             # buffers
-            c_expert_num_tokens_cpu = c_expert_num_tokens.to(
-                "cpu", non_blocking=False)
+            c_expert_num_tokens_cpu = c_expert_num_tokens.to("cpu", non_blocking=False)
 
         return ExpertTokensMetadata(
             expert_num_tokens=c_expert_num_tokens,
-            expert_num_tokens_cpu=c_expert_num_tokens_cpu)
+            expert_num_tokens_cpu=c_expert_num_tokens_cpu,
+        )
 
     def _prepare(
         self,
@@ -843,11 +854,11 @@ class FusedMoEModularKernel(torch.nn.Module):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
     ) -> tuple[
-            torch.Tensor,
-            Optional[torch.Tensor],
-            Optional[ExpertTokensMetadata],
-            torch.Tensor,
-            torch.Tensor,
+        torch.Tensor,
+        Optional[torch.Tensor],
+        Optional[ExpertTokensMetadata],
+        torch.Tensor,
+        torch.Tensor,
     ]:
         """
         The _prepare method is a wrapper around self.prepare_finalize.prepare
@@ -859,16 +870,21 @@ class FusedMoEModularKernel(torch.nn.Module):
             # TODO(lucas): enable in follow-up
             assert not dbo_enabled()
 
-            (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
-             _expert_topk_weights) = self.prepare_finalize.prepare(
-                 hidden_states,
-                 topk_weights,
-                 topk_ids,
-                 global_num_experts,
-                 expert_map,
-                 apply_router_weight_on_input,
-                 self.fused_experts.quant_config,
-             )
+            (
+                a1q,
+                a1q_scale,
+                expert_tokens_meta,
+                _expert_topk_ids,
+                _expert_topk_weights,
+            ) = self.prepare_finalize.prepare(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                global_num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+                self.fused_experts.quant_config,
+            )
         else:
             # Overlap shared expert compute with all2all dispatch.
             dbo_maybe_run_recv_hook()
@@ -931,7 +947,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         apply_router_weight_on_input: bool,
         expert_tokens_meta: Optional[ExpertTokensMetadata],
     ) -> torch.Tensor:
-        _, M_full, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
+        _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
+            a1q, w1, w2, topk_ids
+        )
 
         num_chunks, CHUNK_SIZE = self._chunk_info(M_full)
 
@@ -959,19 +977,32 @@ class FusedMoEModularKernel(torch.nn.Module):
         else:
             assert num_chunks > 0
             workspace13, workspace2, fused_out = self._allocate_buffers(
-                in_dtype, a1q.device, CHUNK_SIZE, M_full, N, K, top_k,
-                global_num_experts, local_num_experts, expert_tokens_meta)
+                in_dtype,
+                a1q.device,
+                CHUNK_SIZE,
+                M_full,
+                N,
+                K,
+                top_k,
+                global_num_experts,
+                local_num_experts,
+                expert_tokens_meta,
+            )
 
         for chunk_idx in range(num_chunks):
             s, e = input_chunk_range(chunk_idx)
 
             c_expert_tokens_meta = self._slice_expert_tokens_metadata(
-                num_chunks, expert_tokens_meta, topk_ids[s:e],
-                local_num_experts, expert_map)
+                num_chunks,
+                expert_tokens_meta,
+                topk_ids[s:e],
+                local_num_experts,
+                expert_map,
+            )
 
-            c_fused_out = self._slice_output_tensor(fused_out, chunk_idx,
-                                                    num_chunks, CHUNK_SIZE,
-                                                    M_full)
+            c_fused_out = self._slice_output_tensor(
+                fused_out, chunk_idx, num_chunks, CHUNK_SIZE, M_full
+            )
 
             self.fused_experts.apply(
                 output=c_fused_out,
@@ -1111,15 +1142,14 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
-        a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = (
-            self._prepare(
-                hidden_states,
-                topk_weights,
-                topk_ids,
-                global_num_experts,
-                expert_map,
-                apply_router_weight_on_input,
-            ))
+        a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            global_num_experts,
+            expert_map,
+            apply_router_weight_on_input,
+        )
 
         fused_out = self._fused_experts(
             in_dtype=hidden_states.dtype,
