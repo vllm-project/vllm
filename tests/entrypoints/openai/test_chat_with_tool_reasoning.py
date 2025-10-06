@@ -45,12 +45,13 @@ TOOLS = [
                 "properties": {
                     "city": {
                         "type": "string",
-                        "description": "The city to find the weather for, e.g. 'San Francisco'",
+                        "description": "The city to find the weather for, e.g. "
+                        "'San Francisco'",
                     },
                     "state": {
                         "type": "string",
-                        "description": "the two-letter abbreviation for the state that the city is"
-                        " in, e.g. 'CA' which would mean 'California'",
+                        "description": "the two-letter abbreviation for the state that "
+                        "the city is in, e.g. 'CA' which would mean 'California'",
                     },
                     "unit": {
                         "type": "string",
@@ -69,7 +70,8 @@ MESSAGES = [
     {"role": "assistant", "content": "I'm doing well! How can I help you?"},
     {
         "role": "user",
-        "content": "Can you tell me what the temperate will be in Dallas, in fahrenheit?",
+        "content": "Can you tell me what the temperate will be in Dallas, "
+        "in fahrenheit?",
     },
 ]
 

@@ -471,7 +471,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     top_logprobs: Optional[int] = 0
     max_tokens: Optional[int] = Field(
         default=None,
-        deprecated="max_tokens is deprecated in favor of the max_completion_tokens field",
+        deprecated="max_tokens is deprecated in favor of "
+        "the max_completion_tokens field",
     )
     max_completion_tokens: Optional[int] = None
     n: Optional[int] = 1

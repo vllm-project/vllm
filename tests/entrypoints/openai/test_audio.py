@@ -145,7 +145,7 @@ async def test_single_chat_session_audio_base64encoded(
                 {
                     "type": "audio_url",
                     "audio_url": {
-                        "url": f"data:audio/wav;base64,{base64_encoded_audio[audio_url]}"
+                        "url": f"data:audio/wav;base64,{base64_encoded_audio[audio_url]}"  # noqa: E501
                     },
                 },
                 {"type": "text", "text": "What's happening in this audio?"},

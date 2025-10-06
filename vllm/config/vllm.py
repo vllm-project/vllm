@@ -472,7 +472,7 @@ class VllmConfig:
                 self.compilation_config.cudagraph_mode.has_full_cudagraphs()
                 and self.model_config is not None
                 and not self.model_config.disable_cascade_attn
-                and not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+                and not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()  # noqa: E501
             ):
                 logger.warning_once(
                     "No piecewise cudagraph for executing cascade attention."

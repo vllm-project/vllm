@@ -164,7 +164,7 @@ def invoke_main() -> None:
     )
     parser.add_argument(
         "--batched", action="store_true", help="consider time to prepare batch"
-    )  # noqa: E501
+    )
     parser.add_argument(
         "--num-iteration",
         type=int,

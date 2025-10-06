@@ -17,10 +17,10 @@ from typing_extensions import Concatenate, ParamSpec
 from vllm.utils import get_open_port, has_deep_ep
 
 if has_deep_ep():
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
+    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
         DeepEPHTPrepareAndFinalize,
     )
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
+    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
         DeepEPLLPrepareAndFinalize,
     )
 

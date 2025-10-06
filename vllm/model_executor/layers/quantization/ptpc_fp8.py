@@ -107,8 +107,8 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
 
         assert layer.weight.data.dtype == torch.bfloat16, (
-            f"Currently torch._scaled_mm (hipBLASLt) rowwise gemm only support output dtype of bfloat16. {str(layer.weight.data.dtype)} is specified."
-        )  # noqa: E501
+            f"Currently torch._scaled_mm (hipBLASLt) rowwise gemm only support output dtype of bfloat16. {str(layer.weight.data.dtype)} is specified."  # noqa: E501
+        )
         # Quantize the weights.
         qweight, weight_scale = ops.scaled_fp8_quant(
             layer.weight, scale=None, use_per_token_if_dynamic=True

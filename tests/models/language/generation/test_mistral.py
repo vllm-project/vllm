@@ -46,12 +46,13 @@ TOOLS = [
                 "properties": {
                     "city": {
                         "type": "string",
-                        "description": "The city to find the weather for, e.g. 'San Francisco'",
+                        "description": "The city to find the weather for, e.g. "
+                        "'San Francisco'",
                     },
                     "state": {
                         "type": "string",
-                        "description": "the two-letter abbreviation for the state that the city is"
-                        " in, e.g. 'CA' which would mean 'California'",
+                        "description": "the two-letter abbreviation for the state that "
+                        "the city is in, e.g. 'CA' which would mean 'California'",
                     },
                     "unit": {
                         "type": "string",
@@ -85,7 +86,8 @@ MSGS = [
     {"role": "system", "content": "You are an assistant."},
     {
         "role": "user",
-        "content": "Could you please rewrite the below article? \n\n My English needs improvving, maybe I make errors.",  # noqa
+        "content": "Could you please rewrite the below article? \n\n My English needs "
+        "improvving, maybe I make errors.",
     },
     {
         "role": "assistant",
@@ -96,14 +98,16 @@ MSGS = [
                 "type": "function",
                 "function": {
                     "name": "rewrite",
-                    "arguments": '{"text":"My English needs improvving, maybe I make errors."}',  # noqa
+                    "arguments": '{"text":"My English needs improvving, maybe '
+                    'I make errors."}',
                 },
             }
         ],
     },
     {
         "role": "tool",
-        "content": '{"action":"rewrite","outcome":"My English needs improving, maybe I make errors."}',  # noqa
+        "content": '{"action":"rewrite","outcome":"My English needs improving, maybe '
+        'I make errors."}',
         "tool_call_id": "bbc5b7ede",
         "name": "rewrite",
     },

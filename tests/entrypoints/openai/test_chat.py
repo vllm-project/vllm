@@ -835,17 +835,18 @@ async def test_extra_fields_allowed(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_complex_message_content(client: openai.AsyncOpenAI):
+    content = [
+        {
+            "type": "text",
+            "text": "what is 1+1? please provide the result without any other text.",
+        }
+    ]
     resp = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "what is 1+1? please provide the result without any other text.",
-                    }
-                ],
+                "content": content,
             }
         ],
         temperature=0,

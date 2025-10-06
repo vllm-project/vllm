@@ -243,7 +243,7 @@ def test_fix_functionalization(model_class: torch.nn.Module, do_fusion: bool):
     # check if the functionalization pass is applied
     for op in model.ops_in_model(do_fusion):
         find_auto_fn(backend_no_func.graph_post_pass.nodes, op)
-        assert find_auto_fn_maybe(backend_func.graph_post_pass.nodes, op) is None  # noqa: E501
+        assert find_auto_fn_maybe(backend_func.graph_post_pass.nodes, op) is None
 
     # make sure the ops were all de-functionalized
     found = dict()
