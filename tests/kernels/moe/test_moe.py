@@ -51,7 +51,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_w
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
-from vllm.model_executor.layers.fused_moe.cpu_fused_moe import CPUFusedMOE
 
 NUM_EXPERTS = [8, 64, 192]
 EP_SIZE = [1, 4]
@@ -921,29 +920,36 @@ def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
 @pytest.mark.parametrize("activation", ["silu"])
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only test")
 def test_cpu_fused_moe_basic(m, n, k, e, topk, dtype, with_bias, activation):
+    from vllm.model_executor.layers.fused_moe.cpu_fused_moe import CPUFusedMOE
+
     device = "cpu"
     torch.manual_seed(7)
 
-    a   = (torch.randn((m, k), device=device, dtype=dtype) / 10)
-    w13 = (torch.randn((e, 2 * n, k), device=device, dtype=dtype) / 10)
-    w2  = (torch.randn((e, k, n), device=device, dtype=dtype) / 10)
+    a = torch.randn((m, k), device=device, dtype=dtype) / 10
+    w13 = torch.randn((e, 2 * n, k), device=device, dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device=device, dtype=dtype) / 10
     router_logits = torch.randn((m, e), device=device, dtype=dtype)
 
     b1 = b2 = None
     if with_bias:
-        b1 = (torch.randn((e, 2 * n), device=device, dtype=dtype) / 10)
-        b2 = (torch.randn((e, k),      device=device, dtype=dtype) / 10)
+        b1 = torch.randn((e, 2 * n), device=device, dtype=dtype) / 10
+        b2 = torch.randn((e, k), device=device, dtype=dtype) / 10
 
-    ref = torch_moe(a, w13, w2, router_logits, topk, b1, b2) if with_bias \
-            else torch_moe(a, w13, w2, router_logits, topk)
+    ref = (
+        torch_moe(a, w13, w2, router_logits, topk, b1, b2)
+        if with_bias
+        else torch_moe(a, w13, w2, router_logits, topk)
+    )
 
     class _Dummy(torch.nn.Module):
         def __init__(self, w13, w2, b1=None, b2=None):
             super().__init__()
             self.w13_weight = torch.nn.Parameter(w13, requires_grad=False)
-            self.w2_weight  = torch.nn.Parameter(w2,  requires_grad=False)
-            if b1 is not None: self.w13_bias = torch.nn.Parameter(b1, requires_grad=False)
-            if b2 is not None: self.w2_bias  = torch.nn.Parameter(b2,  requires_grad=False)
+            self.w2_weight = torch.nn.Parameter(w2, requires_grad=False)
+            if b1 is not None:
+                self.w13_bias = torch.nn.Parameter(b1, requires_grad=False)
+            if b2 is not None:
+                self.w2_bias = torch.nn.Parameter(b2, requires_grad=False)
 
     layer = _Dummy(w13, w2, b1, b2).to(dtype)
     fused = CPUFusedMOE(layer)
@@ -967,6 +973,8 @@ def test_cpu_fused_moe_basic(m, n, k, e, topk, dtype, with_bias, activation):
     # Tolerances: fp32 tight; bf16 looser (esp. with bias)
     if dtype == torch.float32:
         atol = 1e-3
+    elif with_bias:
+        atol = 8e-2
     else:
-        atol = 8e-2 if with_bias else 5e-2
+        atol = 5e-2
     torch.testing.assert_close(out, ref, atol=atol, rtol=0)
