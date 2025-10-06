@@ -307,9 +307,14 @@ class LLMEngine:
         # 4) Record stats
         if self.logger_manager is not None:
             assert outputs.scheduler_stats is not None
+
+            mm_cache = self.processor.input_preprocessor.mm_processor_cache
+            mm_cache_stats = mm_cache.make_stats() if mm_cache else None
+
             self.logger_manager.record(
                 scheduler_stats=outputs.scheduler_stats,
                 iteration_stats=iteration_stats,
+                mm_cache_stats=mm_cache_stats,
             )
             self.do_log_stats_with_interval()
 
