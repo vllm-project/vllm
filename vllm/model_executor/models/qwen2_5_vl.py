@@ -52,16 +52,12 @@ from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
-
-# yapf: disable
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
-
-# yapf: enable
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -1402,12 +1398,10 @@ class Qwen2_5_VLForConditionalGeneration(
         # Tensors
         input_ids_t = torch.as_tensor(input_ids, device=device, dtype=torch.long)
 
-        # fmt: off
-        mm_embeddings_out = [mm[:, :-4] for mm in
-                             multimodal_embeddings]
-        mm_embeddings_pos = [mm[:, -4:].permute(1, 0).long() for mm in
-                             multimodal_embeddings]
-        # fmt: in
+        mm_embeddings_out = [mm[:, :-4] for mm in multimodal_embeddings]
+        mm_embeddings_pos = [
+            mm[:, -4:].permute(1, 0).long() for mm in multimodal_embeddings
+        ]
 
         positions, mrope_positions_delta = recompute_mrope_positions(
             input_ids_t,
