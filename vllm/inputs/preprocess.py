@@ -17,7 +17,8 @@ from vllm.multimodal.inputs import (
     MultiModalUUIDDict,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
+from vllm.utils.jsontree import json_iter_leaves
 
 from .data import (
     DecoderOnlyInputs,
@@ -44,16 +45,19 @@ class InputPreprocessor:
     def __init__(
         self,
         model_config: ModelConfig,
-        tokenizer: Optional[AnyTokenizer],
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         mm_processor_cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> None:
         super().__init__()
 
         self.model_config = model_config
-        self.tokenizer = tokenizer
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_processor_cache
+
+        if model_config.skip_tokenizer_init:
+            self.tokenizer = None
+        else:
+            self.tokenizer = init_tokenizer_from_configs(model_config)
 
     def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
@@ -273,7 +277,10 @@ class InputPreprocessor:
         mm_hashes = mm_input["mm_hashes"]
 
         # Validate that all mm items have a string as their hash
-        if not contains_only_strings(mm_hashes):
+        contains_only_strings = all(
+            isinstance(leaf, str) for leaf in json_iter_leaves(mm_hashes)
+        )
+        if not contains_only_strings:
             raise ValueError(
                 f"mm_hashes must contain only strings, got: {mm_hashes}. "
                 "This is likely due to an incorrect custom implementation of "
@@ -693,15 +700,3 @@ class InputPreprocessor:
     def clear_cache(self) -> None:
         if self.mm_processor_cache is not None:
             self.mm_processor_cache.clear_cache()
-
-
-# Helper function to validate that a nested dictionary contains
-# only strings or list of strings as the leaf values.
-def contains_only_strings(obj: object):
-    if isinstance(obj, str):
-        return True
-    if isinstance(obj, list):
-        return all(isinstance(x, str) for x in obj)
-    if isinstance(obj, dict):
-        return all(contains_only_strings(v) for v in obj.values())
-    return False
