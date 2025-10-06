@@ -196,9 +196,9 @@ def build_logitsprocs(
     if vllm_config.speculative_config:
         if custom_logitsprocs:
             raise ValueError(STR_SPEC_DEC_REJECTS_LOGITSPROCS)
-        logger.debug(
-            "Skipping logits processor loading because "
-            "they are not supported when speculative decoding is enabled."
+        logger.warning(
+            "min_p, logit_bias, and min_tokens parameters won't currently work "
+            "with speculative decoding enabled."
         )
         return LogitsProcessors()
 
