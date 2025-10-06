@@ -21,10 +21,10 @@ class OCP_MX_Scheme(str, Enum):
     w_fp6_e2m3_a_fp6_e2m3 = "w_fp6_e2m3_a_fp6_e2m3"
 
     @classmethod
-    def from_quant_dtype(cls, input_dtype: Union[str, None],
-                         weight_dtype: Union[str, None]):
-        if (input_dtype not in OCP_MX_DTYPES
-                or weight_dtype not in OCP_MX_DTYPES):
+    def from_quant_dtype(
+        cls, input_dtype: Union[str, None], weight_dtype: Union[str, None]
+    ):
+        if input_dtype not in OCP_MX_DTYPES or weight_dtype not in OCP_MX_DTYPES:
             return None
         elif input_dtype == "fp4" and weight_dtype == "fp4":
             return cls.w_fp4_a_fp4
@@ -40,5 +40,8 @@ class OCP_MX_Scheme(str, Enum):
             logger.warning(
                 "input_dtype='%s' and"
                 " weight_dtype='%s' is not supported "
-                "in OCP_MX_Scheme at the moment.", input_dtype, weight_dtype)
+                "in OCP_MX_Scheme at the moment.",
+                input_dtype,
+                weight_dtype,
+            )
             return None
