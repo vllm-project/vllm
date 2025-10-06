@@ -183,6 +183,8 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
             device=device,
         )
 
+        self.reorder_batch_threshold = self.tree_attn_bias.shape[0]
+
     def build(
         self,
         common_prefix_len: int,
