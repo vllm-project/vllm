@@ -22,7 +22,7 @@ def find_common_prefix(s1: str, s2: str) -> str:
     e.g. find_common_prefix('{"fruit": "ap"}', '{"fruit": "apple"}') ->
     '{"fruit": "ap'
     """
-    prefix = ''
+    prefix = ""
     min_length = min(len(s1), len(s2))
     for i in range(0, min_length):
         if s1[i] == s2[i]:
@@ -40,7 +40,7 @@ def find_common_suffix(s1: str, s2: str) -> str:
 
     e.g. find_common_suffix('{"fruit": "ap"}', '{"fruit": "apple"}') -> '"}'
     """
-    suffix = ''
+    suffix = ""
     min_length = min(len(s1), len(s2))
     for i in range(1, min_length + 1):
         if s1[-i] == s2[-i] and not s1[-i].isalnum():
@@ -70,15 +70,15 @@ def extract_intermediate_diff(curr: str, old: str) -> str:
     """
     suffix = find_common_suffix(curr, old)
 
-    old = old[::-1].replace(suffix[::-1], '', 1)[::-1]
+    old = old[::-1].replace(suffix[::-1], "", 1)[::-1]
     prefix = find_common_prefix(curr, old)
     diff = curr
     if len(suffix):
-        diff = diff[::-1].replace(suffix[::-1], '', 1)[::-1]
+        diff = diff[::-1].replace(suffix[::-1], "", 1)[::-1]
 
     if len(prefix):
         # replace the prefix only once in case it's mirrored
-        diff = diff.replace(prefix, '', 1)
+        diff = diff.replace(prefix, "", 1)
 
     return diff
 

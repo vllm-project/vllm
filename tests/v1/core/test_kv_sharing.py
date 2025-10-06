@@ -26,8 +26,7 @@ def test_initialize_kv_cache_for_kv_sharing_different_attn_groups():
     # However, if they have different attention backends, they will be
     # placed in different attention groups for KV cache group 0
     kv_cache_groups = [
-        KVCacheGroupSpec(["model.layers.0", "model.layers.1"],
-                         new_kv_cache_spec()),
+        KVCacheGroupSpec(["model.layers.0", "model.layers.1"], new_kv_cache_spec()),
     ]
 
     add_kv_sharing_layers_to_kv_cache_groups(
@@ -38,7 +37,10 @@ def test_initialize_kv_cache_for_kv_sharing_different_attn_groups():
     # Check that the layers were added to the correct KV cache group
     assert len(kv_cache_groups) == 1
     assert kv_cache_groups[0].layer_names == [
-        "model.layers.0", "model.layers.1", "model.layers.2", "model.layers.3"
+        "model.layers.0",
+        "model.layers.1",
+        "model.layers.2",
+        "model.layers.3",
     ]
 
 
@@ -53,8 +55,7 @@ def test_initialize_kv_cache_for_kv_sharing_same_attn_groups():
     }
 
     kv_cache_groups = [
-        KVCacheGroupSpec(["model.layers.0", "model.layers.1"],
-                         new_kv_cache_spec()),
+        KVCacheGroupSpec(["model.layers.0", "model.layers.1"], new_kv_cache_spec()),
     ]
 
     add_kv_sharing_layers_to_kv_cache_groups(
@@ -65,14 +66,17 @@ def test_initialize_kv_cache_for_kv_sharing_same_attn_groups():
     # Check that the layers were added to the correct KV cache group
     assert len(kv_cache_groups) == 1
     assert kv_cache_groups[0].layer_names == [
-        "model.layers.0", "model.layers.1", "model.layers.2", "model.layers.3"
+        "model.layers.0",
+        "model.layers.1",
+        "model.layers.2",
+        "model.layers.3",
     ]
 
 
 def test_initialize_kv_cache_for_kv_sharing_no_attn_groups():
     """
     Test KV sharing set up when no attention groups are provided.
-    This is the case for the TPU model runner, which doesn't have 
+    This is the case for the TPU model runner, which doesn't have
     support for attention groups yet.
     """
     shared_kv_cache_layers = {
@@ -92,9 +96,5 @@ def test_initialize_kv_cache_for_kv_sharing_no_attn_groups():
 
     # Check that the layers were added to the correct KV cache group
     assert len(kv_cache_groups) == 2
-    assert kv_cache_groups[0].layer_names == [
-        "model.layers.0", "model.layers.2"
-    ]
-    assert kv_cache_groups[1].layer_names == [
-        "model.layers.1", "model.layers.3"
-    ]
+    assert kv_cache_groups[0].layer_names == ["model.layers.0", "model.layers.2"]
+    assert kv_cache_groups[1].layer_names == ["model.layers.1", "model.layers.3"]
