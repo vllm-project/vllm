@@ -1181,7 +1181,7 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid, SupportsMultiModa
                 # Start of EVS-specific code
                 retention_mask = compute_retention_mask(
                     single_video_embeddings,
-                    video_size_thw=torch.tensor([num_frames, rows, cols]),
+                    video_size_thw=(num_frames, rows, cols),
                     spatial_merge_size=1,
                     q=video_pruning_rate,
                 )
