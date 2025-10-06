@@ -7,9 +7,7 @@ GPU buffer offloading during sleep_mode.
 Run using : VLLM_HOST_IP=127.0.0.1 python cuda_graph_sleep_mode.py
 """
 
-import logging
 import os
-import sys
 
 import ray
 from ray.util.placement_group import placement_group
@@ -17,8 +15,11 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
+from vllm.logger import init_logger
 
 # Initialize logger with explicit stdout handler for Ray compatibility
+import logging
+import sys
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -103,10 +104,8 @@ for step in range(50):
 
     # Test different sleep levels at different steps
     sleep_level = 0
-    if (step + 1) % 5 == 0:
-        sleep_level = 2
-    if (step + 1) % 10 == 0:
-        sleep_level = 1
+    if (step + 1) % 5 == 0: sleep_level = 2
+    if (step + 1) % 10 == 0: sleep_level = 1
 
     if sleep_level:
         logger.info("--- Entering sleep mode level %d ---", sleep_level)

@@ -28,7 +28,7 @@ def find_loaded_library(lib_name) -> Optional[str]:
     the file `/proc/self/maps` contains the memory maps of the process, which includes the
     shared libraries loaded by the process. We can use this file to find the path of the
     a loaded library.
-    """ # noqa
+    """  # noqa
     found_line = None
     with open("/proc/self/maps") as f:
         for line in f:
@@ -43,17 +43,21 @@ def find_loaded_library(lib_name) -> Optional[str]:
     start = found_line.index("/")
     path = found_line[start:].strip()
     filename = path.split("/")[-1]
-    assert filename.rpartition(".so")[0].startswith(lib_name), \
+    assert filename.rpartition(".so")[0].startswith(lib_name), (
         f"Unexpected filename: {filename} for library {lib_name}"
+    )
     return path
 
 
 cumem_available = False
 try:
-    from vllm.cumem_allocator import (init_module, python_create_and_map,
-                                      python_unmap_and_release)
-    from vllm.distributed.device_communicators.cuda_wrapper import (
-        CudaRTLibrary)
+    from vllm.cumem_allocator import (
+        init_module,
+        python_create_and_map,
+        python_unmap_and_release,
+    )
+    from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+
     lib_name = find_loaded_library("cumem_allocator")
     libcudart = CudaRTLibrary()
     cumem_available = True
@@ -86,20 +90,19 @@ def unmap_and_release(allocation_handle: HandleType) -> None:
 
 
 def get_pluggable_allocator(
-    python_malloc_fn: Callable[[int],
-                               int], python_free_func: Callable[[int, int],
-                                                                None]
+    python_malloc_fn: Callable[[int], int], python_free_func: Callable[[int, int], None]
 ) -> torch.cuda.memory.CUDAPluggableAllocator:
     init_module(python_malloc_fn, python_free_func)
     new_alloc = torch.cuda.memory.CUDAPluggableAllocator(
-        lib_name, 'my_malloc', 'my_free')
+        lib_name, "my_malloc", "my_free"
+    )
     return new_alloc
 
 
 @contextmanager
 def use_memory_pool_with_allocator(
-        python_malloc_fn: Callable[[int], int],
-        python_free_func: Callable[[int, int], None]) -> None:
+    python_malloc_fn: Callable[[int], int], python_free_func: Callable[[int, int], None]
+) -> None:
     new_alloc = get_pluggable_allocator(python_malloc_fn, python_free_func)
     mem_pool = torch.cuda.memory.MemPool(new_alloc._allocator)
     with torch.cuda.memory.use_mem_pool(mem_pool):
@@ -130,6 +133,7 @@ class CuMemAllocator:
     the global variable will be overwritten and the free callback will
     not work as expected.
     """
+
     instance: "CuMemAllocator" = None
     default_tag: str = "default"
     graphs_tag: str = "graphs"
@@ -148,10 +152,11 @@ class CuMemAllocator:
 
     def __init__(self):
         conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
-        assert "expandable_segments:True" not in conf, \
-            ("Expandable segments are not compatible with memory pool. "
+        assert "expandable_segments:True" not in conf, (
+            "Expandable segments are not compatible with memory pool. "
             "Please track https://github.com/pytorch/pytorch/issues/147851 "
-            "for the latest updates.")
+            "for the latest updates."
+        )
 
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
@@ -170,10 +175,14 @@ class CuMemAllocator:
         when memory is allocated in the memory pool."""
         py_d_mem = allocation_handle[2]
         self.pointer_to_data[py_d_mem] = AllocationData(
-            allocation_handle, self.current_tag)
+            allocation_handle, self.current_tag
+        )
         logger.debug(
             "Allocated %s bytes for %s with address %s from cumem allocator",
-            allocation_handle[1], self.current_tag, py_d_mem)
+            allocation_handle[1],
+            self.current_tag,
+            py_d_mem,
+        )
         return
 
     def _python_free_callback(self, ptr: int) -> HandleType:
@@ -185,7 +194,10 @@ class CuMemAllocator:
             data.cpu_backup_tensor = None
         logger.debug(
             "Freed %s bytes for %s with address %s from cumem allocator",
-            data.handle[1], data.tag, ptr)
+            data.handle[1],
+            data.tag,
+            ptr,
+        )
         return data.handle
 
     def sleep(
@@ -207,12 +219,11 @@ class CuMemAllocator:
             # when the allocator sleeps
             offload_tags = (CuMemAllocator.default_tag, CuMemAllocator.graphs_tag)
         elif isinstance(offload_tags, str):
-            offload_tags = (offload_tags, )
+            offload_tags = (offload_tags,)
 
         assert isinstance(offload_tags, tuple)
 
-        # Handle CUDA graphs if model_runner is provided and graphs are being
-        # offloaded
+        # Handle CUDA graphs first if model_runner is provided and graphs are being offloaded
         has_graphs = CuMemAllocator.graphs_tag in offload_tags
         if model_runner is not None and has_graphs:
             self._save_cuda_graphs(model_runner)
@@ -229,8 +240,9 @@ class CuMemAllocator:
                 cpu_backup_tensor = torch.empty(
                     size_in_bytes,
                     dtype=torch.uint8,
-                    device='cpu',
-                    pin_memory=is_pin_memory_available())
+                    device="cpu",
+                    pin_memory=is_pin_memory_available(),
+                )
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor
@@ -241,7 +253,7 @@ class CuMemAllocator:
             "%.2f GiB is backed up in CPU and the rest %.2f GiB is discarded "
             "directly. %s", total_bytes / 1024**3, backup_bytes / 1024**3,
             (total_bytes - backup_bytes) / 1024**3,
-            f"Graph offloaded (tag: {CuMemAllocator.graphs_tag})" if has_graphs
+            f"CUDA graphs offloaded to CPU (tag: {CuMemAllocator.graphs_tag})" if has_graphs
             else "CUDA graphs not managed by CuMemAllocator")
 
         gc.collect()
@@ -264,8 +276,9 @@ class CuMemAllocator:
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
-                        size_in_bytes = cpu_backup_tensor.numel(
-                        ) * cpu_backup_tensor.element_size()
+                        size_in_bytes = (
+                            cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
+                        )
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
@@ -292,8 +305,9 @@ class CuMemAllocator:
 
         old_tag = self.current_tag
         self.current_tag = tag
-        with use_memory_pool_with_allocator(self.python_malloc_callback,
-                                            self.python_free_callback) as data:
+        with use_memory_pool_with_allocator(
+            self.python_malloc_callback, self.python_free_callback
+        ) as data:
             # start to hit another PyTorch bug in PyTorch 2.6,
             # possibly because of gc-related issue w.r.t. the allocator and
             # the memory pool.
@@ -351,21 +365,20 @@ class CuMemAllocator:
 
     def setup_graph_pool_for_sleep_mode(self) -> None:
         """
-        Set up custom graph pool for sleep mode after graph capture.
-        This ensures graphs captured with the native pool can be properly
-        mangaged during sleep/wake cycles.
+        Set up custom graph pool for sleep mode after CUDA graph capture is complete.
+        This ensures graphs captured with the native pool can be properly managed
+        during sleep/wake cycles by initializing our custom pool context.
         """
         try:
             # Initialize the custom graph pool context
             graph_pool_handle = self.get_graph_pool_handle()
 
-            logger.info("CuMemAllocator: Successfully set up custom graph "
-                        "pool for sleep mode management "
-                        "(handle type: %s)", type(graph_pool_handle).__name__)
+            logger.info("CuMemAllocator: Successfully set up custom graph pool for "
+                       f"sleep mode management (handle type: {type(graph_pool_handle).__name__})")
 
         except Exception as e:
-            logger.warning("CuMemAllocator: Failed to set up custom graph "
-                           f"pool for sleep mode: %s. Using global pool", e)
+            logger.warning("CuMemAllocator: Failed to set up custom graph pool for sleep mode: %s. "
+                          "CUDA graphs will use native PyTorch pool during sleep/wake cycles.", e)
 
     def _save_cuda_graphs(self, model_runner) -> None:
         """Put CUDA graphs to sleep."""
@@ -374,18 +387,13 @@ class CuMemAllocator:
         # Check if model runner has cudagraph dispatcher
         if hasattr(model_runner, "cudagraph_dispatcher"):
             dispatcher = model_runner.cudagraph_dispatcher
-            self._sleep_saved_cudagraphs["dispatcher"] = (
-                dispatcher.get_sleep_state()
-            )
+            self._sleep_saved_cudagraphs["dispatcher"] = dispatcher.get_sleep_state()
             logger.info(
                 "Saved cudagraph dispatcher state for %d modes",
-                len(
-                    self._sleep_saved_cudagraphs["dispatcher"][
-                        "dispatcher_keys"
-                    ]
-                ),
+                len(self._sleep_saved_cudagraphs["dispatcher"]["dispatcher_keys"]),
             )
 
+        # Handle model sleep using clean interfaces
         cuda_graph_count = 0
         model = model_runner.model
         if hasattr(model, 'enter_sleep_mode'):
@@ -393,10 +401,7 @@ class CuMemAllocator:
             self._sleep_saved_cudagraphs["model"] = sleep_state
             cuda_graph_count += count
 
-        logger.info(
-            "Put %d CUDA graphs into sleep mode.", cuda_graph_count
-        )
-
+        logger.info("Put %d CUDA graphs into sleep mode.", cuda_graph_count)
 
         # Synchronize and try to free memory
         torch.cuda.synchronize()
@@ -423,8 +428,7 @@ class CuMemAllocator:
         cuda_graph_count = 0
 
         # Verify dispatcher state
-        if (hasattr(model_runner, "cudagraph_dispatcher") and
-            "dispatcher" in self._sleep_saved_cudagraphs):
+        if hasattr(model_runner, "cudagraph_dispatcher") and "dispatcher" in self._sleep_saved_cudagraphs:
             dispatcher = model_runner.cudagraph_dispatcher
             if dispatcher.verify_wake_state(self._sleep_saved_cudagraphs["dispatcher"]):
                 logger.info("Cudagraph dispatcher state verified successfully.")
