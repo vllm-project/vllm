@@ -404,3 +404,6 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
             intermediate_cache13=workspace2,
             intermediate_cache2=workspace13,
         )
+
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+        ops.moe_sum(input, output)

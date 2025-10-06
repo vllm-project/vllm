@@ -46,6 +46,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+from .fused_marlin_moe import MarlinExperts
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
@@ -2076,6 +2077,7 @@ def modular_triton_fused_moe(
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        TritonExperts(quant_config),
+        TritonExperts(quant_config) if not quant_config.use_mxfp4_w4a16 \
+            else MarlinExperts(quant_config),
         shared_experts,
     )

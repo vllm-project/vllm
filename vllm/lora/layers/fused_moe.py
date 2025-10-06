@@ -16,6 +16,8 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import (FusedMoEQuantConfig,
                                                          _get_config_dtype_str)
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEQuantConfig, mxfp4_w4a16_moe_quant_config)
+from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     modular_triton_fused_moe, try_get_optimal_moe_config)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
@@ -36,7 +38,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         base_layer = self.base_layer
         base_layer._lora = {}
         top_k = base_layer.top_k
-        quant_config = base_layer.quant_config
+        quant_config = base_layer.quant_config if not isinstance(base_layer.quant_config, Mxfp4Config) \
+            else mxfp4_w4a16_moe_quant_config(w1_bias=base_layer.w13_bias,
+                w2_bias=base_layer.w2_bias,
+                w1_scale=base_layer.w13_weight_scale,
+                w2_scale=base_layer.w2_weight_scale,
+            )
 
         def fwd_decorator(layer, func):
 
