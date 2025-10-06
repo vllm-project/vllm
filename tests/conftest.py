@@ -420,7 +420,9 @@ class HfRunner:
         if audios is not None:
             assert len(prompts) == len(audios)
 
-        all_inputs: list[Union[BatchFeature, BatchEncoding, dict[str, torch.Tensor]]] = []
+        all_inputs: list[
+            Union[BatchFeature, BatchEncoding, dict[str, torch.Tensor]]
+        ] = []
         for i, prompt in enumerate(prompts):
             if isinstance(prompt, str):
                 processor_kwargs: dict[str, Any] = {
@@ -446,9 +448,16 @@ class HfRunner:
                     inputs = inputs.to(dtype=self.dtype)
                 all_inputs.append(inputs)
             else:
+                # check that prompt is (batched) list of integers (token ids)
                 assert isinstance(prompt, list) and all(
                     isinstance(x, int) for x in prompt
-                ), "prompt must be a list of ints corresponding to the prompt token ids"
+                ), (
+                    "Prompt must be a list of ints corresponding to the prompt token ids."
+                )
+                # check that no multimodal input is provided
+                assert not (images or videos or audios), (
+                    "When providing prompt token ids multimodal inputs are not supported."
+                )
                 input_dict: dict[str, torch.Tensor] = {
                     "input_ids": torch.tensor(prompt, dtype=torch.long).unsqueeze(0),
                 }
