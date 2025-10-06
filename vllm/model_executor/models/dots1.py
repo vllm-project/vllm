@@ -146,8 +146,7 @@ class Dots1MoE(nn.Module):
             self.gate.e_score_correction_bias = None
 
         if config.n_shared_experts is not None:
-            intermediate_size = (config.moe_intermediate_size *
-                                 config.n_shared_experts)
+            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
             self.shared_experts = Dots1MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
@@ -183,13 +182,13 @@ class Dots1MoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits) * self.routed_scaling_factor
+        final_hidden_states = (
+            self.experts(hidden_states=hidden_states, router_logits=router_logits)
+            * self.routed_scaling_factor
+        )
 
         if self.shared_experts is not None:
-            final_hidden_states = final_hidden_states[0] + final_hidden_states[
-                1]
+            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)

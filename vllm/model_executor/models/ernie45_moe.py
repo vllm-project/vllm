@@ -146,15 +146,17 @@ class Ernie4_5_MoeMoE(nn.Module):
         )
 
         if self.has_shared_experts:
-            intermediate_size = (config.moe_intermediate_size *
-                                 config.moe_num_shared_experts)
+            intermediate_size = (
+                config.moe_intermediate_size * config.moe_num_shared_experts
+            )
             self.shared_experts = Ernie4_5_MoeMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.shared_experts",
-                reduce_results=False)
+                reduce_results=False,
+            )
         else:
             self.shared_experts = None
 
@@ -183,8 +185,7 @@ class Ernie4_5_MoeMoE(nn.Module):
         )
 
         if self.has_shared_experts:
-            final_hidden_states = final_hidden_states[0] + final_hidden_states[
-                1]
+            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
 
         if self.tp_size > 1:
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(

@@ -414,11 +414,13 @@ class HunYuanSparseMoeBlock(nn.Module):
             self.physical_expert_start + self.n_local_physical_experts
         )
 
-        self.gate = ReplicatedLinear(config.hidden_size,
-                                     config.num_experts,
-                                     bias=False,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate")
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            config.num_experts,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.gate",
+        )
         if config.use_mixed_mlp_moe > 0:
             # Get layer_id num_shared_expert if config.num_shared_expert is
             # a list.
@@ -461,11 +463,11 @@ class HunYuanSparseMoeBlock(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(hidden_states=hidden_states,
-                                           router_logits=router_logits)
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=router_logits
+        )
         if self.shared_mlp is not None:
-            final_hidden_states = final_hidden_states[0] + final_hidden_states[
-                1]
+            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)

@@ -132,22 +132,14 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                 f"the number of experts {config.num_experts}."
             )
 
-        self.experts = FusedMoE(
-            num_experts=config.num_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
-            renormalize=config.norm_topk_prob,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            config.num_experts,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.gate",
         )
 
-        self.gate = ReplicatedLinear(config.hidden_size,
-                                     config.num_experts,
-                                     bias=False,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate")
         if config.shared_expert_intermediate_size > 0:
             self.shared_expert = Qwen2MoeMLP(
                 hidden_size=config.hidden_size,
@@ -170,7 +162,8 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             reduce_results=False,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
-            prefix=f"{prefix}.experts")
+            prefix=f"{prefix}.experts",
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
@@ -180,11 +173,11 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(hidden_states=hidden_states,
-                                           router_logits=router_logits)
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=router_logits
+        )
         if self.shared_expert is not None:
-            final_hidden_states = final_hidden_states[0] + final_hidden_states[
-                1]
+            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
         if self.tp_size > 1:
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
                 final_hidden_states
