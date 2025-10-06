@@ -734,6 +734,15 @@ class OpenAIServingChat(OpenAIServing):
                         combined_reasoning = ""
                         tool_messages = []
 
+                        # Calculate base_index once before the loop
+                        base_index = 0
+                        for msg in harmony_parser.messages:
+                            if (msg.channel == "commentary"
+                                    and msg.recipient
+                                    and msg.recipient.startswith(
+                                        "functions.")):
+                                base_index += 1
+
                         for group in groups:
                             group_channel = group['channel']
                             group_recipient = group['recipient']
@@ -746,14 +755,6 @@ class OpenAIServingChat(OpenAIServing):
                                     combined_reasoning += group_text
                             elif (group_channel == "commentary" and group_recipient
                                   and group_recipient.startswith("functions.")):
-
-                                base_index = 0
-                                for msg in harmony_parser.messages:
-                                    if (msg.channel == "commentary"
-                                            and msg.recipient
-                                            and msg.recipient.startswith(
-                                                "functions.")):
-                                        base_index += 1
 
                                 if prev_recipient != group_recipient:
                                     tool_name = group_recipient.split(
@@ -768,10 +769,12 @@ class OpenAIServingChat(OpenAIServing):
                                         index=base_index,
                                     ))
                                     prev_recipient = group_recipient
+                                    # Increment index for next tool call
+                                    base_index += 1
 
                                 if group_text:
                                     tool_messages.append(DeltaToolCall(
-                                        index=base_index,
+                                        index=base_index - 1,  # Use the index of the current tool call
                                         function=DeltaFunctionCall(
                                             arguments=group_text),
                                     ))
