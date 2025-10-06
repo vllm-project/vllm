@@ -342,6 +342,29 @@ def gemma3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
+def gemma3_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
+    """Sanitize vllm output [gemma-3] to compare with hf output."""
+    output_ids, output_str, out_logprobs = vllm_output
+
+    config = AutoConfig.from_pretrained(model)
+    image_token_id = config.image_token_id
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    eos_token_id = tokenizer.eos_token_id
+
+    hf_output_ids = [
+        token_id
+        for idx, token_id in enumerate(output_ids)
+        if token_id != image_token_id
+    ]
+
+    hf_output_str = output_str
+    if hf_output_ids[-1] == eos_token_id:
+        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+
+    return hf_output_ids, hf_output_str, out_logprobs
+
+
 def glm4v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for GLM4V."""
     hf_processor = hf_model.processor

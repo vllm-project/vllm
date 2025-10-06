@@ -193,6 +193,20 @@ VLM_TEST_SETTINGS = {
         # when processing the 3rd prompt in vLLM
         marks=[pytest.mark.core_model, pytest.mark.skip(reason="Test hangs")],
     ),
+    # Gemma3 has bidirectional mask on images
+    "gemma3-transformers": VLMTestInfo(
+        models=["google/gemma-3-4b-it"],
+        test_type=VLMTestType.IMAGE,
+        prompt_formatter=lambda vid_prompt: f"<'<bos><start_of_turn>user\n{vid_prompt}<start_of_image><end_of_turn>\n<start_of_turn>model\n",  # noqa: E501
+        max_model_len=4096,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=model_utils.gemma3_vllm_to_hf_output,
+        image_size_factors=[(0.25, 0.5, 1.0)],
+        vllm_runner_kwargs={
+            "model_impl": "transformers",
+        },
+        marks=[pytest.mark.core_model],
+    ),
     "idefics3-transformers": VLMTestInfo(
         models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
