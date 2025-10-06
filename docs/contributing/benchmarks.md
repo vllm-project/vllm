@@ -808,9 +808,9 @@ Run the benchmark:
 vllm bench serve \
   --model jinaai/jina-embeddings-v3 \
   --backend openai-embeddings \
-  --endpoint /v1/embeddings
+  --endpoint /v1/embeddings \
   --dataset-name sharegpt \
-  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
+  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json
 ```
 
 ##### Multi-modal Embeddings
