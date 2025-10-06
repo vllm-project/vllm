@@ -740,6 +740,10 @@ class VllmRunner:
         )
 
         if not kwargs.get("compilation_config", None):
+            # Note(@tdoublep): This is set to 4 because some tests (e.g., hybrid
+            # model tests) may set max_num_seqs=4. If min cudagraph_capture_size is
+            # set to larger than max_num_seqs, then it will lead to *no* graphs
+            # being captured which can trigger edge cases that we don't handle yet.
             kwargs["compilation_config"] = {"cudagraph_capture_sizes": [4]}
 
         with init_ctx:
