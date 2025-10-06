@@ -602,8 +602,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         else:
             # Regular attention (common case).
-            # Decodes are at the front and prefills are at the back,
-            # according to reorder_batch()
+            # Decodes are at the front and prefills are at the back.
             num_prefills = attn_metadata.num_prefills
             num_decodes = attn_metadata.num_decodes
             if num_prefills > 0:
@@ -925,8 +924,7 @@ class FlashInferImpl(AttentionImpl):
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
         kv_cache_permute = kv_cache.permute(*stride_order)
         # Regular attention (common case).
-        # Decodes are at the front and prefills are at the back,
-        # according to reorder_batch()
+        # Decodes are at the front and prefills are at the back.
         if num_prefill_tokens > 0:
             prefill_wrapper = attn_metadata.prefill_wrapper
             prefill_query = query[num_decode_tokens:]

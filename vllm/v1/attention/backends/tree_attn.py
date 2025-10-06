@@ -4,10 +4,11 @@
 
 import ast
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
@@ -20,16 +21,9 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    reorder_batch_to_split_decodes_and_prefills,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
-
-from vllm import _custom_ops as ops
 
 logger = init_logger(__name__)
 
@@ -189,12 +183,7 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
             device=device,
         )
 
-    def reorder_batch(
-        self, input_batch: "InputBatch", scheduler_output: "SchedulerOutput"
-    ) -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(
-            input_batch, scheduler_output, decode_threshold=self.tree_attn_bias.shape[0]
-        )
+        self.reorder_batch_threshold = self.tree_attn_bias.shape[0]
 
     def build(
         self,
