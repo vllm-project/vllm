@@ -1491,7 +1491,7 @@ def test_different_block_size():
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["layer1"],
-                FullAttentionSpec(block_size * 2, 1, 1, torch.float32, False),
+                FullAttentionSpec(block_size * 2, 1, 1, torch.float32),
             ),
             KVCacheGroupSpec(
                 ["layer2"],
@@ -1500,7 +1500,6 @@ def test_different_block_size():
                     1,
                     1,
                     torch.float32,
-                    False,
                     sliding_window=2 * block_size,
                 ),
             ),
@@ -1540,10 +1539,10 @@ def test_different_block_size():
     # But should return 4 * 16 because full attention cache hit length must be
     # a multiple of 32
     manager.block_pool.cached_block_hash_to_block.pop(
-        make_block_hash_with_group_id(req1.block_hashes[6], 1)
+        make_block_hash_with_group_id(req1.block_hashes[6], 1), 11
     )
     manager.block_pool.cached_block_hash_to_block.pop(
-        make_block_hash_with_group_id(req1.block_hashes[5], 1)
+        make_block_hash_with_group_id(req1.block_hashes[5], 1), 10
     )
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
     assert len(computed_blocks.blocks[0]) == 2
