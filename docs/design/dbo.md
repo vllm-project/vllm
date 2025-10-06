@@ -49,7 +49,7 @@ Note that you'll need to have DeepEp installed and at least two GPUs visible in 
 
 ### GPU Model Runner
 
-The `GpuModelRunner` is responsible for splitting up the batch into microbatches. Mechanically this requires two steps. The first is to coordinate between all of the DP ranks to decide if we are microbatching. Microbatching must be uniform between all DP ranks. If any DP rank doesn’t want to microbatch, none of them will. If all DP ranks want to microbatch, the total number of tokens is padded up to the max number of tokens amongst all ranks. If any rank would end up with an empty second microbatch after the padding is applied, microbatching will be aborted and no ranks will microbatch. Once all ranks have decided to microbatch, the second step is to slice up the `CommonAttentionMetadata` so that we have one attention metadata per-microbatch.
+The batch is split into microbatches by the `GPUModelRunner` class. This is accomplished in two steps. First, coordination across all DP ranks is performed to determine whether microbatching will be applied. Microbatching must be uniform across all DP ranks. If microbatching is not feasible for any DP rank, it is disabled for all ranks. If all DP ranks are going to microbatch, the total number of tokens is padded up to the max number of tokens amongst all ranks. If any rank would end up with an empty second microbatch after the padding is applied, microbatching will be aborted and no ranks will microbatch. Once microbatching has been initiated by all ranks, the second step is performed. The `CommonAttentionMetadata` is sliced in half by the `GPUModelRunner` so that there is one attention metadata per-microbatch.
 
 ### UBatchWrapper
 
