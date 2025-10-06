@@ -705,10 +705,7 @@ def _pplx_moe(
         with set_current_vllm_config(vllm_config), override_config(moe_config):
             topk_weight, topk_ids, _ = fused_topk(a, score, topk, False)
 
-            if shared_experts is not None:
-                shared_output = shared_experts(a)
-            else:
-                shared_output = None
+            shared_output = shared_experts(a) if shared_experts is not None else None
 
             torch_output = torch_experts(
                 a,
