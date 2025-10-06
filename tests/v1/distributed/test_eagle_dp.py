@@ -35,30 +35,31 @@ async def test_run_eagle_dp(use_vllm_v1):
         trust_remote_code=True,
     )
 
-    eagle_engine_args = engine_args.replace(speculative_config={
-        "model": draft_model,
-        "method": "eagle",
-        "num_speculative_tokens": 3,
-    })
+    eagle_engine_args = engine_args.replace(
+        speculative_config={
+            "model": draft_model,
+            "method": "eagle",
+            "num_speculative_tokens": 3,
+        }
+    )
 
-    if not current_platform.supports_v1(
-            eagle_engine_args.create_model_config()):
-        pytest.skip(reason="Requires V1-supporting platform.",
-                    allow_module_level=True)
+    if not current_platform.supports_v1(eagle_engine_args.create_model_config()):
+        pytest.skip(reason="Requires V1-supporting platform.", allow_module_level=True)
 
     prompt = "This is a test of data parallel with eagle"
     num_expected_tokens = 100
-    sampling_params = SamplingParams(min_tokens=num_expected_tokens,
-                                     max_tokens=num_expected_tokens,
-                                     ignore_eos=True,
-                                     output_kind=RequestOutputKind.FINAL_ONLY,
-                                     temperature=0)
+    sampling_params = SamplingParams(
+        min_tokens=num_expected_tokens,
+        max_tokens=num_expected_tokens,
+        ignore_eos=True,
+        output_kind=RequestOutputKind.FINAL_ONLY,
+        temperature=0,
+    )
 
     async def generate_with_timeout(given_engine: AsyncLLM):
         async for out in given_engine.generate(
-                request_id="test-eagle-dp",
-                prompt=prompt,
-                sampling_params=sampling_params):
+            request_id="test-eagle-dp", prompt=prompt, sampling_params=sampling_params
+        ):
             token_ids = out.outputs[0].token_ids
             assert len(token_ids) == num_expected_tokens
             return token_ids
@@ -68,8 +69,9 @@ async def test_run_eagle_dp(use_vllm_v1):
             engine = AsyncLLM.from_engine_args(engine_args)
             after.callback(engine.shutdown)
 
-            token_ids = await asyncio.wait_for(generate_with_timeout(engine),
-                                               timeout=30)
+            token_ids = await asyncio.wait_for(
+                generate_with_timeout(engine), timeout=30
+            )
 
             assert not engine.output_processor.has_unfinished_requests()
         return token_ids
