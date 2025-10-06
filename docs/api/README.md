@@ -14,7 +14,7 @@ API documentation for vLLM's configuration classes.
 - [vllm.config.LoRAConfig][]
 - [vllm.config.MultiModalConfig][]
 - [vllm.config.PoolerConfig][]
-- [vllm.config.DecodingConfig][]
+- [vllm.config.StructuredOutputsConfig][]
 - [vllm.config.ObservabilityConfig][]
 - [vllm.config.KVTransferConfig][]
 - [vllm.config.CompilationConfig][]
@@ -46,7 +46,6 @@ Engine classes for offline and online inference.
 Inference parameters for vLLM APIs.
 
 [](){ #sampling-params }
-[](){ #pooling-params }
 
 - [vllm.SamplingParams][]
 - [vllm.PoolingParams][]

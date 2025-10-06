@@ -16,13 +16,11 @@ class DataModuleConfig(TypedDict):
     no_data_replace: float
     no_label_replace: int
     num_workers: int
-    test_transform: list[
-        albumentations.core.transforms_interface.BasicTransform]
+    test_transform: list[albumentations.core.transforms_interface.BasicTransform]
 
 
 class ImagePrompt(BaseModel):
-
-    data_format: Literal["b64_json", "bytes", "url"]
+    data_format: Literal["b64_json", "bytes", "url", "path"]
     """
     This is the data type for the input image
     """
@@ -45,7 +43,7 @@ MultiModalPromptType = Union[ImagePrompt]
 
 class ImageRequestOutput(BaseModel):
     """
-    The output data of an image request to vLLM. 
+    The output data of an image request to vLLM.
 
     Args:
         type (str): The data content type [path, object]

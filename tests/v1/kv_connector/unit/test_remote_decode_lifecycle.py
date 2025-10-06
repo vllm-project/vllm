@@ -2,11 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 
+import pytest
+
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import FinishReason, RequestStatus
 
-from .utils import (assert_scheduler_empty, create_model_runner_output,
-                    create_request, create_scheduler, create_vllm_config)
+from .utils import (
+    assert_scheduler_empty,
+    create_model_runner_output,
+    create_request,
+    create_scheduler,
+    create_vllm_config,
+)
+
+pytestmark = pytest.mark.cpu_test
 
 
 def test_basic_lifecycle():
@@ -20,11 +29,13 @@ def test_basic_lifecycle():
     NUM_EXTERNAL_FULL_BLOCKS = 2
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
-    request = create_request(request_id=1,
-                             block_size=BLOCK_SIZE,
-                             max_tokens=1,
-                             num_tokens=NUM_TOKENS,
-                             do_remote_decode=True)
+    request = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        max_tokens=1,
+        num_tokens=NUM_TOKENS,
+        do_remote_decode=True,
+    )
 
     scheduler.add_request(request)
     request_id = request.request_id
@@ -39,8 +50,9 @@ def test_basic_lifecycle():
     model_runner_output = create_model_runner_output(reqs=[request])
 
     # (1c): update_from_output()
-    engine_core_outputs = scheduler.update_from_output(scheduler_output,
-                                                       model_runner_output)
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, model_runner_output
+    )
 
     # Ensure the request is finished after 1 token.
     assert request.is_finished()
@@ -56,7 +68,8 @@ def test_basic_lifecycle():
 
     # ... but blocks should not be freed.
     blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
-        0].req_to_blocks[request_id]
+        0
+    ].req_to_blocks[request_id]
     for block in blocks:
         assert block.ref_cnt == 1
 
@@ -88,7 +101,8 @@ def test_basic_lifecycle():
     # (3b): execute_model()
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     model_runner_output.kv_connector_output = KVConnectorOutput(
-        finished_sending=[request_id])
+        finished_sending={request_id}
+    )
 
     # (3c): update_from_output()
     scheduler.update_from_output(scheduler_output, model_runner_output)
@@ -106,11 +120,13 @@ def test_short_prompt_lifecycle():
     # Not enough tokens for full block.
     BLOCK_SIZE = vllm_config.cache_config.block_size
     NUM_TOKENS = BLOCK_SIZE // 2
-    request = create_request(request_id=1,
-                             block_size=BLOCK_SIZE,
-                             max_tokens=1,
-                             num_tokens=NUM_TOKENS,
-                             do_remote_decode=True)
+    request = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        max_tokens=1,
+        num_tokens=NUM_TOKENS,
+        do_remote_decode=True,
+    )
 
     scheduler.add_request(request)
 
@@ -128,14 +144,15 @@ def test_short_prompt_lifecycle():
     eco = scheduler.update_from_output(scheduler_output, model_runner_output)
     kv_transfer_params = eco[0].outputs[0].kv_transfer_params
 
-    assert (len(kv_transfer_params["remote_block_ids"]) == 1)
+    assert len(kv_transfer_params["remote_block_ids"]) == 1
 
     # Confirm we do not have any memory leaks after req lifecycle.
     # We need to mark sending finish to clear data for persistent batch.
     scheduler_output = scheduler.schedule()
     # Use create_model_runner_output to pass kv_connector_output along
     model_runner_output = create_model_runner_output(
-        reqs=[request], finished_sending=[request.request_id])
+        reqs=[request], finished_sending={request.request_id}
+    )
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)
 
@@ -151,14 +168,15 @@ def test_prefix_cache_lifecycle():
     NUM_EXTERNAL_FULL_BLOCKS = 3
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
-    request_normal = create_request(request_id=1,
-                                    block_size=BLOCK_SIZE,
-                                    num_tokens=NUM_TOKENS)
+    request_normal = create_request(
+        request_id=1, block_size=BLOCK_SIZE, num_tokens=NUM_TOKENS
+    )
 
     scheduler.add_request(request_normal)
     scheduler_output = scheduler.schedule()
-    model_runner_output = create_model_runner_output(reqs=[request_normal],
-                                                     use_eos=True)
+    model_runner_output = create_model_runner_output(
+        reqs=[request_normal], use_eos=True
+    )
     scheduler.update_from_output(scheduler_output, model_runner_output)
     scheduler.schedule()
     scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
@@ -170,10 +188,12 @@ def test_prefix_cache_lifecycle():
     NUM_EXTERNAL_FULL_BLOCKS -= 1
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
-    request_remote = create_request(request_id=1,
-                                    block_size=BLOCK_SIZE,
-                                    num_tokens=NUM_TOKENS,
-                                    do_remote_decode=True)
+    request_remote = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=NUM_TOKENS,
+        do_remote_decode=True,
+    )
 
     scheduler.add_request(request_remote)
     scheduler_output = scheduler.schedule()
@@ -183,14 +203,13 @@ def test_prefix_cache_lifecycle():
 
     # Ensure we send all block ids, including the partial blocks,
     # even if there is a cache hit.
-    assert (len(
-        kv_transfer_params["remote_block_ids"]) == (NUM_EXTERNAL_FULL_BLOCKS +
-                                                    1))
+    assert len(kv_transfer_params["remote_block_ids"]) == (NUM_EXTERNAL_FULL_BLOCKS + 1)
 
     # STEP (2): Ensure it is freed.
     scheduler_output = scheduler.schedule()
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
     model_runner_output.kv_connector_output = KVConnectorOutput(
-        finished_sending=[request_remote.request_id])
+        finished_sending={request_remote.request_id}
+    )
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)
