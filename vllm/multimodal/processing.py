@@ -1946,6 +1946,24 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     "model (usually arising from an inconsistency between "
                     "`_call_hf_processor` and `_get_mm_fields_config`).")
 
+    def _validate_mm_updates(
+        self,
+        mm_updates: MultiModalPromptUpdates,
+        mm_item_counts: Mapping[str, int],
+    ) -> None:
+        for modality, item_count in mm_item_counts.items():
+            placeholders = mm_updates.get(modality, [])
+
+            if len(placeholders) != item_count:
+                raise RuntimeError(
+                    f"Expected there to be {item_count} prompt updates "
+                    f"corresponding to {item_count} {modality} items, but "
+                    f"instead found {len(placeholders)} prompt updates! "
+                    "This is likely because you forgot to include input "
+                    "placeholder tokens (e.g., `<image>`, `<|image_pad|>`) "
+                    "in the prompt. If the model has a chat template, make "
+                    "sure you have applied it before calling `LLM.generate`.")
+
     def _validate_mm_placeholders(
         self,
         mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
@@ -1955,17 +1973,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             placeholders = mm_placeholders.get(modality, [])
 
             if len(placeholders) != item_count:
-                # NOTE: If you are a model developer, this can also arise from
-                # an inconsistency between `_call_hf_processor` and
-                # `_get_mm_fields_config` implementations
                 raise RuntimeError(
-                    f"Expected there to be {item_count} prompt updates "
+                    f"Expected there to be {item_count} prompt placeholders "
                     f"corresponding to {item_count} {modality} items, but "
-                    f"instead found {len(placeholders)} prompt updates! "
-                    "This is likely because you forgot to include input "
-                    "placeholder tokens (e.g., `<image>`, `<|image_pad|>`) "
-                    "in the prompt. If the model has a chat template, make "
-                    "sure you have applied it before calling `LLM.generate`.")
+                    f"instead found {len(placeholders)} prompt placeholders! "
+                    "Make sure the implementation of `_call_hf_processor` and "
+                    "`_get_mm_fields_config` are consistent with each other.")
 
     def _maybe_apply_prompt_updates(
         self,
@@ -1977,6 +1990,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
+        self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
 
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
