@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test model set-up and inference for quantized HF models supported
  on the GPU backend using FPQuant.
- 
+
  Validating the configuration and printing results for manual checking.
 
  Run `pytest tests/quantization/test_fp_quant.py`.

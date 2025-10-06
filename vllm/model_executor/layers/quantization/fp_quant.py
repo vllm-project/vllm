@@ -9,15 +9,16 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm._custom_ops import (cutlass_scaled_fp4_mm, fusedQuantizeMx,
-                              fusedQuantizeNv, matmul_ada_mxf4_bf16_tn,
-                              matmul_mxf4_bf16_tn)
+                              fusedQuantizeNv, matmul_mxf4_bf16_tn)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.qutlass_utils.utils import to_blocked
+from vllm.utils import direct_register_custom_op
 
 
 class FPQuantConfig(QuantizationConfig):
@@ -29,7 +30,7 @@ class FPQuantConfig(QuantizationConfig):
         forward_dtype: str = "mxfp4",
         forward_method: str = "abs_max",
         pseudoquantization: bool = False,
-        modules_to_not_convert: list[str] = None,
+        modules_to_not_convert: Optional[list[str]] = None,
     ) -> None:
         super().__init__()
         self.hadamard_group_size = hadamard_group_size
@@ -78,12 +79,11 @@ class FPQuantConfig(QuantizationConfig):
                    pseudoquantization, modules_to_not_convert)
 
     def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["FPQuantLinearMethod"]:
-        if self.modules_to_not_convert is not None:
-            if any(
-                    prefix.endswith(module)
-                    for module in self.modules_to_not_convert):
-                return UnquantizedLinearMethod()
+                         prefix: str) -> Optional[LinearMethodBase]:
+        if (self.modules_to_not_convert is not None and any(
+                prefix.endswith(module)
+                for module in self.modules_to_not_convert)):
+            return UnquantizedLinearMethod()
 
         if isinstance(layer, LinearBase):
             return FPQuantLinearMethod(self)
@@ -110,7 +110,7 @@ class FPQuantLinearMethod(LinearMethodBase):
 
         if params_dtype != torch.bfloat16:
             raise ValueError("Only bfloat16 is currently supported by FPQuant")
-        if input_size_per_partition % self.quant_config.hadamard_group_size != 0:
+        if input_size_per_partition % self.quant_config.hadamard_group_size != 0:  # noqa: E501
             raise ValueError(
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
@@ -218,6 +218,127 @@ class FPQuantLinearMethod(LinearMethodBase):
                                  self.quant_config.forward_dtype)
 
 
+def ceil_div(a, b):
+    return (a + b - 1) // b
+
+
+def fused_quantize_mx(
+        x_flat: torch.Tensor, hadamard_matrix: torch.Tensor,
+        forward_method: str) -> tuple[torch.Tensor, torch.Tensor]:
+    return fusedQuantizeMx(x_flat, hadamard_matrix, method=forward_method)
+
+
+def fused_quantize_mx_fake(x_flat, hadamard_matrix, forward_method):
+    rows, cols = x_flat.size(0), x_flat.size(1) // 32
+    padded_rows = ((rows + 128 - 1) // 128) * 128
+    padded_cols = ((cols + 4 - 1) // 4) * 4
+
+    xh_e2m1 = torch.empty(x_flat.size(0),
+                          x_flat.size(1) // 2,
+                          dtype=torch.uint8,
+                          device=x_flat.device)
+    xh_e8m0 = torch.empty(padded_rows,
+                          padded_cols,
+                          dtype=torch.float8_e8m0fnu,
+                          device=x_flat.device)
+
+    return xh_e2m1, xh_e8m0
+
+
+direct_register_custom_op(
+    op_name="fused_quantize_mx",
+    op_func=fused_quantize_mx,
+    mutates_args=[],
+    fake_impl=fused_quantize_mx_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
+
+
+def matmul_mxf4_bf16(x: torch.Tensor, w: torch.Tensor, xs: torch.Tensor,
+                     ws: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
+    return matmul_mxf4_bf16_tn(x, w,
+                               to_blocked(xs, True).view(torch.float8_e8m0fnu),
+                               to_blocked(ws, True).view(torch.float8_e8m0fnu),
+                               alpha)
+
+
+def matmul_mxf4_bf16_fake(x, w, xs, ws, alpha):
+    return torch.empty(*x.shape[:-1],
+                       w.shape[0],
+                       dtype=torch.bfloat16,
+                       device=x.device)
+
+
+direct_register_custom_op(
+    op_name="matmul_mxf4_bf16",
+    op_func=matmul_mxf4_bf16,
+    mutates_args=[],
+    fake_impl=matmul_mxf4_bf16_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
+
+
+def fused_quantize_nv(
+        x_flat: torch.Tensor, hadamard_matrix: torch.Tensor,
+        global_scale: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    return fusedQuantizeNv(x_flat, hadamard_matrix, global_scale)
+
+
+def fused_quantize_nv_fake(x_flat, hadamard_matrix, global_scale):
+    rows, cols = x_flat.size(0), x_flat.size(1) // 16
+    padded_rows = ((rows + 128 - 1) // 128) * 128
+    padded_cols = ((cols + 4 - 1) // 4) * 4
+
+    xh_e2m1 = torch.empty(x_flat.size(0),
+                          x_flat.size(1) // 2,
+                          dtype=torch.uint8,
+                          device=x_flat.device)
+    xh_e8m0 = torch.empty(padded_rows,
+                          padded_cols,
+                          dtype=torch.float8_e4m3fn,
+                          device=x_flat.device)
+
+    return xh_e2m1, xh_e8m0
+
+
+direct_register_custom_op(
+    op_name="fused_quantize_nv",
+    op_func=fused_quantize_nv,
+    mutates_args=[],
+    fake_impl=fused_quantize_nv_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
+
+
+def matmul_nvf4_bf16(x: torch.Tensor, w: torch.Tensor, xs: torch.Tensor,
+                     ws: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
+    return cutlass_scaled_fp4_mm(
+        x,
+        w,
+        to_blocked(xs, True).view(torch.float8_e4m3fn).view(
+            -1, x.shape[1] // 8),  # *2//16
+        to_blocked(ws,
+                   True).view(torch.float8_e4m3fn).view(-1, x.shape[1] // 8),
+        alpha,
+        torch.bfloat16)
+
+
+def matmul_nvf4_bf16_fake(x, w, xs, ws, alpha):
+    return torch.empty(*x.shape[:-1],
+                       w.shape[0],
+                       dtype=torch.bfloat16,
+                       device=x.device)
+
+
+direct_register_custom_op(
+    op_name="matmul_nvf4_bf16",
+    op_func=matmul_nvf4_bf16,
+    mutates_args=[],
+    fake_impl=matmul_nvf4_bf16_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
+
+
 def quantized_forward(x: torch.Tensor, qweight: torch.Tensor,
                       weight_scales: torch.Tensor,
                       weight_global_scale: torch.Tensor,
@@ -228,31 +349,17 @@ def quantized_forward(x: torch.Tensor, qweight: torch.Tensor,
     x_flat = x.contiguous().flatten(end_dim=-2)
 
     if forward_dtype == "mxfp4":
-        x_flat_q, x_flat_scales = fusedQuantizeMx(x_flat,
-                                                  forward_hadamard_matrix,
-                                                  method=forward_method)
-        if x_flat_q.size(0) <= 64:
-            y = matmul_ada_mxf4_bf16_tn(
-                x_flat_q, qweight, x_flat_scales.view(torch.float8_e8m0fnu),
-                weight_scales.view(torch.float8_e8m0fnu),
-                1 / (weight_global_scale * act_global_scale))
-        else:
-            y = matmul_mxf4_bf16_tn(
-                x_flat_q, qweight,
-                to_blocked(x_flat_scales, False).view(torch.float8_e8m0fnu),
-                to_blocked(weight_scales, False).view(torch.float8_e8m0fnu),
-                1 / (weight_global_scale * act_global_scale))
+        x_flat_q, x_flat_scales = torch.ops.vllm.fused_quantize_mx(
+            x_flat, forward_hadamard_matrix, forward_method)
+        y = torch.ops.vllm.matmul_mxf4_bf16(
+            x_flat_q, qweight, x_flat_scales, weight_scales,
+            1 / (weight_global_scale * act_global_scale))
     elif forward_dtype == "nvfp4":
-        x_flat_q, x_flat_scales = fusedQuantizeNv(x_flat,
-                                                  forward_hadamard_matrix,
-                                                  act_global_scale)
-        y = cutlass_scaled_fp4_mm(
-            x_flat_q, qweight,
-            to_blocked(x_flat_scales, False).view(torch.float8_e4m3fn).view(
-                -1, x_flat.shape[1] // 16),
-            to_blocked(weight_scales, False).view(torch.float8_e4m3fn).view(
-                -1, x_flat.shape[1] // 16),
-            1 / (weight_global_scale * act_global_scale), torch.bfloat16)
+        x_flat_q, x_flat_scales = torch.ops.vllm.fused_quantize_nv(
+            x_flat, forward_hadamard_matrix, act_global_scale)
+        y = torch.ops.vllm.matmul_nvf4_bf16(
+            x_flat_q, qweight, x_flat_scales, weight_scales,
+            1 / (weight_global_scale * act_global_scale))
     else:
         raise ValueError(f"Unsupported forward_dtype: {forward_dtype}")
 
