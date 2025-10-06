@@ -1645,7 +1645,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 "fused output quantization is not yet supported"
                 " for MLACommonImpl")
 
-        if attn_metadata is None:
+        if attn_metadata is None or not attn_metadata:
             # During the profile run try to simulate to worse case output size
             # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
             # since this can be large
