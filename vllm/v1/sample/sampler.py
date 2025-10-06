@@ -24,39 +24,39 @@ class Sampler(nn.Module):
     A layer that samples the next tokens from the model's outputs
     with the following steps in order:
 
-    1. If logprobs are requested:  
+    1. If logprobs are requested:
         a) If `logprobs_mode` is `raw_logprobs`, compute logprobs
-           as the final logprobs to return.  
+           as the final logprobs to return.
         b) If `logprobs_mode` is `raw_logits`, clone the logits
-           as the final logprobs to return.  
-    2. Convert logits to float32.  
-    3. Apply allowed token ids whitelist.  
-    4. Apply bad words exclusion.  
+           as the final logprobs to return.
+    2. Convert logits to float32.
+    3. Apply allowed token ids whitelist.
+    4. Apply bad words exclusion.
     5. Apply logit processors which are not argmax-invariant,
-       i.e. that can impact greedy sampling.  
-        a) Min tokens processor  
-        b) Logit bias processor  
-    6. Apply penalties  
-        a) Repetition penalty  
-        b) Frequency penalty  
-        c) Presence penalty  
-    7. Sample the next tokens. `sample` method performs the following steps:  
+       i.e. that can impact greedy sampling.
+        a) Min tokens processor
+        b) Logit bias processor
+    6. Apply penalties
+        a) Repetition penalty
+        b) Frequency penalty
+        c) Presence penalty
+    7. Sample the next tokens. `sample` method performs the following steps:
         a) If not `all_random`, perform greedy sampling. If `all_greedy`,
-           return the greedily sampled tokens and final logprobs if requested.  
-        b) Apply temperature.  
+           return the greedily sampled tokens and final logprobs if requested.
+        b) Apply temperature.
         c) Apply logit processors which are argmax-invariant, by default
-           the min_p processor.  
-        d) Apply top_k and/or top_p.  
-        e) Sample the next tokens with the probability distribution.  
+           the min_p processor.
+        d) Apply top_k and/or top_p.
+        e) Sample the next tokens with the probability distribution.
         f) If `all_random` or temperature >= epsilon (1e-5), return the
            randomly sampled tokens and final logprobs if requested. Else,
-           return the greedily sampled tokens and logprobs if requested.  
+           return the greedily sampled tokens and logprobs if requested.
     8. Gather the logprobs of the top `max_num_logprobs` and sampled token
        (if requested). Note that if the sampled token is within the top
        `max_num_logprobs`, the logprob will be eventually merged in
        `LogprobsProcessor` during output processing. Therefore, the
        final output may contain either `max_num_logprobs + 1` or
-       `max_num_logprobs` logprobs.  
+       `max_num_logprobs` logprobs.
     9. Return the final `SamplerOutput`.
     """
 
@@ -86,8 +86,9 @@ class Sampler(nn.Module):
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
 
-        logits = self.apply_logits_processors(logits, sampling_metadata,
-                                              predict_bonus_token)
+        logits = self.apply_logits_processors(
+            logits, sampling_metadata, predict_bonus_token
+        )
         # Sample the next token.
         sampled, processed_logprobs = self.sample(logits, sampling_metadata)
         if processed_logprobs is not None:
@@ -100,8 +101,11 @@ class Sampler(nn.Module):
 
         # Gather the logprobs of the topk and sampled token (if requested).
         # Get logprobs and rank tensors (if requested)
-        logprobs_tensors = None if num_logprobs is None else \
-            self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled)
+        logprobs_tensors = (
+            None
+            if num_logprobs is None
+            else self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled)
+        )
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
@@ -142,8 +146,7 @@ class Sampler(nn.Module):
         may update the logits tensor in-place.
         """
 
-        assert not (sampling_metadata.all_greedy
-                    and sampling_metadata.all_random)
+        assert not (sampling_metadata.all_greedy and sampling_metadata.all_random)
         if sampling_metadata.all_random:
             greedy_sampled = None
         else:
@@ -160,8 +163,9 @@ class Sampler(nn.Module):
         assert sampling_metadata.temperature is not None
 
         # Apply temperature.
-        logits = self.apply_temperature(logits, sampling_metadata.temperature,
-                                        sampling_metadata.all_random)
+        logits = self.apply_temperature(
+            logits, sampling_metadata.temperature, sampling_metadata.all_random
+        )
 
         # Apply logits processors that only apply to random sampling
         # (argmax invariant)
@@ -216,9 +220,7 @@ class Sampler(nn.Module):
         """
         assert token_ids.dtype == torch.int64
         # Find the topK values.
-        topk_logprobs, topk_indices = torch.topk(logprobs,
-                                                 num_logprobs,
-                                                 dim=-1)
+        topk_logprobs, topk_indices = torch.topk(logprobs, num_logprobs, dim=-1)
 
         # Get with the logprob of the prompt or sampled token.
         token_ids = token_ids.unsqueeze(-1)
@@ -244,8 +246,10 @@ class Sampler(nn.Module):
         if spec_token_ids is None:
             return output_token_ids
 
-        return [[*out, *spec] if spec else out
-                for out, spec in zip(output_token_ids, spec_token_ids)]
+        return [
+            [*out, *spec] if spec else out
+            for out, spec in zip(output_token_ids, spec_token_ids)
+        ]
 
     def apply_logits_processors(
         self,
@@ -253,8 +257,9 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
         predict_bonus_token: bool,
     ) -> torch.Tensor:
-        any_penalties_or_bad_words = (sampling_metadata.bad_words_token_ids
-                                      or not sampling_metadata.no_penalties)
+        any_penalties_or_bad_words = (
+            sampling_metadata.bad_words_token_ids or not sampling_metadata.no_penalties
+        )
 
         output_token_ids = sampling_metadata.output_token_ids
         if predict_bonus_token and any_penalties_or_bad_words:
@@ -267,16 +272,16 @@ class Sampler(nn.Module):
 
         # Apply allowed token ids.
         if sampling_metadata.allowed_token_ids_mask is not None:
-            logits.masked_fill_(sampling_metadata.allowed_token_ids_mask,
-                                float("-inf"))
+            logits.masked_fill_(sampling_metadata.allowed_token_ids_mask, float("-inf"))
 
         # Apply bad words exclusion.
         if sampling_metadata.bad_words_token_ids:
             apply_bad_words(
                 logits,
                 sampling_metadata.bad_words_token_ids,
-                output_token_ids if output_token_ids is not None else
-                sampling_metadata.output_token_ids,
+                output_token_ids
+                if output_token_ids is not None
+                else sampling_metadata.output_token_ids,
             )
 
         # Apply logits processors which can impact greedy sampling.
@@ -284,8 +289,7 @@ class Sampler(nn.Module):
             logits = processor.apply(logits)
 
         # Apply penalties (e.g., freq_penalties).
-        logits = self.apply_penalties(logits, sampling_metadata,
-                                      output_token_ids)
+        logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
         return logits
 
     def apply_penalties(
@@ -302,7 +306,8 @@ class Sampler(nn.Module):
                 sampling_metadata.presence_penalties,
                 sampling_metadata.frequency_penalties,
                 sampling_metadata.repetition_penalties,
-                output_token_ids if output_token_ids is not None else
-                sampling_metadata.output_token_ids,
+                output_token_ids
+                if output_token_ids is not None
+                else sampling_metadata.output_token_ids,
             )
         return logits
