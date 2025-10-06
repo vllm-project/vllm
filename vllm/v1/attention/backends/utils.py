@@ -93,8 +93,8 @@ class CommonAttentionMetadata:
     # Needed by CrossAttentionBuilder
     encoder_seq_lens: Optional[np.ndarray] = None
 
-    cp_seq_lens: Optional[torch.Tensor] = None
-    """Sequence lengths of the local rank in context parallelism world"""
+    dcp_local_seq_lens: Optional[torch.Tensor] = None
+    """Sequence lengths of the local rank in decode context parallelism world"""
 
 
 def slice_query_start_locs(

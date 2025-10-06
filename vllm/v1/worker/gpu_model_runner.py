@@ -393,7 +393,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
-            self.cp_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+            self.dcp_local_seq_lens = self._make_buffer(
+                self.max_num_reqs, dtype=torch.int32
+            )
         # Because inputs_embeds may be bfloat16 and we don't need a numpy
         # version of this tensor, avoid a RuntimeError by not creating a
         # numpy buffer.
@@ -1334,7 +1336,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_logits_indices=logits_indices.size(0),
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
-                cp_seq_lens=self.cp_seq_lens.gpu[:num_reqs]
+                dcp_local_seq_lens=self.dcp_local_seq_lens.gpu[:num_reqs]
                 if self.dcp_world_size > 1
                 else None,
             )
@@ -3381,7 +3383,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         kv_cache_group_id
                     ].slot_mapping.gpu[:num_tokens],
                     causal=True,
-                    cp_seq_lens=self.cp_seq_lens.gpu[:num_reqs]
+                    dcp_local_seq_lens=self.dcp_local_seq_lens.gpu[:num_reqs]
                     if self.dcp_world_size > 1
                     else None,
                 )

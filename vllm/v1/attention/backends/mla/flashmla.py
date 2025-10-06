@@ -102,7 +102,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
-        cp_tot_seq_lens_device: Optional[torch.Tensor],
+        dcp_tot_seq_lens_device: Optional[torch.Tensor],
     ) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = get_mla_metadata(
             seq_lens_device,
@@ -143,7 +143,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             seq_lens=seq_lens_device,
             tile_scheduler_metadata=tile_scheduler_metadata,
             num_splits=num_splits,
-            cp_tot_seq_lens=cp_tot_seq_lens_device,
+            dcp_tot_seq_lens=dcp_tot_seq_lens_device,
         )
 
 
