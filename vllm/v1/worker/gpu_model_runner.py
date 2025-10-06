@@ -48,9 +48,6 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     is_mixture_of_experts,
@@ -59,8 +56,6 @@ from vllm.model_executor.models.interfaces import (
     supports_multimodal_pruning,
     supports_transcription,
 )
-
-# yapf: enable
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling,
     is_pooling_model,
@@ -101,9 +96,6 @@ from vllm.v1.attention.backends.utils import (
     split_attn_metadata,
 )
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -118,8 +110,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-
-# yapf: enable
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -3401,7 +3391,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                 attn_metadata[ubid][layer_name] = attn_metadata_i
                     else:
                         assert type(attn_metadata) is dict
-                        attn_metadata_i = attn_group.get_metadata_builder().build_for_cudagraph_capture(
+                        metadata_builder = attn_group.get_metadata_builder()
+                        attn_metadata_i = metadata_builder.build_for_cudagraph_capture(
                             common_attn_metadata
                         )
                         for layer_name in attn_group.layer_names:

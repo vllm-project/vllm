@@ -18,8 +18,6 @@ from vllm.entrypoints.openai.protocol import (
     ErrorResponse,
     UsageInfo,
 )
-
-# yapf: enable
 from vllm.entrypoints.openai.serving_engine import (
     ClassificationServeContext,
     OpenAIServing,

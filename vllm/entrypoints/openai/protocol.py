@@ -11,8 +11,6 @@ from typing import Annotated, Any, ClassVar, Generic, Literal, Optional, TypeVar
 import regex as re
 import torch
 from fastapi import HTTPException, UploadFile
-
-# yapf: disable
 from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
@@ -46,8 +44,6 @@ from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreated
 from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
-
-# yapf: enable
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
@@ -475,7 +471,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     top_logprobs: Optional[int] = 0
     max_tokens: Optional[int] = Field(
         default=None,
-        deprecated="max_tokens is deprecated in favor of the max_completion_tokens field",
+        deprecated="max_tokens is deprecated in favor of "
+        "the max_completion_tokens field",
     )
     max_completion_tokens: Optional[int] = None
     n: Optional[int] = 1
