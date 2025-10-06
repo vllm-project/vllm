@@ -14,8 +14,7 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import worker_receiver_cache_from_config
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        run_method)
+from vllm.utils import get_distributed_init_method, get_ip, get_open_port, run_method
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.utils import get_and_update_mm_cache
 from vllm.v1.outputs import AsyncModelRunnerOutput
@@ -25,14 +24,11 @@ logger = init_logger(__name__)
 
 
 class UniProcExecutor(ExecutorBase):
-
     uses_ray: bool = False
 
     def _init_executor(self) -> None:
-        """Initialize the worker and load the model.
-        """
-        self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config,
-                                               rpc_rank=0)
+        """Initialize the worker and load the model."""
+        self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config, rpc_rank=0)
         distributed_init_method, rank, local_rank = self._distributed_args()
         is_driver_worker = True
         kwargs = dict(
@@ -43,24 +39,24 @@ class UniProcExecutor(ExecutorBase):
             is_driver_worker=is_driver_worker,
         )
         self.mm_receiver_cache = worker_receiver_cache_from_config(
-            self.vllm_config, MULTIMODAL_REGISTRY, Lock())
+            self.vllm_config, MULTIMODAL_REGISTRY, Lock()
+        )
 
         self.async_output_thread: Optional[ThreadPoolExecutor] = None
         if self.max_concurrent_batches > 1:
             self.async_output_thread = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="WorkerAsyncOutput")
+                max_workers=1, thread_name_prefix="WorkerAsyncOutput"
+            )
 
-        self.collective_rpc("init_worker", args=([kwargs], ))
+        self.collective_rpc("init_worker", args=([kwargs],))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
 
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
+        distributed_init_method = get_distributed_init_method(get_ip(), get_open_port())
         # set local rank as the device index if specified
-        device_info = self.vllm_config.device_config.device.__str__().split(
-            ":")
+        device_info = self.vllm_config.device_config.device.__str__().split(":")
         local_rank = int(device_info[1]) if len(device_info) > 1 else 0
         return distributed_init_method, 0, local_rank
 
@@ -68,12 +64,14 @@ class UniProcExecutor(ExecutorBase):
     def max_concurrent_batches(self) -> int:
         return 2 if self.scheduler_config.async_scheduling else 1
 
-    def collective_rpc(self,
-                       method: Union[str, Callable],
-                       timeout: Optional[float] = None,
-                       args: Tuple = (),
-                       kwargs: Optional[Dict] = None,
-                       non_block: bool = False) -> List[Any]:
+    def collective_rpc(
+        self,
+        method: Union[str, Callable],
+        timeout: Optional[float] = None,
+        args: Tuple = (),
+        kwargs: Optional[Dict] = None,
+        non_block: bool = False,
+    ) -> List[Any]:
         if kwargs is None:
             kwargs = {}
         if self.mm_receiver_cache is not None and method == "execute_model":
@@ -101,10 +99,13 @@ class UniProcExecutor(ExecutorBase):
         return
 
     def reinitialize_distributed(
-            self, reconfig_request: ReconfigureDistributedRequest) -> None:
+        self, reconfig_request: ReconfigureDistributedRequest
+    ) -> None:
         self.driver_worker.reinitialize_distributed(reconfig_request)
-        if reconfig_request.new_data_parallel_rank == \
-        ReconfigureRankType.SHUTDOWN_CURRENT_RANK:
+        if (
+            reconfig_request.new_data_parallel_rank
+            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
+        ):
             self.shutdown()
         return
 
@@ -132,15 +133,16 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     deterministic, all the engines will generate the same outputs,
     and they don't need to synchronize the states with each other.
     """
+
     uses_ray: bool = False
 
     def _init_executor(self) -> None:
-        """Initialize the worker and load the model.
-        """
+        """Initialize the worker and load the model."""
         if envs.VLLM_USE_V1:
-            assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, \
-            ("To get deterministic execution in V1, "
-            "please set VLLM_ENABLE_V1_MULTIPROCESSING=0")
+            assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
+                "To get deterministic execution in V1, "
+                "please set VLLM_ENABLE_V1_MULTIPROCESSING=0"
+            )
         super()._init_executor()
 
     def _distributed_args(self) -> tuple[str, int, int]:
@@ -168,6 +170,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         """
         a, b = super().determine_num_available_blocks()
         from vllm.distributed.parallel_state import get_world_group
+
         cpu_group = get_world_group().cpu_group
         a_tensor = torch.tensor([a], device="cpu", dtype=torch.int64)
         b_tensor = torch.tensor([b], device="cpu", dtype=torch.int64)
