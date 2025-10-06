@@ -477,13 +477,15 @@ class Ovis2_5(nn.Module, SupportsMultiModal):
         if desired_patches % h_orig == 0:
             best_pad_h = 0
             w_factor = desired_patches // h_orig
-            best_pad_w = w_factor - w_orig if (w_factor > w_orig
-                                               and w_factor % 2 == 0) else 0
+            best_pad_w = (w_factor - w_orig if
+                          (w_factor > w_orig and w_factor %
+                           self.config.vit_config.hidden_stride == 0) else 0)
         elif desired_patches % w_orig == 0:
             best_pad_w = 0
             h_factor = desired_patches // w_orig
-            best_pad_h = h_factor - h_orig if (h_factor > h_orig
-                                               and h_factor % 2 == 0) else 0
+            best_pad_h = (h_factor - h_orig if
+                          (h_factor > h_orig and h_factor %
+                           self.config.vit_config.hidden_stride == 0) else 0)
         elif desired_patches % h_orig != 0 and desired_patches % w_orig != 0:
             if h_orig > w_orig:
                 w_factor = self.find_factor(desired_patches, w_orig)
