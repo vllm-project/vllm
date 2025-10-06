@@ -1,12 +1,12 @@
 # Metrics
 
-Ensure the v1 LLM Engine exposes a superset of the metrics available in v0.
+vLLM exposes a rich set of metrics to support observability and capacity planning for the V1 engine.
 
 ## Objectives
 
-- Achieve parity of metrics between v0 and v1.
-- The priority use case is accessing these metrics via Prometheus, as this is what we expect to be used in production environments.
-- Logging support (i.e. printing metrics to the info log) is provided for more ad-hoc testing, debugging, development, and exploratory use cases.
+- Provide comprehensive coverage of engine and request level metrics to aid production monitoring.
+- Prioritize Prometheus integrations, as this is what we expect to be used in production environments.
+- Offer logging support (i.e. printing metrics to the info log) for ad-hoc testing, debugging, development, and exploratory use cases.
 
 ## Background
 
@@ -17,9 +17,9 @@ Metrics in vLLM can be categorized as follows:
 
 The mental model is that server-level metrics help explain the values of request-level metrics.
 
-### v0 Metrics
+### Metrics Overview
 
-In v0, the following metrics are exposed via a Prometheus-compatible `/metrics` endpoint using the `vllm:` prefix:
+The following metrics are exposed via a Prometheus-compatible `/metrics` endpoint using the `vllm:` prefix and are documented under [Inferencing and Serving -> Production Metrics](../usage/metrics.md):
 
 - `vllm:num_requests_running` (Gauge)
 - `vllm:num_requests_swapped` (Gauge)
@@ -57,8 +57,6 @@ In v0, the following metrics are exposed via a Prometheus-compatible `/metrics` 
 - `vllm:spec_decode_num_draft_tokens_total` (Counter)
 - `vllm:spec_decode_num_emitted_tokens_total` (Counter)
 
-These are documented under [Inferencing and Serving -> Production Metrics](../usage/metrics.md).
-
 ### Grafana Dashboard
 
 vLLM also provides [a reference example](../examples/online_serving/prometheus_grafana.md) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
@@ -86,7 +84,7 @@ See [the PR which added this Dashboard](gh-pr:2316) for interesting and useful b
 
 Prometheus support was initially added [using the aioprometheus library](gh-pr:1890), but a switch was made quickly to [prometheus_client](gh-pr:2730). The rationale is discussed in both linked PRs.
 
-With the switch to `aioprometheus`, we lost a `MetricsMiddleware` to track HTTP metrics, but this was reinstated [using prometheus_fastapi_instrumentator](gh-pr:15657):
+During those migrations we briefly lost a `MetricsMiddleware` to track HTTP metrics, but this was reinstated [using prometheus_fastapi_instrumentator](gh-pr:15657):
 
 ```bash
 $ curl http://0.0.0.0:8000/metrics 2>/dev/null  | grep -P '^http_(?!.*(_bucket|_created|_sum)).*'
@@ -96,10 +94,6 @@ http_response_size_bytes_count{handler="/v1/completions"} 201.0
 http_request_duration_highr_seconds_count 201.0
 http_request_duration_seconds_count{handler="/v1/completions",method="POST"} 201.0
 ```
-
-### Multi-process Mode
-
-In v0, metrics are collected in the engine core process and we use multiprocess mode to make them available in the API server process. See <gh-pr:7279>.
 
 ### Built in Python/Process Metrics
 
@@ -116,22 +110,7 @@ The following metrics are supported by default by `prometheus_client`, but they 
 - `process_open_fds`
 - `process_max_fds`
 
-This is relevant because if we move away from multiprocess mode in v1,
-we get these back. However, it's questionable how relevant these are
-if they don't aggregate these stats for all processes that make up a
-vLLM instance.
-
-### v0 PRs and Issues
-
-For background, these are some of the relevant PRs which added the v0 metrics:
-
-- <gh-pr:1890>
-- <gh-pr:2316>
-- <gh-pr:2730>
-- <gh-pr:4464>
-- <gh-pr:7279>
-
-Also note the ["Even Better Observability"](gh-issue:3616) feature where e.g. [a detailed roadmap was laid out](gh-issue:3616#issuecomment-2030858781).
+This is relevant because if we move away from multiprocess mode we get these back. However, it's questionable how relevant these are if they don't aggregate these stats for all processes that make up a vLLM instance.
 
 ## v1 Design
 
@@ -396,9 +375,8 @@ recent metric is used, but only from currently running processes.
 
 This was added in <gh-pr:9477> and there is
 [at least one known user](https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/54).
-If we revisit this design and deprecate the old metric, we should reduce
-the need for a significant deprecation period by making the change in
-v0 also and asking this project to move to the new metric.
+If we revisit this design and deprecate the old metric, we should
+coordinate with downstream users so they can migrate before the removal.
 
 ### Prefix Cache metrics
 
@@ -491,7 +469,7 @@ if seq_group.is_finished():
 
 This seems duplicative, and one of them should be removed. The latter
 is used by the Grafana dashboard, so we should deprecate or remove the
-former from v0.
+former.
 
 ### Prefix Cache Hit Rate
 
@@ -500,7 +478,7 @@ See above - we now expose 'queries' and 'hits' counters rather than a
 
 ### KV Cache Offloading
 
-Two v0 metrics relate to a "swapped" preemption mode that is no
+Two legacy metrics relate to a "swapped" preemption mode that is no
 longer relevant in v1:
 
 - `vllm:num_requests_swapped`
@@ -511,7 +489,7 @@ cache to complete other requests), we swap kv cache blocks out to CPU
 memory. This is also known as "KV cache offloading" and is configured
 with `--swap-space` and `--preemption-mode`.
 
-In v0, [vLLM has long supported beam search](gh-issue:6226). The
+Historically, [vLLM has long supported beam search](gh-issue:6226). The
 SequenceGroup encapsulated the idea of N Sequences which
 all shared the same prompt kv blocks. This enabled KV cache block
 sharing between requests, and copy-on-write to do branching. CPU
@@ -524,7 +502,7 @@ and the part of the prompt that was evicted can be recomputed.
 
 SequenceGroup was removed in V1, although a replacement will be
 required for "parallel sampling" (`n>1`).
-[Beam search was moved out of the core (in V0)](gh-issue:8306). There was a
+[Beam search was moved out of the core](gh-issue:8306). There was a
 lot of complex code for a very uncommon feature.
 
 In V1, with prefix caching being better (zero over head) and therefore
@@ -535,7 +513,7 @@ better.
 
 ### Parallel Sampling
 
-Some v0 metrics are only relevant in the context of "parallel
+Some legacy metrics are only relevant in the context of "parallel
 sampling". This is where the `n` parameter in a request is used to
 request multiple completions from the same prompt.
 
@@ -554,7 +532,7 @@ also add these metrics.
 
 ### Speculative Decoding
 
-Some v0 metrics are specific to "speculative decoding". This is where
+Some legacy metrics are specific to "speculative decoding". This is where
 we generate candidate tokens using a faster, approximate method or
 model and then validate those tokens with the larger model.
 
@@ -566,7 +544,7 @@ model and then validate those tokens with the larger model.
 
 There is a PR under review (<gh-pr:12193>) to add "prompt lookup (ngram)"
 speculative decoding to v1. Other techniques will follow. We should
-revisit the v0 metrics in this context.
+revisit these metrics in this context.
 
 !!! note
     We should probably expose acceptance rate as separate accepted
@@ -639,7 +617,7 @@ metrics are often relatively straightforward to add:
    metrics are usually of very limited use unless they can be enabled
    by default and in production.
 3. They have an impact on development and maintenance of the
-   project. Every metric added to v0 has made this v1 effort more
+   project. Every metric added over time has made this effort more
    time-consuming, and perhaps not all metrics justify this ongoing
    investment in their maintenance.
 
@@ -650,7 +628,7 @@ performance and health. Tracing, on the other hand, tracks individual
 requests as they move through different services and components. Both
 fall under the more general heading of "Observability".
 
-v0 has support for OpenTelemetry tracing:
+vLLM has support for OpenTelemetry tracing:
 
 - Added by <gh-pr:4687>
 - Configured with `--oltp-traces-endpoint` and `--collect-detailed-traces`
@@ -663,11 +641,11 @@ OpenTelemetry has a
 [Gen AI Working Group](https://github.com/open-telemetry/community/blob/main/projects/gen-ai.md).
 
 Since metrics is a big enough topic on its own, we are going to tackle
-the topic of tracing in v1 separately.
+the topic of tracing separately.
 
 ### OpenTelemetry Model Forward vs Execute Time
 
-In v0, we have the following two metrics:
+The current implementation exposes the following two metrics:
 
 - `vllm:model_forward_time_milliseconds` (Histogram) - The time spent
   in the model forward pass when this request was in the batch.

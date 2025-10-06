@@ -33,7 +33,7 @@ In vLLM V1, the default preemption mode is `RECOMPUTE` rather than `SWAP`, as re
 
 Chunked prefill allows vLLM to process large prefills in smaller chunks and batch them together with decode requests. This feature helps improve both throughput and latency by better balancing compute-bound (prefill) and memory-bound (decode) operations.
 
-In vLLM V1, **chunked prefill is always enabled by default**. This is different from vLLM V0, where it was conditionally enabled based on model characteristics.
+In vLLM V1, **chunked prefill is always enabled by default** so that behavior is consistent across supported models.
 
 With chunked prefill enabled, the scheduling policy prioritizes decode requests. It batches all pending decode requests before scheduling any prefill operations. When there are available tokens in the `max_num_batched_tokens` budget, it schedules pending prefills. If a pending prefill request cannot fit into `max_num_batched_tokens`, it automatically chunks it.
 
@@ -49,7 +49,7 @@ You can tune the performance by adjusting `max_num_batched_tokens`:
 - Smaller values (e.g., 2048) achieve better inter-token latency (ITL) because there are fewer prefills slowing down decodes.
 - Higher values achieve better time to first token (TTFT) as you can process more prefill tokens in a batch.
 - For optimal throughput, we recommend setting `max_num_batched_tokens > 8192` especially for smaller models on large GPUs.
-- If `max_num_batched_tokens` is the same as `max_model_len`, that's almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).
+- If `max_num_batched_tokens` is the same as `max_model_len`, the scheduler behaves similarly to the legacy policy where large prefills ran without chunking (while still prioritizing decodes).
 
 ```python
 from vllm import LLM

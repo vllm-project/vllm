@@ -602,8 +602,9 @@ On the other hand, modalities separated by `/` are mutually exclusive.
 See [this page](../features/multimodal_inputs.md) on how to pass multi-modal inputs to the model.
 
 !!! important
-    **To enable multiple multi-modal items per text prompt in vLLM V0**, you have to set `limit_mm_per_prompt` (offline inference)
-    or `--limit-mm-per-prompt` (online serving). For example, to enable passing up to 4 images per text prompt:
+    You can control the maximum number of multimodal inputs per prompt by setting
+    `limit_mm_per_prompt` (offline inference) or `--limit-mm-per-prompt` (online
+    serving). For example, to enable passing up to 4 images per text prompt:
 
     Offline inference:
 
@@ -621,8 +622,6 @@ See [this page](../features/multimodal_inputs.md) on how to pass multi-modal inp
     ```bash
     vllm serve Qwen/Qwen2-VL-7B-Instruct --limit-mm-per-prompt '{"image":4}'
     ```
-
-    **This is no longer required if you are using vLLM V1.**
 
 !!! tip
     For hybrid-only models such as Llama-4, Step3 and Mistral-3, a text-only mode can be enabled by setting all supported multimodal modalities to 0 (e.g, `--limit-mm-per-prompt '{"image":0}`) so that their multimodal modules will not be loaded to free up more GPU memory for KV cache.
@@ -731,16 +730,7 @@ Some models are supported only via the [Transformers backend](#transformers). Th
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 !!! warning
-    Both V0 and V1 support `Gemma3ForConditionalGeneration` for text-only inputs.
-    However, there are differences in how they handle text + image inputs:
-
-    V0 correctly implements the model's attention pattern:
-    - Uses bidirectional attention between the image tokens corresponding to the same image
-    - Uses causal attention for other tokens
-    - Implemented via (naive) PyTorch SDPA with masking tensors
-    - Note: May use significant memory for long prompts with image
-
-    V1 currently uses a simplified attention pattern:
+    `Gemma3ForConditionalGeneration` uses a simplified attention pattern for text + image inputs:
     - Uses causal attention for all tokens, including image tokens
     - Generates reasonable outputs but does not match the original model's attention for text + image inputs, especially when `{"do_pan_and_scan": true}`
     - Will be updated in the future to support the correct behavior
@@ -798,11 +788,11 @@ Some models are supported only via the [Transformers backend](#transformers). Th
     For more details, please see: <gh-pr:4087#issuecomment-2250397630>
 
 !!! warning
-    Our PaliGemma implementations have the same problem as Gemma 3 (see above) for both V0 and V1.
+    Our PaliGemma implementations currently share the same attention limitation as Gemma 3 (see above).
 
 !!! note
     For Qwen2.5-Omni, reading audio from video pre-processing (`--mm-processor-kwargs '{"use_audio_in_video": true}'`)
-    is currently supported on V0 (but not V1), because overlapping modalities is not yet supported in V1.
+    is currently unsupported because overlapping modalities are not yet supported.
 
 #### Transcription
 

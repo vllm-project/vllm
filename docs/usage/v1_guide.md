@@ -1,22 +1,16 @@
 # vLLM V1
 
-!!! announcement
-
-    We have started the process of deprecating V0. Please read [RFC #18571](gh-issue:18571) for more details.
-
 V1 is now enabled by default for all supported use cases, and we will gradually enable it for every use case we plan to support. Please share any feedback on [GitHub](https://github.com/vllm-project/vllm) or in the [vLLM Slack](https://inviter.co/vllm-slack).
 
 To disable V1, please set the environment variable as: `VLLM_USE_V1=0`, and send us a GitHub issue sharing the reason!
 
 ## Why vLLM V1?
 
-vLLM V0 successfully supported a wide range of models and hardware, but as new features were developed independently, the system grew increasingly complex. This complexity made it harder to integrate new capabilities and introduced technical debt, revealing the need for a more streamlined and unified design.
-
-Building on V0’s success, vLLM V1 retains the stable and proven components from V0
-(such as the models, GPU kernels, and utilities). At the same time, it significantly
-re-architects the core systems, covering the scheduler, KV cache manager, worker,
-sampler, and API server, to provide a cohesive, maintainable framework that better
-accommodates continued growth and innovation.
+vLLM V1 re-architects the engine to reduce accumulated complexity while preserving
+the stable, battle-tested components users rely on (such as models, GPU kernels,
+and supporting utilities). The scheduler, KV cache manager, worker, sampler, and
+API server now operate within a cohesive framework that is easier to extend and
+maintain as new capabilities are added.
 
 Specifically, V1 aims to:
 
@@ -88,8 +82,6 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 | **Mamba Models**            | <nobr>🟢 (Mamba-2), 🟢 (Mamba-1)</nobr>                                            |
 | **Multimodal Models**       | <nobr>🟢 Functional</nobr>                                                         |
 
-vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol.
-
 !!! tip
 
     This corresponds to the V1 column in our [list of supported models](../models/supported_models.md).
@@ -149,8 +141,8 @@ encoder and decoder (e.g., `BartForConditionalGeneration`,
 
 #### Semantic Changes to Logprobs
 
-vLLM V1 supports logprobs and prompt logprobs. However, there are some important semantic
-differences compared to V0:
+vLLM V1 supports logprobs and prompt logprobs. However, there are some important semantics
+to consider:
 
 ##### Logprobs Calculation
 
@@ -175,7 +167,7 @@ As part of the major architectural rework in vLLM V1, several legacy features ha
 ##### Sampling features
 
 - **best_of**: This feature has been deprecated due to limited usage. See details at [RFC #13361](gh-issue:13361).
-- **Per-Request Logits Processors**: In V0, users could pass custom
+- **Per-Request Logits Processors**: Previously, users could pass custom
   processing functions to adjust logits on a per-request basis. In vLLM V1, this
   feature has been deprecated. Instead, the design is moving toward supporting **global logits
   processors**, a feature the team is actively working on for future releases. See details at [RFC #13360](gh-pr:13360).
