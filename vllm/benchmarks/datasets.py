@@ -58,8 +58,6 @@ try:
 except ImportError:
     librosa = PlaceholderModule("librosa")
 
-import cv2
-
 try:
     from vllm.utils import FlexibleArgumentParser
 except ImportError:
@@ -728,6 +726,14 @@ class RandomMultiModalDataset(RandomDataset):
         Creates a video with random pixel values, encodes it to MP4 format,
         and returns the content as bytes.
         """
+        try:
+            import cv2
+        except ImportError as e:
+            raise ImportError(
+                "Please install OpenCV to generate random videos for benchmarking: "
+                "pip install -r requirements/bench.txt."
+            ) from e
+
         random_pixels = self._rng.integers(
             0,
             256,
