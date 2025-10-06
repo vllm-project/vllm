@@ -310,8 +310,7 @@ class SpecDecodeBaseProposer:
         else:
             positions = target_positions[last_token_indices]
 
-        # NOTE(Tomas): What is the intention of this ifelse?
-        if self.method == "mtp":
+        if self.method in ("deepseek_mtp", "ernie_mtp", "longcat_flash_mtp"):
             hidden_states = self.hidden_states[last_token_indices]
         else:
             hidden_states = hidden_states[last_token_indices]

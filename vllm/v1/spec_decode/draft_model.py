@@ -57,10 +57,8 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]] = None,
     ) -> torch.Tensor:
         """
-        - Trims unnecessary tokens from the input, like those rejected by
-        the sampler, or those already processed by the draft model.
-        - Merges the next_token_ids with the existing token ids into
-        a flat sequence.
+        This function processes the inputs first before calling the .propose()
+        method of the parent class.
         """
         inputs = DraftModelInputs(
             cad=common_attn_metadata,
@@ -184,7 +182,7 @@ def merge_next_token_ids_into_token_ids(
     """
     Merges the next token ids with the existing token ids into a flat sequence.
     Does the same for the positions, computes new slot mapping,
-    and updates the common_attn_metadata.
+    and updates the common_attn_metadata. The inputs are not modified in-place.
     """
     cad: CommonAttentionMetadata = inputs.cad
 
