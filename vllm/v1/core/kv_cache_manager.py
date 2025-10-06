@@ -22,6 +22,7 @@ class KVCacheBlocks:
     Scheduler and KVCacheManager, to hide KVCacheManager's internal data
     structure from the Scheduler.
     """
+
     blocks: tuple[SingleTypeKVCacheBlocks, ...]
     """
     `blocks[i][j]` refers to the i-th kv_cache_group
@@ -36,8 +37,9 @@ class KVCacheBlocks:
         """Adds two KVCacheBlocks instances."""
         return KVCacheBlocks(
             tuple(
-                list(blk1) + list(blk2)
-                for blk1, blk2 in zip(self.blocks, other.blocks)))
+                list(blk1) + list(blk2) for blk1, blk2 in zip(self.blocks, other.blocks)
+            )
+        )
 
     @overload
     def get_block_ids(
@@ -137,7 +139,8 @@ class KVCacheManager:
         # via create_kv_cache_blocks instead of creating new ones to avoid GC
         # overhead.
         self.empty_kv_cache_blocks = KVCacheBlocks(
-            tuple(() for _ in range(self.num_kv_cache_groups)))
+            tuple(() for _ in range(self.num_kv_cache_groups))
+        )
 
     @property
     def usage(self) -> float:
@@ -174,9 +177,10 @@ class KVCacheManager:
         """
         # Prefix caching is disabled or
         # When the request requires prompt logprobs, we skip prefix caching.
-        if (not self.enable_caching
-                or (request.sampling_params is not None
-                    and request.sampling_params.prompt_logprobs is not None)):
+        if not self.enable_caching or (
+            request.sampling_params is not None
+            and request.sampling_params.prompt_logprobs is not None
+        ):
             return self.empty_kv_cache_blocks, 0
 
         # NOTE: When all tokens hit the cache, we must recompute the last token
@@ -205,8 +209,7 @@ class KVCacheManager:
                 self.prefix_cache_stats.queries += request.num_tokens
                 self.prefix_cache_stats.hits += num_new_computed_tokens
 
-        return (self.create_kv_cache_blocks(computed_blocks),
-                num_new_computed_tokens)
+        return (self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens)
 
     def allocate_slots(
         self,
@@ -394,8 +397,7 @@ class KVCacheManager:
 
     def get_blocks(self, request_id: str) -> KVCacheBlocks:
         """Get the blocks of a request."""
-        return self.create_kv_cache_blocks(
-            self.coordinator.get_blocks(request_id))
+        return self.create_kv_cache_blocks(self.coordinator.get_blocks(request_id))
 
     def get_block_ids(self, request_id: str) -> tuple[list[int], ...]:
         """Get the block ids of a request."""
@@ -407,7 +409,7 @@ class KVCacheManager:
             self.coordinator.cache_blocks(request, num_computed_tokens)
 
     def create_kv_cache_blocks(
-            self, blocks: tuple[list[KVCacheBlock], ...]) -> KVCacheBlocks:
+        self, blocks: tuple[list[KVCacheBlock], ...]
+    ) -> KVCacheBlocks:
         # Only create new KVCacheBlocks for non-empty blocks
-        return KVCacheBlocks(blocks) if any(
-            blocks) else self.empty_kv_cache_blocks
+        return KVCacheBlocks(blocks) if any(blocks) else self.empty_kv_cache_blocks
