@@ -48,7 +48,6 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -421,6 +420,8 @@ class ModifiedWhisperEncoder(WhisperEncoder):
     dummy_inputs=UltravoxDummyInputsBuilder,
 )
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -547,9 +548,8 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         # [[B1, 80, M1], [B2, 80, M2]] -> [B1+B2, 80, max(M1, M2)]
         audio_features = pad_and_concat_to_dim3(audio_input["data"])
 
-        # [B1, B2] -> [B1+B2]
-        audio_lens = flatten_bn(audio_input["lens"], concat=True)
-        audio_token_len = flatten_bn(audio_input["token_len"], concat=True)
+        audio_lens = audio_input["lens"]
+        audio_token_len = audio_input["token_len"]
 
         embeddings = self._audio_features_to_embeddings(audio_features, audio_lens)
 
@@ -660,9 +660,6 @@ def pad_and_concat_to_dim3(
         C must be the same for all input tensors.
     """
     if isinstance(features, torch.Tensor):
-        if features.ndim > 3:
-            # Flatten [B, N, 80, M] -> [B * N, 80, M]
-            features = flatten_bn(features)
         return features
 
     features = [pad_and_concat_to_dim3(f) for f in features]
