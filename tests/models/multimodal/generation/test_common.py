@@ -222,8 +222,7 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={
             "model_impl": "transformers",
         },
-        # FIXME: Investigate mrope issue
-        marks=[large_gpu_mark(min_gb=32), pytest.mark.skip(reason="Mrope issue")],
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     #### Extended model tests
     "aria": VLMTestInfo(
