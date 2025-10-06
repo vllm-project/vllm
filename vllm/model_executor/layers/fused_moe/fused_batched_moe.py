@@ -365,7 +365,7 @@ def batched_triton_kernel(
 
 def invoke_moe_batched_triton_kernel(
     A: torch.Tensor,  # [E, max_tokens, K]
-    B: torch.Tensor,  # [E, K, N]
+    B: torch.Tensor,  # [E, N, K]
     C: torch.Tensor,  # [E, max_tokens, N]
     expert_num_tokens: torch.Tensor,  # [E]
     compute_type: tl.dtype,
@@ -920,7 +920,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
-        E, max_num_tokens, N, K, top_k_num = mk._moe_problem_size(
+        E, max_num_tokens, N, K, top_k_num = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids
         )
 

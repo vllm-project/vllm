@@ -12,7 +12,7 @@ import functools
 import importlib
 import importlib.util
 import os
-from typing import Any, Callable, NoReturn, Optional
+from typing import Any, Callable, NoReturn
 
 import requests
 import torch
@@ -202,14 +202,14 @@ def supports_trtllm_attention() -> bool:
 
 
 @functools.cache
-def _force_use_trtllm_attention(env_value: Optional[bool]) -> Optional[bool]:
+def _force_use_trtllm_attention(env_value: bool | None) -> bool | None:
     """Cache the env value for VLLM_USE_TRTLLM_ATTENTION"""
     if env_value is not None:
         logger.info_once("VLLM_USE_TRTLLM_ATTENTION is set to %s", env_value)
     return env_value
 
 
-def force_use_trtllm_attention() -> Optional[bool]:
+def force_use_trtllm_attention() -> bool | None:
     """
     Return ``None`` if VLLM_USE_TRTLLM_ATTENTION is not set,
     return ``True`` if TRTLLM attention is forced to be used,
@@ -283,11 +283,18 @@ def use_trtllm_attention(
 
     if force_use_trtllm is None:
         # Environment variable not set - use auto-detection
-        use_trtllm = (
-            num_tokens <= 256 and max_seq_len <= 131072 and kv_cache_dtype == "auto"
-        )
-        if use_trtllm:
-            logger.warning_once("Using TRTLLM attention (auto-detected).")
+        if is_prefill:
+            # Prefill auto-detection
+            use_trtllm = max_seq_len <= 131072 and kv_cache_dtype == "auto"
+            if use_trtllm:
+                logger.warning_once("Using TRTLLM prefill attention (auto-detected).")
+        else:
+            # Decode auto-detection
+            use_trtllm = (
+                num_tokens <= 256 and max_seq_len <= 131072 and kv_cache_dtype == "auto"
+            )
+            if use_trtllm:
+                logger.warning_once("Using TRTLLM decode attention (auto-detected).")
         return use_trtllm
 
     # Environment variable is set to 1 - respect it
@@ -401,7 +408,7 @@ def flashinfer_scaled_fp8_mm(
     scale_a: torch.Tensor,
     scale_b: torch.Tensor,
     out_dtype: torch.dtype,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert a.ndim == 2 and b.ndim == 2
     assert a.shape[1] == b.shape[0]
