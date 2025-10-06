@@ -21,6 +21,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
+from vllm.multimodal.inputs import NestedTensors
 
 from .utils import AutoWeightsLoader, maybe_prefix
 
@@ -241,7 +242,12 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             requires_grad=False,
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+        is_multimodal: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
     def forward(
