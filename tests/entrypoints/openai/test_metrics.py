@@ -261,21 +261,25 @@ async def test_metrics_exist(
     # sending a request triggers the metrics to be logged.
     if model_key == "text":
         await client.completions.create(
-            model=model_name, prompt="Hello, my name is", max_tokens=5, temperature=0.0
+            model=model_name,
+            prompt="Hello, my name is",
+            max_tokens=5,
+            temperature=0.0,
         )
     else:
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": _IMAGE_URL}},
-                    {"type": "text", "text": "What's in this image?"},
-                ],
-            }
-        ]
-
         await client.chat.completions.create(
-            model=model_name, messages=messages, max_tokens=5, temperature=0.0
+            model=model_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": _IMAGE_URL}},
+                        {"type": "text", "text": "What's in this image?"},
+                    ],
+                }
+            ],
+            max_tokens=5,
+            temperature=0.0,
         )
 
     response = requests.get(server.url_for("metrics"))
