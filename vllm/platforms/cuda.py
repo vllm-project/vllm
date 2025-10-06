@@ -181,7 +181,8 @@ class CudaPlatformBase(Platform):
             use_cutlass_mla = False
             use_flashinfer_mla = False
 
-            if envs.VLLM_ATTENTION_BACKEND is None:
+            attention_backend = vllm_config.attention_config.backend
+            if attention_backend is None:
                 # Default case
                 if cls.is_device_capability(100):
                     # Blackwell => Force CutlassMLA.
@@ -189,15 +190,15 @@ class CudaPlatformBase(Platform):
                     # TODO: This does not work, because the
                     # global_force_attn_backend_context_manager is not set.
                     # See vllm/attention/selector.py:_cached_get_attn_backend
-                    envs.VLLM_ATTENTION_BACKEND = "CUTLASS_MLA"
+                    vllm_config.attention_config.backend = "CUTLASS_MLA"
                 else:
                     # Not Blackwell
                     use_flashmla = True
             else:
                 # Forced case
-                use_flashmla = envs.VLLM_ATTENTION_BACKEND == "FLASHMLA"
-                use_cutlass_mla = envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA"
-                use_flashinfer_mla = envs.VLLM_ATTENTION_BACKEND == "FLASHINFER_MLA"
+                use_flashmla = attention_backend == "FLASHMLA"
+                use_cutlass_mla = attention_backend == "CUTLASS_MLA"
+                use_flashinfer_mla = attention_backend == "FLASHINFER_MLA"
 
             from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 

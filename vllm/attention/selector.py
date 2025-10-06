@@ -126,8 +126,11 @@ def _cached_get_attn_backend(
     if backend_by_global_setting is not None:
         selected_backend = backend_by_global_setting
     else:
-        # Check the environment variable and override if specified
-        backend_by_env_var: str | None = envs.VLLM_ATTENTION_BACKEND
+        # Check the config and override if specified
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+        backend_by_env_var: str | None = vllm_config.attention_config.backend
         if backend_by_env_var is not None:
             if backend_by_env_var.endswith("_VLLM_V1"):
                 logger.warning(
