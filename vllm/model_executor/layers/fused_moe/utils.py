@@ -251,8 +251,8 @@ def moe_kernel_quantize_input(
         return _nvfp4_quantize(A, A_scale, is_sf_swizzled_layout=is_fp4_scale_swizzled)
     elif quant_dtype == "mxfp4":
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
-    elif quant_dtype == "fp8":
-        # TODO: `quant_dtype == "fp8"` is ambiguous,
+    elif quant_dtype == "mxfp8":
+        # TODO: `quant_dtype == "mxfp8"` is ambiguous,
         # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
         return _mxfp8_e4m3_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp6_e3m2":
