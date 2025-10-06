@@ -18,7 +18,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
-from vllm.utils.jsontree import json_map_leaves, json_reduce_leaves
+from vllm.utils.jsontree import json_iter_leaves
 
 from .data import (
     DecoderOnlyInputs,
@@ -277,10 +277,8 @@ class InputPreprocessor:
         mm_hashes = mm_input["mm_hashes"]
 
         # Validate that all mm items have a string as their hash
-        contains_only_strings = json_reduce_leaves(
-            lambda x, y: x and y,
-            json_map_leaves(lambda x: isinstance(x, str), mm_hashes),
-            True,
+        contains_only_strings = all(
+            isinstance(leaf, str) for leaf in json_iter_leaves(mm_hashes)
         )
         if not contains_only_strings:
             raise ValueError(
