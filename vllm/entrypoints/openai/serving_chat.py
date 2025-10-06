@@ -820,12 +820,14 @@ class OpenAIServingChat(OpenAIServing):
                         for token_id in output.token_ids:
                             harmony_parser.process(token_id)
                             token_delta = harmony_parser.last_content_delta or ""
-                            token_states.append((
-                                harmony_parser.current_channel,
-                                harmony_parser.current_recipient,
-                                token_delta
-                            ))
-                        delta_text = "".join(state for _, _, state in token_states)
+                            token_states.append(
+                                (
+                                    harmony_parser.current_channel,
+                                    harmony_parser.current_recipient,
+                                    token_delta,
+                                )
+                            )
+                        delta_text = "".join(delta for _, _, delta in token_states)
                     else:
                         delta_text = output.text
 
@@ -858,15 +860,20 @@ class OpenAIServingChat(OpenAIServing):
                         # Group consecutive tokens with same channel/recipient
                         groups: list[dict[str, str]] = []
                         for channel, recipient, text in token_states:
-                            if (groups and groups[-1]['channel'] == channel
-                                    and groups[-1]['recipient'] == recipient):
-                                groups[-1]['text'] += text
+                            if (
+                                groups
+                                and groups[-1]["channel"] == channel
+                                and groups[-1]["recipient"] == recipient
+                            ):
+                                groups[-1]["text"] += text
                             else:
-                                groups.append({
-                                    'channel': channel,
-                                    'recipient': recipient,
-                                    'text': text
-                                })
+                                groups.append(
+                                    {
+                                        "channel": channel,
+                                        "recipient": recipient,
+                                        "text": text,
+                                    }
+                                )
 
                         # Process each group and create delta messages
                         delta_message = None
@@ -875,70 +882,97 @@ class OpenAIServingChat(OpenAIServing):
                         tool_messages = []
 
                         # Calculate base_index once before the loop
-                        # This represents the number of completed tool calls
+                        # This counts completed tool calls in messages
                         base_index = 0
                         for msg in harmony_parser.messages:
-                            if (msg.channel == "commentary"
-                                    and msg.recipient
-                                    and msg.recipient.startswith(
-                                        "functions.")):
+                            if (
+                                msg.channel == "commentary"
+                                and msg.recipient
+                                and msg.recipient.startswith("functions.")
+                            ):
                                 base_index += 1
 
-                        # next_tool_index tracks the index for the next NEW tool call
-                        next_tool_index = base_index
+                        # If there's an ongoing tool call from previous chunk,
+                        # the next new tool call starts at base_index + 1
+                        if prev_recipient and prev_recipient.startswith("functions."):
+                            next_tool_index = base_index + 1
+                            # Ongoing call is at base_index
+                            ongoing_tool_index = base_index
+                        else:
+                            # No ongoing call, next new call is at base_index
+                            next_tool_index = base_index
+                            ongoing_tool_index = None
 
                         for group in groups:
-                            group_channel = group['channel']
-                            group_recipient = group['recipient']
-                            group_text = group['text']
+                            group_channel = group["channel"]
+                            group_recipient = group["recipient"]
+                            group_text = group["text"]
 
                             if group_channel == "final":
                                 combined_content += group_text
                             elif group_channel == "analysis":
                                 if request.include_reasoning:
                                     combined_reasoning += group_text
-                            elif (group_channel == "commentary" and group_recipient
-                                  and group_recipient.startswith("functions.")):
-
+                            elif (
+                                group_channel == "commentary"
+                                and group_recipient
+                                and group_recipient.startswith("functions.")
+                            ):
+                                opened_new_call = False
                                 if prev_recipient != group_recipient:
                                     # New tool call - emit the opening message
-                                    tool_name = group_recipient.split(
-                                        "functions.", 1)[1]
-                                    tool_messages.append(DeltaToolCall(
-                                        id=make_tool_call_id(),
-                                        type="function",
-                                        function=DeltaFunctionCall(
-                                            name=tool_name,
-                                            arguments="",
-                                        ),
-                                        index=next_tool_index,
-                                    ))
+                                    tool_name = group_recipient.split("functions.", 1)[
+                                        1
+                                    ]
+                                    tool_messages.append(
+                                        DeltaToolCall(
+                                            id=make_tool_call_id(),
+                                            type="function",
+                                            function=DeltaFunctionCall(
+                                                name=tool_name,
+                                                arguments="",
+                                            ),
+                                            index=next_tool_index,
+                                        )
+                                    )
+                                    opened_new_call = True
                                     prev_recipient = group_recipient
                                     # Increment for subsequent new tool calls
                                     next_tool_index += 1
 
                                 if group_text:
                                     # Stream arguments for the ongoing tool call
-                                    # Use next_tool_index - 1 if we opened a call
-                                    # this chunk, else base_index for ongoing
-                                    tool_call_index = (next_tool_index - 1
-                                                       if next_tool_index > base_index
-                                                       else base_index)
-                                    tool_messages.append(DeltaToolCall(
-                                        index=tool_call_index,
-                                        function=DeltaFunctionCall(
-                                            arguments=group_text),
-                                    ))
+                                    if opened_new_call:
+                                        # Just opened in this group
+                                        tool_call_index = next_tool_index - 1
+                                    else:
+                                        # Continuing from previous chunk
+                                        # If ongoing_tool_index is None here, it means
+                                        # we're continuing a call but prev_recipient
+                                        # wasn't a function. Use base_index.
+                                        tool_call_index = (
+                                            ongoing_tool_index
+                                            if ongoing_tool_index is not None
+                                            else base_index
+                                        )
+                                    tool_messages.append(
+                                        DeltaToolCall(
+                                            index=tool_call_index,
+                                            function=DeltaFunctionCall(
+                                                arguments=group_text
+                                            ),
+                                        )
+                                    )
 
                         # Combine all non-empty fields into a single message
                         if combined_content or combined_reasoning or tool_messages:
                             delta_kwargs: dict[str, Any] = {}
                             if combined_content:
-                                delta_kwargs['content'] = combined_content
+                                delta_kwargs["content"] = combined_content
                             if combined_reasoning:
-                                delta_kwargs['reasoning_content'] = combined_reasoning
+                                delta_kwargs["reasoning_content"] = combined_reasoning
                             if tool_messages:
-                                delta_kwargs['tool_calls'] = tool_messages
+                                delta_kwargs["tool_calls"] = tool_messages
                                 harmony_tools_streamed[i] = True
 
                             delta_message = DeltaMessage(**delta_kwargs)
@@ -1216,7 +1250,8 @@ class OpenAIServingChat(OpenAIServing):
                             tool_args = "".join(
                                 tc.function.arguments
                                 for tc in delta_message.tool_calls
-                                if tc.function and tc.function.arguments)
+                                if tc.function and tc.function.arguments
+                            )
                             if tool_args:
                                 delta_content_parts.append(f"[tool_calls: {tool_args}]")
 
