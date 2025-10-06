@@ -1,9 +1,0 @@
-codecov:
-  require_ci_to_pass: false
-
-fixes:
-  - "^/usr/.*/site-packages/vllm/::vllm/"
-  - "^/usr/.*/dist-packages/vllm/::vllm/"
-  - "^/vllm-workspace/vllm/::vllm/"
-
-
