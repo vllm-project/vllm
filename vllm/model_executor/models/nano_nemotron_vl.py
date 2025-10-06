@@ -487,7 +487,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
                     # End of EVS-specific code
                 else:
-                    tokens_per_frame = [tokens_per_frame] * num_frames
+                    tokens_per_frame = [tokens_in_single_frame] * num_frames
 
                 video_repl = self.get_video_repl(tokens_per_frame, self.video_token)
 
