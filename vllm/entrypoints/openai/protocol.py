@@ -2117,8 +2117,7 @@ class ResponsesResponse(OpenAIBaseModel):
                 if isinstance(m, dict):
                     serialized.append(m)
                 elif hasattr(m, "__dict__"):
-                    # Fallback to __dict__ representation
-                    serialized.append(m.__dict__)
+                    serialized.append(m.to_dict())
                 else:
                     # fallback to pyandic dump
                     serialized.append(m.model_dump_json())
@@ -2135,8 +2134,7 @@ class ResponsesResponse(OpenAIBaseModel):
                 if isinstance(m, dict):
                     serialized.append(m)
                 elif hasattr(m, "__dict__"):
-                    # Fallback to __dict__ representation
-                    serialized.append(m.__dict__)
+                    serialized.append(m.to_dict())
                 else:
                     # fallback to pyandic dump
                     serialized.append(m.model_dump_json())
