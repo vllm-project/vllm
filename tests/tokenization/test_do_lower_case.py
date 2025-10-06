@@ -13,6 +13,6 @@ TOKENIZER_NAMES = ["BAAI/bge-base-en"]
 def test_special_tokens(tokenizer_name: str, n_tokens: int):
     tokenizer = get_tokenizer(tokenizer_name, revision="main")
 
-    prompts = '[UNK]' * n_tokens
+    prompts = "[UNK]" * n_tokens
     prompt_token_ids = tokenizer.encode(prompts)
     assert len(prompt_token_ids) == n_tokens + 2

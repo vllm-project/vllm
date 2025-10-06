@@ -8,14 +8,21 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionMetadata,
+    AttentionType,
+)
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata,
-    reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+    reorder_batch_to_split_decodes_and_prefills,
+    split_decodes_and_prefills,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
@@ -28,7 +35,6 @@ logger = init_logger(__name__)
 
 
 class TreeAttentionBackend(AttentionBackend):
-
     accept_output_buffer: bool = True
 
     @classmethod
@@ -48,7 +54,8 @@ class TreeAttentionBackend(AttentionBackend):
                 f"Head size {head_size} is not supported by {attn_type}. "
                 f"Supported head sizes are: {supported_head_sizes}. "
                 "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes.")
+                "FlexAttention backend which supports all head sizes."
+            )
 
     @staticmethod
     def get_name() -> str:
@@ -114,9 +121,9 @@ class TreeAttentionMetadata:
             # metadata structure
             return self._cached_prefill_metadata
 
-        q_start_loc = self.query_start_loc[self.num_decodes:]
+        q_start_loc = self.query_start_loc[self.num_decodes :]
         q_seqlens = torch.diff(q_start_loc)
-        kv_seqlens = self.seq_lens[self.num_decodes:]
+        kv_seqlens = self.seq_lens[self.num_decodes :]
         # Construct & cache prefill-phase attention metadata structure
         self._cached_prefill_metadata = TreeAttentionMetadata(
             num_actual_tokens=self.num_prefill_tokens,
@@ -124,8 +131,8 @@ class TreeAttentionMetadata:
             query_start_loc=q_start_loc - q_start_loc[0],
             max_seq_len=int(kv_seqlens.max().item()),
             seq_lens=kv_seqlens,
-            block_table=self.block_table[self.num_decodes:],
-            slot_mapping=self.slot_mapping[self.num_decode_tokens:],
+            block_table=self.block_table[self.num_decodes :],
+            slot_mapping=self.slot_mapping[self.num_decode_tokens :],
         )
         return self._cached_prefill_metadata
 
@@ -139,9 +146,9 @@ class TreeAttentionMetadata:
             # metadata structure
             return self._cached_decode_metadata
 
-        q_start_loc = self.query_start_loc[:self.num_decodes + 1]
+        q_start_loc = self.query_start_loc[: self.num_decodes + 1]
         q_seqlens = torch.diff(q_start_loc)
-        kv_seqlens = self.seq_lens[:self.num_decodes]
+        kv_seqlens = self.seq_lens[: self.num_decodes]
         # Construct & cache decode-phase attention metadata structure
         self._cached_decode_metadata = TreeAttentionMetadata(
             num_actual_tokens=self.num_decode_tokens,
@@ -149,16 +156,14 @@ class TreeAttentionMetadata:
             query_start_loc=q_start_loc,
             max_seq_len=int(kv_seqlens.max().item()),
             seq_lens=kv_seqlens,
-            block_table=self.block_table[:self.num_decodes],
-            slot_mapping=self.slot_mapping[:self.num_decode_tokens],
+            block_table=self.block_table[: self.num_decodes],
+            slot_mapping=self.slot_mapping[: self.num_decode_tokens],
             tree_attn_bias=self.tree_attn_bias,
         )
         return self._cached_decode_metadata
 
 
-class TreeAttentionMetadataBuilder(
-        AttentionMetadataBuilder[TreeAttentionMetadata]):
-
+class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadata]):
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -172,10 +177,9 @@ class TreeAttentionMetadataBuilder(
 
         spec_config = vllm_config.speculative_config
         spec_token_tree = (spec := spec_config) and spec.speculative_token_tree
-        tree_choices: list[tuple[int,
-                                 ...]] = (ast.literal_eval(spec_token_tree)
-                                          if spec_token_tree is not None else
-                                          [(0, )])
+        tree_choices: list[tuple[int, ...]] = (
+            ast.literal_eval(spec_token_tree) if spec_token_tree is not None else [(0,)]
+        )
         # Construct the tree attention bias.
         depth_counts = _get_depth_counts(tree_choices)
         self.tree_attn_bias = _prepare_tree_attn_bias(
@@ -185,12 +189,12 @@ class TreeAttentionMetadataBuilder(
             device=device,
         )
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
+    def reorder_batch(
+        self, input_batch: "InputBatch", scheduler_output: "SchedulerOutput"
+    ) -> bool:
         return reorder_batch_to_split_decodes_and_prefills(
-            input_batch,
-            scheduler_output,
-            decode_threshold=self.tree_attn_bias.shape[0])
+            input_batch, scheduler_output, decode_threshold=self.tree_attn_bias.shape[0]
+        )
 
     def build(
         self,
@@ -200,8 +204,10 @@ class TreeAttentionMetadataBuilder(
     ) -> TreeAttentionMetadata:
         decode_threshold = self.tree_attn_bias.shape[0]
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            split_decodes_and_prefills(common_attn_metadata,
-                                       decode_threshold=decode_threshold))
+            split_decodes_and_prefills(
+                common_attn_metadata, decode_threshold=decode_threshold
+            )
+        )
 
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         q_start_loc = common_attn_metadata.query_start_loc
@@ -241,8 +247,7 @@ class TreeAttentionMetadataBuilder(
             # Slice the tree attention bias for drafting. Exclude
             # the root level.
             start, end = 1, 1 + common_attn_metadata.max_query_len
-            self.tree_attn_bias = self.tree_attn_bias[start:end,
-                                                      start:end].contiguous()
+            self.tree_attn_bias = self.tree_attn_bias[start:end, start:end].contiguous()
 
         # Build attention bias.
         attn_metadata = self.build(0, common_attn_metadata, fast_build=True)
@@ -273,10 +278,9 @@ def _prepare_tree_attn_bias(
 ) -> torch.Tensor:
     # +1 comes from the additional root node.
     tree_len = len(sorted_tree_choices) + 1
-    tree_attn_mask = torch.full((tree_len, tree_len),
-                                -torch.inf,
-                                device=device,
-                                dtype=dtype)
+    tree_attn_mask = torch.full(
+        (tree_len, tree_len), -torch.inf, device=device, dtype=dtype
+    )
 
     # Set diagonal to all zeros. Each token should
     # attend to itself.
@@ -298,14 +302,14 @@ def _prepare_tree_attn_bias(
             ancestor_idx = []
             for c in range(len(cur_tree_choice) - 1):
                 ancestor_idx.append(
-                    sorted_tree_choices.index(cur_tree_choice[:c + 1]) + 1)
+                    sorted_tree_choices.index(cur_tree_choice[: c + 1]) + 1
+                )
             tree_attn_mask[j + start + 1, ancestor_idx] = mask_val
         start += depth_counts[i]
     return tree_attn_mask
 
 
 class TreeAttentionImpl(AttentionImpl):
-
     def __init__(
         self,
         num_heads: int,
@@ -341,10 +345,12 @@ class TreeAttentionImpl(AttentionImpl):
         TreeAttentionBackend.validate_head_size(head_size)
 
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "TreeAttentionImpl.")
+            raise NotImplementedError(
+                "Encoder self-attention and "
+                "encoder/decoder cross-attention "
+                "are not implemented for "
+                "TreeAttentionImpl."
+            )
 
     def forward(
         self,
@@ -374,8 +380,8 @@ class TreeAttentionImpl(AttentionImpl):
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
-                "fused output quantization is not yet supported"
-                " for TreeAttentionImpl")
+                "fused output quantization is not yet supported for TreeAttentionImpl"
+            )
 
         if attn_metadata is None:
             # Profiling run.
@@ -404,8 +410,7 @@ class TreeAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
-        descale_shape = (attn_metadata.query_start_loc.shape[0] - 1,
-                         key.shape[1])
+        descale_shape = (attn_metadata.query_start_loc.shape[0] - 1, key.shape[1])
         if prefill_meta := attn_metadata.prefill_metadata:
             unified_attention(
                 q=query[num_decode_tokens:num_actual_tokens],
