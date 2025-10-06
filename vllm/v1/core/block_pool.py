@@ -11,8 +11,6 @@ from vllm.distributed.kv_events import (
     KVCacheEvent,
 )
 from vllm.logger import init_logger
-
-# yapf: disable
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
@@ -25,8 +23,6 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
 )
-
-# yapf: enable
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
