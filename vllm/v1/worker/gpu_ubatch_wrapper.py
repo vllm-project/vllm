@@ -452,7 +452,7 @@ class UBatchWrapper:
                 return self._run_ubatches(ubatch_metadata, self.model)
 
     def enter_sleep_mode(self) -> tuple[dict, int]:
-        """Put UBatch CUDA graphs to sleep and return state for restoration and count."""
+        """Put graphs to sleep and return state for restoration and count."""
         sleep_state = {}
         cuda_graph_count = 0
 
