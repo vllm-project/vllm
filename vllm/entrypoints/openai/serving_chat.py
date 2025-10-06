@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Any, Final
+from typing import Any, Callable, Final, Optional, Union
 
 import jinja2
 import partial_json_parser
@@ -856,11 +856,10 @@ class OpenAIServingChat(OpenAIServing):
 
                     if self.use_harmony:
                         # Group consecutive tokens with same channel/recipient
-                        groups = []
+                        groups: list[dict[str, str]] = []
                         for channel, recipient, text in token_states:
-                            if not text:
-                                continue
-                            if groups and groups[-1]['channel'] == channel and groups[-1]['recipient'] == recipient:
+                            if (groups and groups[-1]['channel'] == channel
+                                    and groups[-1]['recipient'] == recipient):
                                 groups[-1]['text'] += text
                             else:
                                 groups.append({
@@ -915,14 +914,16 @@ class OpenAIServingChat(OpenAIServing):
                                         index=next_tool_index,
                                     ))
                                     prev_recipient = group_recipient
-                                    # Increment for any subsequent new tool calls in this chunk
+                                    # Increment for subsequent new tool calls
                                     next_tool_index += 1
 
                                 if group_text:
                                     # Stream arguments for the ongoing tool call
-                                    # The current call index is next_tool_index - 1 if we just
-                                    # opened it, OR base_index if continuing from prev chunk
-                                    tool_call_index = next_tool_index - 1 if next_tool_index > base_index else base_index
+                                    # Use next_tool_index - 1 if we opened a call
+                                    # this chunk, else base_index for ongoing
+                                    tool_call_index = (next_tool_index - 1
+                                                       if next_tool_index > base_index
+                                                       else base_index)
                                     tool_messages.append(DeltaToolCall(
                                         index=tool_call_index,
                                         function=DeltaFunctionCall(
@@ -931,7 +932,7 @@ class OpenAIServingChat(OpenAIServing):
 
                         # Combine all non-empty fields into a single message
                         if combined_content or combined_reasoning or tool_messages:
-                            delta_kwargs = {}
+                            delta_kwargs: dict[str, Any] = {}
                             if combined_content:
                                 delta_kwargs['content'] = combined_content
                             if combined_reasoning:
@@ -1209,7 +1210,8 @@ class OpenAIServingChat(OpenAIServing):
                         if delta_message.content:
                             delta_content_parts.append(delta_message.content)
                         if delta_message.reasoning_content:
-                            delta_content_parts.append(f"[reasoning: {delta_message.reasoning_content}]")
+                            reasoning = delta_message.reasoning_content
+                            delta_content_parts.append(f"[reasoning: {reasoning}]")
                         if delta_message.tool_calls:
                             tool_args = "".join(
                                 tc.function.arguments
