@@ -17,14 +17,15 @@ def qwen2_5_vl_chat_template(*query):
     return f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{''.join(query)}<|im_end|><|im_start|>assistant\n"  # noqa: E501
 
 
-VIDEO_PROMPTS = VIDEO_ASSETS.prompts({
-    "baby_reading":
-    qwen2_5_vl_chat_template(
-        VIDEO_PLACEHOLDER,
-        "Describe this video with a short sentence ",
-        "(no more than 20 words)",
-    ),
-})
+VIDEO_PROMPTS = VIDEO_ASSETS.prompts(
+    {
+        "baby_reading": qwen2_5_vl_chat_template(
+            VIDEO_PLACEHOLDER,
+            "Describe this video with a short sentence ",
+            "(no more than 20 words)",
+        ),
+    }
+)
 
 
 @pytest.mark.core_model
@@ -33,10 +34,15 @@ VIDEO_PROMPTS = VIDEO_ASSETS.prompts({
 @pytest.mark.parametrize("num_frames", [16])
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
-def test_qwen2_5_vl_evs_functionality(vllm_runner, video_assets, model,
-                                      video_pruning_rate: float,
-                                      num_frames: int, dtype: str,
-                                      max_tokens: int) -> None:
+def test_qwen2_5_vl_evs_functionality(
+    vllm_runner,
+    video_assets,
+    model,
+    video_pruning_rate: float,
+    num_frames: int,
+    dtype: str,
+    max_tokens: int,
+) -> None:
     """Test EVS (Efficient Video Sampling) functionality with different
     pruning rates.
     """
@@ -51,19 +57,18 @@ def test_qwen2_5_vl_evs_functionality(vllm_runner, video_assets, model,
     videos = [sampled_vids[0]]
 
     # Initialize model with EVS configuration
-    with vllm_runner(model,
-                     runner="generate",
-                     max_model_len=4000,
-                     max_num_seqs=1,
-                     dtype=dtype,
-                     limit_mm_per_prompt={"video": 1},
-                     tensor_parallel_size=1,
-                     video_pruning_rate=video_pruning_rate) as vllm_model:
-
+    with vllm_runner(
+        model,
+        runner="generate",
+        max_model_len=4000,
+        max_num_seqs=1,
+        dtype=dtype,
+        limit_mm_per_prompt={"video": 1},
+        tensor_parallel_size=1,
+        video_pruning_rate=video_pruning_rate,
+    ) as vllm_model:
         # Generate output - this should not crash
-        outputs = vllm_model.generate_greedy(prompts,
-                                             max_tokens,
-                                             videos=videos)
+        outputs = vllm_model.generate_greedy(prompts, max_tokens, videos=videos)
 
         # Basic validation that we got a response
         assert len(outputs) == 1
@@ -83,10 +88,15 @@ def test_qwen2_5_vl_evs_functionality(vllm_runner, video_assets, model,
 @pytest.mark.parametrize("num_frames", [16])
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
-def test_qwen2_5_vl_evs_batched_videos(vllm_runner, video_assets, model,
-                                       video_pruning_rate: float,
-                                       num_frames: int, dtype: str,
-                                       max_tokens: int) -> None:
+def test_qwen2_5_vl_evs_batched_videos(
+    vllm_runner,
+    video_assets,
+    model,
+    video_pruning_rate: float,
+    num_frames: int,
+    dtype: str,
+    max_tokens: int,
+) -> None:
     """Test EVS functionality with batched videos.
 
     This test validates that:
@@ -102,23 +112,21 @@ def test_qwen2_5_vl_evs_batched_videos(vllm_runner, video_assets, model,
 
     # Test batched videos
     prompts = [VIDEO_PROMPTS[0], VIDEO_PROMPTS[0]]
-    videos = [sampled_vids[0],
-              sampled_vids[0]]  # Use same video twice for testing
+    videos = [sampled_vids[0], sampled_vids[0]]  # Use same video twice for testing
 
     # Initialize model with EVS configuration
-    with vllm_runner(model,
-                     runner="generate",
-                     max_model_len=4000,
-                     max_num_seqs=2,
-                     dtype=dtype,
-                     limit_mm_per_prompt={"video": 2},
-                     tensor_parallel_size=1,
-                     video_pruning_rate=video_pruning_rate) as vllm_model:
-
+    with vllm_runner(
+        model,
+        runner="generate",
+        max_model_len=4000,
+        max_num_seqs=2,
+        dtype=dtype,
+        limit_mm_per_prompt={"video": 2},
+        tensor_parallel_size=1,
+        video_pruning_rate=video_pruning_rate,
+    ) as vllm_model:
         # Generate output - this should not crash
-        outputs = vllm_model.generate_greedy(prompts,
-                                             max_tokens,
-                                             videos=videos)
+        outputs = vllm_model.generate_greedy(prompts, max_tokens, videos=videos)
 
         # Basic validation that we got responses for both videos
         assert len(outputs) == 2

@@ -15,20 +15,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Wrapper around `transformers` models for pooling tasks."""
+
 from typing import Optional, Union
 
 import torch
 from transformers import AutoModelForSequenceClassification
 
-from vllm.attention import AttentionType
+from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.pooler import (ClassifierPooler, CLSPool,
-                                               DispatchPooler, Pooler)
+from vllm.model_executor.layers.pooler import (
+    ClassifierPooler,
+    CLSPool,
+    DispatchPooler,
+    Pooler,
+)
 from vllm.sequence import IntermediateTensors
 
 from .interfaces_base import VllmModelForPooling
 from .transformers import TransformersBase, can_enable_torch_compile
+from .transformers_moe import TransformersMoEBase
 from .utils import WeightsMapper
 
 
@@ -51,16 +57,22 @@ class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
             # Replace legacy suffixes used for norms
             ".gamma": ".weight",
             ".beta": ".bias",
-        })
+        },
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         # Skip unsupported/unwanted output embeddings layers
-        self.skip_prefixes.extend([
-            "model.lm_head.", "model.predictions.", "model.qa_outputs.",
-            "model.embeddings_project.", "model.discriminator_predictions."
-        ])
+        self.skip_prefixes.extend(
+            [
+                "model.lm_head.",
+                "model.predictions.",
+                "model.qa_outputs.",
+                "model.embeddings_project.",
+                "model.discriminator_predictions.",
+            ]
+        )
 
         # Some encoder models have the position_ids buffer in the checkpoint.
         # vLLM will always pass position_ids as an argument, so we skip loading
@@ -79,7 +91,8 @@ class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
         self.padding_idx = self.text_config.pad_token_id
 
     def create_attention_instances(
-            self, attn_type: AttentionType = AttentionType.DECODER):
+        self, attn_type: AttentionType = AttentionType.DECODER
+    ) -> dict[int, Attention]:
         # TODO(hmellor): Better way to detect encoder models
         # In encoder models, the attention layers will have `is_causal=False`
         is_encoder = lambda m: not getattr(m, "is_causal", True)
@@ -90,14 +103,7 @@ class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
 
         # Check minimum transformers version for encoder models support
         if attn_type == AttentionType.ENCODER_ONLY:
-            import transformers
-            from packaging.version import Version
-            installed = Version(transformers.__version__)
-            required = Version("4.57.0.dev0")
-            if installed < required:
-                raise ValueError(
-                    "Encoder models with the Transformers backend require "
-                    f"transformers>={required}, but got {installed}")
+            self.check_version("4.57.0.dev0", "encoder models support")
 
         return super().create_attention_instances(attn_type)
 
@@ -111,10 +117,12 @@ class TransformersPoolingBase(TransformersBase, VllmModelForPooling):
         if self.is_roberta:
             # RoBERTa-specific positions padding
             positions += self.padding_idx + 1
-        return super().forward(input_ids=input_ids,
-                               positions=positions,
-                               intermediate_tensors=intermediate_tensors,
-                               inputs_embeds=inputs_embeds)
+        return super().forward(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
 
 
 @support_torch_compile(enable_if=can_enable_torch_compile)
@@ -127,10 +135,12 @@ class TransformersEmbeddingModel(TransformersPoolingBase):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler({
-            "encode": Pooler.for_encode(pooler_config),
-            "embed": Pooler.for_embed(pooler_config),
-        })
+        self.pooler = DispatchPooler(
+            {
+                "encode": Pooler.for_encode(pooler_config),
+                "embed": Pooler.for_embed(pooler_config),
+            }
+        )
 
 
 @support_torch_compile(enable_if=can_enable_torch_compile)
@@ -162,12 +172,12 @@ class TransformersForSequenceClassification(TransformersPoolingBase):
         if self.model.pooler is not None:
             raise ValueError(
                 "Sequence classification models with pooling layers are not "
-                "supported yet in the Transformers backend.")
+                "supported yet in the Transformers backend."
+            )
 
         # Unlike `lm_head`, `classifier` is not always `nn.Linear`.
         self.classifier = seq_cls_model.classifier
-        self.init_parameters(self.classifier,
-                             dtype=self.model_config.head_dtype)
+        self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
 
         class ClassifierWithReshape(self.classifier.__class__):
             """CLSPool has already been applied in `pooling`.
@@ -180,21 +190,34 @@ class TransformersForSequenceClassification(TransformersPoolingBase):
 
         self.classifier.__class__ = ClassifierWithReshape
 
-        self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_encode(pooler_config),
-            "classify":
-            ClassifierPooler(
-                pooling=CLSPool(),
-                classifier=self.classifier,
-                act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                    vllm_config.model_config),
-            ),
-            "score":
-            ClassifierPooler(
-                pooling=CLSPool(),
-                classifier=self.classifier,
-                act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                    vllm_config.model_config),
-            ),
-        })
+        self.pooler = DispatchPooler(
+            {
+                "encode": Pooler.for_encode(pooler_config),
+                "classify": ClassifierPooler(
+                    pooling=CLSPool(),
+                    classifier=self.classifier,
+                    act_fn=ClassifierPooler.act_fn_for_seq_cls(
+                        vllm_config.model_config
+                    ),
+                ),
+                "score": ClassifierPooler(
+                    pooling=CLSPool(),
+                    classifier=self.classifier,
+                    act_fn=ClassifierPooler.act_fn_for_cross_encoder(
+                        vllm_config.model_config
+                    ),
+                ),
+            }
+        )
+
+
+@support_torch_compile(enable_if=can_enable_torch_compile)
+class TransformersMoEEmbeddingModel(TransformersMoEBase, TransformersEmbeddingModel):
+    pass
+
+
+@support_torch_compile(enable_if=can_enable_torch_compile)
+class TransformersMoEForSequenceClassification(
+    TransformersMoEBase, TransformersForSequenceClassification
+):
+    pass
