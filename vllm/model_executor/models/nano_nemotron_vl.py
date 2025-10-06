@@ -573,7 +573,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             ]
         )
 
-        return PromptUpdateDetails.select_text(repl_full, repl_full)
+        return PromptUpdateDetails.from_seq(repl_full)
 
 
 class BaseNanoNemotronVLProcessingInfo(BaseProcessingInfo):
