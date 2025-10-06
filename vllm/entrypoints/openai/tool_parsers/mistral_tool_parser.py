@@ -368,7 +368,7 @@ class MistralToolParser(ToolParser):
         content = None
         delta_tool_calls: list[DeltaToolCall] = []
         current_tool_call: DeltaToolCall = DeltaToolCall(
-            index=self.current_tool_id, )
+            index=self.current_tool_id, type="function")
         current_tool_call_modified = False
         if self.bot_token in delta_text:
             # this is the first tool call
@@ -465,7 +465,10 @@ class MistralToolParser(ToolParser):
                 self.current_tool_id += 1
                 self.current_tool_mistral_id = \
                     MistralToolCall.generate_random_id()
-                current_tool_call = DeltaToolCall(index=self.current_tool_id, )
+                current_tool_call = DeltaToolCall(
+                    index=self.current_tool_id,
+                    type="function",
+                )
             if current_tool_call.function is None:
                 current_tool_call.function = DeltaFunctionCall()
 
