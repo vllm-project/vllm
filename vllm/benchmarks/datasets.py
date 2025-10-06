@@ -995,7 +995,14 @@ class RandomMultiModalDataset(RandomDataset):
         )
 
         vocab_size = tokenizer.vocab_size
-        prohibited_tokens = tokenizer.all_special_ids
+        # Can't use tokenizer.all_special_ids since
+        # it returns ONLY ids from special_tokens_map.json which
+        # is WAY less than total number of special tokens
+        prohibited_tokens = list(
+            tok_id
+            for tok_id, token in tokenizer.added_tokens_decoder.items()
+            if token.special
+        )
         logger.info("Special tokens: %s", repr(prohibited_tokens))
         all_tokens = np.arange(vocab_size)
         allowed_tokens = np.array(list(set(all_tokens) - set(prohibited_tokens)))
