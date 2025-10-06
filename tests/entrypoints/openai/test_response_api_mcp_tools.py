@@ -133,11 +133,11 @@ async def test_mcp_tool_env_flag_enabled_commentary_channel_disabled(
     assert response is not None
     assert response.status == "completed"
     for message in response.input_messages:
-        assert message.role != "developer", (
+        assert message["role"] != "developer", (
             "There should not be a developer message as no function tools exist."
         )
-        if message.role == "system":
+        if message["role"] == "system":
             assert (
                 "commentary"
-                not in message.content[0]["channel_config"]["valid_channels"]
+                not in message["content"][0]["channel_config"]["valid_channels"]
             ), "Commentary channel should not be valid"
