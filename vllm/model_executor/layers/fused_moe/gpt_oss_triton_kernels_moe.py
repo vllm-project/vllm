@@ -149,6 +149,7 @@ def triton_kernel_fused_experts(
     if global_num_experts == -1:
         global_num_experts = E
 
+    w1_bias_padded, w2_bias_padded = None, None
     # Only apply padding optimization on AMD/ROCm hardware
     if torch.version.hip is not None:
         # Apply padding for better memory alignment
@@ -177,12 +178,14 @@ def triton_kernel_fused_experts(
             )
 
             # Pad bias tensors if they exist
-            if quant_config.w1_bias is not None:
-                quant_config.w1_bias = F.pad(
+            w1_bias_padded = quant_config.w1_bias
+            if w1_bias_padded is not None:
+                w1_bias_padded = F.pad(
                     quant_config.w1_bias, (0, 2 * ffn_dim_padding, 0, 0), "constant", 0
                 )
-            if quant_config.w2_bias is not None:
-                quant_config.w2_bias = F.pad(
+            w2_bias_padded = quant_config.w2_bias
+            if w2_bias_padded is not None:
+                w2_bias_padded = F.pad(
                     quant_config.w2_bias, (0, hidden_dim_padding, 0, 0), "constant", 0
                 )
 
@@ -196,7 +199,7 @@ def triton_kernel_fused_experts(
     intermediate_cache1 = matmul_ogs(
         hidden_states,
         w1,
-        quant_config.w1_bias,
+        w1_bias_padded if w1_bias_padded is not None else quant_config.w1_bias,
         routing_data,
         gather_indx=gather_indx,
         precision_config=quant_config.w1_precision,
@@ -207,7 +210,7 @@ def triton_kernel_fused_experts(
     intermediate_cache3 = matmul_ogs(
         intermediate_cache1,
         w2,
-        quant_config.w2_bias,
+        w2_bias_padded if w2_bias_padded is not None else quant_config.w2_bias,
         routing_data,
         scatter_indx=scatter_indx,
         precision_config=quant_config.w2_precision,
