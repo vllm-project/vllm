@@ -6,16 +6,16 @@ from typing import Optional
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.v1.attention.backends.mamba_attn import (
-    BaseMambaAttentionMetadataBuilder)
-from vllm.v1.attention.backends.utils import (PAD_SLOT_ID,
-                                              CommonAttentionMetadata,
-                                              compute_causal_conv1d_metadata,
-                                              split_decodes_and_prefills)
+from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
+from vllm.v1.attention.backends.utils import (
+    PAD_SLOT_ID,
+    CommonAttentionMetadata,
+    compute_causal_conv1d_metadata,
+    split_decodes_and_prefills,
+)
 
 
 class ShortConvAttentionBackend(AttentionBackend):
-
     @staticmethod
     def get_builder_cls() -> type["ShortConvAttentionMetadataBuilder"]:
         return ShortConvAttentionMetadataBuilder
@@ -39,12 +39,14 @@ class ShortConvAttentionMetadata:
 
 
 class ShortConvAttentionMetadataBuilder(
-        BaseMambaAttentionMetadataBuilder[ShortConvAttentionMetadata]):
-
-    def build(self,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> ShortConvAttentionMetadata:
+    BaseMambaAttentionMetadataBuilder[ShortConvAttentionMetadata]
+):
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> ShortConvAttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
@@ -54,28 +56,38 @@ class ShortConvAttentionMetadataBuilder(
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold))
+                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
+            )
+        )
 
         has_initial_states_p = None
         if num_prefills > 0:
             has_initial_states_cpu = (
-                common_attn_metadata.
-                num_computed_tokens_cpu[num_reqs - num_prefills:num_reqs] > 0)
-            has_initial_states_p = has_initial_states_cpu.to(
-                query_start_loc.device)
+                common_attn_metadata.num_computed_tokens_cpu[
+                    num_reqs - num_prefills : num_reqs
+                ]
+                > 0
+            )
+            has_initial_states_p = has_initial_states_cpu.to(query_start_loc.device)
 
-            query_start_loc_p = common_attn_metadata.query_start_loc[
-                -num_prefills - 1:] - num_decode_tokens
+            query_start_loc_p = (
+                common_attn_metadata.query_start_loc[-num_prefills - 1 :]
+                - num_decode_tokens
+            )
 
-            nums_dict, batch_ptr, token_chunk_offset_ptr = \
+            nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(query_start_loc_p)
+            )
 
-        elif (num_decodes > 0 and num_decodes <= self.decode_cudagraph_max_bs
-              and self.compilation_config.full_cuda_graph):
+        elif (
+            num_decodes > 0
+            and num_decodes <= self.decode_cudagraph_max_bs
+            and self.compilation_config.full_cuda_graph
+        ):
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)
-            self.state_indices_tensor[:num_decodes].copy_(state_indices_tensor,
-                                                          non_blocking=True)
+            self.state_indices_tensor[:num_decodes].copy_(
+                state_indices_tensor, non_blocking=True
+            )
             state_indices_tensor = self.state_indices_tensor[:num_input_tokens]
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 

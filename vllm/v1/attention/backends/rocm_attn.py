@@ -1,26 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
+
 from dataclasses import dataclass
 from typing import ClassVar, Optional
 
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
-from vllm.attention.ops.chunked_prefill_paged_decode import (
-    chunked_prefill_paged_decode)
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionMetadata,
+    AttentionType,
+)
+from vllm.attention.ops.chunked_prefill_paged_decode import chunked_prefill_paged_decode
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey, kFp8StaticTensorSym)
+    QuantKey,
+    kFp8StaticTensorSym,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.utils import (AttentionCGSupport,
-                                              AttentionMetadataBuilder,
-                                              CommonAttentionMetadata)
+from vllm.v1.attention.backends.utils import (
+    AttentionCGSupport,
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -56,21 +64,25 @@ class RocmAttentionMetadata:
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
 
 
-class RocmAttentionMetadataBuilder(
-        AttentionMetadataBuilder[RocmAttentionMetadata]):
+class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
-    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
-                 vllm_config: VllmConfig, device: torch.device):
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         self.block_size = kv_cache_spec.block_size
 
         model_config = vllm_config.model_config
         self.num_heads_q = model_config.get_num_attention_heads(
-            vllm_config.parallel_config)
-        self.num_heads_kv = model_config.get_num_kv_heads(
-            vllm_config.parallel_config)
+            vllm_config.parallel_config
+        )
+        self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
 
     def build_for_cudagraph_capture(
@@ -90,10 +102,12 @@ class RocmAttentionMetadataBuilder(
 
         return attn_metadata
 
-    def build(self,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> RocmAttentionMetadata:
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> RocmAttentionMetadata:
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
@@ -106,14 +120,13 @@ class RocmAttentionMetadataBuilder(
         use_cascade = common_prefix_len > 0
 
         if use_cascade:
-            cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
-                                                dtype=torch.int32,
-                                                device=self.device)
-            prefix_kv_lens = torch.tensor([common_prefix_len],
-                                          dtype=torch.int32,
-                                          device=self.device)
-            suffix_kv_lens = (common_attn_metadata.seq_lens_cpu -
-                              common_prefix_len)
+            cu_prefix_query_lens = torch.tensor(
+                [0, num_actual_tokens], dtype=torch.int32, device=self.device
+            )
+            prefix_kv_lens = torch.tensor(
+                [common_prefix_len], dtype=torch.int32, device=self.device
+            )
+            suffix_kv_lens = common_attn_metadata.seq_lens_cpu - common_prefix_len
             suffix_kv_lens = suffix_kv_lens.to(self.device)
         else:
             cu_prefix_query_lens = None
@@ -140,7 +153,6 @@ class RocmAttentionMetadataBuilder(
 
 
 class RocmAttentionBackend(AttentionBackend):
-
     accept_output_buffer: bool = True
 
     @classmethod
@@ -160,7 +172,8 @@ class RocmAttentionBackend(AttentionBackend):
                 f"Head size {head_size} is not supported by {attn_type}. "
                 f"Supported head sizes are: {supported_head_sizes}. "
                 "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes.")
+                "FlexAttention backend which supports all head sizes."
+            )
 
     @staticmethod
     def get_name() -> str:
@@ -196,7 +209,6 @@ class RocmAttentionBackend(AttentionBackend):
 
 
 class RocmAttentionImpl(AttentionImpl):
-
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
 
@@ -237,10 +249,12 @@ class RocmAttentionImpl(AttentionImpl):
         RocmAttentionBackend.validate_head_size(head_size)
 
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "RocmAttentionImpl")
+            raise NotImplementedError(
+                "Encoder self-attention and "
+                "encoder/decoder cross-attention "
+                "are not implemented for "
+                "RocmAttentionImpl"
+            )
 
         self.fp8_dtype = current_platform.fp8_dtype()
 
@@ -249,7 +263,8 @@ class RocmAttentionImpl(AttentionImpl):
             assert sinks.shape[0] == num_heads, (
                 "Sinks must have the same number of heads as the number of "
                 f"heads in the layer. Sinks shape: {sinks.shape}, "
-                f"num_heads: {num_heads}.")
+                f"num_heads: {num_heads}."
+            )
 
     def forward(
         self,
@@ -280,7 +295,8 @@ class RocmAttentionImpl(AttentionImpl):
         if output_block_scale is not None:
             raise NotImplementedError(
                 "fused block_scale output quantization is not yet supported"
-                " for RocmAttentionImpl")
+                " for RocmAttentionImpl"
+            )
 
         if attn_metadata is None:
             # Profiling run.
@@ -300,7 +316,8 @@ class RocmAttentionImpl(AttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
 
         key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size)
+            kv_cache, self.num_kv_heads, self.head_size
+        )
 
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache.
@@ -320,16 +337,17 @@ class RocmAttentionImpl(AttentionImpl):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
             num_tokens, num_heads, head_size = query.shape
-            assert layer._q_scale_float == 1.0, \
+            assert layer._q_scale_float == 1.0, (
                 "A non 1.0 q_scale is not currently supported."
+            )
             if current_platform.is_cuda():
                 # Skip Q quantization on ROCm and XPU, enable this on cuda
                 # only, since dequantizing back to f32 in the attention kernel
                 # is not supported.
                 query, _ = ops.scaled_fp8_quant(
-                    query.reshape(
-                        (num_tokens, num_heads * head_size)).contiguous(),
-                    layer._q_scale)
+                    query.reshape((num_tokens, num_heads * head_size)).contiguous(),
+                    layer._q_scale,
+                )
                 query = query.reshape((num_tokens, num_heads, head_size))
 
         cu_seqlens_q = attn_metadata.query_start_loc
