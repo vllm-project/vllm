@@ -2,24 +2,33 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import tempfile
 from collections import defaultdict
+from itertools import count
 from typing import Any, Callable, Optional
 
 import torch
 
 from vllm import SamplingParams
-from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
-                         ModelConfig, SchedulerConfig, VllmConfig)
-from vllm.distributed.kv_transfer.kv_connector.factory import (
-    KVConnectorFactory)
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    KVTransferConfig,
+    ModelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa
-    SharedStorageConnector)
+    SharedStorageConnector,
+)
 from vllm.utils import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
-                                         init_none_hash)
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec)
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -41,14 +50,24 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.encoder_cache_manager.cached) == 0
 
     # KVCache Manager.
-    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
-               req_to_blocks) == 0
-    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
-               num_cached_block) == 0
+    assert (
+        len(
+            scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks
+        )
+        == 0
+    )
+    assert (
+        len(
+            scheduler.kv_cache_manager.coordinator.single_type_managers[
+                0
+            ].num_cached_block
+        )
+        == 0
+    )
     num_free_blocks = (
-        scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
-    assert num_free_blocks == (
-        scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
+        scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks
+    )
+    assert num_free_blocks == (scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
 
     # NOTE(rob): just the ref count on blocks will be 0. The hash
     # value, etc will remain since we lazily evict for prefix cache.
@@ -61,12 +80,15 @@ def create_vllm_config(
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 64,
     block_size: int = 16,
+    max_model_len: int = 10000,
+    enable_chunked_prefill: bool = True,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
-        max_model_len=max_num_batched_tokens,
+        max_model_len=max_model_len,
+        enable_chunked_prefill=enable_chunked_prefill,
     )
     model_config = ModelConfig(
         model=model,
@@ -86,11 +108,13 @@ def create_vllm_config(
         kv_connector="NixlConnector",
         kv_role="kv_both",
     )
-    return VllmConfig(scheduler_config=scheduler_config,
-                      model_config=model_config,
-                      cache_config=cache_config,
-                      kv_transfer_config=kv_transfer_config,
-                      device_config=DeviceConfig("cpu"))
+    return VllmConfig(
+        scheduler_config=scheduler_config,
+        model_config=model_config,
+        cache_config=cache_config,
+        kv_transfer_config=kv_transfer_config,
+        device_config=DeviceConfig("cpu"),
+    )
 
 
 def create_scheduler(
@@ -103,9 +127,9 @@ def create_scheduler(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(['layer'],
-                             FullAttentionSpec(block_size, 1, 1, torch.float32,
-                                               False))
+            KVCacheGroupSpec(
+                ["layer"], FullAttentionSpec(block_size, 1, 1, torch.float32, False)
+            )
         ],
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
@@ -117,19 +141,27 @@ def create_scheduler(
     )
 
 
+_request_count = count(1)
 _none_hash_initialized = False
 
 
-def create_request(request_id: int,
-                   num_tokens: int = 10,
-                   max_tokens: int = 16,
-                   do_remote_decode: bool = False,
-                   do_remote_prefill: bool = False,
-                   use_all_1s_for_prompt_tokens: bool = False,
-                   num_remote_blocks: int = 3,
-                   block_size: int = 16,
-                   hash_fn: Callable = sha256) -> Request:
+def create_request(
+    request_id: Optional[int] = None,
+    num_tokens: int = 10,
+    common_prefix_len=0,
+    max_tokens: int = 16,
+    do_remote_decode: bool = False,
+    do_remote_prefill: bool = False,
+    num_remote_blocks: int = 3,
+    block_size: int = 16,
+    hash_fn: Callable = sha256,
+) -> Request:
     """Make dummy request for testing."""
+    assert num_tokens >= common_prefix_len >= 0
+
+    if request_id is None:
+        request_id = next(_request_count)
+
     global _none_hash_initialized
     if not _none_hash_initialized:
         init_none_hash(hash_fn)
@@ -139,24 +171,23 @@ def create_request(request_id: int,
 
     if do_remote_decode:
         assert not do_remote_prefill
-        kv_transfer_params = dict(do_remote_prefill=False,
-                                  do_remote_decode=True)
+        kv_transfer_params = dict(do_remote_prefill=False, do_remote_decode=True)
     elif do_remote_prefill:
-        kv_transfer_params = dict(do_remote_prefill=True,
-                                  do_remote_decode=False,
-                                  remote_engine_id="my-engine-id",
-                                  remote_block_ids=list(
-                                      range(num_remote_blocks)),
-                                  remote_host="my-host",
-                                  remote_port=1234)
+        kv_transfer_params = dict(
+            do_remote_prefill=True,
+            do_remote_decode=False,
+            remote_engine_id="my-engine-id",
+            remote_block_ids=list(range(num_remote_blocks)),
+            remote_host="my-host",
+            remote_port=1234,
+        )
 
     max_tokens = 1 if do_remote_decode else max_tokens
     sampling_params = SamplingParams(max_tokens=max_tokens)
 
-    if use_all_1s_for_prompt_tokens:
-        prompt_token_ids = [1] * num_tokens
-    else:
-        prompt_token_ids = [i * request_id for i in range(num_tokens)]
+    common_prefix = [1] * common_prefix_len if common_prefix_len > 0 else []
+    suffix = [i * request_id for i in range(num_tokens - common_prefix_len)]
+    prompt_token_ids = common_prefix + suffix
 
     req = Request(
         request_id=f"id-{request_id}",
@@ -173,9 +204,11 @@ def create_request(request_id: int,
 
 def create_model_runner_output(
     reqs: list[Request],
-    finished_sending: Optional[list[str]] = None,
-    finished_recving: Optional[list[str]] = None,
+    finished_sending: Optional[set[str]] = None,
+    finished_recving: Optional[set[str]] = None,
+    invalid_block_ids: Optional[set[int]] = None,
     use_eos: bool = False,
+    token_id: int = 0,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
 
@@ -184,15 +217,22 @@ def create_model_runner_output(
     req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
 
     # Make sampled tokens.
-    sampled_token = EOS_TOKEN_ID if use_eos else 0
+    sampled_token = EOS_TOKEN_ID if use_eos else token_id
     sampled_token_ids = [[sampled_token] for _ in req_ids]
 
-    kv_connector_output = None if (
-        finished_sending is None
-        and finished_recving is None) else KVConnectorOutput(
+    kv_connector_output = (
+        None
+        if (
+            finished_sending is None
+            and finished_recving is None
+            and invalid_block_ids is None
+        )
+        else KVConnectorOutput(
             finished_sending=finished_sending,
             finished_recving=finished_recving,
+            invalid_block_ids=invalid_block_ids or set(),
         )
+    )
 
     # Make output data structure.
     return ModelRunnerOutput(
@@ -207,22 +247,30 @@ def create_model_runner_output(
 
 
 class TestSharedStorageConnector(SharedStorageConnector):
-
     def __init__(self, config: VllmConfig, role):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
         self._connector = SharedStorageConnector(config, role)
         self.call_record: dict[str, int] = defaultdict(int)
         # Use a unique temp file per connector
-        self._event_file = tempfile.gettempdir(
-        ) + f"/connector_{self.name}-{self.role.name}_events.log"
+        self._event_file = (
+            tempfile.gettempdir()
+            + f"/connector_{self.name}-{self.role.name}_events.log"
+        )
         # Start with an empty file
         with open(self._event_file, "w") as _:
             pass
 
     def __getattribute__(self, name):
-        if name in ("_connector", "call_record", "name", "_event_file",
-                    "__class__", "__dict__", "__getattribute__",
-                    "__init__"):  # avoid recursion
+        if name in (
+            "_connector",
+            "call_record",
+            "name",
+            "_event_file",
+            "__class__",
+            "__dict__",
+            "__getattribute__",
+            "__init__",
+        ):  # avoid recursion
             return object.__getattribute__(self, name)
         if not hasattr(self._connector, name):
             return object.__getattribute__(self, name)
@@ -241,21 +289,20 @@ class TestSharedStorageConnector(SharedStorageConnector):
                     if isinstance(arg, int):
                         to_log.append(str(arg))
                     elif isinstance(arg, KVCacheBlocks):
-                        to_log.append(
-                            f"num_blocks={[len(b) for b in arg.blocks]}")
+                        to_log.append(f"num_blocks={[len(b) for b in arg.blocks]}")
 
                 # Log the event as a line to the file
                 try:
                     with open(self._event_file, "a") as f:
-                        f.write(' '.join(to_log) + "\n")
+                        f.write(" ".join(to_log) + "\n")
                 except Exception as e:
-                    print(f"[ERROR] Could not log event {name} "
-                          f"for {self.name}: {e}")
+                    print(f"[ERROR] Could not log event {name} for {self.name}: {e}")
                 return attr(*args, **kwargs)
 
             return wrapper
         return attr
 
 
-KVConnectorFactory.register_connector("TestSharedStorageConnector", __name__,
-                                      TestSharedStorageConnector.__name__)
+KVConnectorFactory.register_connector(
+    "TestSharedStorageConnector", __name__, TestSharedStorageConnector.__name__
+)

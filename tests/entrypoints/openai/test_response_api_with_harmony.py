@@ -15,21 +15,15 @@ MODEL_NAME = "openai/gpt-oss-20b"
 
 
 @pytest.fixture(scope="module")
-def monkeypatch_module():
-    from _pytest.monkeypatch import MonkeyPatch
-    mpatch = MonkeyPatch()
-    yield mpatch
-    mpatch.undo()
-
-
-@pytest.fixture(scope="module")
-def server(monkeypatch_module: pytest.MonkeyPatch):
+def server():
     args = ["--enforce-eager", "--tool-server", "demo"]
+    env_dict = dict(
+        VLLM_ENABLE_RESPONSES_API_STORE="1",
+        PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
+    )
 
-    with monkeypatch_module.context() as m:
-        m.setenv("VLLM_ENABLE_RESPONSES_API_STORE", "1")
-        with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-            yield remote_server
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
+        yield remote_server
 
 
 @pytest_asyncio.fixture
@@ -94,22 +88,10 @@ async def test_chat(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
         input=[
-            {
-                "role": "system",
-                "content": "Respond in Korean."
-            },
-            {
-                "role": "user",
-                "content": "Hello!"
-            },
-            {
-                "role": "assistant",
-                "content": "Hello! How can I help you today?"
-            },
-            {
-                "role": "user",
-                "content": "What is 13 * 24? Explain your answer."
-            },
+            {"role": "system", "content": "Respond in Korean."},
+            {"role": "user", "content": "Hello!"},
+            {"role": "assistant", "content": "Hello! How can I help you today?"},
+            {"role": "user", "content": "What is 13 * 24? Explain your answer."},
         ],
     )
     assert response is not None
@@ -124,10 +106,7 @@ async def test_chat_with_input_type(client: OpenAI, model_name: str):
         input=[
             {
                 "role": "user",
-                "content": [{
-                    "type": "input_text",
-                    "text": "What is 13*24?"
-                }],
+                "content": [{"type": "input_text", "text": "What is 13*24?"}],
             },
         ],
     )
@@ -141,14 +120,10 @@ async def test_structured_output(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
         input=[
-            {
-                "role": "system",
-                "content": "Extract the event information."
-            },
+            {"role": "system", "content": "Extract the event information."},
             {
                 "role": "user",
-                "content":
-                "Alice and Bob are going to a science fair on Friday.",
+                "content": "Alice and Bob are going to a science fair on Friday.",
             },
         ],
         text={
@@ -158,18 +133,9 @@ async def test_structured_output(client: OpenAI, model_name: str):
                 "schema": {
                     "type": "object",
                     "properties": {
-                        "name": {
-                            "type": "string"
-                        },
-                        "date": {
-                            "type": "string"
-                        },
-                        "participants": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        },
+                        "name": {"type": "string"},
+                        "date": {"type": "string"},
+                        "participants": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["name", "date", "participants"],
                     "additionalProperties": False,
@@ -289,12 +255,61 @@ async def test_stateful_multi_turn(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_streaming_types(client: OpenAI, model_name: str):
+    prompts = [
+        "tell me a story about a cat in 20 words",
+    ]
+
+    # this links the "done" type with the "start" type
+    # so every "done" type should have a corresponding "start" type
+    # and every open block should be closed by the end of the stream
+    pairs_of_event_types = {
+        "response.completed": "response.created",
+        "response.output_item.done": "response.output_item.added",
+        "response.content_part.done": "response.content_part.added",
+        "response.output_text.done": "response.output_text.delta",
+        "response.web_search_call.done": "response.web_search_call.added",
+        "response.reasoning_text.done": "response.reasoning_text.delta",
+        "response.reasoning_part.done": "response.reasoning_part.added",
+    }
+
+    for prompt in prompts:
+        response = await client.responses.create(
+            model=model_name,
+            input=prompt,
+            reasoning={"effort": "low"},
+            tools=[],
+            stream=True,
+            background=False,
+        )
+
+        stack_of_event_types = []
+        async for event in response:
+            if event.type == "response.created":
+                stack_of_event_types.append(event.type)
+            elif event.type == "response.completed":
+                assert stack_of_event_types[-1] == pairs_of_event_types[event.type]
+                stack_of_event_types.pop()
+            if event.type.endswith("added"):
+                stack_of_event_types.append(event.type)
+            elif event.type.endswith("delta"):
+                if stack_of_event_types[-1] == event.type:
+                    continue
+                stack_of_event_types.append(event.type)
+            elif event.type.endswith("done"):
+                assert stack_of_event_types[-1] == pairs_of_event_types[event.type]
+                stack_of_event_types.pop()
+        assert len(stack_of_event_types) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("background", [True, False])
 async def test_streaming(client: OpenAI, model_name: str, background: bool):
     # TODO: Add back when web search and code interpreter are available in CI
     prompts = [
         "tell me a story about a cat in 20 words",
-        # "What is 13 * 24? Use python to calculate the result.",
+        "What is 13 * 24? Use python to calculate the result.",
         # "When did Jensen found NVIDIA? Search it and answer the year only.",
     ]
 
@@ -307,12 +322,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                 # {
                 #     "type": "web_search_preview"
                 # },
-                # {
-                #     "type": "code_interpreter",
-                #     "container": {
-                #         "type": "auto"
-                #     }
-                # },
+                {"type": "code_interpreter", "container": {"type": "auto"}},
             ],
             stream=True,
             background=background,
@@ -328,6 +338,15 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             if event.type == "response.created":
                 resp_id = event.response.id
 
+            # test vllm custom types are in the response
+            if event.type in [
+                "response.completed",
+                "response.in_progress",
+                "response.created",
+            ]:
+                assert "input_messages" in event.response.model_extra
+                assert "output_messages" in event.response.model_extra
+
             if current_event_mode != event.type:
                 current_event_mode = event.type
                 print(f"\n[{event.type}] ", end="", flush=True)
@@ -337,18 +356,21 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                 assert event.item.id != current_item_id
                 current_item_id = event.item.id
             elif event.type in [
-                    "response.output_text.delta",
-                    "response.reasoning_text.delta"
+                "response.output_text.delta",
+                "response.reasoning_text.delta",
             ]:
                 assert event.item_id == current_item_id
 
             # verify content_index_id is correct
-            if event.type == "response.content_part.added":
+            if event.type in [
+                "response.content_part.added",
+                "response.reasoning_part.added",
+            ]:
                 assert event.content_index != current_content_index
                 current_content_index = event.content_index
             elif event.type in [
-                    "response.output_text.delta",
-                    "response.reasoning_text.delta"
+                "response.output_text.delta",
+                "response.reasoning_text.delta",
             ]:
                 assert event.content_index == current_content_index
 
@@ -358,8 +380,10 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                 print(f"{event.delta}", end="", flush=True)
             elif "response.code_interpreter_call_code.done" in event.type:
                 print(f"Code: {event.code}", end="", flush=True)
-            elif ("response.output_item.added" in event.type
-                  and event.item.type == "web_search_call"):
+            elif (
+                "response.output_item.added" in event.type
+                and event.item.type == "web_search_call"
+            ):
                 print(f"Web search: {event.item.action}", end="", flush=True)
             events.append(event)
 
@@ -370,13 +394,13 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
         if background:
             starting_after = 5
             async with await client.responses.retrieve(
-                    response_id=resp_id,
-                    stream=True,
-                    starting_after=starting_after) as stream:
+                response_id=resp_id, stream=True, starting_after=starting_after
+            ) as stream:
                 counter = starting_after
                 async for event in stream:
                     counter += 1
                     assert event == events[counter]
+            assert counter == len(events) - 1
 
 
 @pytest.mark.asyncio
@@ -386,9 +410,7 @@ async def test_web_search(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
         input="Who is the president of South Korea as of now?",
-        tools=[{
-            "type": "web_search_preview"
-        }],
+        tools=[{"type": "web_search_preview"}],
     )
     assert response is not None
     assert response.status == "completed"
@@ -396,20 +418,29 @@ async def test_web_search(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.skip(reason="Code interpreter tool is not available in CI yet.")
 async def test_code_interpreter(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="Multiply 64548*15151 using builtin python interpreter.",
-        tools=[{
-            "type": "code_interpreter",
-            "container": {
-                "type": "auto"
-            }
-        }],
+        # TODO: Ideally should be able to set max tool calls
+        # to prevent multi-turn, but it is not currently supported
+        # would speed up the test
+        input=(
+            "What's the first 4 digits after the decimal point of "
+            "cube root of `19910212 * 20250910`? "
+            "Show only the digits. The python interpreter is not stateful "
+            "and you must print to see the output."
+        ),
+        tools=[{"type": "code_interpreter", "container": {"type": "auto"}}],
+        temperature=0.0,  # More deterministic output in response
     )
     assert response is not None
     assert response.status == "completed"
+    assert response.usage.output_tokens_details.tool_output_tokens > 0
+    for item in response.output:
+        if item.type == "message":
+            output_string = item.content[0].text
+            print("output_string: ", output_string, flush=True)
+            assert "5846" in output_string
 
 
 def get_weather(latitude, longitude):
@@ -436,31 +467,30 @@ def call_function(name, args):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_function_calling(client: OpenAI, model_name: str):
-    tools = [{
-        "type": "function",
-        "name": "get_weather",
-        "description":
-        "Get current temperature for provided coordinates in celsius.",  # noqa
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "latitude": {
-                    "type": "number"
+    tools = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get current temperature for provided coordinates in celsius.",  # noqa
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "latitude": {"type": "number"},
+                    "longitude": {"type": "number"},
                 },
-                "longitude": {
-                    "type": "number"
-                },
+                "required": ["latitude", "longitude"],
+                "additionalProperties": False,
             },
-            "required": ["latitude", "longitude"],
-            "additionalProperties": False,
-        },
-        "strict": True,
-    }]
+            "strict": True,
+        }
+    ]
 
     response = await client.responses.create(
         model=model_name,
         input="What's the weather like in Paris today?",
         tools=tools,
+        temperature=0.0,
+        extra_body={"request_id": "test_function_calling_non_resp"},
     )
     assert response is not None
     assert response.status == "completed"
@@ -476,11 +506,13 @@ async def test_function_calling(client: OpenAI, model_name: str):
 
     response_2 = await client.responses.create(
         model=model_name,
-        input=[{
-            "type": "function_call_output",
-            "call_id": tool_call.call_id,
-            "output": str(result),
-        }],
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": tool_call.call_id,
+                "output": str(result),
+            }
+        ],
         tools=tools,
         previous_response_id=response.id,
     )
@@ -520,17 +552,12 @@ async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
         {
             "type": "function",
             "name": "get_weather",
-            "description":
-            "Get current temperature for provided coordinates in celsius.",  # noqa
+            "description": "Get current temperature for provided coordinates in celsius.",  # noqa
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "latitude": {
-                        "type": "number"
-                    },
-                    "longitude": {
-                        "type": "number"
-                    },
+                    "latitude": {"type": "number"},
+                    "longitude": {"type": "number"},
                 },
                 "required": ["latitude", "longitude"],
                 "additionalProperties": False,
@@ -541,8 +568,7 @@ async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
 
     response = await client.responses.create(
         model=model_name,
-        input=
-        "Help me plan a trip to a random place. And tell me the weather there.",
+        input="Help me plan a trip to a random place. And tell me the weather there.",
         tools=tools,
     )
     assert response is not None
@@ -559,11 +585,13 @@ async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
 
     response_2 = await client.responses.create(
         model=model_name,
-        input=[{
-            "type": "function_call_output",
-            "call_id": tool_call.call_id,
-            "output": str(result),
-        }],
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": tool_call.call_id,
+                "output": str(result),
+            }
+        ],
         tools=tools,
         previous_response_id=response.id,
     )
@@ -581,11 +609,13 @@ async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
 
     response_3 = await client.responses.create(
         model=model_name,
-        input=[{
-            "type": "function_call_output",
-            "call_id": tool_call.call_id,
-            "output": str(result),
-        }],
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": tool_call.call_id,
+                "output": str(result),
+            }
+        ],
         tools=tools,
         previous_response_id=response_2.id,
     )
@@ -597,26 +627,23 @@ async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_function_calling_required(client: OpenAI, model_name: str):
-    tools = [{
-        "type": "function",
-        "name": "get_weather",
-        "description":
-        "Get current temperature for provided coordinates in celsius.",  # noqa
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "latitude": {
-                    "type": "number"
+    tools = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get current temperature for provided coordinates in celsius.",  # noqa
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "latitude": {"type": "number"},
+                    "longitude": {"type": "number"},
                 },
-                "longitude": {
-                    "type": "number"
-                },
+                "required": ["latitude", "longitude"],
+                "additionalProperties": False,
             },
-            "required": ["latitude", "longitude"],
-            "additionalProperties": False,
-        },
-        "strict": True,
-    }]
+            "strict": True,
+        }
+    ]
 
     with pytest.raises(BadRequestError):
         await client.responses.create(
@@ -629,32 +656,44 @@ async def test_function_calling_required(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_function_calling_full_history(client: OpenAI, model_name: str):
-    tools = [{
-        "type": "function",
-        "name": "get_weather",
-        "description":
-        "Get current temperature for provided coordinates in celsius.",  # noqa
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "latitude": {
-                    "type": "number"
-                },
-                "longitude": {
-                    "type": "number"
-                },
-            },
-            "required": ["latitude", "longitude"],
-            "additionalProperties": False,
-        },
-        "strict": True,
-    }]
+async def test_system_message_with_tools(client: OpenAI, model_name: str):
+    from vllm.entrypoints.harmony_utils import get_system_message
 
-    input_messages = [{
-        "role": "user",
-        "content": "What's the weather like in Paris today?"
-    }]
+    # Test with custom tools enabled - commentary channel should be available
+    sys_msg = get_system_message(with_custom_tools=True)
+    valid_channels = sys_msg.content[0].channel_config.valid_channels
+    assert "commentary" in valid_channels
+
+    # Test with custom tools disabled - commentary channel should be removed
+    sys_msg = get_system_message(with_custom_tools=False)
+    valid_channels = sys_msg.content[0].channel_config.valid_channels
+    assert "commentary" not in valid_channels
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_function_calling_full_history(client: OpenAI, model_name: str):
+    tools = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get current temperature for provided coordinates in celsius.",  # noqa
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "latitude": {"type": "number"},
+                    "longitude": {"type": "number"},
+                },
+                "required": ["latitude", "longitude"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        }
+    ]
+
+    input_messages = [
+        {"role": "user", "content": "What's the weather like in Paris today?"}
+    ]
 
     response = await client.responses.create(
         model=model_name,
@@ -671,8 +710,7 @@ async def test_function_calling_full_history(client: OpenAI, model_name: str):
 
     result = call_function(name, args)
 
-    input_messages.extend(
-        response.output)  # append model's function call message
+    input_messages.extend(response.output)  # append model's function call message
     input_messages.append(
         {  # append result message
             "type": "function_call_output",
@@ -689,3 +727,18 @@ async def test_function_calling_full_history(client: OpenAI, model_name: str):
     assert response_2 is not None
     assert response_2.status == "completed"
     assert response_2.output_text is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_output_messages_enabled(client: OpenAI, model_name: str, server):
+    response = await client.responses.create(
+        model=model_name,
+        input="What is the capital of South Korea?",
+        extra_body={"enable_response_messages": True},
+    )
+
+    assert response is not None
+    assert response.status == "completed"
+    assert len(response.input_messages) > 0
+    assert len(response.output_messages) > 0
