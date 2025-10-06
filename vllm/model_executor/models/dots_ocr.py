@@ -807,7 +807,7 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
                     rope_type="rope_3d",
                 )
             else:
-                image_embeds = self.vision_tower(pixel_values, grid_thw)[
+                image_embeds = self.vision_tower(pixel_values, grid_thw_list)[
                     :, : self.config.hidden_size
                 ]
 
