@@ -372,10 +372,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # self.cudagraph_batch_sizes sorts in ascending order.
-        if self.compilation_config.cudagraph_capture_sizes and \
-                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-            self.cudagraph_batch_sizes = (sorted(
-                self.compilation_config.cudagraph_capture_sizes))
+        if (
+            self.compilation_config.cudagraph_capture_sizes
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            self.cudagraph_batch_sizes = sorted(
+                self.compilation_config.cudagraph_capture_sizes
+            )
 
         # Cache the device properties.
         self._init_device_properties()
@@ -3778,8 +3781,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
                 # make sure we capture the largest batch size first
-                compilation_cases = sorted(self.cudagraph_batch_sizes,
-                                           reverse=True)
+                compilation_cases = sorted(self.cudagraph_batch_sizes, reverse=True)
                 self._capture_cudagraphs(
                     compilation_cases,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
@@ -3800,8 +3802,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     for x in self.cudagraph_batch_sizes
                     if x <= max_num_tokens and x >= self.uniform_decode_query_len
                 ]
-                compilation_cases_decode = sorted(decode_cudagraph_batch_sizes,
-                                                  reverse=True)
+                compilation_cases_decode = sorted(
+                    decode_cudagraph_batch_sizes, reverse=True
+                )
                 self._capture_cudagraphs(
                     compilation_cases=compilation_cases_decode,
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,

@@ -644,31 +644,38 @@ class VllmConfig:
 
         # calculate the default `batch_size_capture_list`
         batch_size_capture_list = []
-        if self.model_config is not None and \
-            not self.model_config.enforce_eager:
-            max_cudagraph_capture_size = self.compilation_config.\
-                max_cudagraph_capture_size
+        if self.model_config is not None and not self.model_config.enforce_eager:
+            max_cudagraph_capture_size = (
+                self.compilation_config.max_cudagraph_capture_size
+            )
             if max_cudagraph_capture_size is None:
                 max_cudagraph_capture_size = min(
-                    self.scheduler_config.max_num_seqs * 2, 512)
+                    self.scheduler_config.max_num_seqs * 2, 512
+                )
             assert max_cudagraph_capture_size >= 1, (
-                "Maximum cudagraph size should be greater than or equal to 1.")
+                "Maximum cudagraph size should be greater than or equal to 1."
+            )
             batch_size_capture_list = [
                 i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
             ]
             if max_cudagraph_capture_size >= 8:
                 # Step size 8 for small batch sizes, up to 256(not included)
                 batch_size_capture_list += list(
-                    range(8, min(max_cudagraph_capture_size, 256), 8))
+                    range(8, min(max_cudagraph_capture_size, 256), 8)
+                )
             if max_cudagraph_capture_size >= 256:
                 # Step size 16 for larger batch sizes
                 batch_size_capture_list += list(
-                    range(256, max_cudagraph_capture_size + 1, 16))
+                    range(256, max_cudagraph_capture_size + 1, 16)
+                )
 
-            if self.parallel_config.tensor_parallel_size > 1 and \
-                self.compilation_config.pass_config.enable_sequence_parallelism:
-                batch_size_capture_list = \
-                    self.update_sizes_for_sequence_parallelism(batch_size_capture_list)
+            if (
+                self.parallel_config.tensor_parallel_size > 1
+                and self.compilation_config.pass_config.enable_sequence_parallelism
+            ):
+                batch_size_capture_list = self.update_sizes_for_sequence_parallelism(
+                    batch_size_capture_list
+                )
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             batch_size_capture_list = [
                 size for size in batch_size_capture_list if size <= max_num_tokens

@@ -601,14 +601,15 @@ class CompilationConfig:
 
         # sort to make sure cudagraph capture sizes are in ascending order
         self.cudagraph_capture_sizes.sort()
-        max_cudagraph_capture_size = self.cudagraph_capture_sizes[
-            -1] if self.cudagraph_capture_sizes else 0
+        max_cudagraph_capture_size = (
+            self.cudagraph_capture_sizes[-1] if self.cudagraph_capture_sizes else 0
+        )
         if self.max_cudagraph_capture_size is not None:
-            assert self.max_cudagraph_capture_size ==\
-                max_cudagraph_capture_size, (
+            assert self.max_cudagraph_capture_size == max_cudagraph_capture_size, (
                 f"max_cudagraph_capture_size:{self.max_cudagraph_capture_size}"
                 " should be consistent with the max value of "
-                f"cudagraph_capture_sizes:{max_cudagraph_capture_size}")
+                f"cudagraph_capture_sizes:{max_cudagraph_capture_size}"
+            )
         else:
             self.max_cudagraph_capture_size = max_cudagraph_capture_size
 
@@ -617,9 +618,9 @@ class CompilationConfig:
             0 for i in range(self.max_cudagraph_capture_size + 1)
         ]
         for end, start in zip(
-                self.cudagraph_capture_sizes +
-            [self.max_cudagraph_capture_size + 1],
-            [0] + self.cudagraph_capture_sizes):
+            self.cudagraph_capture_sizes + [self.max_cudagraph_capture_size + 1],
+            [0] + self.cudagraph_capture_sizes,
+        ):
             for bs in range(start, end):
                 if bs == start:
                     self.bs_to_padded_graph_size[bs] = start

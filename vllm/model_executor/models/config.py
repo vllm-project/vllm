@@ -251,14 +251,16 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
         compilation_config = vllm_config.compilation_config
         # Only override when the user has not set either of
         # cudagraph_capture_sizes or max_cudagraph_capture_size.
-        if compilation_config.cudagraph_capture_sizes is None and \
-            compilation_config.max_cudagraph_capture_size is None:
+        if (
+            compilation_config.cudagraph_capture_sizes is None
+            and compilation_config.max_cudagraph_capture_size is None
+        ):
             # FIXME(woosuk): When using full cuda graph with FA3, the max
             # supported size is 992.
             compilation_config.max_cudagraph_capture_size = 992
             logger.info(
-                "Overriding max cuda graph capture size to "
-                "%d for performance.", 992)
+                "Overriding max cuda graph capture size to %d for performance.", 992
+            )
 
 
 class MambaModelConfig(VerifyAndUpdateConfig):

@@ -88,8 +88,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         )
 
         if self.use_full_cuda_graph and self.fa_aot_schedule:
-            self.max_cudagraph_size = self.compilation_config.\
-                max_cudagraph_capture_size
+            self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
 
             if self.max_cudagraph_size > 992:
                 # This condition derives from FA3's internal heuristic.
