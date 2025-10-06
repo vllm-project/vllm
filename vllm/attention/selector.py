@@ -254,3 +254,4 @@ def global_force_attn_backend_context_manager(
     finally:
         # Revert the original global backend override, if any
         global_force_attn_backend(original_value)
+        _cached_get_attn_backend.cache_clear()
