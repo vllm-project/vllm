@@ -3,6 +3,7 @@
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
@@ -15,8 +16,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils import has_triton_kernels
-import torch.nn.functional as F
-import triton
 
 logger = init_logger(__name__)
 
@@ -108,7 +107,12 @@ def triton_kernel_moe_forward(
 
 
 def get_padding_alignment():
-    return 256 if triton.runtime.driver.active.get_current_target().arch in ("gfx950") else 128
+    return (
+        256
+        if triton.runtime.driver.active.get_current_target().arch in ("gfx950")
+        else 128
+    )
+
 
 # This is a triton implementation of the fused_experts function
 def triton_kernel_fused_experts(
@@ -151,24 +155,36 @@ def triton_kernel_fused_experts(
         pad_align = get_padding_alignment()
         hidden_dim = hidden_states.shape[-1]
         ffn_dim = N // 2  # w1 outputs 2*ffn_dim for SwiGLU
-        
-        hidden_dim_padding = (triton.cdiv(hidden_dim, pad_align) * pad_align) - hidden_dim
+
+        hidden_dim_padding = (
+            triton.cdiv(hidden_dim, pad_align) * pad_align
+        ) - hidden_dim
         ffn_dim_padding = (triton.cdiv(ffn_dim, pad_align) * pad_align) - ffn_dim
-        
+
         # Pad tensors for optimal memory alignment
         if hidden_dim_padding > 0 or ffn_dim_padding > 0:
             # Pad input tensor
-            hidden_states = F.pad(hidden_states, (0, hidden_dim_padding, 0, 0), "constant", 0)
-            
+            hidden_states = F.pad(
+                hidden_states, (0, hidden_dim_padding, 0, 0), "constant", 0
+            )
+
             # Pad weight tensors
-            w1 = F.pad(w1, (0, 2*ffn_dim_padding, 0, hidden_dim_padding, 0, 0), "constant", 0)
-            w2 = F.pad(w2, (0, hidden_dim_padding, 0, ffn_dim_padding, 0, 0), "constant", 0)
-            
+            w1 = F.pad(
+                w1, (0, 2 * ffn_dim_padding, 0, hidden_dim_padding, 0, 0), "constant", 0
+            )
+            w2 = F.pad(
+                w2, (0, hidden_dim_padding, 0, ffn_dim_padding, 0, 0), "constant", 0
+            )
+
             # Pad bias tensors if they exist
             if quant_config.w1_bias is not None:
-                quant_config.w1_bias = F.pad(quant_config.w1_bias, (0, 2*ffn_dim_padding, 0, 0), "constant", 0)
+                quant_config.w1_bias = F.pad(
+                    quant_config.w1_bias, (0, 2 * ffn_dim_padding, 0, 0), "constant", 0
+                )
             if quant_config.w2_bias is not None:
-                quant_config.w2_bias = F.pad(quant_config.w2_bias, (0, hidden_dim_padding, 0, 0), "constant", 0)
+                quant_config.w2_bias = F.pad(
+                    quant_config.w2_bias, (0, hidden_dim_padding, 0, 0), "constant", 0
+                )
 
     act = FusedActivation(
         FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
@@ -176,7 +192,6 @@ def triton_kernel_fused_experts(
         2,
     )
     gammas = routing_data.gate_scal if routing_data else None
-    
 
     intermediate_cache1 = matmul_ogs(
         hidden_states,
