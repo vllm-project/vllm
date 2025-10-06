@@ -19,25 +19,25 @@ def _run_test(
     vllm_runner: type[VllmRunner],
     model: str,
 ) -> None:
-
     prompt = [
         {
             # This model deals with no text input
             "prompt_token_ids": [1],
             "multi_modal_data": generate_test_mm_data(),
-        } for _ in range(10)
+        }
+        for _ in range(10)
     ]
 
     with vllm_runner(
-            model,
-            runner="pooling",
-            dtype="half",
-            enforce_eager=True,
-            skip_tokenizer_init=True,
-            # Limit the maximum number of sequences to avoid the
-            # test going OOM during the warmup run
-            max_num_seqs=32,
-            default_torch_num_threads=1,
+        model,
+        runner="pooling",
+        dtype="half",
+        enforce_eager=True,
+        skip_tokenizer_init=True,
+        # Limit the maximum number of sequences to avoid the
+        # test going OOM during the warmup run
+        max_num_seqs=32,
+        default_torch_num_threads=1,
     ) as vllm_model:
         vllm_model.encode(prompt)
 
