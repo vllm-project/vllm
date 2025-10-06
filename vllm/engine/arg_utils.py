@@ -1223,7 +1223,7 @@ class EngineArgs:
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 
-        (self.model, self.tokenizer, self.speculative_config) = (
+        (self.model, self.tokenizer, self.speculative_config, self.load_format) = (
             maybe_override_with_speculators(
                 model=self.model,
                 tokenizer=self.tokenizer,

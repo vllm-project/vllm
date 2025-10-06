@@ -487,6 +487,65 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     return config
 
 
+def is_oci_model_with_tag(model: str) -> bool:
+    """
+    Detect if model name is an OCI reference with explicit tag or digest.
+
+    Returns True for OCI references with explicit tag/digest:
+    - username/model:tag
+    - username/model:v1.0
+    - registry.io/username/model:tag
+    - registry.io/username/model@sha256:digest
+
+    Returns False for:
+    - username/model (ambiguous - could be HuggingFace or OCI with implicit tag)
+    - local/path/to/model (local filesystem paths)
+    - model (single name without repository)
+
+    This allows automatic detection of OCI format when the reference is
+    unambiguous (has explicit tag/digest), while requiring explicit
+    load_format="oci" for ambiguous cases.
+
+    Args:
+        model: Model name or path to check
+
+    Returns:
+        True if the model name matches OCI reference pattern with tag/digest
+    """
+    import regex as re
+
+    # Return False for local paths that exist on filesystem
+    if os.path.exists(model):
+        return False
+
+    # Pattern explanation:
+    # ^                                    - Start of string
+    # (?:(?:[^/]+\.[^/]+|[^/]+:[0-9]+)/)? - Optional registry:
+    #                                        - either with domain (contains dot)
+    #                                        - or with port (hostname:port)
+    # [^/]+/                               - Repository owner/namespace (required slash)
+    # [^/:@]+                              - Repository name (no slashes, colons, or @)
+    # [:@]                                 - Tag separator (: or @)
+    # .+                                   - Tag or digest content
+    # $                                    - End of string
+    #
+    # This matches:
+    # - username/repo:tag
+    # - username/repo@sha256:abc
+    # - registry.io/username/repo:tag
+    # - registry.io:5000/username/repo:tag (registry with port)
+    # - localhost:8080/username/repo:tag (hostname with port)
+    #
+    # Does NOT match:
+    # - username/repo (no tag)
+    # - /path/to/model:tag (starts with /)
+    # - ./relative/path (starts with .)
+    # - model (no slash)
+    pattern = r"^(?:(?:[^/]+\.[^/]+|[^/]+:[0-9]+)/)?[^/]+/[^/:@]+[:@].+$"
+
+    return bool(re.match(pattern, model))
+
+
 def maybe_override_with_speculators(
     model: str,
     tokenizer: str,
@@ -494,12 +553,15 @@ def maybe_override_with_speculators(
     revision: Optional[str] = None,
     vllm_speculative_config: Optional[dict[str, Any]] = None,
     **kwargs,
-) -> tuple[str, str, Optional[dict[str, Any]]]:
+) -> tuple[str, str, Optional[dict[str, Any]], str]:
     """
     Resolve model configuration when speculators are detected.
 
     Checks if the provided model is a speculators model and if so, extracts
     the target model configuration and builds the speculative config.
+
+    Also handles automatic OCI format detection when the model name includes
+    an explicit tag or digest (e.g., username/model:tag).
 
     Args:
         model: Model name or path
@@ -509,10 +571,18 @@ def maybe_override_with_speculators(
         vllm_speculative_config: Existing vLLM speculative config
 
     Returns:
-        Tuple of (resolved_model, resolved_tokenizer, speculative_config)
+        Tuple of (resolved_model, resolved_tokenizer, speculative_config, load_format)
     """
-    # Handle OCI models - download first before config loading
+    # Auto-detect OCI format when model name has explicit tag/digest
     load_format = kwargs.get("load_format", "auto")
+    if load_format == "auto" and is_oci_model_with_tag(model):
+        logger.info(
+            "Auto-detected OCI format for model with explicit tag/digest: %s", model
+        )
+        kwargs["load_format"] = "oci"
+        load_format = "oci"
+
+    # Handle OCI models - download first before config loading
     if load_format == "oci":
         from vllm.config.load import LoadConfig
         from vllm.model_executor.model_loader.oci_loader import OciModelLoader
@@ -551,7 +621,7 @@ def maybe_override_with_speculators(
 
     if speculators_config is None:
         # No speculators config found, return original values
-        return model, tokenizer, vllm_speculative_config
+        return model, tokenizer, vllm_speculative_config, load_format
 
     # Speculators format detected - process overrides
     from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
@@ -567,7 +637,7 @@ def maybe_override_with_speculators(
     verifier_model = speculators_config["verifier"]["name_or_path"]
     model = tokenizer = verifier_model
 
-    return model, tokenizer, speculative_config
+    return model, tokenizer, speculative_config, load_format
 
 
 def get_config(
