@@ -397,5 +397,4 @@ def record_function_or_nullcontext(name: str) -> AbstractContextManager:
         func = nvtx.annotate
 
     _PROFILER_FUNC = func
-    print("Profiler function set to: ", _PROFILER_FUNC)
     return func(name)

@@ -663,7 +663,7 @@ class WorkerProc:
                 if self.mm_receiver_cache is not None \
                     and func.__name__ == "execute_model":
                     get_and_update_mm_cache(self.mm_receiver_cache, args)
-                    output = func(*args, **kwargs)
+                output = func(*args, **kwargs)
             except Exception as e:
                 # Notes have been introduced in python 3.11
                 if hasattr(e, "add_note"):

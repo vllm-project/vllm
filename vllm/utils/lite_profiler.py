@@ -94,9 +94,10 @@ def scope_function(name: str):
     return _lite_profiler.scope(name)
 
 
-def emit_lite_profiler_report(log_path: str | None) -> None:
+def emit_lite_profiler_report() -> None:
     """Print a lite-profiler summary when profiling is enabled."""
 
+    log_path = envs.VLLM_LITE_PROFILER_LOG_PATH
     if log_path is None:
         return
 

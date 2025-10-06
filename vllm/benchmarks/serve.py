@@ -36,7 +36,6 @@ import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
-import vllm.envs as envs
 from vllm.benchmarks.datasets import (SampleRequest, add_dataset_parser,
                                       get_samples)
 from vllm.benchmarks.lib.endpoint_request_func import (
@@ -1333,6 +1332,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
     
-    emit_lite_profiler_report(envs.VLLM_LITE_PROFILER_LOG_PATH)
+    emit_lite_profiler_report()
 
     return result_json

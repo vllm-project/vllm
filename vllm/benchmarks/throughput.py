@@ -16,7 +16,6 @@ from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
 
-import vllm.envs as envs
 from vllm.benchmarks.datasets import (AIMODataset, BurstGPTDataset,
                                       ConversationDataset,
                                       InstructCoderDataset,
@@ -718,4 +717,4 @@ def main(args: argparse.Namespace):
             json.dump(results, f, indent=4)
         save_to_pytorch_benchmark_format(args, results)
     
-    emit_lite_profiler_report(envs.VLLM_LITE_PROFILER_LOG_PATH)
+    emit_lite_profiler_report()

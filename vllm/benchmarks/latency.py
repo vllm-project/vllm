@@ -170,4 +170,4 @@ def main(args: argparse.Namespace):
             json.dump(results, f, indent=4)
         save_to_pytorch_benchmark_format(args, results)
     
-    emit_lite_profiler_report(envs.VLLM_LITE_PROFILER_LOG_PATH)
+    emit_lite_profiler_report()
