@@ -76,10 +76,14 @@ def _kv_cache_update_kernel(
     static_argnames=["page_size", "num_slices_per_block"],
 )
 def kv_cache_update(
-    new_kv: jax.Array,  # [total_num_token, num_combined_kv_heads, head_dim]
-    slices: jax.Array,  # [3, slices], list of (kv_cache_start, new_kv_start, slice_len)
-    kv_cache: jax.Array,  # [total_num_pages * page_size, num_combined_kv_heads, head_dim]
-    num_kv_update_slices: jax.Array,  # [1]
+    # [total_num_token, num_combined_kv_heads, head_dim]
+    new_kv: jax.Array,
+    # [3, slices], list of (kv_cache_start, new_kv_start, slice_len)
+    slices: jax.Array,
+    # [total_num_pages * page_size, num_combined_kv_heads, head_dim]
+    kv_cache: jax.Array,
+    # [1]
+    num_kv_update_slices: jax.Array,
     *,
     page_size: int = 32,
     num_slices_per_block: int = 8,

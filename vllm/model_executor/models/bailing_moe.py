@@ -270,8 +270,8 @@ class BailingMoE(nn.Module):
             ) or (
                 self.score_function == "sigmoid" and self.correction_bias is not None
             ), (
-                "score_function and correction_bias should be in 2 combination (softmax, None) or (sigmoid, not None)"
-            )  # noqa: E501
+                "score_function and correction_bias should be in 2 combination (softmax, None) or (sigmoid, not None)"  # noqa: E501
+            )
         else:
             # default value for scoring_func
             self.score_function = "softmax"

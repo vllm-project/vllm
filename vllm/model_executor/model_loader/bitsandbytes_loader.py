@@ -391,7 +391,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     total_shard_sizes = next(
                         (
                             sizes
-                            for module, sizes in self.maybe_fused_weights_modules.items()
+                            for module, sizes in self.maybe_fused_weights_modules.items()  # noqa: E501
                             if check_match(mapped_weight_name, module)
                         )
                     )

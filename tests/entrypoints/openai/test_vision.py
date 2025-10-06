@@ -233,7 +233,7 @@ async def test_single_chat_session_image_base64encoded(
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}"
+                        "url": f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}"  # noqa: E501
                     },
                 },
                 {"type": "text", "text": content_text},
@@ -300,7 +300,7 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}"
+                        "url": f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}"  # noqa: E501
                     },
                 },
                 {"type": "text", "text": "What's in this image?"},

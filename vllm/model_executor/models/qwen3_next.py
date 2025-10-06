@@ -916,8 +916,9 @@ class Qwen3NextDecoderLayer(nn.Module):
                 )
             else:
                 assert len(hidden_states.shape) == len(self.ffn_layer_scale.shape), (
-                    f"shape must be the same {len(hidden_states.shape)}, {len(self.ffn_layer_scale.shape)}"
-                )  # noqa: E501
+                    f"shape must be the same {len(hidden_states.shape)}, "
+                    f"{len(self.ffn_layer_scale.shape)}"
+                )
                 hidden_states = hidden_states * (
                     self.ffn_layer_scale.to(hidden_states.dtype) + 1
                 )

@@ -119,9 +119,12 @@ class TorchCompileWrapperWithCustomDispatcher:
 
             src = depyf.decompile(new_code)
             msg = (
-                "Assigning / modifying buffers of nn.Module during forward pass is not allowed when using cudagraph inside the compiler because it will cause silent errors. Please use eager mode or fix the code. The following code contains clues about which buffer is being modified (please search for the usage of the function `update`):\n"
-                + src
-            )  # noqa
+                "Assigning / modifying buffers of nn.Module during forward pass is not "
+                "allowed when using cudagraph inside the compiler because it will "
+                "cause silent errors. Please use eager mode or fix the code. The "
+                "following code contains clues about which buffer is being modified "
+                f"(please search for the usage of the function `update`):\n{src}"
+            )
             raise RuntimeError(msg)
 
     @contextmanager
@@ -132,8 +135,9 @@ class TorchCompileWrapperWithCustomDispatcher:
         variables as the original code. Therefore we can directly switch
         the code object in the function and call it.
 
-        See https://dev-discuss.pytorch.org/t/what-is-the-relationship-requirement-among-original-bytecode-transformed-bytecode-and-bytecode-returned-by-hooks-in-dynamo/1693/7 for more details.
-        """  # noqa
+        See https://dev-discuss.pytorch.org/t/what-is-the-relationship-requirement-among-original-bytecode-transformed-bytecode-and-bytecode-returned-by-hooks-in-dynamo/1693/7
+        for more details.
+        """
         self.__class__.forward.__code__ = self.compiled_codes[index]
         yield
         self.__class__.forward.__code__ = self.original_code_object

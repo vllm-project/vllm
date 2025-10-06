@@ -12,7 +12,7 @@ PROMPT_TEMPLATE = """I want you to act as a SQL terminal in front of an example 
 
 EXPECTED_LORA_OUTPUT = [
     "SELECT count(*) FROM singer",
-    "SELECT avg(age) ,  min(age) ,  max(age) FROM singer WHERE country  =  'France'",  # noqa: E501
+    "SELECT avg(age) ,  min(age) ,  max(age) FROM singer WHERE country  =  'France'",
     "SELECT name ,  country ,  age FROM singer ORDER BY age",
 ]
 
@@ -21,10 +21,16 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     prompts = [
         PROMPT_TEMPLATE.format(query="How many singers do we have?"),
         PROMPT_TEMPLATE.format(
-            query="What is the average, minimum, and maximum age of all singers from France?"  # noqa: E501
+            query=(
+                "What is the average, minimum, and maximum "
+                "age of all singers from France?"
+            )
         ),
         PROMPT_TEMPLATE.format(
-            query="Show name, country, age for all singers ordered by age from the oldest to the youngest."  # noqa: E501
+            query=(
+                "Show name, country, age for all singers ordered "
+                "by age from the oldest to the youngest."
+            )
         ),
     ]
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=32)

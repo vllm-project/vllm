@@ -25,12 +25,14 @@ tools = [
                 "properties": {
                     "city": {
                         "type": "string",
-                        "description": "The city to find the weather for, e.g. 'Vienna'",
+                        "description": "The city to find the weather for, e.g. "
+                        "'Vienna'",
                         "default": "Vienna",
                     },
                     "country": {
                         "type": "string",
-                        "description": "The country that the city is in, e.g. 'Austria'",
+                        "description": "The country that the city is in, e.g. "
+                        "'Austria'",
                     },
                     "unit": {
                         "type": "string",
@@ -85,12 +87,14 @@ tools = [
                 "properties": {
                     "city": {
                         "type": "string",
-                        "description": "The city to get the forecast for, e.g. 'Vienna'",
+                        "description": "The city to get the forecast for, e.g. "
+                        "'Vienna'",
                         "default": "Vienna",
                     },
                     "country": {
                         "type": "string",
-                        "description": "The country that the city is in, e.g. 'Austria'",
+                        "description": "The country that the city is in, e.g. "
+                        "'Austria'",
                     },
                     "days": {
                         "type": "integer",

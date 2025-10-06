@@ -271,7 +271,7 @@ if __name__ == "__main__":
     parser = make_config_arg_parser(
         description=(
             "Run single prepare-finalize & fused-experts combination test"
-            "Example : python3 -m tests.kernels.moe.test_modular_kernel_combinations "  # noqa: E501
+            "Example : python3 -m tests.kernels.moe.test_modular_kernel_combinations "
             "--pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts"
         )
     )

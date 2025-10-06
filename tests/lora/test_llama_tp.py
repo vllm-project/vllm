@@ -15,10 +15,10 @@ MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
 EXPECTED_LORA_OUTPUT = [
     "  SELECT icao FROM table_name_74 WHERE airport = 'lilongwe international airport' ",  # noqa: E501
-    "  SELECT nationality FROM table_name_11 WHERE elector = 'anchero pantaleone' ",  # noqa: E501
+    "  SELECT nationality FROM table_name_11 WHERE elector = 'anchero pantaleone' ",
     "  SELECT one_mora FROM table_name_95 WHERE gloss = 'low tone mora with a gloss of /˩okiru/' [òkìɽɯ́] AND accented_mora = 'low tone mora with a gloss of /˩okiru/' [òkìɽɯ́] ",  # noqa: E501
     "  SELECT sex FROM people WHERE people_id IN (SELECT people_id FROM candidate GROUP BY sex ORDER BY COUNT(people_id) DESC LIMIT 1) ",  # noqa: E501
-    "  SELECT pick FROM table_name_60 WHERE former_wnba_team = 'Minnesota Lynx' ",  # noqa: E501
+    "  SELECT pick FROM table_name_60 WHERE former_wnba_team = 'Minnesota Lynx' ",
     "  SELECT womens_doubles FROM table_28138035_4 WHERE mens_singles = 'Werner Schlager' ",  # noqa: E501
 ]
 

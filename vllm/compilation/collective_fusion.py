@@ -834,7 +834,10 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
                 scale_out=None,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant,  # we don't use norm_out afterwards
+                # We don't use norm_out afterwards
+                pattern_code=(
+                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant
+                ),
                 scale_factor=scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
@@ -928,11 +931,14 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
                 scale_out=None,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant,  # we don't use norm_out afterwards
+                # We don't use norm_out afterwards
+                pattern_code=(
+                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant
+                ),
                 scale_factor=scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
-            # # quant_out, rms_norm_residual
+            # quant_out, rms_norm_residual
             return allreduce[4], allreduce[2]
 
         pm.register_replacement(
@@ -1028,7 +1034,10 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 scale_out=output_scale,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP4Quant,  # we don't use norm_out afterwards
+                # We don't use norm_out afterwards
+                pattern_code=(
+                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP4Quant
+                ),
                 scale_factor=input_global_scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
@@ -1130,7 +1139,10 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 scale_out=output_scale,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP4Quant,  # we don't use norm_out afterwards
+                # We don't use norm_out afterwards
+                pattern_code=(
+                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP4Quant
+                ),
                 scale_factor=input_global_scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )

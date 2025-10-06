@@ -1000,8 +1000,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             "base_layer.": "",
         },
         orig_to_new_prefix={
-            "model.embed_tokens_extend.audio_embed.audio_projection.vision.": "embed_tokens_extend.audio_projection_for_vision.",
-            "model.embed_tokens_extend.audio_embed.audio_projection.speech.": "embed_tokens_extend.audio_projection.",
+            "model.embed_tokens_extend.audio_embed.audio_projection.vision.": "embed_tokens_extend.audio_projection_for_vision.",  # noqa: E501
+            "model.embed_tokens_extend.audio_embed.audio_projection.speech.": "embed_tokens_extend.audio_projection.",  # noqa: E501
             "model.embed_tokens_extend.audio_embed.": "embed_tokens_extend.",
             "model.embed_tokens_extend.image_embed.": "vision_encoder.",
         },

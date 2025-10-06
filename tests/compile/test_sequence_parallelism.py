@@ -186,7 +186,7 @@ class TestQuantModel(torch.nn.Module):
         ):
             # If fusion happens, the fused op is the one
             # we check for (de)functionalization
-            return [torch.ops._C.fused_add_rms_norm_static_fp8_quant.default]  # noqa: E501
+            return [torch.ops._C.fused_add_rms_norm_static_fp8_quant.default]
         else:
             # If no fusion, the original ops are checked
             return [
@@ -322,7 +322,7 @@ def sequence_parallelism_pass_on_test_model(
     # check if the functionalization pass is applied
     for op in model.ops_in_model():
         find_auto_fn(backend_no_func.graph_post_pass.nodes, op)
-        assert find_auto_fn_maybe(backend_func.graph_post_pass.nodes, op) is None  # noqa: E501
+        assert find_auto_fn_maybe(backend_func.graph_post_pass.nodes, op) is None
 
     # make sure the ops were all de-functionalized
     found = dict()
