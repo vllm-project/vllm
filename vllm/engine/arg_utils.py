@@ -1355,7 +1355,7 @@ class EngineArgs:
 
         This method reads from environment variables to maintain backward
         compatibility with existing deployments. All attention-related
-        environment variables are respected:
+        environment variables are respected but will emit deprecation warnings:
         - VLLM_ATTENTION_BACKEND (can also be set via --attention-backend CLI arg)
         - VLLM_USE_TRITON_FLASH_ATTN
         - VLLM_FLASH_ATTN_VERSION
@@ -1366,7 +1366,45 @@ class EngineArgs:
         - VLLM_USE_TRTLLM_ATTENTION
         - VLLM_DISABLE_FLASHINFER_PREFILL
         - VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION
+
+        Note: In the future, these environment variables will be deprecated
+        in favor of CLI arguments in the --attention-config group.
         """
+
+        # Check if any attention env vars are set and warn users
+        attention_env_vars_in_use = []
+        if envs.is_set("VLLM_ATTENTION_BACKEND"):
+            attention_env_vars_in_use.append("VLLM_ATTENTION_BACKEND")
+        if envs.is_set("VLLM_USE_TRITON_FLASH_ATTN"):
+            attention_env_vars_in_use.append("VLLM_USE_TRITON_FLASH_ATTN")
+        if envs.is_set("VLLM_FLASH_ATTN_VERSION"):
+            attention_env_vars_in_use.append("VLLM_FLASH_ATTN_VERSION")
+        if envs.is_set("VLLM_V1_USE_PREFILL_DECODE_ATTENTION"):
+            attention_env_vars_in_use.append("VLLM_V1_USE_PREFILL_DECODE_ATTENTION")
+        if envs.is_set("VLLM_USE_AITER_UNIFIED_ATTENTION"):
+            attention_env_vars_in_use.append("VLLM_USE_AITER_UNIFIED_ATTENTION")
+        if envs.is_set("VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH"):
+            attention_env_vars_in_use.append(
+                "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH"
+            )
+        if envs.is_set("VLLM_USE_CUDNN_PREFILL"):
+            attention_env_vars_in_use.append("VLLM_USE_CUDNN_PREFILL")
+        if envs.is_set("VLLM_USE_TRTLLM_ATTENTION"):
+            attention_env_vars_in_use.append("VLLM_USE_TRTLLM_ATTENTION")
+        if envs.is_set("VLLM_DISABLE_FLASHINFER_PREFILL"):
+            attention_env_vars_in_use.append("VLLM_DISABLE_FLASHINFER_PREFILL")
+        if envs.is_set("VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION"):
+            attention_env_vars_in_use.append("VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION")
+
+        if attention_env_vars_in_use:
+            logger.warning(
+                "The following attention-related environment variables are set: %s. "
+                "These are deprecated and will be removed in a future release. "
+                "Please use CLI arguments in the AttentionConfig group instead "
+                "(e.g., --attention-backend).",
+                ", ".join(attention_env_vars_in_use),
+            )
+
         return AttentionConfig(
             backend=self.attention_backend,
             use_triton_flash_attn=envs.VLLM_USE_TRITON_FLASH_ATTN,
