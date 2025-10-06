@@ -31,17 +31,23 @@ from vllm.distributed import (
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fla.ops import (
-    RMSNormGated, chunk_gated_delta_rule, fused_recurrent_gated_delta_rule)
+    RMSNormGated,
+    chunk_gated_delta_rule,
+    fused_recurrent_gated_delta_rule,
+)
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.model_executor.layers.layernorm import (
-    GemmaRMSNorm as Qwen3NextRMSNorm)
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3NextRMSNorm
+
 # yapf: enable
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
@@ -129,16 +135,18 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.physical_expert_start = (self.ep_rank *
-                                      self.n_local_physical_experts)
-        self.physical_expert_end = (self.physical_expert_start +
-                                    self.n_local_physical_experts)
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = (
+            self.physical_expert_start + self.n_local_physical_experts
+        )
 
-        self.gate = ReplicatedLinear(config.hidden_size,
-                                     config.num_experts,
-                                     bias=False,
-                                     quant_config=quant_config,
-                                     prefix=f"{prefix}.gate")
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            config.num_experts,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate",
+        )
 
         if config.shared_expert_intermediate_size > 0:
             self.shared_expert = Qwen3NextMLP(
@@ -165,7 +173,8 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.experts",
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
-            is_sequence_parallel=self.is_sequence_parallel)
+            is_sequence_parallel=self.is_sequence_parallel,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
@@ -183,8 +192,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         )
 
         if self.shared_expert is not None:
-            final_hidden_states = final_hidden_states[0] + final_hidden_states[
-                1]
+            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
