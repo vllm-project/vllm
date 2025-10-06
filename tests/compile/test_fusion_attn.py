@@ -92,9 +92,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
             device=self.device,
         )
 
-    def build_attn_metadata(
-        self, batch_size: int, backend: _Backend
-    ) -> AttentionMetadata:
+    def build_attn_metadata(self, batch_size: int) -> AttentionMetadata:
         """Initialize attention metadata."""
 
         # Create common attn metadata
@@ -105,6 +103,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
 
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
+        backend = self.attn.backend
 
         # Create dummy KV cache for the selected backend
         if backend == _Backend.ROCM_ATTN:
@@ -131,7 +130,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 dtype=self.kv_cache_dtype,
                 device=self.device,
             )
-        else:
+        elif backend == _Backend.TRITON_ATTN:
             # k/v as 2nd dimention
             # NHD: [num_blocks, block_size, num_kv_heads, head_size]
             kv_cache = torch.zeros(
@@ -143,6 +142,18 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 dtype=self.kv_cache_dtype,
                 device=self.device,
             )
+        elif backend == _Backend.FLASHINFER:
+            kv_cache = torch.zeros(
+                num_blocks,
+                2,
+                self.num_kv_heads,
+                self.block_size,
+                self.head_size,
+                dtype=self.kv_cache_dtype,
+                device=self.device,
+            ).permute(0, 1, 3, 2, 4)
+        else:
+            raise ValueError(f"Unsupported backend: {backend}")
         self.attn.kv_cache = [kv_cache]
 
         # Build attn metadata
@@ -349,9 +360,7 @@ def test_attention_quant_pattern(
         model_unfused = model_unfused.to(device)
 
         forward_ctx = get_forward_context()
-        forward_ctx.attn_metadata = model_unfused.build_attn_metadata(
-            batch_size, backend=backend
-        )
+        forward_ctx.attn_metadata = model_unfused.build_attn_metadata(batch_size)
 
         # Run model directly without compilation and fusion
         result_unfused = model_unfused(q, k, v)
@@ -377,9 +386,7 @@ def test_attention_quant_pattern(
         model_fused = model_fused.to(device)
 
         forward_ctx = get_forward_context()
-        forward_ctx.attn_metadata = model_fused.build_attn_metadata(
-            batch_size, backend=backend
-        )
+        forward_ctx.attn_metadata = model_fused.build_attn_metadata(batch_size)
 
         # Create test backend with fusion passes enabled
         noop_pass = NoOpEliminationPass(vllm_config)
