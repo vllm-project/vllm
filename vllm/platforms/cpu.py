@@ -348,7 +348,10 @@ class CpuPlatform(Platform):
         ]
 
         # Filter allowed CPUs
-        allowed_cpu_id_list = os.sched_getaffinity(0)
+        if hasattr(os, "sched_getaffinity"):
+            allowed_cpu_id_list = os.sched_getaffinity(0)
+        else:
+            raise NotImplementedError("Unsupported OS")
         logical_cpu_list = [x for x in logical_cpu_list if x.id in allowed_cpu_id_list]
 
         # Get allowed NUMA nodes

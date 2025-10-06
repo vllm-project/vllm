@@ -4,8 +4,9 @@
 import asyncio
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable
 from functools import cached_property
-from typing import Any, Awaitable, Callable, List, Optional, Set, Union
+from typing import Any, Callable, List, Optional, Set, Union
 
 from typing_extensions import TypeVar
 
