@@ -523,8 +523,14 @@ def test_check_stop_min_tokens():
 
     # Test case 2: min_tokens > 0 and num_output_tokens >= min_tokens
     # Should follow normal stopping logic (stop on EOS)
-    request.output_token_ids = [10, 11, 12, 13, 14,
-                                EOS_TOKEN_ID]  # 6 tokens > min_tokens
+    request.output_token_ids = [
+        10,
+        11,
+        12,
+        13,
+        14,
+        EOS_TOKEN_ID,
+    ]  # 6 tokens > min_tokens
 
     result = check_stop(request, max_model_len=100)
     assert result is True, "Should stop on EOS when min_tokens met"
@@ -570,14 +576,13 @@ def test_check_stop_min_tokens():
     assert result is False, "Should not stop when num_output_tokens<min_tokens"
 
     # Test case 5: min_tokens met, should stop on stop token
-    request_stop.output_token_ids = [10, 11, 12, 13, 14,
-                                     42]  # 6 tokens >= min_tokens=5
+    request_stop.output_token_ids = [10, 11, 12, 13, 14, 42]  # 6 tokens >= min_tokens=5
 
     result = check_stop(request_stop, max_model_len=100)
     assert result is True, "Should stop on stop token when min_tokens met"
     assert request_stop.status == RequestStatus.FINISHED_STOPPED
     assert request_stop.stop_reason == 42
-    
+
 
 @pytest.mark.parametrize(
     "enable_prefix_caching, prompt_logprobs",
