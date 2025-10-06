@@ -13,13 +13,16 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.platforms import current_platform
-from vllm.utils import (cuda_device_count_stateless, has_deep_ep,
-                        has_deep_gemm, has_pplx)
+from vllm.utils import cuda_device_count_stateless, has_deep_ep, has_deep_gemm, has_pplx
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
-from .modular_kernel_tools.common import (Config, RankTensors, WeightTensors,
-                                          reference_moe_impl,
-                                          run_modular_kernel)
+from .modular_kernel_tools.common import (
+    Config,
+    RankTensors,
+    WeightTensors,
+    reference_moe_impl,
+    run_modular_kernel,
+)
 from .modular_kernel_tools.mk_objects import (
     MK_FUSED_EXPERT_TYPES,
     MK_MULTI_GPU_PREPARE_FINALIZE_TYPES,
@@ -165,16 +168,21 @@ def is_nyi_config(config: Config) -> bool:
     return not info.supports_expert_map
 
 
-def generate_valid_test_cases(world_size: int,
-                              prepare_finalize_types) -> list[tuple[Any, ...]]:
+def generate_valid_test_cases(
+    world_size: int, prepare_finalize_types
+) -> list[tuple[Any, ...]]:
     cases = []
     total = 0
 
     for k, n, e, dtype, quant_config, combination, chunk_size in product(
-            Ks, Ns, Es, DTYPEs, MK_QUANT_CONFIGS,
-            product(prepare_finalize_types, MK_FUSED_EXPERT_TYPES),
-            FUSED_MOE_CHUNK_SIZEs):
-
+        Ks,
+        Ns,
+        Es,
+        DTYPEs,
+        MK_QUANT_CONFIGS,
+        product(prepare_finalize_types, MK_FUSED_EXPERT_TYPES),
+        FUSED_MOE_CHUNK_SIZEs,
+    ):
         total = total + 1
 
         config = Config(
@@ -192,7 +200,7 @@ def generate_valid_test_cases(world_size: int,
         )
 
         # TODO(bnell): figure out how to get verbose flag here.
-        verbose = False  #pytestconfig.getoption('verbose') > 0
+        verbose = False  # pytestconfig.getoption('verbose') > 0
 
         valid, reason = config.is_valid()
 
@@ -206,8 +214,19 @@ def generate_valid_test_cases(world_size: int,
                 print(f"Test config {config} is nyi.")
             continue
 
-        cases.append((k, n, e, dtype, quant_config, combination[0],
-                      combination[1], chunk_size, world_size))
+        cases.append(
+            (
+                k,
+                n,
+                e,
+                dtype,
+                quant_config,
+                combination[0],
+                combination[1],
+                chunk_size,
+                world_size,
+            )
+        )
 
     print(f"{len(cases)} of {total} valid configs generated.")
 
@@ -217,8 +236,9 @@ def generate_valid_test_cases(world_size: int,
 @pytest.mark.parametrize(
     "k,n,e,dtype,quant_config,prepare_finalize_type,fused_experts_type,chunk_size,world_size",
     generate_valid_test_cases(
-        world_size=2,
-        prepare_finalize_types=MK_MULTI_GPU_PREPARE_FINALIZE_TYPES))
+        world_size=2, prepare_finalize_types=MK_MULTI_GPU_PREPARE_FINALIZE_TYPES
+    ),
+)
 @meets_multi_gpu_requirements
 def test_modular_kernel_combinations_multigpu(
     k: int,
@@ -247,15 +267,16 @@ def test_modular_kernel_combinations_multigpu(
         fused_moe_chunk_size=chunk_size,
         world_size=world_size,
     )
-    verbosity = pytestconfig.getoption('verbose')
+    verbosity = pytestconfig.getoption("verbose")
     run(config, verbosity > 0)
 
 
 @pytest.mark.parametrize(
     "k,n,e,dtype,quant_config,prepare_finalize_type,fused_experts_type,chunk_size,world_size",
     generate_valid_test_cases(
-        world_size=1,
-        prepare_finalize_types=MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES))
+        world_size=1, prepare_finalize_types=MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES
+    ),
+)
 def test_modular_kernel_combinations_singlegpu(
     k: int,
     n: int,
@@ -282,7 +303,7 @@ def test_modular_kernel_combinations_singlegpu(
         world_size=world_size,
     )
 
-    verbosity = pytestconfig.getoption('verbose')
+    verbosity = pytestconfig.getoption("verbose")
     run(config, verbosity > 0)
 
 

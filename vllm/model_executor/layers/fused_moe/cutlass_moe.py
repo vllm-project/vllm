@@ -443,8 +443,7 @@ class CutlassBatchedExpertsFp8(CutlassExpertsFp8Base):
         assert num_dp is not None
         assert M_chunk == M_full
         workspace1 = (self.max_experts_per_worker, M_full * num_dp, max(N, K))
-        workspace2 = (self.max_experts_per_worker, M_full * num_dp,
-                      max(N // 2, K))
+        workspace2 = (self.max_experts_per_worker, M_full * num_dp, max(N // 2, K))
         output = (self.max_experts_per_worker, M_full, K)
         return (workspace1, workspace2, output)
 

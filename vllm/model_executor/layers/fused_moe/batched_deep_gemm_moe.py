@@ -261,10 +261,8 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # end up sending their tokens. This needs to be fixed.
         num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
-        max_num_tokens = (M_chunk if self.max_num_tokens is None else
-                          self.max_num_tokens)
-        workspace13 = (num_experts, max_num_tokens * num_dispatchers,
-                       max(K, N))
+        max_num_tokens = M_chunk if self.max_num_tokens is None else self.max_num_tokens
+        workspace13 = (num_experts, max_num_tokens * num_dispatchers, max(K, N))
         workspace2 = (num_experts, max_num_tokens * num_dispatchers, (N // 2))
         output = (num_experts, max_num_tokens * num_dispatchers, K)
         return (workspace13, workspace2, output)
@@ -299,7 +297,8 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert w2.size(1) == K
 
         E, max_num_tokens, N, K, _ = self._moe_problem_size(
-            hidden_states, w1, w2, topk_ids)
+            hidden_states, w1, w2, topk_ids
+        )
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
 

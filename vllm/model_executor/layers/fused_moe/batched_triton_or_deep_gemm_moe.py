@@ -119,13 +119,27 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if self.allow_deep_gemm:
             assert self.batched_deep_gemm_experts is not None
             return self.batched_deep_gemm_experts.workspace_shapes(
-                M_chunk, M_full, N, K, topk, global_num_experts,
-                local_num_experts, expert_tokens_metadata)
+                M_chunk,
+                M_full,
+                N,
+                K,
+                topk,
+                global_num_experts,
+                local_num_experts,
+                expert_tokens_metadata,
+            )
         else:
             assert self.batched_triton_experts is not None
             return self.batched_triton_experts.workspace_shapes(
-                M_chunk, M_full, N, K, topk, global_num_experts,
-                local_num_experts, expert_tokens_metadata)
+                M_chunk,
+                M_full,
+                N,
+                K,
+                topk,
+                global_num_experts,
+                local_num_experts,
+                expert_tokens_metadata,
+            )
 
     def apply(
         self,

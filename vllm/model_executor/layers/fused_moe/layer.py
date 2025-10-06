@@ -1247,15 +1247,13 @@ class FusedMoE(CustomOp):
                 logits_shape = (moe.max_num_tokens, num_experts)
 
             self.batched_hidden_states = torch.zeros(
-                states_shape,
-                dtype=moe.in_dtype,
-                device=torch.cuda.current_device())
+                states_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
+            )
 
             # Note here we use `num_experts` which is logical expert count
             self.batched_router_logits = torch.zeros(
-                logits_shape,
-                dtype=moe.in_dtype,
-                device=torch.cuda.current_device())
+                logits_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
+            )
 
     @property
     def shared_experts(self) -> Optional[torch.nn.Module]:
@@ -1313,9 +1311,11 @@ class FusedMoE(CustomOp):
     def use_dp_chunking(self) -> bool:
         # Route to the chunked forward path using the FlashInfer Cutlass kernel
         # only when data parallelism (DP) is enabled.
-        return (self.moe_parallel_config.use_pplx_kernels
-                or self.moe_parallel_config.use_deepep_ll_kernels
-                or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels))
+        return (
+            self.moe_parallel_config.use_pplx_kernels
+            or self.moe_parallel_config.use_deepep_ll_kernels
+            or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
+        )
 
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated
@@ -1982,8 +1982,10 @@ class FusedMoE(CustomOp):
         early.
         """
         assert self.quant_method is not None
-        return (self.quant_method.fused_experts is not None
-                and self.quant_method.fused_experts.output_is_reduced())
+        return (
+            self.quant_method.fused_experts is not None
+            and self.quant_method.fused_experts.output_is_reduced()
+        )
 
     def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
         """
@@ -2200,9 +2202,9 @@ class FusedMoE(CustomOp):
         if self.use_dp_chunking:
             return self.forward_impl_chunked(hidden_states, router_logits)
 
-        do_naive_dispatch_combine: bool = (self.dp_size > 1
-                                           and self.quant_method.fused_experts
-                                           is None)
+        do_naive_dispatch_combine: bool = (
+            self.dp_size > 1 and self.quant_method.fused_experts is None
+        )
 
         # If there are shared experts but we are not using a modular kernel, the
         # shared experts must be called here

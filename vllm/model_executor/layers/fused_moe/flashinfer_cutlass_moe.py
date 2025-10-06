@@ -118,7 +118,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
           of each tuple must be the number of tokens.
         """
         workspace1 = (M_chunk, K)
-        workspace2 = (0, )
+        workspace2 = (0,)
         output_shape = (M_full, K * 2 if self.quant_dtype == "nvfp4" else K)
         # The workspace is determined by `aq`, since it comes after any
         # potential communication op and is involved in the expert computation.

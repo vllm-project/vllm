@@ -233,17 +233,25 @@ class Config:
 
         # check type support
         if self.quant_dtype is None:
-            if (self.dtype not in self.pf_supported_types()
-                    or self.dtype not in self.fe_supported_types()):
-                return False, (f"Unsupported type {self.dtype} not in "
-                               f"{self.pf_supported_types()} and "
-                               f"{self.fe_supported_types()}.")
+            if (
+                self.dtype not in self.pf_supported_types()
+                or self.dtype not in self.fe_supported_types()
+            ):
+                return False, (
+                    f"Unsupported type {self.dtype} not in "
+                    f"{self.pf_supported_types()} and "
+                    f"{self.fe_supported_types()}."
+                )
         else:
-            if (self.quant_dtype not in self.pf_supported_types()
-                    or self.quant_dtype not in self.fe_supported_types()):
-                return False, (f"Unsupported quant type {self.quant_dtype} "
-                               f"not in {self.pf_supported_types()} and "
-                               f"{self.fe_supported_types()}.")
+            if (
+                self.quant_dtype not in self.pf_supported_types()
+                or self.quant_dtype not in self.fe_supported_types()
+            ):
+                return False, (
+                    f"Unsupported quant type {self.quant_dtype} "
+                    f"not in {self.pf_supported_types()} and "
+                    f"{self.fe_supported_types()}."
+                )
 
         # Check block quanization support
         is_block_quatized = self.quant_block_shape is not None
