@@ -177,12 +177,14 @@ def triton_kernel_fused_experts(
                 w2, (0, hidden_dim_padding, 0, ffn_dim_padding, 0, 0), "constant", 0
             )
 
-            # Pad bias tensors if they exist
+            # Pad bias tensors on if they exist
             w1_bias_padded = quant_config.w1_bias
             if w1_bias_padded is not None:
                 w1_bias_padded = F.pad(
                     quant_config.w1_bias, (0, 2 * ffn_dim_padding, 0, 0), "constant", 0
                 )
+
+            # Pad bias tensors on if they exist
             w2_bias_padded = quant_config.w2_bias
             if w2_bias_padded is not None:
                 w2_bias_padded = F.pad(
