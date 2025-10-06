@@ -3,7 +3,7 @@
 """Attention layer with XFormersAttention."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import torch
 
@@ -33,9 +33,6 @@ try:
     XFORMERS_AVAILABLE = True
 except ImportError:
     XFORMERS_AVAILABLE = False
-
-if TYPE_CHECKING:
-    pass
 
 from vllm import _custom_ops as ops
 

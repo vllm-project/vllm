@@ -4,10 +4,11 @@
 
 import ast
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
@@ -23,11 +24,6 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-
-if TYPE_CHECKING:
-    pass
-
-from vllm import _custom_ops as ops
 
 logger = init_logger(__name__)
 
