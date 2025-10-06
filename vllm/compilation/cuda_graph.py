@@ -208,7 +208,7 @@ class CUDAGraphWrapper:
 
     def enter_sleep_mode(self) -> tuple[dict, int]:
         """Put CUDA graphs to sleep and return state for restoration and count."""
-        sleep_state = {"entries": {}}
+        sleep_state: dict[str, dict] = {"entries": {}}
         cuda_graph_count = 0
 
         for key, entry in self.concrete_cudagraph_entries.items():
