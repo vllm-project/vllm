@@ -23,13 +23,10 @@ the 1st will be sampled after the prefill and the 2nd after the first decode
 """
 
 import pytest
-import torch
-from transformers import AutoModelForCausalLM
 
+from tests.conftest import HfRunner, VllmRunner
 from tests.models.utils import check_outputs_equal
 from tests.utils import create_new_process_for_each_test
-from vllm import LLM, SamplingParams
-from vllm.inputs import TokensPrompt
 
 
 @create_new_process_for_each_test()
@@ -43,6 +40,8 @@ from vllm.inputs import TokensPrompt
 )
 def test_max_context_length(
     model: str,
+    vllm_runner: type[VllmRunner],
+    hf_runner: type[HfRunner],
     prompt_len: int,
     max_tokens: int,
 ) -> None:
@@ -57,42 +56,26 @@ def test_max_context_length(
     # Construct a prompt of size prompt_len
     prompt_ids = [[43] * prompt_len]
 
-    # Generate max_tokens new tokens deterministically.
-    sampling_params = [
-        SamplingParams(max_tokens=max_tokens, temperature=0.0, ignore_eos=True)
-    ]
-
     # --- vLLM generation ---
-    llm = LLM(
-        model=model,
-        tokenizer=model,
+    with vllm_runner(
+        model_name=model,
+        tokenizer_name=model,
         max_model_len=2048,
         max_num_seqs=1,
         tensor_parallel_size=1,
-    )
-
-    vllm_token_prompts = [TokensPrompt(prompt_token_ids=prompt_ids[0])]
-    vllm_results = llm.generate(vllm_token_prompts, sampling_params)
-
-    vllm_output_ids = vllm_results[0].outputs[0].token_ids
+    ) as vllm_model:
+        # Generate max_tokens new tokens deterministically.
+        vllm_outputs = vllm_model.generate_greedy(prompt_ids, max_tokens)
 
     # --- HuggingFace generation ---
-    with torch.no_grad():
-        hf_model = AutoModelForCausalLM.from_pretrained(model)
+    with hf_runner(
+        model_name=model,
+    ) as hf_model:
+        hf_outputs = hf_model.generate_greedy(prompt_ids, max_tokens)
 
-        # HF expects a tensor of input ids shaped (batch, seq_len).
-        hf_input_tokens = torch.tensor(prompt_ids[0]).unsqueeze(0)
-
-        # Generate max_tokens new tokens deterministically.
-        hf_generated = hf_model.generate(
-            hf_input_tokens,
-            do_sample=False,
-            min_new_tokens=max_tokens,
-            max_new_tokens=max_tokens,
-        )
-
-        # HF returns the prompt + generated tokens. Slice off the prompt.
-        hf_output_ids = hf_generated.cpu().tolist()[0][len(prompt_ids[0]) :]
+    # vLLM and HF runners return prompt + generated tokens. Slice off the prompt.
+    vllm_output_ids = vllm_outputs[0][0][prompt_len:]
+    hf_output_ids = hf_outputs[0][0][prompt_len:]
 
     # check that exactly max_tokens tokens were generated with vLLM and HF
     assert len(vllm_output_ids) == len(hf_output_ids) == max_tokens
