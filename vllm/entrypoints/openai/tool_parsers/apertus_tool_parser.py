@@ -57,16 +57,20 @@ class ApertusToolParser(ToolParser):
         self.tool_calls_suffix = "<|tools_suffix|>"
 
         # State for streaming
-        self.prev_tool_call_arr: list[dict] = []
-        self.current_tool_id: int = -1
-        self.current_tool_name_sent: bool = False
-        self.streamed_args_for_tool: list[str] = []
+        self._reset_streaming_state()
 
         # Regex to extract tool calls block (suffix is optional for incomplete outputs)
         self.tool_call_regex = re.compile(
                 rf"{re.escape(self.tool_calls_prefix)}(.*?)(?:{re.escape(self.tool_calls_suffix)}|$)",
                 re.DOTALL,
                 )
+
+    def _reset_streaming_state(self):
+        """Reset streaming state for a new request."""
+        self.prev_tool_call_arr: list[dict] = []
+        self.current_tool_id: int = -1
+        self.current_tool_name_sent: bool = False
+        self.streamed_args_for_tool: list[str] = []
 
     def extract_tool_calls(
             self, model_output: str, request: ChatCompletionRequest
@@ -121,6 +125,7 @@ class ApertusToolParser(ToolParser):
                                         name=function_name,
                                         arguments=json.dumps(arguments, ensure_ascii=False),
                                         ),
+                                id=make_tool_call_id(),
                                 )
                         )
 
@@ -137,6 +142,12 @@ class ApertusToolParser(ToolParser):
             request: ChatCompletionRequest,
             ) -> DeltaMessage | None:
         """Extract tool calls in streaming mode."""
+        # Reset state at the start of a new streaming session
+        # (detected when previous_text is empty or doesn't contain tool prefix)
+        if not previous_text or (self.tool_calls_prefix not in previous_text and
+                                  self.tool_calls_prefix in current_text):
+            self._reset_streaming_state()
+
         # Check if we're in a tool call block
         if self.tool_calls_prefix not in current_text:
             return DeltaMessage(content=delta_text)
@@ -153,13 +164,16 @@ class ApertusToolParser(ToolParser):
             if len(tool_call_arr) > self.current_tool_id + 1:
                 delta = self._finalize_previous_tool()
                 self._start_new_tool(len(tool_call_arr))
+                self.prev_tool_call_arr = tool_call_arr
                 return delta
 
             current_tool_call = tool_call_arr[self.current_tool_id]
 
             # Send tool name if not sent yet
             if not self.current_tool_name_sent:
-                return self._send_tool_name(current_tool_call)
+                delta = self._send_tool_name(current_tool_call)
+                self.prev_tool_call_arr = tool_call_arr
+                return delta
 
             # Stream arguments
             delta = self._stream_arguments(current_tool_call, json_str)
@@ -194,6 +208,14 @@ class ApertusToolParser(ToolParser):
     def _finalize_previous_tool(self) -> DeltaMessage | None:
         """Finalize any remaining arguments from the previous tool."""
         if self.current_tool_id < 0:
+            return None
+
+        # Check if prev_tool_call_arr has been initialized and has the current tool
+        if not self.prev_tool_call_arr or self.current_tool_id >= len(self.prev_tool_call_arr):
+            return None
+
+        # Check if streamed_args_for_tool has the current tool
+        if self.current_tool_id >= len(self.streamed_args_for_tool):
             return None
 
         prev_tool = self.prev_tool_call_arr[self.current_tool_id]
@@ -256,6 +278,10 @@ class ApertusToolParser(ToolParser):
         arguments = current_tool_call[function_name]
 
         if not arguments:
+            return None
+
+        # Check if streamed_args_for_tool has the current tool
+        if self.current_tool_id >= len(self.streamed_args_for_tool):
             return None
 
         sent = len(self.streamed_args_for_tool[self.current_tool_id])
