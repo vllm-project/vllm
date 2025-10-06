@@ -298,17 +298,17 @@ class FusedMoEQuantConfig:
     @property
     def ocp_mx_scheme(self) -> Union[str, None]:
         if not hasattr(self, "_ocp_mx_scheme"):
-            assert self._a1.dtype is None or isinstance(self._a1.dtype, str)
-            assert self._w1.dtype is None or isinstance(self._w1.dtype, str)
+            if (self._a1.dtype is not None and not isinstance(self._a1.dtype, str)) or (self._w1.dtype is not None and not isinstance(self._w1.dtype, str)):
+                self._ocp_mx_scheme = None
+            else:
+                ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
+                    self._a1.dtype, self._w1.dtype
+                )
 
-            ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
-                self._a1.dtype, self._w1.dtype
-            )
+                if ocp_mx_scheme is not None:
+                    ocp_mx_scheme = ocp_mx_scheme.value
 
-            if ocp_mx_scheme is not None:
-                ocp_mx_scheme = ocp_mx_scheme.value
-
-            self._ocp_mx_scheme = ocp_mx_scheme
+                self._ocp_mx_scheme = ocp_mx_scheme
 
         return self._ocp_mx_scheme
 
