@@ -46,6 +46,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
@@ -465,7 +466,7 @@ class MambaMixer2(MambaBase, CustomOp):
         compilation_config.static_forward_context[prefix] = self
         # The tuple is (conv_state, ssm_state)
         self.kv_cache = (torch.tensor([]), torch.tensor([]))
-
+        self.fp8_dtype = current_platform.fp8_dtype()
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
@@ -514,7 +515,10 @@ class MambaMixer2(MambaBase, CustomOp):
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0].transpose(-1, -2)
-            ssm_state = self_kv_cache[1]
+            if self.cache_config.mamba_ssm_cache_dtype.startswith("fp8"):
+                ssm_state = self_kv_cache[1].view(self.fp8_dtype)
+            else:
+                ssm_state = self_kv_cache[1]
             state_indices_tensor = attn_metadata.state_indices_tensor
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
@@ -689,6 +693,9 @@ class MambaMixer2(MambaBase, CustomOp):
                     0,
                 )
 
+                # TODO: add fp8 dequantization logic here when loading
+                #       ssm state. Should load scales tensors if available
+
             # NOTE: final output is an in-place update of out tensor
             varlen_states = mamba_chunk_scan_combined_varlen(
                 hidden_states_p.view(
@@ -790,6 +797,9 @@ class MambaMixer2(MambaBase, CustomOp):
                 # - varlen state is a (num_prefills, nheads, headdim, dstate)
                 #   tensor
                 ssm_state[state_indices_tensor_p] = varlen_states
+
+            # TODO: Add fp8 quantization logic here for storing back
+            #       ssm state. Should also update scales if dynamic
 
         # Process decode requests
         if has_decode:
