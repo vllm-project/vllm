@@ -18,7 +18,7 @@ class AttentionConfig:
 
     backend: Optional[str] = None
     """Attention backend to use. If None, will be selected automatically.
-    Example options: TORCH_SDPA, FLASH_ATTN, XFORMERS, FLASHINFER, etc."""
+    Example options: FLASH_ATTN, XFORMERS, FLASHINFER, etc."""
 
     use_triton_flash_attn: bool = True
     """Whether to use triton flash attention."""
@@ -51,7 +51,10 @@ class AttentionConfig:
     """If set, when using fp8 kv, do not quantize Q to fp8."""
 
     def __post_init__(self):
-        # If backend is not set, use environment variable
+        # Environment variable compatibility: If backend is not set,
+        # use VLLM_ATTENTION_BACKEND environment variable.
+        # This ensures backward compatibility with existing deployments
+        # that rely on environment variables.
         if self.backend is None and envs.VLLM_ATTENTION_BACKEND is not None:
             self.backend = envs.VLLM_ATTENTION_BACKEND
 

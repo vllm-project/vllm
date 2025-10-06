@@ -723,8 +723,8 @@ class EngineArgs:
             type=str,
             default=EngineArgs.attention_backend,
             help="Attention backend to use. If not specified, will be selected "
-            "automatically. Example options: TORCH_SDPA, FLASH_ATTN, XFORMERS, "
-            "FLASHINFER, FLASHMLA, etc.",
+            "automatically. Example options: FLASH_ATTN, XFORMERS, FLASHINFER, "
+            "FLASHMLA, etc.",
         )
 
         # Structured outputs arguments
@@ -1351,7 +1351,22 @@ class EngineArgs:
         return SpeculativeConfig(**self.speculative_config)
 
     def create_attention_config(self) -> AttentionConfig:
-        """Create attention configuration."""
+        """Create attention configuration.
+
+        This method reads from environment variables to maintain backward
+        compatibility with existing deployments. All attention-related
+        environment variables are respected:
+        - VLLM_ATTENTION_BACKEND (can also be set via --attention-backend CLI arg)
+        - VLLM_USE_TRITON_FLASH_ATTN
+        - VLLM_FLASH_ATTN_VERSION
+        - VLLM_V1_USE_PREFILL_DECODE_ATTENTION
+        - VLLM_USE_AITER_UNIFIED_ATTENTION
+        - VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
+        - VLLM_USE_CUDNN_PREFILL
+        - VLLM_USE_TRTLLM_ATTENTION
+        - VLLM_DISABLE_FLASHINFER_PREFILL
+        - VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION
+        """
         return AttentionConfig(
             backend=self.attention_backend,
             use_triton_flash_attn=envs.VLLM_USE_TRITON_FLASH_ATTN,
