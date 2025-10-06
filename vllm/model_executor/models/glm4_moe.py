@@ -196,7 +196,8 @@ class Glm4MoE(nn.Module):
             routed_scaling_factor=1.0,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.n_redundant_experts)
+            num_redundant_experts=self.n_redundant_experts,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape

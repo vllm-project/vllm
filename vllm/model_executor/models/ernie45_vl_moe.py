@@ -74,10 +74,7 @@ logger = init_logger(__name__)
 
 
 class Ernie4_5_VLMoeMLP(Ernie4_5_MoeMLP):
-
-    def __init__(self,
-                 shared_experts: Optional[torch.nn.Module] = None,
-                 **kwargs):
+    def __init__(self, shared_experts: Optional[torch.nn.Module] = None, **kwargs):
         super().__init__(**kwargs)
         self.shared_experts = shared_experts
 
@@ -235,20 +232,24 @@ class Ernie4_5_VLMoeMoE(nn.Module):
         assert text_moe_layer_start_index <= text_moe_layer_end_index
 
         if self.has_shared_experts:
-            intermediate_size = (config.moe_intermediate_size[0] *
-                                 config.moe_num_shared_experts)
+            intermediate_size = (
+                config.moe_intermediate_size[0] * config.moe_num_shared_experts
+            )
             self.shared_experts = Ernie4_5_VLMoeMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.shared_experts",
-                reduce_results=False)
+                reduce_results=False,
+            )
         else:
             self.shared_experts = None
 
-        if layer_idx >= text_moe_layer_start_index and \
-            layer_idx <= text_moe_layer_end_index:
+        if (
+            layer_idx >= text_moe_layer_start_index
+            and layer_idx <= text_moe_layer_end_index
+        ):
             self.text_experts_gate = ReplicatedLinear(
                 config.hidden_size,
                 config.moe_num_experts[0],
@@ -373,8 +374,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
             )
 
         if self.has_shared_experts:
-            final_hidden_states = final_hidden_states[0] + final_hidden_states[
-                1]
+            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
 
         if self.tp_size > 1:
             final_hidden_states = (

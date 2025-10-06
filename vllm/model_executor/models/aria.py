@@ -14,8 +14,7 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -208,9 +207,9 @@ class AriaProjector(nn.Module):
 
 
 class AriaFusedMoE(SharedFusedMoE):
-
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
-                      shard_id: str) -> None:
+    def weight_loader(
+        self, param: nn.Parameter, loaded_weight: torch.Tensor, shard_id: str
+    ) -> None:
         # Override the weight_loader to handle the expert weights in the Aria
         # model, which are already packed with experts, and merge the gate and
         # up weights for each expert.
