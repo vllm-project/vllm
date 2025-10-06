@@ -7,18 +7,20 @@ import torch.nn.functional as F
 
 def _histogram(input: torch.Tensor, min: int, max: int) -> torch.Tensor:
     """
-  Compute the histogram of an int32 tensor. The bin edges are defined by the
-  min and max values, with step = 1.
-  """
+    Compute the histogram of an int32 tensor. The bin edges are defined by the
+    min and max values, with step = 1.
+    """
     assert input.dtype == torch.int32, "input must be of torch.int32 dtype."
     assert min <= max, "min must be less than or equal to max."
 
-    def searchsorted(sorted_sequence: torch.Tensor,
-                     values_to_search: torch.Tensor) -> torch.Tensor:
+    def searchsorted(
+        sorted_sequence: torch.Tensor, values_to_search: torch.Tensor
+    ) -> torch.Tensor:
         return (sorted_sequence.unsqueeze(1) == values_to_search).sum(dim=1)
 
-    bin_edges = torch.linspace(min, max, max - min + 1,
-                               dtype=input.dtype).to(input.device)
+    bin_edges = torch.linspace(min, max, max - min + 1, dtype=input.dtype).to(
+        input.device
+    )
     return searchsorted(bin_edges, input).to(torch.int32)
 
 
@@ -41,6 +43,7 @@ def fused_moe(
     """
     assert expert_map is None, "expert_map is not supported for pallas MoE."
     import torch_xla.experimental.custom_kernel  # noqa: F401
+
     orig_shape = hidden_states.shape
     hidden_size = hidden_states.shape[-1]
     num_tokens = hidden_states.shape[:-1].numel()
@@ -50,7 +53,8 @@ def fused_moe(
     dtype = hidden_states.dtype
     assert (num_tokens * topk) % 16 == 0, (
         "The Pallas GMM kernel requires num_tokens * topk to be a multiple of "
-        f"16 but got {num_tokens * topk}")
+        f"16 but got {num_tokens * topk}"
+    )
 
     hidden_states = hidden_states.view(num_tokens, hidden_size)
     gating_output = gating_output.view(num_tokens, num_experts)
@@ -63,8 +67,7 @@ def fused_moe(
     topk_indices = topk_indices.flatten()
     topk_argsort_indices = topk_indices.argsort()
     topk_argsort_revert_indices = topk_argsort_indices.argsort()
-    token_indices = torch.arange(num_tokens,
-                                 device=device).repeat_interleave(topk)
+    token_indices = torch.arange(num_tokens, device=device).repeat_interleave(topk)
     token_indices = token_indices[topk_argsort_indices]
     group_sizes = _histogram(topk_indices.to(torch.int32), 0, num_experts - 1)
 
