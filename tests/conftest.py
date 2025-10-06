@@ -420,7 +420,7 @@ class HfRunner:
         if audios is not None:
             assert len(prompts) == len(audios)
 
-        all_inputs: list[Union[BatchFeature, BatchEncoding]] = []
+        all_inputs: list[Union[BatchFeature, BatchEncoding, dict[str, torch.Tensor]]] = []
         for i, prompt in enumerate(prompts):
             if isinstance(prompt, str):
                 processor_kwargs: dict[str, Any] = {
