@@ -24,8 +24,7 @@ async def test_store(client: openai.AsyncOpenAI):
     assert response.status == "completed"
 
     # The response should not be found.
-    with pytest.raises(openai.NotFoundError,
-                       match="Response with id .* not found."):
+    with pytest.raises(openai.NotFoundError, match="Response with id .* not found."):
         await client.responses.retrieve(response.id)
 
 
@@ -53,8 +52,8 @@ async def test_background(client: openai.AsyncOpenAI):
 @pytest.mark.asyncio
 async def test_background_error(client: openai.AsyncOpenAI):
     with pytest.raises(
-            openai.BadRequestError,
-            match="background can only be used when `store` is true"):
+        openai.BadRequestError, match="background can only be used when `store` is true"
+    ):
         _ = await client.responses.create(
             input="What is 13 * 24?",
             background=True,
@@ -87,8 +86,9 @@ async def test_cancel_completed(client: openai.AsyncOpenAI):
     response = await client.responses.create(input="Hello")
     assert response.status == "completed"
 
-    with pytest.raises(openai.BadRequestError,
-                       match="Cannot cancel a synchronous response."):
+    with pytest.raises(
+        openai.BadRequestError, match="Cannot cancel a synchronous response."
+    ):
         await client.responses.cancel(response.id)
 
 
@@ -97,7 +97,8 @@ async def test_previous_response_id(client: openai.AsyncOpenAI):
     response1 = await client.responses.create(
         instructions="You are tested on your ability to retrieve the correct "
         "information from the previous response.",
-        input="Hello, my name is John.")
+        input="Hello, my name is John.",
+    )
 
     response2 = await client.responses.create(
         input="Actually, my name is not John. My real name is Mark.",
@@ -118,7 +119,8 @@ async def test_two_responses_with_same_prev_id(client: openai.AsyncOpenAI):
     response1 = await client.responses.create(
         instructions="You are tested on your ability to retrieve the correct "
         "information from the previous response.",
-        input="Hello, my name is John.")
+        input="Hello, my name is John.",
+    )
 
     # Both response 2 and 3 use response 1 as the previous response.
     response2 = client.responses.create(
