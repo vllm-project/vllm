@@ -14,7 +14,6 @@ def test_sampler_output():
         [3, 2, -1, -1]
     ])
     # fmt: on
-    so = SamplerOutput(sampled_token_ids=sampled_token_ids,
-                       logprobs_tensors=None)
+    so = SamplerOutput(sampled_token_ids=sampled_token_ids, logprobs_tensors=None)
     expected_n_sampled_tokens = torch.tensor([3, 1, 2])
     assert so.n_sampled_tokens().eq(expected_n_sampled_tokens).all()
