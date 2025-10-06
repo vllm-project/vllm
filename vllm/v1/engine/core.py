@@ -177,14 +177,17 @@ class EngineCore:
             self.vllm_config.cache_config.enable_prefix_caching
             or self.scheduler.get_kv_connector() is not None
         ):
-            block_size = vllm_config.cache_config.block_size
+            hash_block_size = (
+                vllm_config.cache_config.block_size
+                * vllm_config.parallel_config.decode_context_parallel_size
+            )
             caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo
             )
             init_none_hash(caching_hash_fn)
 
             self.request_block_hasher = get_request_block_hasher(
-                block_size, caching_hash_fn
+                hash_block_size, caching_hash_fn
             )
 
         self.step_fn = (
