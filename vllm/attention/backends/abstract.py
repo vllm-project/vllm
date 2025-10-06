@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Generic, List, Optional, Protocol, Tuple, Type, TypeVar
+from typing import Generic, Optional, Protocol, TypeVar
 
 import torch
 
@@ -14,6 +14,7 @@ class AttentionType:
     Attention type.
     Use string to be compatible with `torch.compile`.
     """
+
     DECODER = "decoder"
     """Decoder attention between previous layer Q/K/V."""
     ENCODER = "encoder"
@@ -26,6 +27,7 @@ class AttentionType:
 
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
+
     # For some attention backends, we allocate an output tensor before
     # calling the custom op. When piecewise cudagraph is enabled, this
     # makes sure the output tensor is allocated inside the cudagraph.
@@ -49,12 +51,12 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_impl_cls() -> Type["AttentionImpl"]:
+    def get_impl_cls() -> type["AttentionImpl"]:
         raise NotImplementedError
 
     @staticmethod
     @abstractmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
+    def get_metadata_cls() -> type["AttentionMetadata"]:
         raise NotImplementedError
 
     @classmethod
@@ -74,11 +76,11 @@ class AttentionBackend(ABC):
         num_kv_heads: int,
         head_size: int,
         cache_dtype_str: str = "auto",
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         raise NotImplementedError
 
     @staticmethod
-    def get_kv_cache_stride_order() -> Tuple[int, ...]:
+    def get_kv_cache_stride_order() -> tuple[int, ...]:
         raise NotImplementedError
 
     @classmethod
@@ -94,7 +96,6 @@ T = TypeVar("T", bound=AttentionMetadata)
 
 
 class AttentionLayer(Protocol):
-
     _q_scale: torch.Tensor
     _k_scale: torch.Tensor
     _v_scale: torch.Tensor
@@ -110,12 +111,10 @@ class AttentionLayer(Protocol):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
-        ...
+    ) -> torch.Tensor: ...
 
 
 class AttentionImpl(ABC, Generic[T]):
-
     # Whether the attention impl can return the softmax lse for decode.
     # Some features like decode context parallelism require the softmax lse.
     can_return_lse_for_decode: bool = False
@@ -132,14 +131,16 @@ class AttentionImpl(ABC, Generic[T]):
         self = super().__new__(cls)
         try:
             from vllm.distributed.parallel_state import get_dcp_group
+
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-        self.need_to_return_lse_for_decode = self.dcp_world_size > 1 \
-            and self.can_return_lse_for_decode
+        self.need_to_return_lse_for_decode = (
+            self.dcp_world_size > 1 and self.can_return_lse_for_decode
+        )
         return self
 
     @abstractmethod
@@ -149,7 +150,7 @@ class AttentionImpl(ABC, Generic[T]):
         head_size: int,
         scale: float,
         num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
+        alibi_slopes: Optional[list[float]] = None,
         sliding_window: Optional[int] = None,
         kv_cache_dtype: str = "auto",
         logits_soft_cap: Optional[float] = None,
@@ -186,7 +187,6 @@ class AttentionImpl(ABC, Generic[T]):
 
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
-
     @abstractmethod
     def forward(
         self,
