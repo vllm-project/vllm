@@ -343,9 +343,11 @@ class Scheduler(SchedulerInterface):
                     is_ready = self._update_waiting_for_remote_kv(request)
                     if is_ready:
                         request.status = RequestStatus.WAITING
+                        logger.info("[wxl debug] %s has already received kvcache and enter into waiting status.",
+                                    request.request_id)
                     else:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
+                        logger.info(
+                            "[wxl debug] %s is still in WAITING_FOR_REMOTE_KVS state.",
                             request.request_id)
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)
