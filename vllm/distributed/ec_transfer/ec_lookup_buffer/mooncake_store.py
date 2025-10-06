@@ -186,7 +186,7 @@ class ECMooncakeStore:
     def close(self):
         if self.config.fast_transfer:
             self.store.unregister_buffer(
-                self.tensor_pool.base_address, DEFAULT_TENSOR_POOL_SIZE)
+                self.tensor_pool.base_address, self.config.fast_transfer_buffer_size)
             self.tensor_pool.cleanup()
       
         self.put_loop.call_soon_threadsafe(self.put_loop.stop)
@@ -473,6 +473,6 @@ class ECMooncakeStore:
                 return self.tensor_pool.store_tensor(tensor)
             except InsufficientMemoryError:
                 if not self.fifo_pool_queue:
-                    raise InsufficientMemoryError("Insufficient Memory")
+                    raise
 
                 self._pool_eviction()

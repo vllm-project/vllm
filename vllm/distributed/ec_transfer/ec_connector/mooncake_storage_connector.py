@@ -71,7 +71,8 @@ class ECMooncakeStorageConnector(ECConnectorBase):
 
         for mm_hash, ec_cache in zip(mm_hashes, tensors):
             encoder_cache[mm_hash] = ec_cache
-            assert ec_cache is not None, f"Load failed for {mm_hash}"
+            if ec_cache is None:
+                logger.error(f"Load failed for {mm_hash}")
             logger.debug(f"Load tensor for {mm_hash} successfully")
 
     def save_caches(self, **kwargs) -> None:
