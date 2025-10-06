@@ -57,7 +57,7 @@ from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import set_default_torch_num_threads
+from vllm.utils import is_list_of, set_default_torch_num_threads
 
 logger = init_logger(__name__)
 
@@ -449,16 +449,16 @@ class HfRunner:
                 all_inputs.append(inputs)
             else:
                 # check that prompt is (batched) list of integers (token ids)
-                assert isinstance(prompt, list) and all(
-                    isinstance(x, int) for x in prompt
-                ), (
-                    "Prompt must be a list of ints corresponding to the prompt token ids."
-                )
+                if not is_list_of(prompt, typ=int, check="all"):
+                    raise ValueError(
+                        "Prompt must be a list of ints corresponding to the prompt token ids."
+                    )
                 # check that no multimodal input is provided
-                assert not (images or videos or audios), (
-                    "When providing prompt token ids multimodal inputs are not supported."
-                )
-                input_dict: dict[str, torch.Tensor] = {
+                if images or videos or audios:
+                    raise ValueError(
+                        "When providing prompt token ids multimodal inputs are not supported."
+                    )
+                input_dict = {
                     "input_ids": torch.tensor(prompt, dtype=torch.long).unsqueeze(0),
                 }
                 all_inputs.append(input_dict)
