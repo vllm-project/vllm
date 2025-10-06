@@ -103,8 +103,9 @@ class StructuredOutputBackend(ABC):
     vocab_size: int
 
     @abstractmethod
-    def compile_grammar(self, request_type: StructuredOutputOptions,
-                        grammar_spec: str) -> StructuredOutputGrammar:
+    def compile_grammar(
+        self, request_type: StructuredOutputOptions, grammar_spec: str
+    ) -> StructuredOutputGrammar:
         """
         Compiles a grammar specification into a structured output grammar.
 
