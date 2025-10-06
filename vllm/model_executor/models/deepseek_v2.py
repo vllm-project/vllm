@@ -644,18 +644,22 @@ def sparse_attn_indexer(
                 chunk.cu_seqlen_ke,
             )
             num_rows = logits.shape[0]
-            topk_indices = torch.empty(num_rows,
-                                       topk_tokens,
-                                       dtype=torch.int32,
-                                       device=logits.device)
-            topk_values = torch.empty(num_rows,
-                                      topk_tokens,
-                                      dtype=logits.dtype,
-                                      device=logits.device)
-            torch.ops._C.top_k_per_row(logits, chunk.cu_seqlen_ks,
-                                       chunk.cu_seqlen_ke, topk_indices,
-                                       topk_values, num_rows, logits.stride(0),
-                                       logits.stride(1))
+            topk_indices = torch.empty(
+                num_rows, topk_tokens, dtype=torch.int32, device=logits.device
+            )
+            topk_values = torch.empty(
+                num_rows, topk_tokens, dtype=logits.dtype, device=logits.device
+            )
+            torch.ops._C.top_k_per_row(
+                logits,
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+                topk_indices,
+                topk_values,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+            )
 
             topk_indices -= chunk.cu_seqlen_ks[:, None]
             topk_indices_buffer[
@@ -697,22 +701,21 @@ def sparse_attn_indexer(
         # padded query len
         current_device = padded_q_fp8_decode_tokens.device
         padded_num_tokens = batch_size * next_n
-        row_indices = torch.arange(padded_num_tokens,
-                                   device=current_device) // next_n
-        next_n_offset = torch.arange(
-            padded_num_tokens,
-            device=padded_q_fp8_decode_tokens.device) % next_n
-        index_end_pos = (decode_metadata.seq_lens[row_indices] - next_n +
-                         next_n_offset + 1).unsqueeze(1)
+        row_indices = torch.arange(padded_num_tokens, device=current_device) // next_n
+        next_n_offset = (
+            torch.arange(padded_num_tokens, device=padded_q_fp8_decode_tokens.device)
+            % next_n
+        )
+        index_end_pos = (
+            decode_metadata.seq_lens[row_indices] - next_n + next_n_offset + 1
+        ).unsqueeze(1)
         num_rows = logits.shape[0]
-        topk_indices = torch.empty(num_rows,
-                                   topk_tokens,
-                                   dtype=torch.int32,
-                                   device=logits.device)
-        topk_values = torch.empty(num_rows,
-                                  topk_tokens,
-                                  dtype=logits.dtype,
-                                  device=logits.device)
+        topk_indices = torch.empty(
+            num_rows, topk_tokens, dtype=torch.int32, device=logits.device
+        )
+        topk_values = torch.empty(
+            num_rows, topk_tokens, dtype=logits.dtype, device=logits.device
+        )
         torch.ops._C.top_k_per_row(
             logits,
             torch.zeros(num_rows, dtype=torch.int32, device=logits.device),
@@ -721,7 +724,7 @@ def sparse_attn_indexer(
             topk_values,
             num_rows,
             logits.stride(0),
-            logits.stride(1)
+            logits.stride(1),
         )
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
