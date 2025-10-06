@@ -453,7 +453,7 @@ class CuMemAllocator:
         # Trigger CUDA to fully wake up the graph memory pool
         torch.cuda.synchronize()
 
-        logger.info("Restored %d CUDA graphs from sleep mode.", cuda_graph_count)
+        logger.info("Restored %d graphs from sleep mode.", cuda_graph_count)
 
         # Clear saved state
         self._sleep_saved_cudagraphs.clear()
