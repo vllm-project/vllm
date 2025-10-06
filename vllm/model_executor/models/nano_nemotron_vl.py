@@ -76,6 +76,8 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                encode_tokens)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from .utils import _merge_multimodal_embeddings
+
 # Configure PIL to handle large images without warnings
 # This prevents DecompressionBombWarning for legitimate large images
 Image.MAX_IMAGE_PIXELS = None  # Disable the limit entirely
@@ -1243,25 +1245,14 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid, SupportsMultiModa
         # Create mask for video embedding positions
         is_video_embed = torch.isin(repl_token_ids, embed_token_ids)
 
-        num_total_tokens = repl_token_ids.shape[0]  # incl. indicator + video tokens
-        hidden_size = video_embeddings.shape[1]
-
-        # Initialize final embeddings tensor
-        final_video_embeddings = torch.empty(
-            num_total_tokens,
-            hidden_size,
-            dtype=video_embeddings.dtype,
-            device=device,
+        # Create final video embeddings, merging text embeddings for indicator
+        # tokens with video embeddings
+        text_embeddings = self.get_language_model().get_input_embeddings(repl_token_ids)
+        final_video_embeddings = _merge_multimodal_embeddings(
+            inputs_embeds=text_embeddings,
+            multimodal_embeddings=video_embeddings,
+            is_multimodal=is_video_embed,
         )
-
-        # Replace video embedding positions with actual video embeddings
-        final_video_embeddings[is_video_embed] = video_embeddings
-
-        # Replace non-video positions with language model embeddings.
-        # These are the indicator tokens
-        text_embeddings = self.language_model.get_input_embeddings(
-            repl_token_ids[~is_video_embed])
-        final_video_embeddings[~is_video_embed] = text_embeddings
 
         return final_video_embeddings
 
