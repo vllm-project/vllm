@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.config import (FusedMoEQuantConfig, mx
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     modular_triton_fused_moe, try_get_optimal_moe_config)
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import modular_marlin_fused_moe
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_lora_align_block_size)
 
@@ -198,10 +199,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
             return wrapper
 
+        quant_config if quant_config is not None else FusedMoEQuantConfig.make()
+
         m_fused_moe_fn = modular_triton_fused_moe(
-            quant_config
-            if quant_config is not None else FusedMoEQuantConfig.make(),
-            shared_experts=base_layer.shared_experts)
+            quant_config,
+            shared_experts=base_layer.shared_experts) if not quant_config.use_mxfp4_w4a16 \
+        else modular_marlin_fused_moe(quant_config, shared_experts=base_layer.shared_experts)
 
         fused_experts = m_fused_moe_fn.fused_experts
 

@@ -11,6 +11,8 @@ import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -407,3 +409,13 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)
+
+def modular_marlin_fused_moe(
+    quant_config: FusedMoEQuantConfig,
+    shared_experts: Optional[torch.nn.Module] = None
+) -> mk.FusedMoEModularKernel:
+    return mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        MarlinExperts(quant_config),
+        shared_experts,
+    )
