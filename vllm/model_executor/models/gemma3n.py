@@ -20,8 +20,8 @@ from typing import Optional, Union
 
 import torch
 from torch import nn
-
 from transformers.models.gemma3n.configuration_gemma3n import Gemma3nTextConfig
+
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -53,8 +53,13 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 
 from .interfaces import SupportsLoRA, SupportsQuant
-from .utils import (AutoWeightsLoader, extract_layer_index,
-                    is_pp_missing_parameter, make_layers, maybe_prefix)
+from .utils import (
+    AutoWeightsLoader,
+    extract_layer_index,
+    is_pp_missing_parameter,
+    make_layers,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 

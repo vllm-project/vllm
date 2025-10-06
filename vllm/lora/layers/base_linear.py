@@ -157,8 +157,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         # In transformers backend, x and output have extra batch dimension like
         # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
         # therefore we need to flatten the batch dimensions.
-        if (x.shape[0] ==1 and x.ndim == 3 and
-            output.shape[0] == 1 and output.ndim == 3):
+        if (
+            x.shape[0] == 1
+            and x.ndim == 3
+            and output.shape[0] == 1
+            and output.ndim == 3
+        ):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
