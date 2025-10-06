@@ -119,20 +119,13 @@ class CacheConfig:
     """
 
     kv_cache_memory_bytes: Optional[int] = None
-    """Size of KV Cache, per GPU in bytes unless otherwise configured. By
-    default, this is set to None and vllm can automatically infer the kv cache
-    size based on gpu_memory_utilization. However, users may want to manually
-    specify the kv cache memory size. kv_cache_memory_bytes allows more
-    fine-grain control of how much memory gets used when compared with using
+    """Size of KV Cache per GPU in bytes. By default, this is set to None
+    and vllm can automatically infer the kv cache size based on
+    gpu_memory_utilization. However, users may want to manually specify
+    the kv cache memory size. kv_cache_memory_bytes allows more fine-grain
+    control of how much memory gets used when compared with using
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
-    enable_pp_prop_kv_cache: bool = False
-    """When enabled with pipeline parallelism and explicit layer partitioning,
-    splits kv_cache_memory_bytes proportionally based on layer distribution
-    instead of uniformly. This optimizes memory usage for asymmetric PP
-    setups. Requires: (1) --kv-cache-memory-bytes to be specified,
-    (2) VLLM_PP_LAYER_PARTITION to be set, (3) pipeline parallelism (-pp > 1).
-    """
 
     def compute_hash(self) -> str:
         """

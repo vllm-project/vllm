@@ -1284,7 +1284,8 @@ def get_kv_cache_configs(
     3. Generate the KV cache configs for each worker based on the KV cache
        grouping strategy. (This is reasonable because the layer ratio of
        different PP stages are similar.)
-    4. Change the num_blocks of each worker to the smallest among all workers.
+    4. Change the num_blocks of each worker to the smallest among all workers
+       and shrink tensor sizes proportionally to avoid allocating unused memory.
 
     Args:
         vllm_config: The global VllmConfig
@@ -1345,13 +1346,19 @@ def get_kv_cache_configs(
             )
         )
 
-    # Change the num_blocks of each rank to the smallest among all ranks. We
-    # do not need to shrink the tensor size because it is valid to only use the
-    # first `num_blocks` blocks of the tensor.
+    # Change the num_blocks of each rank to the smallest among all ranks.
+    # We also need to shrink the tensor size proportionally to avoid
+    # allocating unused memory.
     min_num_blocks = min(
         kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs
     )
     for kv_cache_config in kv_cache_configs:
+        num_blocks_old = kv_cache_config.num_blocks
         kv_cache_config.num_blocks = min_num_blocks
+
+        # Shrink tensor size proportionally
+        for tensor in kv_cache_config.kv_cache_tensors:
+            assert tensor.size % num_blocks_old == 0
+            tensor.size = tensor.size // num_blocks_old * min_num_blocks
 
     return kv_cache_configs

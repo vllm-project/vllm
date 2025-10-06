@@ -21,7 +21,6 @@ from vllm.distributed import (
 )
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
-from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -253,43 +252,18 @@ class Worker(WorkerBase):
             # max_num_batched_tokens
             self.model_runner.profile_run()
 
-            pp_group = get_pp_group()
-            if (self.cache_config.enable_pp_prop_kv_cache
-                    and pp_group.world_size > 1
-                    and envs.VLLM_PP_LAYER_PARTITION):
-                hf_config = self.model_config.hf_text_config
-                num_hidden_layers = hf_config.num_hidden_layers
-
-                start_layer, end_layer = get_pp_indices(
-                    num_hidden_layers, pp_group.rank_in_group,
-                    pp_group.world_size)
-                local_layers = end_layer - start_layer
-                prop_kv_cache_bytes = int(kv_cache_memory_bytes *
-                                          local_layers / num_hidden_layers)
-
-                msg = (f"Initial free memory "
-                       f"{GiB(self.init_snapshot.free_memory):.2f} "
-                       f"GiB, reserved {GiB(prop_kv_cache_bytes):.2f} GiB "
-                       f"for KV cache (proportionally split from "
-                       f"{GiB(kv_cache_memory_bytes):.2f} GiB based on "
-                       f"{local_layers}/{num_hidden_layers} layers on rank "
-                       f"{pp_group.rank_in_group}). Skipping memory "
-                       f"profiling.")
-                logger.info(msg)
-                return prop_kv_cache_bytes
-
             msg = (
-                f"Initial free memory "
-                f"{GiB(self.init_snapshot.free_memory):.2f} "
-                f"GiB, reserved {GiB(kv_cache_memory_bytes):.2f} GiB memory "
-                f"for KV Cache as specified by kv_cache_memory_bytes config "
-                f"and skipped memory profiling. This does not respect the "
-                f"gpu_memory_utilization config. Only use "
-                f"kv_cache_memory_bytes config when you want manual control "
-                f"of KV cache memory size. If OOM'ed, check the difference "
-                f"of initial free memory between the current run and the "
-                f"previous run where kv_cache_memory_bytes is suggested and "
-                f"update it correspondingly.")
+                f"Initial free memory {GiB(self.init_snapshot.free_memory):.2f} "
+                f"GiB, reserved {GiB(kv_cache_memory_bytes):.2f} GiB memory for "
+                "KV Cache as specified by kv_cache_memory_bytes config and "
+                "skipped memory profiling. This does not respect the "
+                "gpu_memory_utilization config. Only use kv_cache_memory_bytes "
+                "config when you want manual control of KV cache memory "
+                "size. If OOM'ed, check the difference of initial free "
+                "memory between the current run and the previous run "
+                "where kv_cache_memory_bytes is suggested and update it "
+                "correspondingly."
+            )
             logger.info(msg)
             return kv_cache_memory_bytes
 
