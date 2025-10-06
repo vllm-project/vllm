@@ -2249,14 +2249,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
             end_idx = start_idx + len(sampled_ids)
-            assert end_idx <= self.max_model_len, (
-                "Sampled token IDs exceed the max model length. "
-                f"Total number of tokens: {end_idx} > max_model_len: "
-                f"{self.max_model_len}")
+            assert end_idx <= self.max_model_len + 1, (
+                "Sampled token IDs exceed the max model length + 1. "
+                f"Total number of tokens: {end_idx} > max_model_len + 1: "
+                f"{self.max_model_len + 1}")
 
-            self.input_batch.token_ids_cpu[req_idx,
-                                           start_idx:end_idx] = sampled_ids
-            self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
+            n_tokens_cache = len(sampled_ids)
+
+            # Sampled token IDs exceed the max model length by 1. This is
+            # legitimate as we can still sample 1 last token when the context
+            # length equals the max model length. Note that we do not need to
+            # cache this token ID as the sequence finishes after this step.
+            # Additionally, the buffers token_ids_cpu and is_token_ids are of
+            # size max model length only.
+            if end_idx == self.max_model_len + 1:
+                n_tokens_cache -= 1
+
+            self.input_batch.token_ids_cpu[req_idx, start_idx:(
+                start_idx + n_tokens_cache)] = sampled_ids[:n_tokens_cache]
+            self.input_batch.is_token_ids[req_idx,
+                                          start_idx:(start_idx +
+                                                     n_tokens_cache)] = True
+
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
 
@@ -4229,21 +4243,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     not in ["qwen3_next"]):
                 raise NotImplementedError(
                     "Mamba with speculative decoding is not supported yet.")
-            if self.vllm_config.cache_config.enable_prefix_caching:
-                raise NotImplementedError(
-                    "Prefix caching is not supported for Mamba yet.")
-            max_model_len = self.vllm_config.model_config.max_model_len
-
+            mamba_block_size = self.vllm_config.cache_config.mamba_block_size
             page_size_padded = (
                 self.vllm_config.cache_config.mamba_page_size_padded)
 
-            # Set block_size to max_model_len, so that mamba model will always
-            # have only one block in the KV cache.
             for layer_name, mamba_module in mamba_layers.items():
                 kv_cache_spec[layer_name] = MambaSpec(
                     shapes=mamba_module.get_state_shape(),
                     dtypes=mamba_module.get_state_dtype(),
-                    block_size=max_model_len,
+                    block_size=mamba_block_size,
                     page_size_padded=page_size_padded,
                     mamba_type=mamba_module.mamba_type,
                     num_speculative_blocks=(

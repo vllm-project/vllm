@@ -549,13 +549,8 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
         scheduler_config = vllm_config.scheduler_config
-        if cache_config.enable_prefix_caching:
-            raise RuntimeError(
-                "GraniteMoeHybrid currently does not support prefix caching")
-
         self.quant_config = vllm_config.quant_config
         self.config = config
         self.scheduler_config = scheduler_config

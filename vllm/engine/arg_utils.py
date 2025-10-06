@@ -376,7 +376,7 @@ class EngineArgs:
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    limit_mm_per_prompt: dict[str, int] = \
+    limit_mm_per_prompt: dict[str, Union[int, dict[str, int]]] = \
         get_field(MultiModalConfig, "limit_per_prompt")
     interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
     media_io_kwargs: dict[str, dict[str,
@@ -1563,7 +1563,12 @@ class EngineArgs:
                 self.enable_prefix_caching = False
 
             if self.enable_prefix_caching is None:
-                self.enable_prefix_caching = True
+                # Disable prefix caching default for hybrid models
+                # since the feature is still experimental.
+                if model_config.is_hybrid:
+                    self.enable_prefix_caching = False
+                else:
+                    self.enable_prefix_caching = True
         else:
 
             pooling_type = model_config.pooler_config.pooling_type
