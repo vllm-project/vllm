@@ -14,8 +14,9 @@ from vllm.platforms.tpu import USE_TPU_INFERENCE
 
 from .base_device_communicator import DeviceCommunicatorBase
 
-USE_RAY = parallel_config = get_current_vllm_config(
-).parallel_config.distributed_executor_backend == "ray"
+USE_RAY = parallel_config = (
+    get_current_vllm_config().parallel_config.distributed_executor_backend == "ray"
+)
 
 logger = init_logger(__name__)
 
@@ -27,18 +28,21 @@ if not USE_TPU_INFERENCE:
         import torch_xla.runtime as xr
         from torch_xla._internal import pjrt
         from torch_xla.distributed.xla_multiprocessing import (
-            create_optimized_replica_groups)
+            create_optimized_replica_groups,
+        )
+
         if USE_RAY:
             from vllm.executor import ray_utils
 
 
 class TpuCommunicator(DeviceCommunicatorBase):
-
-    def __init__(self,
-                 cpu_group: ProcessGroup,
-                 device: Optional[torch.device] = None,
-                 device_group: Optional[ProcessGroup] = None,
-                 unique_name: str = ""):
+    def __init__(
+        self,
+        cpu_group: ProcessGroup,
+        device: Optional[torch.device] = None,
+        device_group: Optional[ProcessGroup] = None,
+        unique_name: str = "",
+    ):
         super().__init__(cpu_group, device, device_group, unique_name)
 
         # NOTE(woosuk): When using TP > 1 on TPUs, every TPU on the same node
@@ -99,4 +103,5 @@ class TpuCommunicator(DeviceCommunicatorBase):
 if USE_TPU_INFERENCE:
     from tpu_inference.distributed.device_communicators import (
         TpuCommunicator as TpuInferenceCommunicator)
+
     TpuCommunicator = TpuInferenceCommunicator  # type: ignore
