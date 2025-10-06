@@ -1623,6 +1623,7 @@ class EngineArgs:
             "TREE_ATTN",
             "XFORMERS",
             "ROCM_ATTN",
+            "ROCM_AITER_UNIFIED_ATTN",
         ]
         if (
             envs.is_set("VLLM_ATTENTION_BACKEND")

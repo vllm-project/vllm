@@ -3,13 +3,10 @@
 """Attention layer with PagedAttention and Triton prefix prefill."""
 
 from dataclasses import dataclass
-from functools import cache
 from typing import ClassVar, Optional
 
 import torch
 
-from vllm import _custom_ops as ops
-from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
@@ -96,12 +93,11 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         # slow, so here we set it to 1.
         attn_metadata.seq_lens.fill_(1)
 
-        if envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION:
-            # Here we set the query start locs to 0. This is to
-            # cover up an invalid memory access in the prefix_prefil kernel
-            # that we run into during graph capture (#25985)
-            common_attn_metadata.query_start_loc.zero_()
-            common_attn_metadata.query_start_loc_cpu.zero_()
+        # Here we set the query start locs to 0. This is to
+        # cover up an invalid memory access in the prefix_prefil kernel
+        # that we run into during graph capture (#25985)
+        common_attn_metadata.query_start_loc.zero_()
+        common_attn_metadata.query_start_loc_cpu.zero_()
 
         return attn_metadata
 
@@ -211,14 +207,6 @@ class RocmAttentionBackend(AttentionBackend):
         return RocmAttentionMetadataBuilder
 
 
-@cache
-def use_aiter_unified_attention() -> bool:
-    """Check if aiter unified attention should be used."""
-    # VLLM_ROCM_USE_AITER_MHA needs to set to 0 as well as it is set
-    # to 1 as default
-    return envs.VLLM_ROCM_USE_AITER and envs.VLLM_USE_AITER_UNIFIED_ATTENTION
-
-
 class RocmAttentionImpl(AttentionImpl):
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
@@ -268,23 +256,6 @@ class RocmAttentionImpl(AttentionImpl):
             )
 
         self.fp8_dtype = current_platform.fp8_dtype()
-        self.force_prefill_decode_attn = envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
-
-        if not self.force_prefill_decode_attn:
-            # If not using prefill decode attention, we use the Triton
-            # unified attention implementation.
-            if use_aiter_unified_attention():
-                logger.info_once("Using aiter unified attention for RocmAttentionImpl")
-                from aiter.ops.triton.unified_attention import unified_attention
-
-                self.unified_attention = unified_attention
-            else:
-                logger.info_once("Using vllm unified attention for RocmAttentionImpl")
-                from vllm.attention.ops.triton_unified_attention import (
-                    unified_attention,
-                )
-
-                self.unified_attention = unified_attention
 
         self.sinks = sinks
         if sinks is not None:
@@ -341,58 +312,32 @@ class RocmAttentionImpl(AttentionImpl):
         # Whenever making a change in this method, please benchmark the
         # performance to make sure it does not introduce any overhead.
 
-        use_prefill_decode_attn = self.force_prefill_decode_attn
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        if use_prefill_decode_attn:
-            key_cache, value_cache = PagedAttention.split_kv_cache(
-                kv_cache, self.num_kv_heads, self.head_size
-            )
-        else:
-            key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = PagedAttention.split_kv_cache(
+            kv_cache, self.num_kv_heads, self.head_size
+        )
 
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
-            if use_prefill_decode_attn:
-                PagedAttention.write_to_paged_cache(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.slot_mapping,
-                    self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
-                )
-            else:
-                ops.reshape_and_cache_flash(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.slot_mapping,
-                    self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
-                )
+            PagedAttention.write_to_paged_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
 
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
-            num_tokens, num_heads, head_size = query.shape
             assert layer._q_scale_float == 1.0, (
                 "A non 1.0 q_scale is not currently supported."
             )
-            if current_platform.is_cuda():
-                # Skip Q quantization on ROCm and XPU, enable this on cuda
-                # only, since dequantizing back to f32 in the attention kernel
-                # is not supported.
-                query, _ = ops.scaled_fp8_quant(
-                    query.reshape((num_tokens, num_heads * head_size)).contiguous(),
-                    layer._q_scale,
-                )
-                query = query.reshape((num_tokens, num_heads, head_size))
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
@@ -400,53 +345,27 @@ class RocmAttentionImpl(AttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
-        if use_prefill_decode_attn:
-            # Compute attention and update output up to `num_actual_tokens`.
-            chunked_prefill_paged_decode(
-                query=query[:num_actual_tokens],
-                key=key[:num_actual_tokens],
-                value=value[:num_actual_tokens],
-                output=output[:num_actual_tokens],
-                kv_cache_dtype=self.kv_cache_dtype,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                block_table=block_table,
-                query_start_loc=cu_seqlens_q,
-                seq_lens=seqused_k,
-                max_seq_len=max_seqlen_k,
-                max_query_len=max_seqlen_q,
-                k_scale=layer._k_scale,
-                v_scale=layer._v_scale,
-                alibi_slopes=self.alibi_slopes,
-                sliding_window=self.sliding_window[0],
-                sm_scale=self.scale,
-                output_scale=output_scale,
-                sinks=self.sinks,
-            )
-
-        else:
-            descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
-
-            self.unified_attention(
-                q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=seqused_k,
-                max_seqlen_k=max_seqlen_k,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=block_table,
-                softcap=self.logits_soft_cap,
-                q_descale=None,  # Not supported
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
-                sinks=self.sinks,
-                output_scale=output_scale,
-            )
+        # Compute attention and update output up to `num_actual_tokens`.
+        chunked_prefill_paged_decode(
+            query=query[:num_actual_tokens],
+            key=key[:num_actual_tokens],
+            value=value[:num_actual_tokens],
+            output=output[:num_actual_tokens],
+            kv_cache_dtype=self.kv_cache_dtype,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            block_table=block_table,
+            query_start_loc=cu_seqlens_q,
+            seq_lens=seqused_k,
+            max_seq_len=max_seqlen_k,
+            max_query_len=max_seqlen_q,
+            k_scale=layer._k_scale,
+            v_scale=layer._v_scale,
+            alibi_slopes=self.alibi_slopes,
+            sliding_window=self.sliding_window[0],
+            sm_scale=self.scale,
+            output_scale=output_scale,
+            sinks=self.sinks,
+        )
 
         return output

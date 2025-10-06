@@ -276,25 +276,33 @@ class RocmPlatform(Platform):
             )
 
         if envs.VLLM_USE_V1:
-            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
-                logger.info("Using Flash Attention backend on V1 engine.")
+            if (
+                envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9()
+            ) or selected_backend == _Backend.ROCM_AITER_FA:
+                logger.info("Using Aiter Flash Attention backend on V1 engine.")
                 return (
                     "vllm.v1.attention.backends."
                     "rocm_aiter_fa.AiterFlashAttentionBackend"
                 )
-            elif (
-                (envs.VLLM_ROCM_USE_AITER and envs.VLLM_USE_AITER_UNIFIED_ATTENTION)
-                or envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
+            if (
+                envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
+            ) or selected_backend == _Backend.ROCM_AITER_UNIFIED_ATTN:
+                logger.info("Using Aiter Unified Attention backend on V1 engine.")
+                return (
+                    "vllm.v1.attention.backends."
+                    "rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend"
+                )
+            if (
+                envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
                 or selected_backend == _Backend.ROCM_ATTN
             ):
                 # rocm specific backend, with aiter and/or
                 #   triton prefix-prefill
-                logger.info("Using Rocm/Aiter Attention backend on V1 engine.")
+                logger.info("Using Rocm Attention backend on V1 engine.")
                 return "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
-            else:
-                # default case, using triton unified attention
-                logger.info("Using Triton Attention backend on V1 engine.")
-                return "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+            # default case, using triton unified attention
+            logger.info("Using Triton Attention backend on V1 engine.")
+            return "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
         raise RuntimeError(
             "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
             "to select a supported backend."

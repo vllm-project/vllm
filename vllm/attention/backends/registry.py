@@ -25,3 +25,4 @@ class _Backend(enum.Enum):
     FLEX_ATTENTION = enum.auto()
     TREE_ATTN = enum.auto()
     ROCM_ATTN = enum.auto()
+    ROCM_AITER_UNIFIED_ATTN = enum.auto()
