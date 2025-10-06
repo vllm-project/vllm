@@ -7,7 +7,6 @@ from typing import Any, Optional
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
 
-import vllm.envs as envs
 from vllm.config.utils import config
 
 
@@ -49,16 +48,6 @@ class AttentionConfig:
 
     flashinfer_disable_q_quantization: bool = False
     """If set, when using fp8 kv, do not quantize Q to fp8."""
-
-    def __post_init__(self):
-        # Environment variable compatibility: If backend is not set,
-        # use VLLM_ATTENTION_BACKEND environment variable.
-        # This ensures backward compatibility with existing deployments
-        # that rely on environment variables.
-        # Note: Deprecation warning is emitted in create_attention_config()
-        # to avoid duplicate warnings.
-        if self.backend is None and envs.VLLM_ATTENTION_BACKEND is not None:
-            self.backend = envs.VLLM_ATTENTION_BACKEND
 
     def compute_hash(self) -> str:
         """
