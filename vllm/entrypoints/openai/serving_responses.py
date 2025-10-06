@@ -852,7 +852,11 @@ class OpenAIServingResponses(OpenAIServing):
         if prev_response is None:
             # New conversation.
             reasoning_effort = request.reasoning.effort if request.reasoning else None
-            tool_types = [tool.type for tool in request.tools]
+
+            # Prevent mcp from showing up in this list, as we use mcp tool to enable
+            # built in tools. The correct tool type for MCP tools comes from the
+            # server_label field, which is handled below.
+            tool_types = [tool.type for tool in request.tools if tool.type != "mcp"]
 
             # Allow the MCP Tool type to enable built in tools if the
             # server_label is allowlisted in

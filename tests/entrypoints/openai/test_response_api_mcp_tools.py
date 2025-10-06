@@ -110,3 +110,34 @@ async def test_mcp_tool_env_flag_disabled(mcp_disabled_client: OpenAI, model_nam
     assert response is not None
     assert response.status == "completed"
     assert response.usage.output_tokens_details.tool_output_tokens == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_mcp_tool_env_flag_enabled_commentary_channel_disabled(
+    mcp_enabled_client: OpenAI, model_name: str
+):
+    response = await mcp_enabled_client.responses.create(
+        model=model_name,
+        input=("Don't do anything."),
+        tools=[
+            {
+                "type": "mcp",
+                "server_label": "code_interpreter",
+                # URL unused for DemoToolServer
+                "server_url": "http://localhost:8888",
+            }
+        ],
+        extra_body={"enable_response_messages": True},
+    )
+    assert response is not None
+    assert response.status == "completed"
+    for message in response.input_messages:
+        assert message.role != "developer", (
+            "There should not be a developer message as no function tools exist."
+        )
+        if message.role == "system":
+            assert (
+                "commentary"
+                not in message.content[0]["channel_config"]["valid_channels"]
+            ), "Commentary channel should not be valid"
