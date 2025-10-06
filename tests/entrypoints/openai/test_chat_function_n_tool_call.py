@@ -7,6 +7,7 @@ import pytest_asyncio
 import json
 from rapidfuzz import fuzz
 import jsonschema
+from pprint import pprint
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/gpt-oss-20b"
@@ -166,9 +167,14 @@ async def test_multiple_tool_calls(client: openai.AsyncOpenAI):
     )
 
     calls = response.choices[0].message.tool_calls
+
+    print("\n=== TOOL CALLS ===")
+    pprint(calls)
+
     assert any(c.function.name == FUNC_CALC for c in calls), "Calculator tool missing"
     assert any(c.function.name == FUNC_TIME for c in calls), "Time tool missing"
     assert len(response.choices[0].message.reasoning_content) > 0
+
 
 
 @pytest.mark.asyncio
@@ -219,12 +225,10 @@ async def test_tool_call_with_temperature(client: openai.AsyncOpenAI):
 
     message = response.choices[0].message
     assert message is not None
-    # Accept either a tool call or a direct text answer
     assert (
         message.tool_calls or message.content
     ), "Response missing both text and tool calls"
 
-    # Log for analysis (optional, helps debug temperature variance)
     print(f"Tool calls: {message.tool_calls}")
     print(f"Text: {message.content}")
     
