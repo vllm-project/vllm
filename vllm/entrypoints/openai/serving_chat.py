@@ -876,6 +876,7 @@ class OpenAIServingChat(OpenAIServing):
                         tool_messages = []
 
                         # Calculate base_index once before the loop
+                        # This represents the number of completed tool calls
                         base_index = 0
                         for msg in harmony_parser.messages:
                             if (msg.channel == "commentary"
@@ -883,6 +884,9 @@ class OpenAIServingChat(OpenAIServing):
                                     and msg.recipient.startswith(
                                         "functions.")):
                                 base_index += 1
+
+                        # next_tool_index tracks the index for the next NEW tool call
+                        next_tool_index = base_index
 
                         for group in groups:
                             group_channel = group['channel']
@@ -898,6 +902,7 @@ class OpenAIServingChat(OpenAIServing):
                                   and group_recipient.startswith("functions.")):
 
                                 if prev_recipient != group_recipient:
+                                    # New tool call - emit the opening message
                                     tool_name = group_recipient.split(
                                         "functions.", 1)[1]
                                     tool_messages.append(DeltaToolCall(
@@ -907,15 +912,19 @@ class OpenAIServingChat(OpenAIServing):
                                             name=tool_name,
                                             arguments="",
                                         ),
-                                        index=base_index,
+                                        index=next_tool_index,
                                     ))
                                     prev_recipient = group_recipient
-                                    # Increment index for next tool call
-                                    base_index += 1
+                                    # Increment for any subsequent new tool calls in this chunk
+                                    next_tool_index += 1
 
                                 if group_text:
+                                    # Stream arguments for the ongoing tool call
+                                    # The current call index is next_tool_index - 1 if we just
+                                    # opened it, OR base_index if continuing from prev chunk
+                                    tool_call_index = next_tool_index - 1 if next_tool_index > base_index else base_index
                                     tool_messages.append(DeltaToolCall(
-                                        index=base_index - 1,  # Use the index of the current tool call
+                                        index=tool_call_index,
                                         function=DeltaFunctionCall(
                                             arguments=group_text),
                                     ))
