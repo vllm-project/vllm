@@ -46,7 +46,6 @@ class LiteProfiler:
 
     def _initialize_log_handler(self) -> None:
         log_path = envs.VLLM_LITE_PROFILER_LOG_PATH
-        print("Log path: ", log_path)
         if log_path is None:
             return
 
@@ -62,7 +61,6 @@ class LiteProfiler:
             self._log_path = log_path
 
     def scope(self, name: str):
-        """Create a scope context manager for timing a function."""
         return LiteScope(self, name)
 
     def _log_function_duration(self, name: str, elapsed_ns: int) -> None:
@@ -90,7 +88,6 @@ def scope_function(name: str):
     """
     global _lite_profiler
 
-    # Initialize LiteProfiler only once
     if _lite_profiler is None:
         _lite_profiler = LiteProfiler()
 
@@ -100,7 +97,6 @@ def scope_function(name: str):
 def emit_lite_profiler_report(log_path: str | None) -> None:
     """Print a lite-profiler summary when profiling is enabled."""
 
-    print("Log path: ", log_path)
     if log_path is None:
         return
 

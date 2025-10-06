@@ -5,14 +5,6 @@
 The script consumes the JSONL records emitted by the script `vllm.lite_profiler`
 It expects log lines containing JSON payloads with a ``metrics`` dictionary
 whose values are ``{"ns": int}``.
-
-Usage examples::
-
-    # Use the log file pointed to by VLLM_LITE_PROFILER_LOG_PATH
-    python -m tools.lite_profiler_report
-
-    # Provide an explicit path
-    python -m tools.lite_profiler_report /tmp/vllm-lite-profiler.log
 """
 
 from __future__ import annotations
