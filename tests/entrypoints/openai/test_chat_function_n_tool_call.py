@@ -103,18 +103,16 @@ FUNC_ARGS_TIME = '{"city": "New York"}'
 def extract_reasoning_and_calls(chunks: list):
     """Extract accumulated reasoning text and tool call arguments from streaming chunks."""
     reasoning_content = ""
-    tool_calls = {}  # index -> {"name": str, "arguments": str}
+    tool_calls = {} 
 
     for chunk in chunks:
         choice = getattr(chunk.choices[0], "delta", None)
         if not choice:
             continue
 
-        # Handle reasoning deltas
         if hasattr(choice, "reasoning_content") and choice.reasoning_content:
             reasoning_content += choice.reasoning_content
 
-        # Handle tool call deltas
         for tc in getattr(choice, "tool_calls", []) or []:
             idx = getattr(tc, "index", 0)
             tool_entry = tool_calls.setdefault(idx, {"name": "", "arguments": ""})
@@ -126,7 +124,6 @@ def extract_reasoning_and_calls(chunks: list):
                 if getattr(func, "arguments", None):
                     tool_entry["arguments"] += func.arguments
 
-    # Convert dict to parallel lists
     function_names = [v["name"] for _, v in sorted(tool_calls.items())]
     arguments = [v["arguments"] for _, v in sorted(tool_calls.items())]
 
@@ -252,7 +249,6 @@ async def test_tool_call_argument_accuracy(client: openai.AsyncOpenAI):
     calc_call = next((c for c in calls if c.function.name == FUNC_CALC), None)
     assert calc_call, "Calculator function missing"
 
-    # Parse model arguments (may arrive as JSON string fragments)
     try:
         args = json.loads(calc_call.function.arguments)
     except json.JSONDecodeError:
@@ -280,11 +276,9 @@ async def test_tool_response_schema_accuracy(client: openai.AsyncOpenAI):
         func_name = call.function.name
         args = json.loads(call.function.arguments)
 
-        # Find the tool schema dynamically
         tool = next(t for t in TOOLS if t["function"]["name"] == func_name)
         schema = tool["function"]["parameters"]
 
-        # Validate the arguments against schema
         jsonschema.validate(instance=args, schema=schema)
 
 
@@ -301,7 +295,6 @@ async def test_reasoning_relevance_accuracy(client: openai.AsyncOpenAI):
     reasoning, _, _ = extract_reasoning_and_calls(chunks)
 
     assert len(reasoning) > 0, "No reasoning emitted"
-    # The reasoning should at least reference numbers in the user query
     assert any(num in reasoning for num in ["123", "456"]), \
         f"Reasoning does not reference expected numbers: {reasoning}"
 
