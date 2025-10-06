@@ -17,22 +17,21 @@ from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.weight_utils import (
-    safetensors_weights_iterator)
+from vllm.model_executor.model_loader.weight_utils import safetensors_weights_iterator
 
 logger = init_logger(__name__)
 
 
 class OciModelLoader(BaseModelLoader):
     """Model loader that loads models from OCI registries.
-    
+
     This loader supports pulling models packaged as OCI artifacts with:
     - Safetensors layers (application/vnd.docker.ai.safetensors)
     - Config tar layer (application/vnd.docker.ai.vllm.config.tar)
-    
+
     The model reference format is: [registry/]repository[:tag|@digest]
     If registry is omitted, docker.io is used by default.
-    
+
     Example:
         model="namespace/model:tag"
         model="docker.io/user/model:v1"
@@ -49,10 +48,10 @@ class OciModelLoader(BaseModelLoader):
 
     def _normalize_oci_reference(self, model_ref: str) -> str:
         """Normalize OCI reference to include registry.
-        
+
         Args:
             model_ref: Model reference (e.g., "user/model:tag")
-            
+
         Returns:
             Normalized reference (e.g., "docker.io/user/model:tag")
         """
@@ -71,44 +70,43 @@ class OciModelLoader(BaseModelLoader):
 
     def _get_cache_dir(self, model_ref: str) -> str:
         """Get cache directory for OCI model.
-        
+
         Args:
             model_ref: Normalized model reference
-            
+
         Returns:
             Path to cache directory
         """
         download_dir = self.load_config.download_dir or envs.VLLM_CACHE_ROOT
 
         # Create a safe directory name from the reference
-        safe_ref = model_ref.replace(":", "_").replace("/",
-                                                       "_").replace("@", "_")
+        safe_ref = model_ref.replace(":", "_").replace("/", "_").replace("@", "_")
         cache_dir = os.path.join(download_dir, "oci", safe_ref)
         os.makedirs(cache_dir, exist_ok=True)
 
         return cache_dir
 
-    def _get_auth_token(self, registry: str, repository: str,
-                        www_authenticate: str) -> Optional[str]:
+    def _get_auth_token(
+        self, registry: str, repository: str, www_authenticate: str
+    ) -> Optional[str]:
         """Get authentication token using OCI-compliant auth discovery.
-        
+
         This method parses the Www-Authenticate header to discover the
         authentication service and obtains a token dynamically, making it
         compatible with any OCI-compliant registry.
-        
+
         Args:
             registry: Registry hostname
             repository: Repository name
             www_authenticate: Value of Www-Authenticate header from 401 response
-            
+
         Returns:
             Authentication token, or None if no authentication is required
         """
         # Parse Www-Authenticate header
         # Format: Bearer realm="https://auth.example.com/token",service="registry.example.com",scope="repository:user/repo:pull"
         if not www_authenticate.startswith("Bearer "):
-            logger.warning("Unsupported authentication scheme: %s",
-                           www_authenticate)
+            logger.warning("Unsupported authentication scheme: %s", www_authenticate)
             return None
 
         auth_params = {}
@@ -147,10 +145,10 @@ class OciModelLoader(BaseModelLoader):
 
     def _parse_oci_reference(self, model_ref: str) -> tuple[str, str, str]:
         """Parse OCI reference into registry, repository, and tag/digest.
-        
+
         Args:
             model_ref: Normalized OCI reference
-            
+
         Returns:
             Tuple of (registry, repository, reference)
         """
@@ -170,12 +168,12 @@ class OciModelLoader(BaseModelLoader):
 
     def _normalize_registry(self, registry: str) -> str:
         """Normalize registry hostname for API calls.
-        
+
         Docker Hub uses registry-1.docker.io for API calls instead of docker.io.
-        
+
         Args:
             registry: Registry hostname
-            
+
         Returns:
             Normalized registry hostname
         """
@@ -183,24 +181,26 @@ class OciModelLoader(BaseModelLoader):
             return "registry-1.docker.io"
         return registry
 
-    def _authenticated_request(self,
-                               url: str,
-                               registry: str,
-                               repository: str,
-                               headers: dict[str, str],
-                               stream: bool = False) -> requests.Response:
+    def _authenticated_request(
+        self,
+        url: str,
+        registry: str,
+        repository: str,
+        headers: dict[str, str],
+        stream: bool = False,
+    ) -> requests.Response:
         """Make an authenticated request to OCI registry.
-        
+
         Handles authentication by trying without auth first, then obtaining
         and using a token if a 401 response is received.
-        
+
         Args:
             url: Request URL
             registry: Registry hostname
             repository: Repository name
             headers: Request headers
             stream: Whether to stream the response
-            
+
         Returns:
             Response object
         """
@@ -214,21 +214,19 @@ class OciModelLoader(BaseModelLoader):
                 token = self._get_auth_token(registry, repository, www_auth)
                 if token:
                     headers["Authorization"] = f"Bearer {token}"
-                    response = self.session.get(url,
-                                                headers=headers,
-                                                stream=stream)
+                    response = self.session.get(url, headers=headers, stream=stream)
 
         return response
 
     def _pull_oci_manifest(
-            self, model_ref: str,
-            cache_dir: str) -> tuple[dict, list[dict], Optional[dict]]:
+        self, model_ref: str, cache_dir: str
+    ) -> tuple[dict, list[dict], Optional[dict]]:
         """Pull OCI manifest and identify layers.
-        
+
         Args:
             model_ref: Normalized OCI reference
             cache_dir: Cache directory
-            
+
         Returns:
             Tuple of (manifest, safetensors_layers, config_layer)
         """
@@ -241,22 +239,23 @@ class OciModelLoader(BaseModelLoader):
         # Use standard OCI registry URL format
         manifest_url = f"https://{registry}/v2/{repository}/manifests/{reference}"
         headers = {
-            "Accept":
-            "application/vnd.oci.image.manifest.v1+json, "
+            "Accept": "application/vnd.oci.image.manifest.v1+json, "
             "application/vnd.docker.distribution.manifest.v2+json"
         }
 
         # Make authenticated request
         try:
-            response = self._authenticated_request(manifest_url, registry,
-                                                   repository, headers)
+            response = self._authenticated_request(
+                manifest_url, registry, repository, headers
+            )
             response.raise_for_status()
             manifest = response.json()
         except Exception as e:
             raise ValueError(
                 f"Failed to pull manifest for {model_ref}. "
                 f"Please ensure the image exists and is accessible. "
-                f"Error: {e}") from e
+                f"Error: {e}"
+            ) from e
 
         if not manifest:
             raise ValueError(f"Failed to pull manifest for {model_ref}")
@@ -274,20 +273,19 @@ class OciModelLoader(BaseModelLoader):
                 config_layer = layer
 
         if not safetensors_layers:
-            raise ValueError(
-                f"No safetensors layers found in OCI image {model_ref}")
+            raise ValueError(f"No safetensors layers found in OCI image {model_ref}")
 
-        logger.info("Found %d safetensors layer(s) in manifest",
-                    len(safetensors_layers))
+        logger.info(
+            "Found %d safetensors layer(s) in manifest", len(safetensors_layers)
+        )
         if config_layer:
             logger.info("Found config tar layer in manifest")
 
         return manifest, safetensors_layers, config_layer
 
-    def _download_layer(self, model_ref: str, layer: dict,
-                        output_path: str) -> None:
+    def _download_layer(self, model_ref: str, layer: dict, output_path: str) -> None:
         """Download a layer from OCI registry.
-        
+
         Args:
             model_ref: Normalized OCI reference
             layer: Layer descriptor from manifest
@@ -300,8 +298,7 @@ class OciModelLoader(BaseModelLoader):
         digest = layer.get("digest", "")
         size = layer.get("size", 0)
 
-        logger.info("Downloading layer %s (%.2f MB)", digest,
-                    size / (1024 * 1024))
+        logger.info("Downloading layer %s (%.2f MB)", digest, size / (1024 * 1024))
 
         # Parse reference
         registry, repository, _ = self._parse_oci_reference(model_ref)
@@ -312,11 +309,9 @@ class OciModelLoader(BaseModelLoader):
         headers: dict[str, str] = {}
 
         # Make authenticated request
-        response = self._authenticated_request(blob_url,
-                                               registry,
-                                               repository,
-                                               headers,
-                                               stream=True)
+        response = self._authenticated_request(
+            blob_url, registry, repository, headers, stream=True
+        )
         response.raise_for_status()
 
         # Write to file
@@ -329,7 +324,7 @@ class OciModelLoader(BaseModelLoader):
 
     def _extract_config_tar(self, tar_path: str, extract_dir: str) -> None:
         """Extract config tar file.
-        
+
         Args:
             tar_path: Path to tar file
             extract_dir: Directory to extract to
@@ -345,13 +340,13 @@ class OciModelLoader(BaseModelLoader):
 
     def _download_oci_model_if_needed(self, model_ref: str) -> str:
         """Download OCI model and its components if not already cached.
-        
-        This is the shared logic for both download_model and 
+
+        This is the shared logic for both download_model and
         download_oci_model_simple.
-        
+
         Args:
             model_ref: OCI model reference
-            
+
         Returns:
             Path to the extracted config directory
         """
@@ -361,17 +356,20 @@ class OciModelLoader(BaseModelLoader):
         manifest_path = os.path.join(cache_dir, "manifest.json")
 
         # Check if config directory is already populated and manifest exists
-        if (os.path.exists(config_dir) and os.listdir(config_dir)
-                and os.path.exists(manifest_path)):
+        if (
+            os.path.exists(config_dir)
+            and os.listdir(config_dir)
+            and os.path.exists(manifest_path)
+        ):
             logger.info("OCI model already cached at %s", cache_dir)
             return config_dir
 
-        logger.info("Downloading OCI model: %s -> %s", model_ref,
-                    normalized_ref)
+        logger.info("Downloading OCI model: %s -> %s", model_ref, normalized_ref)
 
         # Pull manifest
         manifest, safetensors_layers, config_layer = self._pull_oci_manifest(
-            normalized_ref, cache_dir)
+            normalized_ref, cache_dir
+        )
 
         # Save manifest
         with open(manifest_path, "w") as f:
@@ -383,8 +381,7 @@ class OciModelLoader(BaseModelLoader):
 
         for i, layer in enumerate(safetensors_layers):
             digest = layer.get("digest", "").replace("sha256:", "")
-            layer_path = os.path.join(layers_dir,
-                                      f"{i:04d}_{digest}.safetensors")
+            layer_path = os.path.join(layers_dir, f"{i:04d}_{digest}.safetensors")
             self._download_layer(normalized_ref, layer, layer_path)
 
         # Download and extract config layer if present
@@ -399,12 +396,12 @@ class OciModelLoader(BaseModelLoader):
 
     def download_oci_model_simple(self, model_ref: str) -> str:
         """Download OCI model without requiring ModelConfig.
-        
+
         This is a simplified version for early config loading.
-        
+
         Args:
             model_ref: OCI model reference
-            
+
         Returns:
             Path to extracted config directory
         """
@@ -412,7 +409,7 @@ class OciModelLoader(BaseModelLoader):
 
     def download_model(self, model_config: ModelConfig) -> None:
         """Download model from OCI registry.
-        
+
         Args:
             model_config: Model configuration
         """
@@ -422,10 +419,10 @@ class OciModelLoader(BaseModelLoader):
         self, model_config: ModelConfig
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get iterator over model weights from safetensors layers.
-        
+
         Args:
             model_config: Model configuration
-            
+
         Yields:
             Tuples of (parameter_name, tensor)
         """
@@ -443,8 +440,10 @@ class OciModelLoader(BaseModelLoader):
         # Load manifest
         manifest_path = os.path.join(cache_dir, "manifest.json")
         if not os.path.exists(manifest_path):
-            raise ValueError(f"Manifest not found at {manifest_path}. "
-                             f"Cache dir: {cache_dir}, Model ref: {model_ref}")
+            raise ValueError(
+                f"Manifest not found at {manifest_path}. "
+                f"Cache dir: {cache_dir}, Model ref: {model_ref}"
+            )
 
         with open(manifest_path) as f:
             manifest = json.load(f)
@@ -458,29 +457,27 @@ class OciModelLoader(BaseModelLoader):
                 digest = layer.get("digest", "").replace("sha256:", "")
                 # Find matching file
                 for filename in sorted(os.listdir(layers_dir)):
-                    if digest in filename and filename.endswith(
-                            ".safetensors"):
-                        safetensors_files.append(
-                            os.path.join(layers_dir, filename))
+                    if digest in filename and filename.endswith(".safetensors"):
+                        safetensors_files.append(os.path.join(layers_dir, filename))
                         break
 
         if not safetensors_files:
             raise ValueError(f"No safetensors files found in {layers_dir}")
 
-        logger.info("Loading weights from %d safetensors file(s)",
-                    len(safetensors_files))
+        logger.info(
+            "Loading weights from %d safetensors file(s)", len(safetensors_files)
+        )
 
         # Use existing safetensors iterator
         yield from safetensors_weights_iterator(
             safetensors_files,
             use_tqdm_on_load=self.load_config.use_tqdm_on_load,
-            safetensors_load_strategy=(
-                self.load_config.safetensors_load_strategy))
+            safetensors_load_strategy=(self.load_config.safetensors_load_strategy),
+        )
 
-    def load_weights(self, model: nn.Module,
-                     model_config: ModelConfig) -> None:
+    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         """Load weights into the model from OCI layers.
-        
+
         Args:
             model: Model to load weights into
             model_config: Model configuration
@@ -503,7 +500,8 @@ class OciModelLoader(BaseModelLoader):
             # Load weights using iterator
             weights_to_load = {name for name, _ in model.named_parameters()}
             loaded_weights = model.load_weights(
-                self._get_weights_iterator(model_config))
+                self._get_weights_iterator(model_config)
+            )
 
             # Check if all weights were loaded (for non-quantized models)
             if model_config.quantization is None and loaded_weights is not None:
@@ -511,7 +509,8 @@ class OciModelLoader(BaseModelLoader):
                 if weights_not_loaded:
                     raise ValueError(
                         "Following weights were not initialized from "
-                        f"checkpoint: {weights_not_loaded}")
+                        f"checkpoint: {weights_not_loaded}"
+                    )
 
             logger.info("Weights loaded successfully from OCI registry")
         finally:
