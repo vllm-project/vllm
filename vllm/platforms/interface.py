@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import enum
 import os
 import platform
@@ -17,12 +18,14 @@ from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
     from vllm.lora.request import LoRARequest
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils import FlexibleArgumentParser
 else:
+    _Backend = None
     ModelConfig = None
     VllmConfig = None
     LoRARequest = None
@@ -36,30 +39,6 @@ logger = init_logger(__name__)
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(uname()).lower()
-
-
-class _Backend(enum.Enum):
-    FLASH_ATTN = enum.auto()
-    TRITON_ATTN = enum.auto()
-    XFORMERS = enum.auto()
-    ROCM_FLASH = enum.auto()
-    ROCM_AITER_MLA = enum.auto()  # Supported by V1
-    ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
-    TORCH_SDPA = enum.auto()
-    FLASHINFER = enum.auto()
-    FLASHINFER_MLA = enum.auto()
-    TRITON_MLA = enum.auto()  # Supported by V1
-    CUTLASS_MLA = enum.auto()
-    FLASHMLA = enum.auto()  # Supported by V1
-    FLASH_ATTN_MLA = enum.auto()  # Supported by V1
-    PALLAS = enum.auto()
-    IPEX = enum.auto()
-    DUAL_CHUNK_FLASH_ATTN = enum.auto()
-    DIFFERENTIAL_FLASH_ATTN = enum.auto()
-    NO_ATTENTION = enum.auto()
-    FLEX_ATTENTION = enum.auto()
-    TREE_ATTN = enum.auto()
-    ROCM_ATTN = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
@@ -186,15 +165,32 @@ class Platform:
             return device_id
 
     @classmethod
+    def import_core_kernels(cls) -> None:
+        """ Import any platform-specific C kernels. """
+        try:
+            import vllm._C  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._C: %r", e)
+
+    @classmethod
+    def try_import_moe_kernels(cls) -> bool:
+        """ Import any platform-specific MoE kernels. """
+        with contextlib.suppress(ImportError):
+            import vllm._moe_C  # noqa: F401
+            return True
+        return False
+
+    @classmethod
     def get_vit_attn_backend(cls, head_size: int,
-                             dtype: torch.dtype) -> _Backend:
+                             dtype: torch.dtype) -> "_Backend":
+        from vllm.attention.backends.registry import _Backend
         return _Backend.TORCH_SDPA
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool) -> str:
+                             has_sink: bool, use_sparse: bool) -> str:
         """Get the attention backend class of a device."""
         return ""
 

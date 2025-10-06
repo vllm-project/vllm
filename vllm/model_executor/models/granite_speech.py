@@ -33,6 +33,7 @@ from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import CacheConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -168,10 +169,8 @@ class GraniteSpeechMultiModalProcessor(
             # Calculate the number of audio tokens per entry in the batch;
             # This is used to split the batch back out after padding.
             audio_token_index = self.info.get_hf_config().audio_token_index
-            processed_outputs["audio_embed_sizes"] = [
-                torch.sum(indices == audio_token_index).item()
-                for indices in processed_outputs["input_ids"]
-            ]
+            processed_outputs["audio_embed_sizes"] = (
+                processed_outputs["input_ids"] == audio_token_index).sum(-1)
 
         return processed_outputs
 
@@ -183,13 +182,17 @@ class GraniteSpeechDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
+        audio_overrides = mm_options.get("audio") if mm_options else None
+
         return {
             "audio":
             self._get_dummy_audios(
                 length=self.info.get_max_audio_len(),
                 num_audios=num_audios,
+                overrides=audio_overrides,
             )
         }
 
@@ -527,6 +530,7 @@ class GraniteSpeechForConditionalGeneration(
         SupportsPP,
         SupportsLoRA,
 ):
+    merge_by_field_config = True
 
     packed_modules_mapping = {
         "qkv_proj": [
@@ -764,17 +768,6 @@ class GraniteSpeechForConditionalGeneration(
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            audio_embeds = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
-                input_ids,
-                audio_embeds,
-                is_multimodal=input_ids == self.config.audio_token_index,
-            )
-            input_ids = None
 
         model_output = self.language_model(input_ids, positions,
                                            intermediate_tensors, inputs_embeds)

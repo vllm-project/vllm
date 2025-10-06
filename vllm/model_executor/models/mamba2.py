@@ -16,8 +16,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator, MambaStateShapeCalculator)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -223,11 +222,8 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
         scheduler_config = vllm_config.scheduler_config
-        assert not cache_config.enable_prefix_caching, \
-            "Mamba does not support prefix caching"
 
         super().__init__()
         self.config = config
