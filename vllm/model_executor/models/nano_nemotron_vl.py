@@ -71,9 +71,11 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.radio import RadioConfig
-from vllm.transformers_utils.tokenizer import (AnyTokenizer,
-                                               cached_tokenizer_from_config,
-                                               encode_tokens)
+from vllm.transformers_utils.tokenizer import (
+    AnyTokenizer,
+    cached_tokenizer_from_config,
+    encode_tokens,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import _merge_multimodal_embeddings
@@ -228,8 +230,6 @@ def video_to_pixel_values(
     # with image path
     frames_tensors: list[torch.Tensor] = []
     for frame in video:
-        # (ekvhedchenia) TODO: we probably should not use tiling at all for videos as we take
-        # thumbnail tile of fixed size anyway
         pil_frame = dynamic_preprocess(
             Image.fromarray(frame, mode="RGB"),
             image_size=input_size,
@@ -491,7 +491,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
                 video_repl = self.get_video_repl(tokens_per_frame, self.video_token)
 
-                text = [t.replace('<video>', video_repl.full, 1) for t in text]
+                text = [t.replace("<video>", video_repl.full, 1) for t in text]
         return text, video_inputs
 
     def __call__(
@@ -868,8 +868,7 @@ class NanoNemotronVLMultiModalProcessor(
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            video_pruning_rate = self.info.ctx.get_mm_config(
-            ).video_pruning_rate
+            video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
             if video_pruning_rate is not None and video_pruning_rate > 0.0:
                 # Start of EVS-specific code
                 num_tokens = compute_retained_tokens_count(
@@ -1131,7 +1130,7 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid, SupportsMultiModa
         raise AssertionError("This line should be unreachable.")
 
     def _process_image_input(
-            self, image_input: NanoNemotronVLImageInputs
+        self, image_input: NanoNemotronVLImageInputs
     ) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
@@ -1175,7 +1174,6 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid, SupportsMultiModa
         # their feature size (AKA tokens per frame))
         # TODO: Maybe this can be optimized to avoid the loop?
         for i, single_video_embeddings in enumerate(video_embeddings):
-
             num_frames = video_input["num_patches"][i].item()
             assert single_video_embeddings.shape[0] % num_frames == 0
 
@@ -1217,13 +1215,13 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid, SupportsMultiModa
     ) -> torch.Tensor:
         """Create final embeddings that combine video embeddings with
         text embeddings of indicator tokens.
-        
+
         These final embeddings contain:
         - Actual video embeddings in positions corresponding to video content
-        - Text embeddings for indicator tokens (<img>, </img>, and 
+        - Text embeddings for indicator tokens (<img>, </img>, and
           frame separation text) in their respective positions
-        
-        These embeddings will replace the placeholder embeddings to create 
+
+        These embeddings will replace the placeholder embeddings to create
         input_embeds for the LLM.
         """
         device = video_embeddings.device
@@ -1235,12 +1233,14 @@ class NemotronH_Nano_VL_V2(nn.Module, HasInnerState, IsHybrid, SupportsMultiModa
         ).full
 
         tokenizer = cached_tokenizer_from_config(self.model_config)
-        repl_token_ids = torch.tensor(_seq2tokens(tokenizer, video_repl_text),
-                                      device=device)
+        repl_token_ids = torch.tensor(
+            _seq2tokens(tokenizer, video_repl_text), device=device
+        )
 
         # Get embedding token IDs for image context
-        embed_token_ids = torch.tensor(encode_tokens(tokenizer, IMG_CONTEXT),
-                                       device=device)
+        embed_token_ids = torch.tensor(
+            encode_tokens(tokenizer, IMG_CONTEXT), device=device
+        )
 
         # Create mask for video embedding positions
         is_video_embed = torch.isin(repl_token_ids, embed_token_ids)

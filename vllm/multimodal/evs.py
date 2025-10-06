@@ -9,7 +9,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import typing
-from typing import Tuple, Union
+from typing import Union
 
 import torch
 
@@ -38,7 +38,7 @@ def compute_retained_tokens_count(
 
 def compute_retention_mask(
     video_embeds: torch.Tensor,
-    video_size_thw: Union[torch.LongTensor, Tuple[int, int, int]],
+    video_size_thw: Union[torch.LongTensor, tuple[int, int, int]],
     spatial_merge_size: int,
     q: float,
 ) -> torch.Tensor:
@@ -79,10 +79,7 @@ def compute_retention_mask(
     )
 
     dissimilarity_flat = dissimilarity.view(-1)
-    order = torch.argsort(dissimilarity_flat,
-                          dim=-1,
-                          descending=True,
-                          stable=True)
+    order = torch.argsort(dissimilarity_flat, dim=-1, descending=True, stable=True)
     retain_num_tokens = compute_retained_tokens_count(
         tokens_per_frame=tokens_per_frame, num_frames=T, q=q
     )

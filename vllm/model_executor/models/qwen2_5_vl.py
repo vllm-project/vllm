@@ -1011,13 +1011,16 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
             num_tokens = int(grid_thw.prod()) // merge_length
 
             # EVS-specific code
-            video_pruning_rate = self.info.ctx.get_mm_config(
-            ).video_pruning_rate
-            if (modality == "video" and video_pruning_rate is not None
-                    and video_pruning_rate > 0.0):
+            video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
+            if (
+                modality == "video"
+                and video_pruning_rate is not None
+                and video_pruning_rate > 0.0
+            ):
                 T, H, W = map(int, grid_thw)
                 tokens_per_frame = (H // image_processor.merge_size) * (
-                    W // image_processor.merge_size)
+                    W // image_processor.merge_size
+                )
                 num_tokens = compute_retained_tokens_count(
                     tokens_per_frame,
                     T,
