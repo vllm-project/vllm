@@ -439,13 +439,15 @@ class Siglip2Encoder(nn.Module):
                 vit_merger_window_size,
                 vit_merger_window_size,
             )
-            seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
+            if self.fullatt_block_indexes:
+                seqlens = (index_padded != -100).sum([2, 3]).reshape(-1)
             index_padded = index_padded.reshape(-1)
             index_new = index_padded[index_padded != -100]
             window_index.append(index_new + window_index_id)
-            cu_seqlens_tmp = seqlens.cumsum(
-                0) * self.spatial_merge_unit + cu_window_seqlens[-1]
-            cu_window_seqlens.extend(cu_seqlens_tmp.tolist())
+            if self.fullatt_block_indexes:
+                cu_seqlens_tmp = seqlens.cumsum(
+                    0) * self.spatial_merge_unit + cu_window_seqlens[-1]
+                cu_window_seqlens.extend(cu_seqlens_tmp.tolist())
             window_index_id += (grid_t * llm_grid_h * llm_grid_w).item()
         window_index = torch.cat(window_index, dim=0)
 
@@ -484,16 +486,13 @@ class Siglip2Encoder(nn.Module):
         def remove_duplicates_cpu(a):
             return [a[i] for i in range(len(a)) if i == 0 or a[i - 1] != a[i]]
 
-        if is_hpu:
-            cu_window_seqlens = remove_duplicates_cpu(cu_window_seqlens)
-
-        cu_window_seqlens = torch.tensor(
-            cu_window_seqlens,
-            device=inputs_embeds.device,
-            dtype=grid_thws.dtype if torch.jit.is_tracing() else torch.int32,
-        )
-        if not is_hpu:
-            cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+        if self.fullatt_block_indexes:
+            cu_window_seqlens = torch.tensor(
+                cu_window_seqlens,
+                device=inputs_embeds.device,
+                dtype=grid_thws.dtype
+                if torch.jit.is_tracing() else torch.int32,
+            )
 
         seq_len, _ = inputs_embeds.size()
         inputs_embeds = inputs_embeds.reshape(
