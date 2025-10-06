@@ -283,11 +283,13 @@ class CPUFusedMOE:
             tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
 
             layer_w13_weight = layer.w13_weight[i]
+            layer_w13_bias   = layer.w13_bias[i] if hasattr(layer, "w13_bias") else None
             layer_w2_weight = layer.w2_weight[i]
+            layer_w2_bias    = layer.w2_bias[i] if hasattr(layer, "w2_bias") else None
 
-            gate_up = F.linear(tokens_for_this_expert, layer_w13_weight)
+            gate_up = F.linear(tokens_for_this_expert, layer_w13_weight, bias=layer_w13_bias)
             gate_up = silu_and_mul(gate_up)
-            expert_out = F.linear(gate_up, layer_w2_weight)
+            expert_out = F.linear(gate_up, layer_w2_weight, bias=layer_w2_bias)
             outputs.append(expert_out)
             start_idx = end_idx
 
