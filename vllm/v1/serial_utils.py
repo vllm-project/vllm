@@ -18,8 +18,6 @@ from msgspec import msgpack
 
 from vllm import envs
 from vllm.logger import init_logger
-
-# yapf: disable
 from vllm.multimodal.inputs import (
     BaseMultiModalField,
     MultiModalBatchedField,
@@ -32,8 +30,6 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
-
-# yapf: enable
 from vllm.v1.engine import UtilityResult
 
 logger = init_logger(__name__)
