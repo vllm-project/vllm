@@ -1,19 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
+
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
 
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionMetadata,
+    AttentionType,
+)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import (AttentionCGSupport,
-                                              AttentionMetadataBuilder,
-                                              CommonAttentionMetadata)
+from vllm.v1.attention.backends.utils import (
+    AttentionCGSupport,
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 _PARTITION_SIZE_ROCM = 256
@@ -43,55 +50,63 @@ if current_platform.is_rocm():
         batch_idx = tl.program_id(0)
         block_idx = tl.program_id(1)
 
-        batch_query_indexes = tl.load(b_query_lens_loc + batch_idx +
-                                      tl.arange(0, 2))
+        batch_query_indexes = tl.load(b_query_lens_loc + batch_idx + tl.arange(0, 2))
         batch_query_start, batch_query_end = tl.split(batch_query_indexes)
         query_len = batch_query_end - batch_query_start
 
         if query_len <= 1:
             return
 
-        batch_token_indexes = tl.load(b_seq_lens_loc + batch_idx +
-                                      tl.arange(0, 2))
+        batch_token_indexes = tl.load(b_seq_lens_loc + batch_idx + tl.arange(0, 2))
         batch_token_start, batch_token_end = tl.split(batch_token_indexes)
         seq_len = batch_token_end - batch_token_start
 
         if block_idx * BLOCK_SIZE < seq_len:
-            block_mask = (block_idx * BLOCK_SIZE +
-                          tl.arange(0, BLOCK_SIZE)[:, None]) < seq_len
+            block_mask = (
+                block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[:, None]
+            ) < seq_len
 
-            kv_idx = tl.load(block_table + batch_idx * block_table_stride_0 +
-                             block_idx).to(tl.int64)
+            kv_idx = tl.load(
+                block_table + batch_idx * block_table_stride_0 + block_idx
+            ).to(tl.int64)
 
-            kv_buffer_off = kv_idx * BLOCK_SIZE * E_DIM + tl.arange(
-                0, BLOCK_SIZE)[:, None] * E_DIM + tl.arange(0, E_DIM)[None, :]
-            k_vals = tl.load(k_buffer_ptr + kv_buffer_off,
-                             mask=block_mask,
-                             other=0.0)
+            kv_buffer_off = (
+                kv_idx * BLOCK_SIZE * E_DIM
+                + tl.arange(0, BLOCK_SIZE)[:, None] * E_DIM
+                + tl.arange(0, E_DIM)[None, :]
+            )
+            k_vals = tl.load(k_buffer_ptr + kv_buffer_off, mask=block_mask, other=0.0)
             if k_vals.dtype.is_fp8():
-                k_vals = (k_vals.to(tl.float32) *
-                          tl.load(k_scale)).to(output_dtype)
+                k_vals = (k_vals.to(tl.float32) * tl.load(k_scale)).to(output_dtype)
             else:
                 k_vals = k_vals.to(output_dtype)
 
-            v_vals = tl.load(v_buffer_ptr + kv_buffer_off,
-                             mask=block_mask,
-                             other=0.0)
+            v_vals = tl.load(v_buffer_ptr + kv_buffer_off, mask=block_mask, other=0.0)
             if v_vals.dtype.is_fp8():
-                v_vals = (v_vals.to(tl.float32) *
-                          tl.load(v_scale)).to(output_dtype)
+                v_vals = (v_vals.to(tl.float32) * tl.load(v_scale)).to(output_dtype)
             else:
                 v_vals = v_vals.to(output_dtype)
-            kv_values_off = batch_token_start * E_DIM + \
-                block_idx * BLOCK_SIZE * E_DIM + \
-                tl.arange(0, BLOCK_SIZE)[:, None] * E_DIM + \
-                tl.arange(0, E_DIM)[None, :]
+            kv_values_off = (
+                batch_token_start * E_DIM
+                + block_idx * BLOCK_SIZE * E_DIM
+                + tl.arange(0, BLOCK_SIZE)[:, None] * E_DIM
+                + tl.arange(0, E_DIM)[None, :]
+            )
             tl.store(k_values_ptr + kv_values_off, k_vals, mask=block_mask)
             tl.store(v_values_ptr + kv_values_off, v_vals, mask=block_mask)
 
-    def vllm_layout_trans(b_query_lens_loc, b_seq_lens_loc, block_table,
-                          k_cache, v_cache, max_seq_len, k_scale, v_scale,
-                          output_dtype, total_tokens):
+    def vllm_layout_trans(
+        b_query_lens_loc,
+        b_seq_lens_loc,
+        block_table,
+        k_cache,
+        v_cache,
+        max_seq_len,
+        k_scale,
+        v_scale,
+        output_dtype,
+        total_tokens,
+    ):
         H_KV = v_cache.shape[2]
         D = v_cache.shape[3]
         BLOCK_SIZE = v_cache.shape[1]
@@ -107,8 +122,7 @@ if current_platform.is_rocm():
             device=v_cache.device,
         )
 
-        grid = (block_table.shape[0],
-                (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
+        grid = (block_table.shape[0], (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
 
         if output_dtype == torch.float16:
             output_dtype = tl.float16
@@ -117,19 +131,21 @@ if current_platform.is_rocm():
         else:
             raise ValueError(f"Unsupported output dtype: {output_dtype}")
 
-        _vllm_layout_trans_kernel[grid](k_cache,
-                                        v_cache,
-                                        k_values,
-                                        v_values,
-                                        b_query_lens_loc,
-                                        b_seq_lens_loc,
-                                        block_table,
-                                        block_table.stride(0),
-                                        k_scale,
-                                        v_scale,
-                                        output_dtype=output_dtype,
-                                        E_DIM=H_KV * D,
-                                        BLOCK_SIZE=BLOCK_SIZE)
+        _vllm_layout_trans_kernel[grid](
+            k_cache,
+            v_cache,
+            k_values,
+            v_values,
+            b_query_lens_loc,
+            b_seq_lens_loc,
+            block_table,
+            block_table.stride(0),
+            k_scale,
+            v_scale,
+            output_dtype=output_dtype,
+            E_DIM=H_KV * D,
+            BLOCK_SIZE=BLOCK_SIZE,
+        )
 
         return k_values, v_values
 
@@ -152,9 +168,18 @@ if current_platform.is_rocm():
     ) -> torch.Tensor:
         if total_tokens == 0:
             total_tokens = int(cu_seqlens_k[-1].item())
-        k, v = vllm_layout_trans(cu_seqlens_q, cu_seqlens_k, block_table,
-                                 k_cache, v_cache, max_seqlen_k, k_scale,
-                                 v_scale, q.dtype, total_tokens)
+        k, v = vllm_layout_trans(
+            cu_seqlens_q,
+            cu_seqlens_k,
+            block_table,
+            k_cache,
+            v_cache,
+            max_seqlen_k,
+            k_scale,
+            v_scale,
+            q.dtype,
+            total_tokens,
+        )
 
         output = aiter.flash_attn_varlen_func(
             q=q,
@@ -190,16 +215,17 @@ if current_platform.is_rocm():
         v_scale: torch.Tensor,
         total_tokens: int = 0,
     ) -> torch.Tensor:
-        return torch.empty(q.shape[0],
-                           q.shape[1],
-                           v_cache.shape[-2],
-                           dtype=q.dtype,
-                           device=q.device)
+        return torch.empty(
+            q.shape[0], q.shape[1], v_cache.shape[-2], dtype=q.dtype, device=q.device
+        )
 
-    direct_register_custom_op("flash_attn_varlen_func",
-                              flash_attn_varlen_func_impl, ["out"],
-                              flash_attn_varlen_func_fake,
-                              dispatch_key=current_platform.dispatch_key)
+    direct_register_custom_op(
+        "flash_attn_varlen_func",
+        flash_attn_varlen_func_impl,
+        ["out"],
+        flash_attn_varlen_func_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
 
 logger = init_logger(__name__)
 
@@ -231,11 +257,17 @@ class AiterFlashAttentionMetadata:
 
 
 class AiterFlashAttentionMetadataBuilder(
-        AttentionMetadataBuilder[AiterFlashAttentionMetadata]):
-    cudagraph_support = AttentionCGSupport.ALWAYS
+    AttentionMetadataBuilder[AiterFlashAttentionMetadata]
+):
+    cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
-    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
-                 vllm_config: VllmConfig, device: torch.device):
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         self.model_config = vllm_config.model_config
@@ -243,9 +275,9 @@ class AiterFlashAttentionMetadataBuilder(
         self.cache_config = vllm_config.cache_config
 
         self.num_heads_q = self.model_config.get_num_attention_heads(
-            self.parallel_config)
-        self.num_heads_kv = self.model_config.get_num_kv_heads(
-            self.parallel_config)
+            self.parallel_config
+        )
+        self.num_heads_kv = self.model_config.get_num_kv_heads(self.parallel_config)
         self.headdim = self.model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
         # Sliding window size to be used with the AOT scheduler will be
@@ -254,19 +286,22 @@ class AiterFlashAttentionMetadataBuilder(
         self.total_tokens: int = 0
 
     def build_for_cudagraph_capture(
-            self, common_attn_metadata: CommonAttentionMetadata):
-        self.total_tokens = self.model_config.max_model_len \
+        self, common_attn_metadata: CommonAttentionMetadata
+    ):
+        self.total_tokens = (
+            self.model_config.max_model_len
             * self.vllm_config.scheduler_config.max_num_partial_prefills
-        res = self.build(common_prefix_len=0,
-                         common_attn_metadata=common_attn_metadata)
+        )
+        res = self.build(common_prefix_len=0, common_attn_metadata=common_attn_metadata)
         self.total_tokens = 0
         return res
 
-    def build(self,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> 'AiterFlashAttentionMetadata':
-
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> "AiterFlashAttentionMetadata":
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
@@ -277,20 +312,18 @@ class AiterFlashAttentionMetadataBuilder(
         if max_query_len > 1:
             # We pre-compute cumulative seq len needed for prefill attention
             # here to avoid recomputing it for every layer
-            cu_seq_lens = torch.zeros(seq_lens.shape[0] + 1,
-                                      dtype=torch.int32,
-                                      device=seq_lens.device)
-            torch.cumsum(seq_lens,
-                         dim=0,
-                         dtype=cu_seq_lens.dtype,
-                         out=cu_seq_lens[1:])
+            cu_seq_lens = torch.zeros(
+                seq_lens.shape[0] + 1, dtype=torch.int32, device=seq_lens.device
+            )
+            torch.cumsum(seq_lens, dim=0, dtype=cu_seq_lens.dtype, out=cu_seq_lens[1:])
             num_actual_kv_tokens = int(cu_seq_lens[-1].item())
         else:
             cu_seq_lens = None
             num_actual_kv_tokens = 0
 
-        def schedule(batch_size, cu_query_lens, max_query_len, seqlens,
-                     max_seq_len, causal):
+        def schedule(
+            batch_size, cu_query_lens, max_query_len, seqlens, max_seq_len, causal
+        ):
             return None
 
         use_cascade = common_prefix_len > 0
@@ -316,7 +349,6 @@ class AiterFlashAttentionMetadataBuilder(
 
 
 class AiterFlashAttentionBackend(AttentionBackend):
-
     accept_output_buffer: bool = True
 
     @classmethod
@@ -336,11 +368,12 @@ class AiterFlashAttentionBackend(AttentionBackend):
                 f"Head size {head_size} is not supported by {attn_type}. "
                 f"Supported head sizes are: {supported_head_sizes}. "
                 "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes.")
+                "FlexAttention backend which supports all head sizes."
+            )
 
     @staticmethod
     def get_name() -> str:
-        return "FLASH_ATTN_VLLM_V1"
+        return "FLASH_ATTN"
 
     @staticmethod
     def get_impl_cls() -> type["AiterFlashAttentionImpl"]:
@@ -360,6 +393,7 @@ class AiterFlashAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
@@ -367,7 +401,6 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
 
 class AiterFlashAttentionImpl(AttentionImpl):
-
     def __init__(
         self,
         num_heads: int,
@@ -395,7 +428,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
-            logits_soft_cap = 0.
+            logits_soft_cap = 0.0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
@@ -405,10 +438,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
         AiterFlashAttentionBackend.validate_head_size(head_size)
 
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "FlashAttentionImpl")
+            raise NotImplementedError(
+                "Encoder self-attention and "
+                "encoder/decoder cross-attention "
+                "are not implemented for "
+                "FlashAttentionImpl"
+            )
 
     def forward(
         self,
@@ -441,8 +476,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
-                "fused output quantization is not yet supported"
-                " for FlashAttentionImpl")
+                "fused output quantization is not yet supported for FlashAttentionImpl"
+            )
 
         if attn_metadata is None:
             # Profiling run.
@@ -479,8 +514,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
             )
 
         if self.kv_cache_dtype.startswith("fp8"):
-            key_cache = key_cache.view(torch.float8_e4m3fnuz)
-            value_cache = value_cache.view(torch.float8_e4m3fnuz)
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc
@@ -511,13 +546,14 @@ class AiterFlashAttentionImpl(AttentionImpl):
             _, num_heads, head_size = query.shape
             nbytes_per_qo_elem = torch.finfo(query.dtype).bits // 8
             num_seqs = seqused_k.shape[0]
-            max_num_partitions = (max_seqlen_k + _PARTITION_SIZE_ROCM -
-                                  1) // _PARTITION_SIZE_ROCM
+            max_num_partitions = (
+                max_seqlen_k + _PARTITION_SIZE_ROCM - 1
+            ) // _PARTITION_SIZE_ROCM
 
             workspace_buffer = torch.empty(
-                (num_seqs * num_heads * max_num_partitions * head_size) *
-                nbytes_per_qo_elem + 2 *
-                (num_seqs * num_heads * max_num_partitions) * 4,
+                (num_seqs * num_heads * max_num_partitions * head_size)
+                * nbytes_per_qo_elem
+                + 2 * (num_seqs * num_heads * max_num_partitions) * 4,
                 dtype=torch.uint8,
                 device=output.device,
             )
@@ -545,4 +581,5 @@ class AiterFlashAttentionImpl(AttentionImpl):
             return output
         else:
             raise NotImplementedError(
-                "Cascade attention is not implemented for ROCM AITER")
+                "Cascade attention is not implemented for ROCM AITER"
+            )
