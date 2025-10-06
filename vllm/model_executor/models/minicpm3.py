@@ -92,7 +92,6 @@ class MiniCPM3MLP(nn.Module):
 
 
 class MiniCPM3Attention(nn.Module):
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -172,13 +171,15 @@ class MiniCPM3Attention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = Attention(self.num_local_heads,
-                              self.qk_head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_local_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+        self.attn = Attention(
+            self.num_local_heads,
+            self.qk_head_dim,
+            self.scaling,
+            num_kv_heads=self.num_local_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(self, positions: torch.Tensor,
                 hidden_states: torch.Tensor) -> torch.Tensor:
@@ -193,25 +194,26 @@ class MiniCPM3Attention(nn.Module):
         _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                           dim=-1)
         latent_cache, _ = self.kv_a_proj_with_mqa(hidden_states)
-        kv_a, _ = latent_cache.split(
-            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         latent_cache = latent_cache.unsqueeze(1)
         kv_a = self.kv_a_layernorm(kv_a.contiguous())
         kv, _ = self.kv_b_proj(kv_a)
-        kv = kv.view(-1, self.num_local_heads,
-                     self.qk_nope_head_dim + self.v_head_dim)
+        kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k_pe = latent_cache[:, :, self.kv_lora_rank:]
+
+        k_pe = latent_cache[:, :, self.kv_lora_rank :]
+
         q_pe, k_pe = self.rotary_emb(
             positions,
             q_pe.reshape(-1, self.num_local_heads * self.qk_rope_head_dim),
-            k_pe.reshape(-1, self.qk_rope_head_dim))
+            k_pe.reshape(-1, self.qk_rope_head_dim),
+        )
         q_pe = q_pe.view(-1, self.num_local_heads, self.qk_rope_head_dim)
         k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
-        q[..., self.qk_nope_head_dim:] = q_pe
+        q[..., self.qk_nope_head_dim :] = q_pe
         k = torch.empty_like(q)
         k[..., :self.qk_nope_head_dim] = k_nope
-        k[..., self.qk_nope_head_dim:] = k_pe
+        k[..., self.qk_nope_head_dim :] = k_pe
         q = q.reshape(-1, self.num_local_heads * self.qk_head_dim)
         k = k.view(-1, self.num_local_heads * self.qk_head_dim)
         v = torch.nn.functional.pad(
