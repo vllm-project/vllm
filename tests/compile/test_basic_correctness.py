@@ -144,7 +144,7 @@ def test_compile_correctness(
 
         for level in [
             CompilationMode.NO_COMPILATION,
-            CompilationMode.DYNAMO_AS_IS,
+            CompilationMode.STOCK_TORCH_COMPILE,
             CompilationMode.DYNAMO_ONCE,
             CompilationMode.PIECEWISE,
         ]:

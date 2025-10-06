@@ -233,11 +233,11 @@ def _support_torch_compile(
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
         self.vllm_config = vllm_config
         enable_compile = enable_if is None or enable_if(vllm_config)
-        # for CompilationMode.DYNAMO_AS_IS , the upper level model runner
+        # for CompilationMode.STOCK_TORCH_COMPILE , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
         self.do_not_compile = (
             vllm_config.compilation_config.level
-            in [CompilationMode.NO_COMPILATION, CompilationMode.DYNAMO_AS_IS]
+            in [CompilationMode.NO_COMPILATION, CompilationMode.STOCK_TORCH_COMPILE]
             or not supports_dynamo()
             or _should_ignore_torch_compile(self.__class__)
             or not enable_compile

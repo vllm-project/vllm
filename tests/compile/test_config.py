@@ -90,12 +90,12 @@ def test_use_cudagraphs(vllm_runner, monkeypatch, enabled):
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
-def test_dynamo_as_is(vllm_runner, monkeypatch):
+def test_stock_torch_compile(vllm_runner, monkeypatch):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     with (
-        compilation_counter.expect(dynamo_as_is_count=1),
+        compilation_counter.expect(stock_torch_compile_count=1),
         # loading the model causes compilation (if enabled) to happen
         vllm_runner(
             "facebook/opt-125m",
@@ -112,7 +112,7 @@ def test_no_compilation(vllm_runner, monkeypatch):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     with (
-        compilation_counter.expect(num_graphs_seen=0, dynamo_as_is_count=0),
+        compilation_counter.expect(num_graphs_seen=0, stock_torch_compile_count=0),
         # loading the model causes compilation (if enabled) to happen
         vllm_runner(
             "facebook/opt-125m",
@@ -130,7 +130,7 @@ def test_enforce_eager(vllm_runner, monkeypatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     with (
-        compilation_counter.expect(num_graphs_seen=0, dynamo_as_is_count=0),
+        compilation_counter.expect(num_graphs_seen=0, stock_torch_compile_count=0),
         # loading the model causes compilation (if enabled) to happen
         vllm_runner(
             "facebook/opt-125m", enforce_eager=True, gpu_memory_utilization=0.4

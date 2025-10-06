@@ -2927,11 +2927,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         if (
-            self.vllm_config.compilation_config.level == CompilationMode.DYNAMO_AS_IS
+            self.vllm_config.compilation_config.level
+            == CompilationMode.STOCK_TORCH_COMPILE
             and supports_dynamo()
         ):
             backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
-            compilation_counter.dynamo_as_is_count += 1
+            compilation_counter.stock_torch_compile_count += 1
             self.model.compile(fullgraph=True, backend=backend)
             return
         # for other compilation levels, cudagraph behavior is controlled by
