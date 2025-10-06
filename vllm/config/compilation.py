@@ -197,8 +197,8 @@ class CompilationConfig:
     distributed setting. When the compilation level is 1 or 2, the backend is
     used for the compilation directly (it sees the whole graph). When the
     compilation level is 3, the backend is used for the piecewise compilation
-    (it sees a part of the graph). The backend can not be custor for compilation
-    level 3. Furthermore, compiliation is only piecewise if splitting ops is set
+    (it sees a part of the graph). The backend can not be custom for compilation
+    level 3. Furthermore, compilation is only piecewise if splitting ops is set
     accordingly and use_inductor_cudagraphs_partition is off. Note that the
     default options for splitting ops are sufficient for piecewise compilation.
     """
