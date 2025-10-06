@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
+
 from typing import Optional
 
 import torch
@@ -9,18 +10,21 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import AttentionMetadata, AttentionType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey, kFp8StaticTensorSym)
+    QuantKey,
+    kFp8StaticTensorSym,
+)
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.rocm_attn import (RocmAttentionBackend,
-                                                  RocmAttentionImpl,
-                                                  RocmAttentionMetadata,
-                                                  RocmAttentionMetadataBuilder)
+from vllm.v1.attention.backends.rocm_attn import (
+    RocmAttentionBackend,
+    RocmAttentionImpl,
+    RocmAttentionMetadata,
+    RocmAttentionMetadataBuilder,
+)
 
 logger = init_logger(__name__)
 
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
-
     accept_output_buffer: bool = True
 
     @staticmethod
@@ -57,7 +61,6 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
 
 
 class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
-
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
 
@@ -89,8 +92,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             sinks,
         )
         logger.info_once(
-            "Using aiter unified attention for RocmAiterUnifiedAttentionImpl")
+            "Using aiter unified attention for RocmAiterUnifiedAttentionImpl"
+        )
         from aiter.ops.triton.unified_attention import unified_attention
+
         self.unified_attention = unified_attention
 
     def forward(
@@ -122,7 +127,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         if output_block_scale is not None:
             raise NotImplementedError(
                 "fused block_scale output quantization is not yet supported"
-                " for RocmAttentionImpl")
+                " for RocmAttentionImpl"
+            )
 
         if attn_metadata is None:
             # Profiling run.
@@ -160,8 +166,9 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
-            assert layer._q_scale_float == 1.0, \
+            assert layer._q_scale_float == 1.0, (
                 "A non 1.0 q_scale is not currently supported."
+            )
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
@@ -190,6 +197,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
             sinks=self.sinks,
-            output_scale=output_scale)
+            output_scale=output_scale,
+        )
 
         return output
