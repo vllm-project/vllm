@@ -626,7 +626,7 @@ class RandomDataset(BenchmarkDataset):
         # Decode, then re-encode and truncate to preserve token count invariants
         total_input_len = prefix_len + int(input_len)
         prompt, adjusted_token_sequence, token_mismatch = (
-            gen_prompt_decode_to_target_len(  # noqa: E501
+            gen_prompt_decode_to_target_len(
                 tokenizer=tokenizer,
                 token_sequence=token_sequence,
                 target_token_len=total_input_len,
@@ -2855,7 +2855,7 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
             for _ in range(prompts_per_prefix):
                 suffix_tokens, token_mistmatch = _generate_exact_length_tokens(
                     suffix_len
-                )  # noqa: E501
+                )
                 token_mismatch_total += token_mistmatch
                 combined_tokens = prefix_tokens + suffix_tokens
                 prompt = tokenizer.decode(combined_tokens)
