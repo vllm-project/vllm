@@ -25,6 +25,7 @@ from .qwen3xml_tool_parser import Qwen3XMLToolParser
 from .seed_oss_tool_parser import SeedOssToolParser
 from .step3_tool_parser import Step3ToolParser
 from .xlam_tool_parser import xLAMToolParser
+from .apertus_tool_parser import ApertusToolParser
 
 __all__ = [
     "ToolParser",
@@ -52,4 +53,5 @@ __all__ = [
     "SeedOssToolParser",
     "Step3ToolParser",
     "OpenAIToolParser",
+    "ApertusToolParser",
 ]
