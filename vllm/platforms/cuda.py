@@ -480,8 +480,9 @@ class CudaPlatformBase(Platform):
     @classmethod
     def graph_pool_handle(cls):
         """
-        Override to use CuMemAllocator's custom graph pool when sleep mode is enabled.
-        This allows CUDA graphs to be offloaded to CPU during sleep and restored during wake up.
+        Override to use CuMemAllocator's custom graph pool when sleep mode is
+        enabled. This allows graphs to be offloaded during sleep and restored
+        during wake up.
         """
         try:
             from vllm.config import get_current_vllm_config
@@ -489,7 +490,6 @@ class CudaPlatformBase(Platform):
 
             vllm_config = get_current_vllm_config()
 
-            # Check for complete config initialization (fixes race condition)
             if (vllm_config and
                 vllm_config.model_config and
                 hasattr(vllm_config.model_config, 'enable_sleep_mode') and
@@ -500,12 +500,14 @@ class CudaPlatformBase(Platform):
                 allocator = CuMemAllocator.get_instance()
                 return allocator.get_graph_pool_handle()
             else:
-                # Enhanced logging for debugging
                 config_status = "None" if not vllm_config else "available"
-                model_config_status = "None" if not (vllm_config and vllm_config.model_config) else "available"
+                model_config_status = "None"
                 sleep_mode_status = "unknown"
+                if vllm_config and vllm_config.model_config:
+                    model_config_status = "available"
 
-                if vllm_config and vllm_config.model_config and hasattr(vllm_config.model_config, 'enable_sleep_mode'):
+                if (vllm_config and vllm_config.model_config
+                        and hasattr(vllm_config.model_config, 'enable_sleep_mode'):
                     sleep_mode_status = str(vllm_config.model_config.enable_sleep_mode)
 
                 logger.debug("CUDA Platform: Using native PyTorch graph pool "

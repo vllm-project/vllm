@@ -445,7 +445,8 @@ class CuMemAllocator:
 
         # Restore model CUDA graphs using clean interfaces
         model = model_runner.model
-        if hasattr(model, 'exit_sleep_mode') and "model" in self._sleep_saved_cudagraphs:
+        if (hasattr(model, 'exit_sleep_mode')
+                and "model" in self._sleep_saved_cudagraphs):
             cuda_graph_count += model.exit_sleep_mode(
                 self._sleep_saved_cudagraphs["model"]
             )
