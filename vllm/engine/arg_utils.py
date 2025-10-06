@@ -34,6 +34,7 @@ from typing_extensions import TypeIs, deprecated
 import vllm.envs as envs
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     CompilationConfig,
     ConfigType,
@@ -543,6 +544,7 @@ class EngineArgs:
     )
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str = ModelConfig.override_attention_dtype
+    attention_backend: Optional[str] = AttentionConfig.backend
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
@@ -709,6 +711,20 @@ class EngineArgs:
         load_group.add_argument("--use-tqdm-on-load", **load_kwargs["use_tqdm_on_load"])
         load_group.add_argument(
             "--pt-load-map-location", **load_kwargs["pt_load_map_location"]
+        )
+
+        # Attention arguments
+        attention_group = parser.add_argument_group(
+            title="AttentionConfig",
+            description=AttentionConfig.__doc__,
+        )
+        attention_group.add_argument(
+            "--attention-backend",
+            type=str,
+            default=EngineArgs.attention_backend,
+            help="Attention backend to use. If not specified, will be selected "
+            "automatically. Example options: TORCH_SDPA, FLASH_ATTN, XFORMERS, "
+            "FLASHINFER, FLASHMLA, etc.",
         )
 
         # Structured outputs arguments
@@ -1334,6 +1350,21 @@ class EngineArgs:
         )
         return SpeculativeConfig(**self.speculative_config)
 
+    def create_attention_config(self) -> AttentionConfig:
+        """Create attention configuration."""
+        return AttentionConfig(
+            backend=self.attention_backend,
+            use_triton_flash_attn=envs.VLLM_USE_TRITON_FLASH_ATTN,
+            flash_attn_version=envs.VLLM_FLASH_ATTN_VERSION,
+            v1_use_prefill_decode_attention=envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION,
+            use_aiter_unified_attention=envs.VLLM_USE_AITER_UNIFIED_ATTENTION,
+            flash_attn_max_num_splits_for_cuda_graph=envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH,
+            use_cudnn_prefill=envs.VLLM_USE_CUDNN_PREFILL,
+            use_trtllm_attention=envs.VLLM_USE_TRTLLM_ATTENTION,
+            disable_flashinfer_prefill=envs.VLLM_DISABLE_FLASHINFER_PREFILL,
+            flashinfer_disable_q_quantization=envs.VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION,
+        )
+
     def create_engine_config(
         self,
         usage_context: UsageContext | None = None,
@@ -1707,6 +1738,8 @@ class EngineArgs:
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":
             self.quantization = self.load_format = "bitsandbytes"
+        
+        attention_config = self.create_attention_config()
 
         load_config = self.create_load_config()
 
@@ -1777,9 +1810,10 @@ class EngineArgs:
             parallel_config=parallel_config,
             scheduler_config=scheduler_config,
             device_config=device_config,
+            load_config=load_config,
+            attention_config=attention_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
-            load_config=load_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
             compilation_config=compilation_config,
