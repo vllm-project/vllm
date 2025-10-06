@@ -45,14 +45,17 @@ class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
             current_token_ids,
             delta_token_ids,
         )
-        if (ret is not None and self.start_token_id not in previous_token_ids
-                and self.start_token_id not in delta_token_ids):
+        if (
+            ret is not None
+            and self.start_token_id not in previous_token_ids
+            and self.start_token_id not in delta_token_ids
+        ):
             if self.end_token_id in delta_token_ids:
                 # end token in delta with more tokens,
                 # extract reasoning content and content
                 end_index = delta_text.find(self.end_token)
                 reasoning_content = delta_text[:end_index]
-                content = delta_text[end_index + len(self.end_token):]
+                content = delta_text[end_index + len(self.end_token) :]
                 return DeltaMessage(
                     reasoning_content=reasoning_content,
                     content=content if content else None,

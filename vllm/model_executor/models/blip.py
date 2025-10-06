@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Minimal implementation of BlipVisionModel intended to be only used 
+"""Minimal implementation of BlipVisionModel intended to be only used
 within a vision language model."""
+
 from collections.abc import Iterable
 from typing import Optional, Union
 
@@ -12,9 +13,11 @@ from transformers import Blip2VisionConfig, BlipVisionConfig
 from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
@@ -27,14 +30,14 @@ def get_blip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
 
 
 def get_blip_num_patches(*, image_size: int, patch_size: int) -> int:
-    grid_length = get_blip_patch_grid_length(image_size=image_size,
-                                             patch_size=patch_size)
+    grid_length = get_blip_patch_grid_length(
+        image_size=image_size, patch_size=patch_size
+    )
     return grid_length * grid_length
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/blip/modeling_blip.py#L164 # noqa
 class BlipVisionEmbeddings(nn.Module):
-
     def __init__(self, config: Union[BlipVisionConfig, Blip2VisionConfig]):
         super().__init__()
 
@@ -52,25 +55,28 @@ class BlipVisionEmbeddings(nn.Module):
             stride=self.patch_size,
         )
 
-        self.num_patches = get_blip_num_patches(image_size=self.image_size,
-                                                patch_size=self.patch_size)
+        self.num_patches = get_blip_num_patches(
+            image_size=self.image_size, patch_size=self.patch_size
+        )
         self.num_positions = self.num_patches + 1
 
         self.position_embedding = nn.Parameter(
-            torch.randn(1, self.num_positions, self.embed_dim))
+            torch.randn(1, self.num_positions, self.embed_dim)
+        )
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         batch_size = pixel_values.shape[0]
         target_dtype = self.patch_embedding.weight.dtype
-        patch_embeds = self.patch_embedding(pixel_values.to(
-            dtype=target_dtype))  # shape = [*, width, grid, grid]
+        patch_embeds = self.patch_embedding(
+            pixel_values.to(dtype=target_dtype)
+        )  # shape = [*, width, grid, grid]
         patch_embeds = patch_embeds.flatten(2).transpose(1, 2)
 
         class_embeds = self.class_embedding.expand(batch_size, 1, -1)
         embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
 
         position_embeds = self.position_embedding.to(target_dtype)
-        embeddings = embeddings + position_embeds[:, :embeddings.size(1), :]
+        embeddings = embeddings + position_embeds[:, : embeddings.size(1), :]
 
         return embeddings
 
@@ -93,7 +99,8 @@ class BlipAttention(nn.Module):
             raise ValueError(
                 "embed_dim must be divisible by num_heads "
                 f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {self.num_heads}).")
+                f" {self.num_heads})."
+            )
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
 
@@ -115,12 +122,16 @@ class BlipAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn = MultiHeadAttention(self.num_heads_per_partition,
-                                       self.head_dim, self.scale)
+        self.attn = MultiHeadAttention(
+            self.num_heads_per_partition, self.head_dim, self.scale
+        )
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads,
-                           self.head_dim).transpose(1, 2).contiguous()
+        return (
+            tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
 
     def forward(
         self,
@@ -137,7 +148,6 @@ class BlipAttention(nn.Module):
 
 
 class BlipMLP(nn.Module):
-
     def __init__(
         self,
         config: BlipVisionConfig,
@@ -149,16 +159,20 @@ class BlipMLP(nn.Module):
         self.config = config
 
         self.activation_fn = get_act_fn(config.hidden_act)
-        self.fc1 = ColumnParallelLinear(config.hidden_size,
-                                        config.intermediate_size,
-                                        bias=True,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.fc1")
-        self.fc2 = RowParallelLinear(config.intermediate_size,
-                                     config.hidden_size,
-                                     bias=True,
-                                     quant_config=quant_config,
-                                     prefix=f"{prefix}.fc2")
+        self.fc1 = ColumnParallelLinear(
+            config.hidden_size,
+            config.intermediate_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.fc1",
+        )
+        self.fc2 = RowParallelLinear(
+            config.intermediate_size,
+            config.hidden_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.fc2",
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc1(hidden_states)
@@ -169,7 +183,6 @@ class BlipMLP(nn.Module):
 
 
 class BlipEncoderLayer(nn.Module):
-
     def __init__(
         self,
         config: BlipVisionConfig,
@@ -184,13 +197,9 @@ class BlipEncoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-        self.layer_norm1 = nn.LayerNorm(config.hidden_size,
-                                        eps=config.layer_norm_eps)
-        self.mlp = BlipMLP(config,
-                           quant_config=quant_config,
-                           prefix=f"{prefix}.mlp")
-        self.layer_norm2 = nn.LayerNorm(config.hidden_size,
-                                        eps=config.layer_norm_eps)
+        self.layer_norm1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.mlp = BlipMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
+        self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         residual = hidden_states
@@ -209,7 +218,7 @@ class BlipEncoderLayer(nn.Module):
 
 class BlipEncoder(nn.Module):
     """
-    Transformer encoder consisting of `config.num_hidden_layers` self 
+    Transformer encoder consisting of `config.num_hidden_layers` self
     attention layers. Each layer is a [`BlipEncoderLayer`].
 
     Args:
@@ -232,12 +241,16 @@ class BlipEncoder(nn.Module):
         else:
             num_hidden_layers = num_hidden_layers_override
 
-        self.layers = nn.ModuleList([
-            BlipEncoderLayer(config=config,
-                             quant_config=quant_config,
-                             prefix=f"{prefix}.layers.{layer_idx}")
-            for layer_idx in range(num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                BlipEncoderLayer(
+                    config=config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.layers.{layer_idx}",
+                )
+                for layer_idx in range(num_hidden_layers)
+            ]
+        )
 
     def forward(self, inputs_embeds: torch.Tensor):
         hidden_states = inputs_embeds
@@ -284,8 +297,9 @@ class BlipVisionModel(nn.Module, SupportsQuant):
             require_post_norm = len(self.encoder.layers) == num_hidden_layers
 
         if require_post_norm:
-            self.post_layernorm = nn.LayerNorm(config.hidden_size,
-                                               eps=config.layer_norm_eps)
+            self.post_layernorm = nn.LayerNorm(
+                config.hidden_size, eps=config.layer_norm_eps
+            )
         else:
             self.post_layernorm = None
 
@@ -298,8 +312,7 @@ class BlipVisionModel(nn.Module, SupportsQuant):
 
         return self.post_layernorm(hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -312,8 +325,7 @@ class BlipVisionModel(nn.Module, SupportsQuant):
 
         for name, loaded_weight in weights:
             # post_layernorm is not needed in BlipVisionModel
-            if (name.startswith("post_layernorm")
-                    and self.post_layernorm is None):
+            if name.startswith("post_layernorm") and self.post_layernorm is None:
                 continue
 
             # omit layers when num_hidden_layers_override is set
@@ -322,7 +334,7 @@ class BlipVisionModel(nn.Module, SupportsQuant):
                 if layer_idx >= layer_count:
                     continue
 
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -332,8 +344,7 @@ class BlipVisionModel(nn.Module, SupportsQuant):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
