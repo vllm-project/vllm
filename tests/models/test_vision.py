@@ -16,9 +16,11 @@ from vllm.model_executor.models.vision import (
 from vllm.platforms import current_platform
 from vllm.utils import get_open_port, update_environment_variables
 
+pytestmark = pytest.mark.cpu_test
+
 
 @pytest.mark.parametrize(
-    ("feature_sample_layers", "num_layers_loaded", "max_possible_layers",
+    ("select_layers", "num_layers_loaded", "max_possible_layers",
      "expected_features"),
     [
         # All layers loaded
@@ -28,8 +30,8 @@ from vllm.utils import get_open_port, update_environment_variables
         ([1, 10], 10, 20, [1, 10]),
         ([-20, -11], 10, 20, [1, 10]),
     ])
-def test_resolve_visual_encoder_outputs(feature_sample_layers,
-                                        num_layers_loaded, max_possible_layers,
+def test_resolve_visual_encoder_outputs(select_layers, num_layers_loaded,
+                                        max_possible_layers,
                                         expected_features):
     """
     Test that offsets are correctly handled for vision feature layers.
@@ -39,9 +41,10 @@ def test_resolve_visual_encoder_outputs(feature_sample_layers,
     ]
     output_tensor = resolve_visual_encoder_outputs(
         encoder_outputs=encoder_outputs,
-        feature_sample_layers=feature_sample_layers,
         post_layer_norm=None,
-        max_possible_layers=max_possible_layers)
+        select_layers=select_layers,
+        max_possible_layers=max_possible_layers,
+    )
     assert torch.equal(torch.tensor(expected_features), output_tensor)
 
 

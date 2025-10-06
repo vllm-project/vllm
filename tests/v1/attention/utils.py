@@ -8,10 +8,11 @@ from typing import Optional, Union
 import pytest
 import torch
 
+from vllm.attention.backends.registry import _Backend
 from vllm.config import (CacheConfig, CompilationConfig, DeviceConfig,
                          LoadConfig, ModelConfig, ModelDType, ParallelConfig,
                          SchedulerConfig, VllmConfig)
-from vllm.platforms import _Backend, current_platform
+from vllm.platforms import current_platform
 from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -168,7 +169,6 @@ def create_standard_kv_cache_spec(
             vllm_config.parallel_config),
         head_size=vllm_config.model_config.get_head_size(),
         dtype=vllm_config.model_config.dtype,
-        use_mla=vllm_config.model_config.use_mla,
         sliding_window=vllm_config.model_config.get_sliding_window(),
     )
 
