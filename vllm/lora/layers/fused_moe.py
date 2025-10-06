@@ -14,7 +14,8 @@ from vllm.distributed.parallel_state import (
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig, _get_config_dtype_str
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEQuantConfig,
+                                                         _get_config_dtype_str)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     modular_triton_fused_moe, try_get_optimal_moe_config)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
@@ -57,6 +58,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         def act_decorator(layer, func):
 
             def wrapper(*args, **kwargs):
+                _, output, input = args
+
                 hidden_states = layer._lora["hidden_states"]
                 topk_weights = layer._lora["topk_weights"]
                 curr_topk_ids = layer._lora["topk_ids"]
@@ -67,10 +70,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                  _) = layer.punica_wrapper.token_mapping_meta.meta_args(
                      hidden_states.size(0))
                 config_dtype = _get_config_dtype_str(use_fp8_w8a8=False,
-                                                    use_int8_w8a16=False,
-                                                    use_int4_w4a16=False,
-                                                    use_mxfp4_w4a4=False,
-                                                    dtype=hidden_states.dtype)
+                                                     use_int8_w8a16=False,
+                                                     use_int4_w4a16=False,
+                                                     use_mxfp4_w4a4=False,
+                                                     dtype=hidden_states.dtype)
                 CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
                 num_tokens = hidden_states.size(0)
                 M = min(num_tokens, CHUNK_SIZE)
@@ -110,7 +113,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     curr_topk_ids.shape[-1], -1)
 
                 layer.punica_wrapper.add_lora_fused_moe(
-                    args[2].view(-1, top_k, args[2].shape[-1]),
+                    input.view(-1, top_k, input.shape[-1]),
                     hidden_states,
                     w13_lora_a_stacked,
                     w13_lora_b_stacked,
@@ -125,7 +128,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
                 result = func(*args, **kwargs)
 
-                layer._lora["intermediate_cache2"] = args[1]
+                layer._lora["intermediate_cache2"] = output
                 return result
 
             return wrapper
@@ -139,10 +142,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 curr_topk_ids = layer._lora["topk_ids"]
 
                 config_dtype = _get_config_dtype_str(use_fp8_w8a8=False,
-                                                    use_int8_w8a16=False,
-                                                    use_int4_w4a16=False,
-                                                    use_mxfp4_w4a4=False,
-                                                    dtype=hidden_states.dtype)
+                                                     use_int8_w8a16=False,
+                                                     use_int4_w4a16=False,
+                                                     use_mxfp4_w4a4=False,
+                                                     dtype=hidden_states.dtype)
                 CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
                 num_tokens = hidden_states.size(0)
                 M = min(num_tokens, CHUNK_SIZE)
