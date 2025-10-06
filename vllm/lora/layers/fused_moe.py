@@ -338,9 +338,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 start_idx = self.tp_rank * shard_size
                 end_idx = (self.tp_rank + 1) * shard_size
 
-                w1_lora_b = w1_lora_b[:, start_idx:end_idx]
-                w3_lora_b = w3_lora_b[:, start_idx:end_idx]
-                w2_lora_a = w2_lora_a[start_idx:end_idx, :]
+                w1_lora_b = w1_lora_b[start_idx:end_idx,:]
+                w3_lora_b = w3_lora_b[start_idx:end_idx,:]
+                w2_lora_a = w2_lora_a[:,start_idx:end_idx]
 
             self.w1_lora_a_stacked[
                 index, eid, :w1_lora_a.shape[0], :w1_lora_a.shape[1]].copy_(
