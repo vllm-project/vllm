@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import CompilationLevel, VllmConfig, get_layers_from_vllm_config
+from vllm.config import CompilationMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -82,7 +82,7 @@ class EagleProposer:
 
         self.use_cuda_graph = (
             not current_platform.is_xpu()
-            and self.vllm_config.compilation_config.level == CompilationLevel.PIECEWISE
+            and self.vllm_config.compilation_config.level == CompilationMode.PIECEWISE
             and not self.vllm_config.model_config.enforce_eager
             and not self.speculative_config.enforce_eager
         )

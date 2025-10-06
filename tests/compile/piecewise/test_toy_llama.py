@@ -20,7 +20,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     set_current_vllm_config,
@@ -262,7 +262,7 @@ def run_model(
 ) -> torch.Tensor:
     if use_compile:
         compilation_config = CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            level=CompilationMode.PIECEWISE,
             use_cudagraph=True,
             backend=backend,
             cudagraph_capture_sizes=[1, 2],
@@ -272,7 +272,7 @@ def run_model(
         cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
     else:
         compilation_config = CompilationConfig(
-            level=CompilationLevel.NO_COMPILATION,
+            level=CompilationMode.NO_COMPILATION,
         )
         cudagraph_runtime_mode = CUDAGraphMode.NONE
 
@@ -427,14 +427,14 @@ def benchmark():
     for piecewise in [False, True]:
         if piecewise:
             compilation_config = CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                level=CompilationMode.PIECEWISE,
                 use_cudagraph=True,
                 splitting_ops=["silly.attention"],
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
         else:
             compilation_config = CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
+                level=CompilationMode.PIECEWISE,
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
 

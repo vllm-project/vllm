@@ -10,7 +10,7 @@ from typing import Callable, Optional
 
 import torch
 
-from vllm.config import CompilationLevel, CUDAGraphMode, get_current_vllm_config
+from vllm.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -58,7 +58,7 @@ class TorchCompileWrapperWithCustomDispatcher:
         # subclasses can use this to switch between the custom dispatcher
         # and the default Dynamo guard mechanism.
         self.use_custom_dispatcher: bool = (
-            compilation_level >= CompilationLevel.DYNAMO_ONCE
+            compilation_level >= CompilationMode.DYNAMO_ONCE
         )
 
     def __call__(self, *args, **kwargs):
