@@ -81,7 +81,7 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
 
 @pytest.mark.parametrize(
     "optimization_level",
-    [CompilationMode.DYNAMO_ONCE, CompilationMode.PIECEWISE],
+    [CompilationMode.DYNAMO_TRACE_ONCE, CompilationMode.PIECEWISE],
 )
 @pytest.mark.parametrize("model_info", models_list(all=True))
 @create_new_process_for_each_test()

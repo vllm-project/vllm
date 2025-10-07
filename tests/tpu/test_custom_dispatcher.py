@@ -21,7 +21,7 @@ def test_custom_dispatcher(monkeypatch: pytest.MonkeyPatch):
                 "--max-model-len=256",
                 "--max-num-seqs=32",
                 "--enforce-eager",
-                f"-O{CompilationMode.DYNAMO_ONCE}",
+                f"-O{CompilationMode.DYNAMO_TRACE_ONCE}",
             ],
             arg2=[
                 "--max-model-len=256",

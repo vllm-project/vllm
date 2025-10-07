@@ -265,7 +265,7 @@ class CpuPlatform(Platform):
             else:
                 backend = "inductor"
 
-            compilation_config.level = CompilationMode.DYNAMO_ONCE
+            compilation_config.level = CompilationMode.DYNAMO_TRACE_ONCE
             compilation_config.backend = backend
             compilation_config.inductor_compile_config.update(
                 {
