@@ -648,6 +648,8 @@ def unified_attention(
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict) and layer_name in attn_metadata:
         attn_metadata = attn_metadata[layer_name]
+    else:
+        attn_metadata = None
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     output = self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
@@ -731,6 +733,8 @@ def unified_attention_with_output(
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict) and layer_name in attn_metadata:
         attn_metadata = attn_metadata[layer_name]
+    else:
+        attn_metadata = None
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     if self.attn_backend.include_kv_cache:
