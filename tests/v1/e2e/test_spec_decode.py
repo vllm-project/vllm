@@ -301,7 +301,6 @@ def test_mtp_correctness(
     model_setup: (method, model_name, tp_size)
     """
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
         m.setenv("VLLM_MLA_DISABLE", "1")
 
         method, model_name, tp_size = model_setup
