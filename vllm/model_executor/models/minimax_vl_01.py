@@ -32,7 +32,6 @@ from .pixtral import PixtralHFVisionModel
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
-    flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -180,6 +179,8 @@ class MiniMaxVL01MultiModalProcessor(
     dummy_inputs=MiniMaxVL01DummyInputsBuilder,
 )
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -338,32 +339,16 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             return None
 
         if pixel_values is not None and image_sizes is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError(
-                    f"Incorrect type of pixel values. Got type: {type(pixel_values)}"
-                )
-
-            if not isinstance(image_sizes, (torch.Tensor, list)):
-                raise ValueError(
-                    f"Incorrect type of image sizes. Got type: {type(image_sizes)}"
-                )
-
             return MiniMaxVL01ImagePixelInputs(
                 type="pixel_values",
-                pixel_values=flatten_bn(pixel_values),
-                image_sizes=flatten_bn(image_sizes, concat=True),
+                pixel_values=pixel_values,
+                image_sizes=image_sizes,
             )
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError(
-                    "Incorrect type of image embeddings. "
-                    f"Got type: {type(image_embeds)}"
-                )
-
             return MiniMaxVL01ImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds, concat=True),
+                data=image_embeds,
             )
 
         raise AssertionError("This line should be unreachable.")
