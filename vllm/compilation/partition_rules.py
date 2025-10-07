@@ -13,24 +13,21 @@ logger = init_logger(__name__)
 
 
 def _resolve_operator_overload(op_name: str):
-    """Resolve vLLM operator name to torch.ops OpOverload.
+    """Resolve operator name to torch.ops OpOverload.
 
     Uses PyTorch's lookup_op utility.
-    Example: "aten.addmm.default" -> torch.ops.aten.addmm.default
+    
+    Args:
+        op_name: Operator name in PyTorch format "namespace::name.overload"
+                 Example: "aten::addmm.default"
+    
+    Returns:
+        torch.ops OpOverload object
     """
-    if "." not in op_name:
-        raise ValueError(f"Invalid operator name: {op_name}")
-
-    # Convert vLLM format to PyTorch format (only first dot)
-    # "aten.addmm.default" -> "aten::addmm.default"
-    namespace, rest = op_name.split(".", 1)
-    pytorch_qualname = f"{namespace}::{rest}"
-
-    # Use PyTorch's official lookup_op
     try:
-        return lookup_op(pytorch_qualname)
+        return lookup_op(op_name)
     except Exception as exc:
-        raise ValueError(f"Failed to resolve operator '{op_name}': {exc}") from exc
+        raise ValueError(f"Failed to resolve operator '{op_name}'") from exc
 
 
 @contextlib.contextmanager
