@@ -486,13 +486,13 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
             return OvisImagePatchInputs(
                 type="image_patches",
-                flat_data=pixel_values,
+                flat_data=flatten_bn(pixel_values, concat=True),
                 patches_per_image=[
                     x.shape[0] // (self.config.vit_config.hidden_stride**2)
-                    for x in flatten_bn(pixel_values)
+                    for x in pixel_values
                 ],
-                indicator_tokens=indicator_tokens,
-                grids=grids,
+                indicator_tokens=flatten_bn(indicator_tokens, concat=True),
+                grids=flatten_bn(grids, concat=True),
             )
 
         raise AssertionError("This line should be unreachable.")
