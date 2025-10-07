@@ -155,7 +155,8 @@ Known issues:
       when tools are provided, that results in much better reliability when working with parallel tool calling.
 
 Recommended flags:
-1. To use [`mistral-common`](https://github.com/mistralai/mistral-common) the official Mistral tokenization backend :
+
+1. To use [mistral-common](https://github.com/mistralai/mistral-common) the official Mistral tokenization backend:
 
     `--tokenizer_mode mistral --config_format mistral --load_format mistral --tool-call-parser mistral`
 
