@@ -3354,15 +3354,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if ubatch_slices is not None:
                 attn_metadata = [dict() for _ in range(len(ubatch_slices))]
 
+            seq_lens: Union[list[int], int] = max_num_scheduled_tokens
             if create_mixed_batch:
                 # In the mixed batch mode (used for FI warmup), we use
                 # shorter sequence lengths to run faster.
                 # TODO(luka) better system for describing dummy batches
-                seq_lens: Union[list[int], int] = [1] * num_decode_tokens + [
-                    num_prefill_tokens + 1
-                ]
-            else:
-                seq_lens = max_num_scheduled_tokens
+                seq_lens = [1] * num_decode_tokens + [num_prefill_tokens + 1]
             self.seq_lens.np[:num_reqs] = seq_lens
             self.seq_lens.np[num_reqs:] = 0
             self.seq_lens.copy_to_gpu()
