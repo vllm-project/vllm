@@ -1018,6 +1018,8 @@ class EagleProposer:
         self,
         num_tokens: int,
     ) -> None:
+        # FIXME: when using tree-based specdec, adjust number of forward-passes
+        # according to the depth of the tree.
         for _ in range(self.num_speculative_tokens):
             with set_forward_context(None, self.vllm_config, num_tokens=num_tokens):
                 if self.supports_mm_inputs:
