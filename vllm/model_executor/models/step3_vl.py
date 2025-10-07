@@ -66,9 +66,6 @@ class Step3VLImagePixelInputs(TensorSchema):
         - bnp: Batch size * number of images * number of patches
         - hp: Height of patch
         - wp: Width of patch
-
-    Note that `num_patches` may be different per batch and image,
-    in which case the data is passed as a list instead of a batched tensor.
     """
 
     type: Literal["pixel_values"]
