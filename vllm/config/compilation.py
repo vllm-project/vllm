@@ -719,15 +719,25 @@ class CompilationConfig:
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.enable_attn_fusion
-        if not self.splitting_ops:
-            self.splitting_ops = list(self._attention_ops)
-        else:
-            # Validate that attention ops are not in user-provided splitting_ops
-            if self.splitting_ops_contain_attention():
-                raise ValueError(
-                    "attention ops should not be in splitting_ops "
-                    "when enable_attn_fusion is True"
-                )
+        # For dynamo-partition (non-inductor) attention fusion,
+        # set splitting_ops to empty to avoid splitting at attention ops
+        self.splitting_ops = []
+        if self.cudagraph_mode.has_piecewise_cudagraphs():
+            logger.warning_once(
+                "enable_attn_fusion is incompatible with piecewise "
+                "cudagraph when use_inductor_graph_partition is off. "
+                "In this case, splitting_ops will be set to empty "
+                "list, and cudagraph_mode will be set to FULL. "
+                "Please ensure you are using attention backends that "
+                "support cudagraph or set cudagraph_mode to NONE "
+                "explicitly if encountering any problems."
+            )
+            self.cudagraph_mode = CUDAGraphMode.FULL
+
+        assert not self.splitting_ops_contain_attention(), (
+            "attention ops should not be in splitting_ops "
+            "when enable_attn_fusion is True"
+        )
 
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and any(
