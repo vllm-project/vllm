@@ -1549,8 +1549,7 @@ class FusedMoE(CustomOp):
 
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
-        expert_id = self._map_global_expert_id_to_local_expert_id(
-            global_expert_id)
+        expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
         is_modeloptnvfp4 = quant_method_name == "ModelOptNvFp4FusedMoE"
         is_input_scale = "input_scale" in weight_name
         if expert_id == -1 and not (is_modeloptnvfp4 and is_input_scale):
@@ -1644,7 +1643,8 @@ class FusedMoE(CustomOp):
             self._load_single_value(
                 param=param,
                 loaded_weight=loaded_weight,
-                expert_id=global_expert_id if is_modeloptnvfp4 else expert_id)
+                expert_id=global_expert_id if is_modeloptnvfp4 else expert_id,
+            )
             return True if return_success else None
 
         # Case g_idx
