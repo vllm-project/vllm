@@ -222,6 +222,74 @@ def test_reload_weights():
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+def test_update_weights():
+    """This is testing the RL update weights API from verl:
+    https://github.com/volcengine/verl/blob/e3b77a6e193b3bd31429910e03c7788fea3db353/verl/workers/rollout/vllm_rollout/vllm_rollout_spmd.py#L482-L484
+    """
+    import json
+
+    from torchao.core.config import config_to_dict
+    from torchao.quantization import Float8DynamicActivationFloat8WeightConfig, PerRow
+
+    from vllm import LLM, SamplingParams
+
+    torchao_quant_config = Float8DynamicActivationFloat8WeightConfig(
+        granularity=PerRow()
+    )
+
+    hf_overrides = {
+        "quantization_config_dict_json": json.dumps(
+            config_to_dict(torchao_quant_config)
+        )
+    }
+
+    llm = LLM(
+        model="Qwen/Qwen3-0.6B",
+        dtype="bfloat16",
+        load_format="dummy",
+        enforce_eager=True,
+        quantization="torchao",
+        hf_overrides=hf_overrides,
+    )
+    # Update load format from `dummy` to `auto`
+    llm.collective_rpc(
+        "update_config", args=({"load_config": {"load_format": "auto"}},)
+    )
+    # Now reload real weights inplace
+    llm.collective_rpc("reload_weights")
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+    # model load weights
+    # from transformers import AutoModelForCausalLM
+
+    # hf_model = AutoModelForCausalLM.from_pretrained(
+    #     "Qwen/Qwen3-0.6B", dtype=torch.bfloat16
+    # )
+    # weight = hf_model.model.layers[0].self_attn.o_proj.weight
+    # changed_weight = weight + 0.0001
+    # weights = {"model.layers.0.self_attn.o_proj.weight": changed_weight}
+    # TODO: call model.load_weights from LLM?
+
+    # Create a sampling params object.
+    sampling_params = SamplingParams(temperature=0, top_p=0.95)
+    outputs = llm.generate(prompts, sampling_params)
+    # make sure it runs
+    for output in outputs:
+        generated_text = output.outputs[0].text
+        assert generated_text
+        # can also uncomment locally to make sure the generated
+        # output makes sense
+        # prompt = output.prompt
+        # print(f"Prompt:    {prompt!r}")
+        # print(f"Output:    {generated_text!r}")
+        # print("-" * 60)
+
+
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
 @pytest.mark.skip(
     reason="since torchao nightly is only compatible with torch nightly"
     "currently https://github.com/pytorch/ao/issues/2919, we'll have to skip "
