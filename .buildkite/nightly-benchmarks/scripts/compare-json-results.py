@@ -110,7 +110,10 @@ def compare_data_columns(
         if len(compare_frames) >= 2:
             base = compare_frames[0]
             current = compare_frames[-1]
-            ratio = current / base
+            if "P99" in data_column or "Median" in data_column:
+                ratio = base / current  # for latency
+            else:
+                ratio = current / base
             ratio = ratio.mask(base == 0)  # avoid inf when baseline is 0
             ratio.name = f"Ratio 1 vs {len(compare_frames)}"
             frames.append(ratio)
@@ -406,7 +409,7 @@ if __name__ == "__main__":
 
                 text_file.write(html_msgs_for_data_cols[i])
                 text_file.write(html)
-                with open(group_html_name, "a") as sub_text_file:
+                with open(group_html_name, "a+") as sub_text_file:
                     sub_text_file.write(html_msgs_for_data_cols[i])
                     sub_text_file.write(html)
 
