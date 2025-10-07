@@ -33,3 +33,20 @@ def apply_bad_words(
 ) -> None:
     for i, bad_words_ids in bad_words_token_ids.items():
         _apply_bad_words_single_batch(logits[i], bad_words_ids, past_tokens_ids[i])
+
+
+def apply_bad_words_with_drafts(
+    logits: torch.Tensor,
+    bad_words_token_ids: dict[int, list[list[int]]],
+    past_tokens_ids: list[list[int]],
+    num_draft_tokens: list[int],
+) -> None:
+    start_idx = 0
+    for i, bad_words_ids in bad_words_token_ids.items():
+        for draft_idx in range(num_draft_tokens[i]):
+            _apply_bad_words_single_batch(
+                logits[start_idx + draft_idx],
+                bad_words_ids,
+                past_tokens_ids[start_idx + draft_idx],
+            )
+        start_idx += num_draft_tokens[i]

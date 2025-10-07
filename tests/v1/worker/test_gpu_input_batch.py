@@ -170,6 +170,7 @@ def _construct_expected_sampling_metadata(
             repetition_penalties, dtype=torch.float, device=device
         ),
         output_token_ids=output_token_ids,
+        spec_token_ids=[[] for _ in range(len(output_token_ids))],
         no_penalties=(
             all(x == 0 for x in presence_penalties)
             and all(x == 0 for x in frequency_penalties)
