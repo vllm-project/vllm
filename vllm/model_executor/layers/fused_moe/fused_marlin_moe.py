@@ -42,7 +42,8 @@ def fused_marlin_moe(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     activation: Optional[str] = "silu",
-    activation_func: Optional[str] = None,
+    activation_func: Optional[str] = None, # FIXME: type Callable
+    moe_sum: Optional[str] = None, # FIXME: type Callable
     expert_map: Optional[torch.Tensor] = None,
     global_scale1: Optional[torch.Tensor] = None,
     global_scale2: Optional[torch.Tensor] = None,
@@ -240,12 +241,16 @@ def fused_marlin_moe(
         is_k_full=is_k_full,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=True,
+
         is_zp_float=False,
     ).view(-1, topk, K)
 
     if output is None:
         output = hidden_states if inplace else torch.empty_like(hidden_states)
-    return torch.sum(intermediate_cache3.view(-1, topk, K), dim=1, out=output)
+    if moe_sum is None:
+        return torch.sum(intermediate_cache3.view(-1, topk, K), dim=1, out=output)
+    else:
+        return moe_sum(intermediate_cache3, output)
 
 
 def fused_marlin_moe_fake(
@@ -407,6 +412,7 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
             global_num_experts=global_num_experts,
             activation=activation,
             activation_func=self.activation,
+            moe_sum=self.moe_sum,
             expert_map=expert_map,
             output=output,
             # Workspaces are swapped in workspace_shapes() to account for proper
