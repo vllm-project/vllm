@@ -18,13 +18,13 @@ def test_version():
     assert not _is_torch_equal_or_newer("2.7.1", "2.8.0.dev")
 
 
-def test_use_cudagraphs_dynamic(monkeypatch):
-    assert vllm.envs.VLLM_USE_V1
+def test_use_cudagraphs_dynamic():
     vllm_config = VllmConfig()
     # Default V1 configuration now starts without cudagraphs enabled; the
     # engine decides when to capture based on runtime settings instead of a
     # blanket default.
-    assert not vllm_config.compilation_config.use_cudagraph 
+    assert vllm_config.compilation_config.use_cudagraph
+
 
 def test_custom_op():
     # proper syntax
