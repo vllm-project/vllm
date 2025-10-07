@@ -9,7 +9,7 @@ import cloudpickle
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
-from typing_extensions import TypeVar
+from typing_extensions import TypeVar, deprecated
 
 from vllm.beam_search import (
     BeamSearchInstance,
@@ -354,6 +354,7 @@ class LLM:
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer()
 
+    @deprecated("`set_tokenizer` is deprecated and will be removed in v0.13.")
     def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
         # While CachedTokenizer is dynamic, have no choice but
         # compare class name. Misjudgment will arise from
