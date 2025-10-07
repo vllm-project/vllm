@@ -40,3 +40,6 @@ class SamplingMetadata:
 
     # Loaded logits processors
     logitsprocs: LogitsProcessors
+
+    # Speculative token ids
+    spec_token_ids: Optional[list[list[int]]] = None
