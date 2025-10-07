@@ -445,8 +445,6 @@ class CoreEngineActorManager:
                 "Available resources: "
                 f"{available_resources}"
             )
-        logger.info(f"Created placement groups, {placement_groups}.")
-        logger.info(f"Created ocal dp ranks, {local_dp_ranks}.")
         return placement_groups, local_dp_ranks
 
     @staticmethod
