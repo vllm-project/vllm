@@ -628,25 +628,17 @@ class OciModelLoader(BaseModelLoader):
             model_config._original_model = original_model
             model_config.model = config_dir
 
-        try:
-            # Load weights using iterator
-            weights_to_load = {name for name, _ in model.named_parameters()}
-            loaded_weights = model.load_weights(
-                self._get_weights_iterator(model_config)
-            )
+        # Load weights using iterator
+        weights_to_load = {name for name, _ in model.named_parameters()}
+        loaded_weights = model.load_weights(self._get_weights_iterator(model_config))
 
-            # Check if all weights were loaded (for non-quantized models)
-            if model_config.quantization is None and loaded_weights is not None:
-                weights_not_loaded = weights_to_load - loaded_weights
-                if weights_not_loaded:
-                    raise ValueError(
-                        "Following weights were not initialized from "
-                        f"checkpoint: {weights_not_loaded}"
-                    )
+        # Check if all weights were loaded (for non-quantized models)
+        if model_config.quantization is None and loaded_weights is not None:
+            weights_not_loaded = weights_to_load - loaded_weights
+            if weights_not_loaded:
+                raise ValueError(
+                    "Following weights were not initialized from "
+                    f"checkpoint: {weights_not_loaded}"
+                )
 
-            logger.info("Weights loaded successfully from OCI registry")
-        finally:
-            # Restore original model reference
-            if hasattr(model_config, "_original_model"):
-                model_config.model = model_config._original_model
-                delattr(model_config, "_original_model")
+        logger.info("Weights loaded successfully from OCI registry")
