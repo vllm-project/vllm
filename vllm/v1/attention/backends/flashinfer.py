@@ -144,6 +144,7 @@ def trtllm_prefill_attn_kvfp8_dequant(
 
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
+    supports_quant_query_input: bool = True
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
@@ -807,14 +808,7 @@ class FlashInferImpl(AttentionImpl):
                 elif output.dtype == FP4_DTYPE:
                     self.o_sf_scale = layer._o_scale_float
 
-        # Insert FP8 quant for query
-        if attn_metadata.q_data_type == FP8_DTYPE:
-            num_tokens, num_heads, head_size = query.shape
-            query, _ = ops.scaled_fp8_quant(
-                query.reshape(
-                    (num_tokens, num_heads * head_size)).contiguous(),
-                layer._q_scale)
-            query = query.reshape((num_tokens, num_heads, head_size))
+        # Query quantization is now handled in the attention layer
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
