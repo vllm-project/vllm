@@ -74,6 +74,7 @@ def parse_args():
     parser.add_argument("--custom-mm-prompts", action="store_true")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.8)
     parser.add_argument("--request-id-prefix", type=str, default="")
+    parser.add_argument("--disable-padded-drafter-batch", action="store_true")
     return parser.parse_args()
 
 
@@ -114,6 +115,7 @@ def main(args):
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
+            "disable_padded_drafter_batch": disable_padded_drafter_batch,
         }
     elif args.method == "ngram":
         speculative_config = {
