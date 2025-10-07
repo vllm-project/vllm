@@ -207,20 +207,20 @@ class CompilationConfig:
     Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: Optional[list[str]] = None
     """A list of ops to exclude from cudagraphs, used in piecewise compilation.
-    
+
     The behavior depends on use_inductor_graph_partition:
-    
+
     - When use_inductor_graph_partition=False (default):
-        These ops are used for Dynamo FX-level graph splitting. The graph is 
-        split at these ops before Inductor compilation, creating separate 
+        These ops are used for Dynamo FX-level graph splitting. The graph is
+        split at these ops before Inductor compilation, creating separate
         subgraphs for cudagraph capture.
-        
+
     - When use_inductor_graph_partition=True:
-        These ops are used to register Inductor partition rules. The graph 
-        partitioning happens at Inductor codegen time after all passes and 
-        fusions are finished, allowing better optimization while still 
+        These ops are used to register Inductor partition rules. The graph
+        partitioning happens at Inductor codegen time after all passes and
+        fusions are finished, allowing better optimization while still
         excluding these ops from cudagraphs.
-        
+
     If None, defaults to attention ops for piecewise cudagraphs.
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
 
@@ -669,24 +669,8 @@ class CompilationConfig:
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.enable_attn_fusion
-        if self.splitting_ops is None:
-            self.splitting_ops = []
-            if self.cudagraph_mode.has_piecewise_cudagraphs():
-                logger.warning_once(
-                    "enable_attn_fusion is incompatible with piecewise "
-                    "cudagraph when use_inductor_graph_partition is off."
-                    "In this case, splitting_ops will be set to empty "
-                    "list, and cudagraph_mode will be set to FULL. "
-                    "Please ensure you are using attention backends that "
-                    "support cudagraph or set cudagraph_mode to NONE "
-                    "explicitly if encountering any problems."
-                )
-                self.cudagraph_mode = CUDAGraphMode.FULL
-
-        assert not self.splitting_ops_contain_attention(), (
-            "attention ops should not be in splitting_ops "
-            "when enable_attn_fusion is True"
-        )
+        if not self.splitting_ops:
+            self.splitting_ops = list(self._attention_ops)
 
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and all(
@@ -707,7 +691,7 @@ class CompilationConfig:
         use_inductor_piecewise_compilation = (
             inductor_used
             and self.use_inductor_graph_partition
-            and not self.splitting_ops_contain_attention()
+            and self.splitting_ops_contain_attention()
         )
 
         return use_fx_graph_piecewise_compilation or use_inductor_piecewise_compilation

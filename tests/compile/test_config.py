@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
-import torch
-from pydantic_core import ValidationError
 
 import vllm
 from vllm.compilation.counter import compilation_counter
@@ -159,8 +157,7 @@ def test_splitting_ops_dynamic():
     assert not config.compilation_config.splitting_ops_contain_attention()
 
     # When use_inductor_graph_partition=True
-    torch_version = torch.__version__
-    if is_torch_equal_or_newer(torch_version, "2.9.0.dev"):
+    if is_torch_equal_or_newer("2.9.0.dev"):
         config = VllmConfig(
             compilation_config=CompilationConfig(
                 level=CompilationLevel.PIECEWISE,
@@ -172,7 +169,7 @@ def test_splitting_ops_dynamic():
         # partition rules
         assert config.compilation_config.splitting_ops == ["vllm.unified_attention"]
 
-    # When attn_fusion pass enabled.
+    # When attn_fusion pass enabled, splitting_ops now default to attention ops.
     config = VllmConfig(
         compilation_config=CompilationConfig(
             level=CompilationLevel.PIECEWISE,
@@ -181,26 +178,13 @@ def test_splitting_ops_dynamic():
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
     )
-    assert config.compilation_config.splitting_ops == []
-    # cudagraph mode also fall back to FULL
-    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-
-    # splitting_ops can not contain attention ops when attn_fusion
-    # pass enabled.
-    with pytest.raises(ValidationError):
-        config = VllmConfig(
-            compilation_config=CompilationConfig(
-                level=CompilationLevel.PIECEWISE,
-                pass_config={"enable_attn_fusion": True, "enable_noop": True},
-                custom_ops=["+quant_fp8"],
-                cudagraph_mode=CUDAGraphMode.PIECEWISE,
-                # work around for accessing all attntion ops
-                splitting_ops=CompilationConfig()._attention_ops,
-            )
-        )
+    # With the new simplified logic, attention fusion works with splitting_ops
+    assert config.compilation_config.splitting_ops_contain_attention()
+    # cudagraph mode remains PIECEWISE
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
     # When both use_inductor_graph_partition and attn_fusion pass enabled.
-    if is_torch_equal_or_newer(torch_version, "2.9.0.dev"):
+    if is_torch_equal_or_newer("2.9.0.dev"):
         config = VllmConfig(
             compilation_config=CompilationConfig(
                 level=CompilationLevel.PIECEWISE,
