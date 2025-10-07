@@ -24,8 +24,6 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
-
-# yapf: disable
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
@@ -34,8 +32,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     biased_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import zero_experts_compute_triton
-
-# yapf: enable
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
     FusedMoEModularKernel,
@@ -890,10 +886,7 @@ def determine_expert_map(
     # Distribute experts as evenly as possible to each rank.
     base_experts = global_num_experts // ep_size
     remainder = global_num_experts % ep_size
-    if ep_rank < remainder:
-        local_num_experts = base_experts + 1
-    else:
-        local_num_experts = base_experts
+    local_num_experts = base_experts + 1 if ep_rank < remainder else base_experts
 
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
@@ -1201,6 +1194,8 @@ class FusedMoE(CustomOp):
             if quant_config is None
             else quant_config.get_quant_method(self, prefix)
         )
+        if quant_method is None:
+            quant_method = UnquantizedFusedMoEMethod(moe)
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)

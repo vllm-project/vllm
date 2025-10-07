@@ -14,9 +14,6 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-
-# yapf conflicts with isort for this docstring
-# yapf: disable
 from vllm.entrypoints.openai.protocol import (
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
@@ -32,8 +29,6 @@ from vllm.entrypoints.openai.serving_engine import (
     ServeContext,
     TextTokensPrompt,
 )
-
-# yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt

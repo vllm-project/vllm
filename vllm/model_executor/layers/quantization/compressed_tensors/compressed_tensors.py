@@ -26,7 +26,7 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
+from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
@@ -256,7 +256,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                         )
                     else:
                         target_scheme_map[target]["input_activations"] = (
-                            QuantizationArgs.model_validate(  # noqa: E501
+                            QuantizationArgs.model_validate(
                                 quant_config.get("input_activations")
                             )
                         )
@@ -502,15 +502,11 @@ class CompressedTensorsConfig(QuantizationConfig):
             QuantizationStrategy.CHANNEL,
             QuantizationStrategy.BLOCK,
         ]
-        if not (
+        return (
             is_symmetric_weight
-            and is_static_weight  # noqa: SIM103
+            and is_static_weight
             and is_tensor_or_channel_or_block_weight
-        ):
-            return False
-
-        # All conditions satisfied.
-        return True
+        )
 
     def _is_wNa16_group_channel(
         self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs

@@ -49,9 +49,6 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -84,8 +81,6 @@ from vllm.entrypoints.openai.protocol import (
     TranslationResponse,
     UnloadLoRAAdapterRequest,
 )
-
-# yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_classification import ServingClassification
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion

@@ -10,11 +10,11 @@ import pytest
 import torch
 from packaging import version
 
-from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+from vllm.model_executor.layers.quantization.quark.quark import (
     QuarkLinearMethod,
     QuarkW4A4MXFP4,
 )
-from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkW4A4MXFp4MoEMethod,
 )
 from vllm.platforms import current_platform
