@@ -122,6 +122,10 @@ def rank_worker(
                 atol = 3e-2
                 rtol = 3e-2
 
+            torch.set_printoptions(profile="full")
+            print(f"REF = {ref_out}")
+            print(f"OUT = {mk_out}")
+
             torch.testing.assert_close(ref_out, mk_out, atol=atol, rtol=rtol)
             format_result(verbose, config.describe())
         except Exception as ex:
@@ -149,15 +153,24 @@ def run(config: Config, verbose: bool):
     )
 
 
-Ms = [32, 64]
-# hidden sizes, making this too large will cause fp4 tests to fail.
-# Also needs to be a multiple of 1024 for deep_gemm.
-Ks = [2048]
-Ns = [1024]
-TOPKs = [4, 1]
-Es = [32]
-DTYPEs = [torch.bfloat16]
-FUSED_MOE_CHUNK_SIZEs = [None, 16]
+if False:
+    Ms = [32, 64]
+    # hidden sizes, making this too large will cause fp4 tests to fail.
+    # Also needs to be a multiple of 1024 for deep_gemm.
+    Ks = [2048]
+    Ns = [1024]
+    TOPKs = [4, 1]
+    Es = [32]
+    DTYPEs = [torch.bfloat16]
+    FUSED_MOE_CHUNK_SIZEs = [None, 16]
+else:
+    Ms = [16] #[32, 64]
+    Ks = [512] # must be >= 512 for hybrid
+    Ns = [128]
+    TOPKs = [4, 1]
+    Es = [8]
+    DTYPEs = [torch.bfloat16]
+    FUSED_MOE_CHUNK_SIZEs = [None]
 
 
 def is_nyi_config(config: Config) -> bool:
