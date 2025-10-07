@@ -323,8 +323,6 @@ class CoreEngineActorManager:
         for actor in self.local_engine_actors + self.remote_engine_actors:
             self.run_refs.append(actor.run.remote())
 
-        logger.info("Core engine actors are ready")
-
     @staticmethod
     def create_dp_placement_groups(
         vllm_config: VllmConfig,
