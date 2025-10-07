@@ -8,6 +8,9 @@ import pytest
 import pytest_asyncio
 import requests
 from openai import BadRequestError, NotFoundError, OpenAI
+from openai_harmony import (
+    Message,
+)
 
 from ...utils import RemoteOpenAIServer
 
@@ -326,6 +329,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             ],
             stream=True,
             background=background,
+            extra_body={"enable_response_messages": True},
         )
 
         current_item_id = ""
@@ -334,6 +338,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
         events = []
         current_event_mode = None
         resp_id = None
+        checked_response_completed = False
         async for event in response:
             if event.type == "response.created":
                 resp_id = event.response.id
@@ -346,6 +351,16 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             ]:
                 assert "input_messages" in event.response.model_extra
                 assert "output_messages" in event.response.model_extra
+                if event.type == "response.completed":
+                    # make sure the serialization of content works
+                    for msg in event.response.model_extra["output_messages"]:
+                        # make sure we can convert the messages back into harmony
+                        Message.from_dict(msg)
+
+                    for msg in event.response.model_extra["input_messages"]:
+                        # make sure we can convert the messages back into harmony
+                        Message.from_dict(msg)
+                    checked_response_completed = True
 
             if current_event_mode != event.type:
                 current_event_mode = event.type
@@ -390,6 +405,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
         assert len(events) > 0
         response_completed_event = events[-1]
         assert len(response_completed_event.response.output) > 0
+        assert checked_response_completed
 
         if background:
             starting_after = 5
