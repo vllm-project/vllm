@@ -2050,8 +2050,17 @@ def concat_and_cache_mla_rope_fused(
     kv_cache_scale: torch.Tensor,
 ) -> None:
     torch.ops._C_cache_ops.concat_and_cache_mla_rope_fused(
-        positions, q_pe, k_pe, kv_c, cos_sin_cache, is_neox, slot_mapping,
-        kv_cache, kv_cache_dtype, kv_cache_scale)
+        positions,
+        q_pe,
+        k_pe,
+        kv_c,
+        cos_sin_cache,
+        is_neox,
+        slot_mapping,
+        kv_cache,
+        kv_cache_dtype,
+        kv_cache_scale,
+    )
 
 
 def copy_blocks(
