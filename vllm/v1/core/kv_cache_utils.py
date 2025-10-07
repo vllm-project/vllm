@@ -1243,8 +1243,7 @@ def generate_scheduler_kv_cache_config(
 
 
 def _report_kv_cache_config(
-    vllm_config: VllmConfig,
-    kv_cache_config: KVCacheConfig
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> None:
     """
     Log resolved KV cache configuration.
@@ -1253,10 +1252,16 @@ def _report_kv_cache_config(
         vllm_config: The global VllmConfig
         kv_cache_config: The resolved KV cache configuration
     """
-    min_block_size = min([group.kv_cache_spec.block_size for group in kv_cache_config.kv_cache_groups])
+    min_block_size = min(
+        [group.kv_cache_spec.block_size for group in kv_cache_config.kv_cache_groups]
+    )
 
     # Log the KV cache size and maximum concurrency.
-    num_tokens = kv_cache_config.num_blocks // len(kv_cache_config.kv_cache_groups) * min_block_size
+    num_tokens = (
+        kv_cache_config.num_blocks
+        // len(kv_cache_config.kv_cache_groups)
+        * min_block_size
+    )
     if vllm_config.parallel_config.decode_context_parallel_size > 1:
         num_tokens *= vllm_config.parallel_config.decode_context_parallel_size
         logger.info(
