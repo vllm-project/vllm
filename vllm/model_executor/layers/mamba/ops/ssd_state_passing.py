@@ -13,14 +13,14 @@ from vllm.triton_utils import tl, triton
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE': 64}),
-        triton.Config({'BLOCK_SIZE': 128}),
-        triton.Config({'BLOCK_SIZE': 256}),
-        triton.Config({'BLOCK_SIZE': 512}),
-        triton.Config({'BLOCK_SIZE': 1024}),
-        triton.Config({'BLOCK_SIZE': 2048}),
+        triton.Config({"BLOCK_SIZE": 64}),
+        triton.Config({"BLOCK_SIZE": 128}),
+        triton.Config({"BLOCK_SIZE": 256}),
+        triton.Config({"BLOCK_SIZE": 512}),
+        triton.Config({"BLOCK_SIZE": 1024}),
+        triton.Config({"BLOCK_SIZE": 2048}),
     ],
-    key=['dim'],
+    key=["dim"],
 )
 @triton.jit
 def _state_passing_fwd_kernel(
@@ -58,8 +58,7 @@ def _state_passing_fwd_kernel(
     pid_m = tl.program_id(axis=0)
 
     states_ptr += pid_h * stride_states_head
-    dA_cs_ptr += pid_h * stride_dA_cs_head + (chunk_size -
-                                              1) * stride_dA_cs_csize
+    dA_cs_ptr += pid_h * stride_dA_cs_head + (chunk_size - 1) * stride_dA_cs_csize
     out_ptr += pid_h * stride_out_head
 
     offs_m = pid_m * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -67,31 +66,35 @@ def _state_passing_fwd_kernel(
     out_ptrs = out_ptr + offs_m * stride_out_dim
 
     if HAS_INITSTATES:
-        initstates_ptrs = initstates_ptr \
-            + pid_h * stride_initstates_head \
+        initstates_ptrs = (
+            initstates_ptr
+            + pid_h * stride_initstates_head
             + offs_m * stride_initstates_dim
+        )
 
-        states = tl.load(initstates_ptrs, mask=offs_m < dim,
-                         other=0.0).to(tl.float32)
+        states = tl.load(initstates_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
     else:
-        states = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
+        states = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
 
     prev_seq_idx = 0
     for c in range(nchunks):
-        new_states = tl.load(states_ptrs, mask=offs_m < dim,
-                             other=0.0).to(tl.float32)
+        new_states = tl.load(states_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
         dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
         seq_idx = tl.load(seq_idx_ptr + c * stride_seq_idx_chunk)
         # we have started a new sequence
         if prev_seq_idx != seq_idx:
             if HAS_INITSTATES:
-                initstates_ptrs = initstates_ptr + seq_idx * stride_initstates_batch \
-                    + pid_h * stride_initstates_head \
+                initstates_ptrs = (
+                    initstates_ptr
+                    + seq_idx * stride_initstates_batch
+                    + pid_h * stride_initstates_head
                     + offs_m * stride_initstates_dim
-                states = tl.load(initstates_ptrs, mask=offs_m < dim,
-                                 other=0.0).to(tl.float32)
+                )
+                states = tl.load(initstates_ptrs, mask=offs_m < dim, other=0.0).to(
+                    tl.float32
+                )
             else:
-                states = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
+                states = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
 
         prev_seq_idx = seq_idx
         states = tl.exp(dA_cs) * states + new_states
@@ -115,16 +118,15 @@ def _state_passing_fwd(
     assert dA_cumsum.shape == (nheads, nchunks, chunk_size)
     seqlen = seq_idx.shape[-1]
     out_dtype = states.dtype if out_dtype is None else out_dtype
-    out = torch.empty((nchunks, nheads, dim),
-                      device=states.device,
-                      dtype=out_dtype)
+    out = torch.empty((nchunks, nheads, dim), device=states.device, dtype=out_dtype)
 
-    initial_states_strides = ((initial_states.stride(0),
-                               initial_states.stride(1),
-                               initial_states.stride(2))
-                              if initial_states is not None else (0, 0, 0))
+    initial_states_strides = (
+        (initial_states.stride(0), initial_states.stride(1), initial_states.stride(2))
+        if initial_states is not None
+        else (0, 0, 0)
+    )
 
-    grid = lambda META: (triton.cdiv(dim, META['BLOCK_SIZE']), nheads)
+    grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE"]), nheads)
     with torch.cuda.device(states.device.index):
         _state_passing_fwd_kernel[grid](
             states_ptr=states,
