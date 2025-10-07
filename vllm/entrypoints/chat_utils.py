@@ -498,14 +498,14 @@ def resolve_hf_chat_template(
         tokenizer_name_or_path=model_config.tokenizer,
     )
     if path is not None:
-        logger.info(
+        logger.info_once(
             "Loading chat template fallback for %s as there isn't one "
             "defined on HF Hub.",
             tokenizer.name_or_path,
         )
         chat_template = load_chat_template(path)
     else:
-        logger.debug(
+        logger.debug_once(
             "There is no chat template fallback for %s", tokenizer.name_or_path
         )
 
@@ -1310,10 +1310,7 @@ def _parse_chat_message_content_part(
 
     modality = None
     if part_type == "image_pil":
-        if content is not None:
-            image_content = cast(Image.Image, content)
-        else:
-            image_content = None
+        image_content = cast(Image.Image, content) if content is not None else None
         mm_parser.parse_image_pil(image_content, uuid)
         modality = "image"
     elif part_type in ("image_url", "input_image"):
