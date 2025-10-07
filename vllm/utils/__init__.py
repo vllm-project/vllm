@@ -887,64 +887,74 @@ def get_open_zmq_inproc_path() -> str:
     return f"inproc://{uuid4()}"
 
 
-def get_open_port(prefered_port: int | None = None) -> int:
+def _get_open_ports(ports_to_try: Iterable[int] = (0,), max_count: int = 1) -> set[int]:
     """
-    Get an open port for the vLLM process to listen on.
-    An edge case to handle, is when we run data parallel,
-    we need to avoid ports that are potentially used by
-    the data parallel master process.
-    Right now we reserve 10 ports for the data parallel master
-    process. Currently it uses 2 ports.
+    Find a maximum of `max_count` open ports from the `ports_to_try` list.
+    `ports_to_try` can contain zeros, meaning any available port
+    returned by the os.
+
+    Try to open a port either with IPv4 or IPv6.
     """
+    open_ports: set[int] = set()
+    for port in ports_to_try:
+        for family in (socket.AF_INET, socket.AF_INET6):
+            try:
+                with socket.socket(family, socket.SOCK_STREAM) as s:
+                    s.bind(("", port))
+                    port = s.getsockname()[1]
+            except OSError:
+                continue
 
-    # first, try by argument, then, by env variable, then, use default
-    if prefered_port is None:
-        prefered_port = envs.VLLM_PORT
+            open_ports.add(port)
+            if len(open_ports) >= max_count:
+                return open_ports
+            break
 
-    if prefered_port is None:
-        prefered_port = 0
+    return open_ports
 
+
+def get_open_port_list(max_count: int = 5) -> list[int]:
+    """
+    Find a maximum of `max_count` open ports. The range of acceptable port numbers
+    if inferred from environment variables: VLLM_DP_MASTER_PORT and VLLM_PORT.
+
+    Otherwise try random valid port numbers.
+
+    If no ports could be opened, raise OSError.
+    """
+    starting_port = 0
     if "VLLM_DP_MASTER_PORT" in os.environ:
-        dp_master_port = envs.VLLM_DP_MASTER_PORT
-        reserved_port_range = range(dp_master_port, dp_master_port + 10)
-        for _ in range(10):
-            candidate_port = _get_open_port(prefered_port)
-            if candidate_port not in reserved_port_range:
-                return candidate_port
+        starting_port = envs.VLLM_DP_MASTER_PORT
+    elif "VLLM_PORT" in os.environ:
+        starting_port = envs.VLLM_PORT
+        # assertion holds because "VLLM_PORT" in os.environ
+        assert starting_port is not None
 
-        raise OSError(
-            "Could not get a port outside of range "
-            f"[{dp_master_port}, {dp_master_port + 10})"
-        )
+    if starting_port != 0:
+        ports_to_try = range(starting_port, starting_port + 10)
+    else:
+        # try 10 random ports
+        ports_to_try = (0 for _ in range(10))
 
-    return _get_open_port()
+    open_port = _get_open_ports(ports_to_try, max_count)
+    if len(open_port) < 1:
+        if starting_port == 0:
+            err = "Could not get a random port after 10 tries."
+        else:
+            err = (
+                "Could not get a port outside of range "
+                f"[{starting_port}, {starting_port + 10})"
+            )
+        raise OSError(err)
 
-
-def get_open_ports_list(max_count: int = 5) -> list[int]:
-    """Get a list of open ports."""
-    ports = set[int]()
-
-    start_port = 0
-    if envs.VLLM_PORT is not None:
-        start_port = envs.VLLM_PORT
-
-    for _ in range(max_count):
-        ports.add(get_open_port(start_port))
-        if start_port:
-            start_port += 1
-    return list(ports)
+    return list(open_port)
 
 
-def _get_open_port(prefered_port: int = 0) -> int:
-    for family in (socket.AF_INET, socket.AF_INET6):
-        try:
-            with socket.socket(family, socket.SOCK_STREAM) as s:
-                s.bind(("", prefered_port))
-                port = s.getsockname()[1]
-        except OSError:
-            continue
-        return port
-    raise OSError("Cannot find available port")
+def get_open_port() -> int:
+    """
+    Special case of get_open_port_list with a single port
+    """
+    return get_open_port_list(max_count=1)[0]
 
 
 def find_process_using_port(port: int) -> psutil.Process | None:
