@@ -367,10 +367,13 @@ class CoreEngineActorManager:
                 max_device_per_node
             }, f"Nodes are not homogenous, {nodes}"
             assert len(nodes) * max_device_per_node == world_size * num_pg_to_create, (
-                f"Total available nodes {len(nodes)} and devices {max_device_per_node} do not match required world size {world_size} and data parallel size {num_pg_to_create}"
+                f"Total available nodes {len(nodes)} and devices {max_device_per_node} "
+                f"do not match required world size {world_size} and data parallel size "
+                f"{num_pg_to_create}"
             )
             assert local_engine_count == 1, (
-                f"data-parallel-size-local {local_engine_count} must be 1 if we need multiple nodes per dp group"
+                f"data-parallel-size-local {local_engine_count} must be 1 if we "
+                "need multiple nodes per dp group"
             )
 
             nodes_per_pg_group = world_size // max_device_per_node
@@ -400,7 +403,8 @@ class CoreEngineActorManager:
             for i in range(num_engines):
                 if len(placement_groups) == num_pg_to_create:
                     assert not is_master_ip, (
-                        f"The DP master node (ip: {dp_master_ip_key}) cannot place more than {len(num_pg_to_create)} groups"
+                        f"The DP master node (ip: {dp_master_ip_key}) cannot "
+                        f"place more than {len(num_pg_to_create)} groups"
                     )
                     break
 
@@ -411,9 +415,11 @@ class CoreEngineActorManager:
                     world_size if nodes_per_pg_group == 1 else max_device_per_node
                 )
 
-                # If we need multiple nodes per DP group we might have both "master ip" devices and "worker ip" devices in the same bundle
+                # If we need multiple nodes per DP group we might have both "master ip" 
+                # devices and "worker ip" devices in the same bundle
                 # => [{GPU: 1.0, "node:127.01.10.109": 0.001}, ..., {GPU: 1.0}, ...., {CPU: 2.0}]
-                # If we only need one node, we will have either only "master ip" devices or "worker ip" devices in the same bundle
+                # If we only need one node, we will have either only "master ip" devices 
+                # or "worker ip" devices in the same bundle
                 bundles = (
                     [master_device_dict] * int(is_master_ip) * n_device_per_node
                     + [device_dict]
