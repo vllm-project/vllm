@@ -348,13 +348,13 @@ class EngineArgs:
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = ModelConfig.seed
     max_model_len: Optional[int] = ModelConfig.max_model_len
-    cuda_graph_sizes: list[int] = get_field(
-        CompilationConfig, "cudagraph_capture_sizes"
+    cuda_graph_sizes: Optional[list[int]] = CompilationConfig.cudagraph_capture_sizes
+    cudagraph_capture_sizes: Optional[list[int]] = (
+        CompilationConfig.cudagraph_capture_sizes
     )
-    """ Note: This field is removed from SchedulerConfig. We keep it in CLI
-    and only mapped to CompilationConfig.cudagraph_capture_sizes."""
-    cuda_graph_max_size: Optional[int] = CompilationConfig.max_cudagraph_capture_size
-    """ Alias for CompilationConfig.max_cudagraph_capture_size."""
+    max_cudagraph_capture_size: Optional[int] = (
+        CompilationConfig.max_cudagraph_capture_size
+    )
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -1004,6 +1004,29 @@ class EngineArgs:
             "--async-scheduling", **scheduler_kwargs["async_scheduling"]
         )
 
+        # Compilation arguments
+        compilation_kwargs = get_kwargs(CompilationConfig)
+        compilation_group = parser.add_argument_group(
+            title="CompilationConfig",
+            description=CompilationConfig.__doc__,
+        )
+        compilation_group.add_argument(
+            "--cudagraph-capture-sizes", **compilation_kwargs["cudagraph_capture_sizes"]
+        )
+        compilation_kwargs["cudagraph_capture_sizes"]["help"] = (
+            "--cuda-graph-sizes is deprecated and will be removed in v0.13.0 or v1.0.0,"
+            " whichever is soonest. Please use --cudagraph-capture-sizes instead."
+        )
+        compilation_group.add_argument(
+            "--cuda-graph-sizes",
+            **compilation_kwargs["cudagraph_capture_sizes"],
+            deprecated=True,
+        )
+        compilation_group.add_argument(
+            "--max-cudagraph-capture-size",
+            **compilation_kwargs["max_cudagraph_capture_size"],
+        )
+
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
         vllm_group = parser.add_argument_group(
@@ -1036,23 +1059,6 @@ class EngineArgs:
             "--disable-log-stats",
             action="store_true",
             help="Disable logging statistics.",
-        )
-
-        # we hardcode below two argument, as get_kwargs(CompilationConfig)
-        # doesn't work here.
-        parser.add_argument(
-            "--cuda-graph-sizes",
-            default=None,
-            type=int,
-            nargs="+",
-            help="Alias for compilation_config.cudagraph_capture_sizes.",
-        )
-
-        parser.add_argument(
-            "--cuda-graph-max-size",
-            type=optional_type(int),
-            default=None,
-            help="Alias for compilation_config.max_cudagraph_capture_size.",
         )
 
         return parser
@@ -1568,31 +1574,37 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
-        # override cudagraph_capture_sizes in self.compilation_config
-        if self.cuda_graph_sizes:
-            if isinstance(self.cuda_graph_sizes, list):
-                assert self.compilation_config.cudagraph_capture_sizes is None, (
+        # Compilation config overrides
+        if self.cuda_graph_sizes is not None:
+            logger.warning(
+                "--cuda-graph-sizes is deprecated and will be removed in v0.13.0 or "
+                "v1.0.0, whichever is soonest. Please use --cudagraph-capture-sizes "
+                "instead."
+            )
+            if self.compilation_config.cudagraph_capture_sizes is not None:
+                raise ValueError(
                     "cuda_graph_sizes and compilation_config."
                     "cudagraph_capture_sizes are mutually exclusive"
                 )
-                self.compilation_config.cudagraph_capture_sizes = self.cuda_graph_sizes
-            else:
-                raise TypeError(f"Invalid value for {self.cuda_graph_sizes=}.")
-        # override max_cudagraph_capture_size in self.compilation_config
-        if self.cuda_graph_max_size:
-            if (
-                isinstance(self.cuda_graph_max_size, int)
-                and self.cuda_graph_max_size >= 0
-            ):
-                assert self.compilation_config.max_cudagraph_capture_size is None, (
-                    "cuda_graph_max_size and compilation_config."
+            self.compilation_config.cudagraph_capture_sizes = self.cuda_graph_sizes
+        if self.cudagraph_capture_sizes is not None:
+            if self.compilation_config.cudagraph_capture_sizes is not None:
+                raise ValueError(
+                    "cudagraph_capture_sizes and compilation_config."
+                    "cudagraph_capture_sizes are mutually exclusive"
+                )
+            self.compilation_config.cudagraph_capture_sizes = (
+                self.cudagraph_capture_sizes
+            )
+        if self.max_cudagraph_capture_size is not None:
+            if self.compilation_config.max_cudagraph_capture_size is not None:
+                raise ValueError(
+                    "max_cudagraph_capture_size and compilation_config."
                     "max_cudagraph_capture_size are mutually exclusive"
                 )
-                self.compilation_config.max_cudagraph_capture_size = (
-                    self.cuda_graph_max_size
-                )
-            else:
-                raise TypeError(f"Invalid value for{self.cuda_graph_max_size=}.")
+            self.compilation_config.max_cudagraph_capture_size = (
+                self.max_cudagraph_capture_size
+            )
 
         config = VllmConfig(
             model_config=model_config,
