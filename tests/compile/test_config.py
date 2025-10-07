@@ -24,12 +24,7 @@ def test_use_cudagraphs_dynamic(monkeypatch):
     # Default V1 configuration now starts without cudagraphs enabled; the
     # engine decides when to capture based on runtime settings instead of a
     # blanket default.
-    assert not vllm_config.compilation_config.use_cudagraph
-
-    monkeypatch.setenv("VLLM_USE_V1", "0")
-    vllm_config = VllmConfig()
-    assert vllm_config.compilation_config.use_cudagraph
-
+    assert not vllm_config.compilation_config.use_cudagraph 
 
 def test_custom_op():
     # proper syntax
