@@ -85,11 +85,10 @@ def test_max_model_len():
         num_total_tokens = len(output.prompt_token_ids) + len(
             output.outputs[0].token_ids
         )
-        # Total tokens must not exceed max_model_len + 1 (the last token can be
-        # generated with the context length equal to the max model length)
+        # Total tokens must not exceed max_model_len.
         # It can be less if generation finishes due to other reasons (e.g., EOS)
         # before reaching the absolute model length limit.
-        assert num_total_tokens <= max_model_len + 1
+        assert num_total_tokens <= max_model_len
 
 
 def test_log_stats():
