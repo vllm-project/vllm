@@ -4,7 +4,7 @@
 
 from collections.abc import Iterable, Mapping
 from functools import partial
-from typing import Literal, Optional, TypedDict, Union
+from typing import Annotated, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -37,6 +37,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 
@@ -58,36 +59,21 @@ IMAGE_PAD_TOKEN_ID_MAP = {
 }
 
 
-class OvisVideoPatchInputs(TypedDict):
-    type: Literal["video_patches"]
-    flat_data: torch.Tensor
+class OvisVideoPatchInputs(TensorSchema):
     """
-    Shape:
-    `(batch_size * num_patches, patch_size_x * patch_size_y * num_channels)`
-    """
-
-    indicator_tokens: torch.Tensor
-    """
-    Shape:
-    `(batch_size * (num_patches + 1))`
+    Dimensions:
+        - batch_patches: Batch size * number of patches
+        - patch_size: patch_size_x * patch_size_y * num_channels
+        - patch_indicators: Batch size * (number of patches + 1)
+        - patches_per_image: List of number of total patches for each image
+          in the batch.
     """
 
-    patches_per_image: list[int]
-    """
-    List of number of total patches for each frame in the video.
-    This is used to restore the first two dimensions of `flat_data`.
-    """
-
-
-def _ovis2_5_field_config():
-    return dict(
-        pixel_values=MultiModalFieldConfig.batched("image"),
-        grids=MultiModalFieldConfig.batched("image"),
-        indicator_tokens=MultiModalFieldConfig.batched("image"),
-        video_pixel_values=MultiModalFieldConfig.batched("video"),
-        video_indicator_tokens=MultiModalFieldConfig.batched("video"),
-        video_grids=MultiModalFieldConfig.batched("video"),
-    )
+    type: Literal["image_patches"]
+    flat_data: Annotated[torch.Tensor, TensorShape("batch_patches", "patch_size")]
+    indicator_tokens: Annotated[torch.Tensor, TensorShape("patch_indicators")]
+    patches_per_image: Annotated[list[int], TensorShape("num_patches_per_image")]
+    # This is used to restore the first two dimensions of `flat_data`.
 
 
 class VisualTokenizer(torch.nn.Module):
@@ -380,9 +366,7 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
                 self.visual_indicators_to_visual_tokens(indicator)
                 for indicator in visual_indicators
             ]
-            processed_outputs["video_indicator_tokens"] = torch.tensor(
-                [indicator_tokens]
-            )
+            processed_outputs["video_indicator_tokens"] = torch.tensor(indicator_tokens)
         if "images" in mm_data:
             visual_indicators = [
                 hf_processor.construct_visual_indicators((1, 1, 1), False)
@@ -393,7 +377,7 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
                 for indicator in visual_indicators
             ]
 
-            processed_outputs["indicator_tokens"] = torch.tensor([indicator_tokens])
+            processed_outputs["indicator_tokens"] = torch.tensor(indicator_tokens)
         return processed_outputs
 
     def _apply_hf_processor_tokens_only(
@@ -407,7 +391,14 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return _ovis2_5_field_config()
+        return dict(
+            pixel_values=MultiModalFieldConfig.batched("image"),
+            grids=MultiModalFieldConfig.batched("image"),
+            indicator_tokens=MultiModalFieldConfig.batched("image"),
+            video_pixel_values=MultiModalFieldConfig.batched("video"),
+            video_indicator_tokens=MultiModalFieldConfig.batched("video"),
+            video_grids=MultiModalFieldConfig.batched("video"),
+        )
 
     def _get_prompt_updates(
         self,
