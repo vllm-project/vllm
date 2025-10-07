@@ -388,10 +388,6 @@ def test_async_tp_pass_correctness(
         "pass_config": {"enable_async_tp": async_tp_enabled},
     }
 
-    async_tp_env = tp_env = {
-        "VLLM_USE_V1": "1",
-    }
-
     async_tp_args = [
         *common_args,
         "--tensor-parallel-size",
@@ -410,6 +406,4 @@ def test_async_tp_pass_correctness(
         "mp",
     ]
 
-    compare_two_settings(
-        model_id, async_tp_args, tp_args, async_tp_env, tp_env, method="generate"
-    )
+    compare_two_settings(model_id, async_tp_args, tp_args, method="generate")

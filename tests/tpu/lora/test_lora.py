@@ -17,17 +17,6 @@ from vllm.lora.request import LoRARequest
 # 100 training iterations with a training batch size of 100.
 
 
-@pytest.fixture(scope="function", autouse=True)
-def use_v1_only(monkeypatch: pytest.MonkeyPatch):
-    """
-    Since Multi-LoRA is only supported on the v1 TPU backend, set VLLM_USE_V1=1
-    for all tests in this file
-    """
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        yield
-
-
 def setup_vllm(num_loras: int, tp: int) -> vllm.LLM:
     return vllm.LLM(
         model="Qwen/Qwen2.5-3B-Instruct",

@@ -15,11 +15,6 @@ from vllm.entrypoints.renderer import BaseRenderer
 from ...utils import RemoteOpenAIServer
 
 
-@pytest.fixture(scope="function", autouse=True)
-def use_v1_only(monkeypatch):
-    monkeypatch.setenv("VLLM_USE_V1", "1")
-
-
 @pytest.mark.asyncio
 async def test_empty_prompt():
     model_name = "gpt2"

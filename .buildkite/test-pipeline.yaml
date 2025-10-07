@@ -296,6 +296,7 @@ steps:
     - tests/v1
   commands:
     # split the test to avoid interference
+    - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
     - pytest -v -s v1/kv_offload
     - pytest -v -s v1/sample
@@ -317,7 +318,7 @@ steps:
   no_gpu: true
   commands:
     # split the test to avoid interference
-    - pytest -v -s v1/core
+    - pytest -v -s -m 'cpu_test' v1/core
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
