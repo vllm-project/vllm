@@ -872,10 +872,13 @@ def wait_for_engine_startup(
                 EngineHandshakeMetadata(
                     addresses=addresses,
                     parallel_config={
-                        "data_parallel_master_ip": parallel_config.data_parallel_master_ip,
-                        "data_parallel_master_port": parallel_config.data_parallel_master_port,
-                        "_data_parallel_master_port_list": parallel_config._data_parallel_master_port_list,
-                        "data_parallel_size": parallel_config.data_parallel_size,
+                        k: getattr(parallel_config, k)
+                        for k in (
+                            "data_parallel_master_ip",
+                            "data_parallel_master_port",
+                            "_data_parallel_master_port_list",
+                            "data_parallel_size",
+                        )
                     },
                 )
             )

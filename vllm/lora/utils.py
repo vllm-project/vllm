@@ -19,8 +19,6 @@ from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 
 # being imported for _all_lora_classes below
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
     ColumnParallelLinearWithLoRA,
@@ -38,8 +36,6 @@ from vllm.lora.layers import (
     VocabParallelEmbeddingWithLoRA,
 )
 from vllm.model_executor.layers.linear import LinearBase
-
-# yapf: enable
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
