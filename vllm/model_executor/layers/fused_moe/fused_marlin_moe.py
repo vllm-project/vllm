@@ -5,6 +5,7 @@
 from typing import Optional
 
 import torch
+from typing import Callable
 from typing_extensions import override
 
 import vllm._custom_ops as ops
@@ -41,6 +42,7 @@ def fused_marlin_moe(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     activation: Optional[str] = "silu",
+    activation_func: Optional[str] = None,
     expert_map: Optional[torch.Tensor] = None,
     global_scale1: Optional[torch.Tensor] = None,
     global_scale2: Optional[torch.Tensor] = None,
@@ -189,20 +191,25 @@ def fused_marlin_moe(
         is_zp_float=False,
     )
 
-    if activation == "silu":
-        torch.ops._C.silu_and_mul(
-            intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
-        )
-    elif activation == "swigluoai":
-        # alpha = 1.702, limit = 7.0
-        torch.ops._C.swigluoai_and_mul(
-            intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
-        )
+    if activation_func is not None:
+        activation_func(
+            activation, intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
+    )
     else:
-        raise ValueError(
-            f"Unsupported activation: {activation}. "
-            "Only silu and swigluoai activations are supported."
+        if activation == "silu":
+            torch.ops._C.silu_and_mul(
+                intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
         )
+        elif activation == "swigluoai":
+            # alpha = 1.702, limit = 7.0
+            torch.ops._C.swigluoai_and_mul(
+                intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
+        )
+        else:
+            raise ValueError(
+                f"Unsupported activation: {activation}. "
+                "Only silu and swigluoai activations are supported."
+            )
 
     if expert_map is not None:
         intermediate_cache3.zero_()
@@ -399,6 +406,7 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             activation=activation,
+            activation_func=self.activation,
             expert_map=expert_map,
             output=output,
             # Workspaces are swapped in workspace_shapes() to account for proper
