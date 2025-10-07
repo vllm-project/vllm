@@ -339,12 +339,8 @@ class MistralTokenizer(TokenizerBase):
             )
         else:
             encoded = self.tokenizer.encode(text, bos=True, eos=False)
-            do_truncation = (
-                (truncation is None or truncation)
-                and max_length is not None
-                and len(encoded) > max_length
-            )
-            if do_truncation:
+
+            if truncation is not False and max_length is not None:
                 return encoded[:max_length]
             else:
                 return encoded
