@@ -202,15 +202,15 @@ def replace_rms_norm_class(rms_norm: nn.Module, hidden_size: int) -> RMSNorm:
         kwargs["hidden_size"] = weight_meta.size(0)
     # Check if weight is all zeros, which indicates GemmaRMSNorm
     # We must create a new instance because rms_norm is on meta
-    with torch.device("cpu"):
-        try:
+    try:
+        with torch.device("cpu"):
             weight_test = getattr(rms_norm.__class__(1), "weight", None)
-        except Exception:
-            logger.warning(
-                "Failed to determine if RMSNorm weight is centered on zero or one. "
-                "Defaulting to one."
-            )
-            weight_test = None
+    except Exception:
+        logger.warning(
+            "Failed to determine if RMSNorm weight is centered on zero or one. "
+            "Defaulting to one."
+        )
+        weight_test = None
     if weight_test is not None and torch.all(weight_test == 0):
         return GemmaRMSNorm(**kwargs)
     # Otherwise assume it's a regular RMSNorm
