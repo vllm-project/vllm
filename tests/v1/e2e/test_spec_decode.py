@@ -267,7 +267,7 @@ def test_eagle_correctness(
                 "method": method,
                 "model": spec_model_name,
                 "num_speculative_tokens": 3,
-                "max_model_len": max_num_batched_tokens,
+                "max_model_len": max_model_len,
             },
             max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
