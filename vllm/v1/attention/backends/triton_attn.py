@@ -21,11 +21,6 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-if current_platform.is_cuda_alike():
-    from vllm import _custom_ops as ops
-elif current_platform.is_xpu():
-    from vllm._ipex_ops import ipex_ops as ops
-
 logger = init_logger(__name__)
 
 
@@ -138,6 +133,11 @@ class TritonAttentionMetadataBuilder(
 class TritonAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
+
+    # Skip Q quantization on ROCm and XPU, enable this on cuda
+    # only, since dequantizing back to f32 in the attention kernel
+    # is not supported.
+    supports_quant_query_input: bool = current_platform.is_cuda()
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
@@ -314,18 +314,8 @@ class TritonAttentionImpl(AttentionImpl):
             if key_cache.dtype != self.fp8_dtype:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
-            num_tokens, num_heads, head_size = query.shape
-            assert layer._q_scale_float == 1.0, \
-                "A non 1.0 q_scale is not currently supported."
-            if current_platform.is_cuda():
-                # Skip Q quantization on ROCm and XPU, enable this on cuda
-                # only, since dequantizing back to f32 in the attention kernel
-                # is not supported.
-                query, _ = ops.scaled_fp8_quant(
-                    query.reshape(
-                        (num_tokens, num_heads * head_size)).contiguous(),
-                    layer._q_scale)
-                query = query.reshape((num_tokens, num_heads, head_size))
+
+            # Query quantization is now handled in the attention layer
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
