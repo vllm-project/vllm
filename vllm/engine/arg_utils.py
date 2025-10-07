@@ -1694,11 +1694,12 @@ class EngineArgs:
     ) -> None:
         """Set Default Arguments for V1 Engine."""
 
-        # V1 always uses chunked prefills and prefix caching
+        # V1 uses chunked prefills and prefix caching by default
         # for non-pooling tasks.
         # For pooling tasks the default is False
         if model_config.runner_type != "pooling":
-            self.enable_chunked_prefill = True
+            if self.enable_chunked_prefill is None:
+                self.enable_chunked_prefill = True
 
             # TODO: When prefix caching supports prompt embeds inputs, this
             # check can be removed.

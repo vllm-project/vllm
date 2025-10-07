@@ -158,7 +158,13 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
         )
         lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
-        num_kv_splits = 4  # TODO: heuristic
+
+        from vllm.model_executor.layers.batch_invariant import (
+            vllm_kernel_override_batch_invariant,
+        )
+
+        # For batch invariance, use only 1 split to ensure deterministic reduction
+        num_kv_splits = 1 if vllm_kernel_override_batch_invariant() else 4
 
         # TODO(lucas) Allocate ahead of time
         attn_logits = torch.empty(

@@ -419,6 +419,14 @@ class ModelConfig:
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
     ) -> None:
+        # Enable batch invariance settings if requested
+        from vllm.model_executor.layers.batch_invariant import (
+            vllm_kernel_override_batch_invariant,
+        )
+
+        if vllm_kernel_override_batch_invariant():
+            self.enforce_eager = True
+
         # Set the default seed to 0 in V1.
         # NOTE(woosuk): In V0, we set the default seed to None because the
         # driver worker shares the same process as the user process, and thus
