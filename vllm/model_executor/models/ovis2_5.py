@@ -14,7 +14,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.ovis import OvisImagePatchInputs, VisualEmbedding
+from vllm.model_executor.models.ovis import VisualEmbedding
 from vllm.model_executor.models.siglip2navit import Siglip2NavitModel
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -59,7 +59,24 @@ IMAGE_PAD_TOKEN_ID_MAP = {
 }
 
 
-class OvisVideoPatchInputs(TensorSchema):
+class Ovis2_5ImagePatchInputs(TensorSchema):
+    """
+    Dimensions:
+        - batch_patches: Batch size * number of patches
+        - patch_size: patch_size_x * patch_size_y * num_channels
+        - patch_indicators: Batch size * (number of patches + 1)
+        - patches_per_image: List of number of total patches for each image
+          in the batch.
+    """
+
+    type: Literal["image_patches"]
+    flat_data: Annotated[torch.Tensor, TensorShape("batch_patches", "patch_size")]
+    indicator_tokens: Annotated[torch.Tensor, TensorShape("patch_indicators")]
+    patches_per_image: Annotated[list[int], TensorShape("num_patches_per_image")]
+    # This is used to restore the first two dimensions of `flat_data`.
+
+
+class Ovis2_5VideoPatchInputs(TensorSchema):
     """
     Dimensions:
         - batch_patches: Batch size * number of patches
@@ -465,7 +482,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[OvisImagePatchInputs]:
+    ) -> Optional[Ovis2_5ImagePatchInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         indicator_tokens = kwargs.pop("indicator_tokens", None)
         grids = kwargs.pop("grids", None)
@@ -484,7 +501,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
                     f"Got type: {type(indicator_tokens)}"
                 )
 
-            return OvisImagePatchInputs(
+            return Ovis2_5ImagePatchInputs(
                 type="image_patches",
                 flat_data=flatten_bn(pixel_values, concat=True),
                 patches_per_image=[
@@ -499,7 +516,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
-    ) -> Optional[OvisImagePatchInputs]:
+    ) -> Optional[Ovis2_5VideoPatchInputs]:
         pixel_values = kwargs.pop("video_pixel_values", None)
         indicator_tokens = kwargs.pop("video_indicator_tokens", None)
         grids = kwargs.pop("video_grids", None)
@@ -518,7 +535,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
                     f"Got type: {type(indicator_tokens)}"
                 )
 
-            return OvisVideoPatchInputs(
+            return Ovis2_5VideoPatchInputs(
                 type="video_patches",
                 flat_data=flatten_bn(pixel_values, concat=True),
                 patches_per_image=[
@@ -532,7 +549,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         raise AssertionError("This line should be unreachable.")
 
     def _process_image_input(
-        self, image_input: Union[OvisImagePatchInputs, OvisVideoPatchInputs]
+        self, image_input: Union[Ovis2_5ImagePatchInputs, Ovis2_5VideoPatchInputs]
     ) -> MultiModalEmbeddings:
         image_patches_flat = image_input["flat_data"]
         patches_per_image = image_input["patches_per_image"]
