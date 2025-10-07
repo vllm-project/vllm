@@ -10,8 +10,6 @@ from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
-OCP_MX_BLOCK_SIZE = 32
-
 
 def _swizzle_mxfp4(quant_tensor, scale, num_warps):
     """weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel"""
@@ -144,6 +142,14 @@ def _quant_dequant_mxfp4_fake(
     return torch.empty_like(x)
 
 
+# Protect these operations into a torch custom op to avoid errors as
+# torch._dynamo.exc.Unsupported: Attempted to call function marked as skipped
+# Explanation: Dynamo does not know how to trace the builtin
+# `kernel_ext.PyCapsule.dq_uint8_mxfp4_to_half.` This function is either a
+# Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python
+# extension (perhaps created with pybind).
+# TODO: Make sure there is no way to avoid having these functions
+# marked as skipped by dynamo.
 try:
     direct_register_custom_op(
         op_name="dequant_mxfp4",

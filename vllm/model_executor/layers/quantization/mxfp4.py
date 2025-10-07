@@ -17,8 +17,8 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
-    mxfp4_w4a4_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
+    ocp_mx_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import MarlinExperts
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
@@ -776,7 +776,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         else:
             w1_scale = layer.w13_weight_scale
             w2_scale = layer.w2_weight_scale
-            return mxfp4_w4a4_moe_quant_config(
+            return ocp_mx_moe_quant_config(
+                quant_dtype="mxfp4",
                 w1_bias=layer.w13_bias,
                 w2_bias=layer.w2_bias,
                 w1_scale=w1_scale,

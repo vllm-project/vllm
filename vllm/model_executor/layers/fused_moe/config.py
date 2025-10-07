@@ -9,6 +9,10 @@ import vllm.envs as envs
 from vllm.config import ParallelConfig
 from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    OCP_MX_DTYPES,
+    OCP_MX_Scheme,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.utils import cdiv, has_triton_kernels
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
@@ -30,7 +34,7 @@ def _get_config_dtype_str(
     use_fp8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    use_mxfp4_w4a4: bool = False,
+    ocp_mx_scheme: Optional[str] = None,
 ) -> Optional[str]:
     """
     Return a string used to construct the filename that contains the
@@ -43,8 +47,11 @@ def _get_config_dtype_str(
         return "int8_w8a16"
     elif use_int4_w4a16:
         return "int4_w4a16"
-    elif use_mxfp4_w4a4:
-        return "mxfp4_w4a4"
+    elif ocp_mx_scheme is not None:
+        # The output of this function is passed to `try_get_optimal_moe_config`,
+        # and as we only simulate OCP MX execution in fused_moe for now,
+        # we will NOT look for `*,dtype=w_mxfp4_a_mxfp4.json` for now.
+        return None
     elif dtype == torch.float:
         # avoiding cases where kernel fails when float32 MoE
         # use fp16/bfloat16 configs
@@ -289,8 +296,23 @@ class FusedMoEQuantConfig:
         return self._a1.dtype is None and self._w1.dtype == "int4"
 
     @property
-    def use_mxfp4_w4a4(self) -> bool:
-        return self._a1.dtype == "mxfp4" and self._w1.dtype == "mxfp4"
+    def ocp_mx_scheme(self) -> Union[str, None]:
+        if not hasattr(self, "_ocp_mx_scheme"):
+            if (self._a1.dtype is not None and not isinstance(self._a1.dtype, str)) or (
+                self._w1.dtype is not None and not isinstance(self._w1.dtype, str)
+            ):
+                self._ocp_mx_scheme = None
+            else:
+                ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
+                    self._a1.dtype, self._w1.dtype
+                )
+
+                if ocp_mx_scheme is not None:
+                    ocp_mx_scheme = ocp_mx_scheme.value
+
+                self._ocp_mx_scheme = ocp_mx_scheme
+
+        return self._ocp_mx_scheme
 
     @property
     def use_mxfp4_w4a16(self) -> bool:
@@ -310,7 +332,7 @@ class FusedMoEQuantConfig:
             use_fp8_w8a8=self.use_fp8_w8a8,
             use_int8_w8a16=self.use_int8_w8a16,
             use_int4_w4a16=self.use_int4_w4a16,
-            use_mxfp4_w4a4=self.use_mxfp4_w4a4,
+            ocp_mx_scheme=self.ocp_mx_scheme,
             dtype=dtype,
         )
 
@@ -371,12 +393,14 @@ class FusedMoEQuantConfig:
         w2_bias: Optional[torch.Tensor] = None,
         w1_zp: Optional[torch.Tensor] = None,
         w2_zp: Optional[torch.Tensor] = None,
+        weight_dtype: Union[torch.dtype, str, None] = None,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
         - quant_dtype: Optional quantization type. None if activations are
-          unquantized or quantized prior to calling.  Note: "nvfp4" and
-          "mxfp4" are the only valid string values for quant_dtype.
+          unquantized or quantized prior to calling.  Note: "nvfp4", "mxfp4",
+          "mxfp6_e3m2", "mxfp6_e2m3" are the only valid string values
+          for quant_dtype.
         - per_act_token_quant: Activations have per token quantization.
         - per_out_ch_quant: Outputs have per channel quantization. (only
           for cutlass).
@@ -395,11 +419,22 @@ class FusedMoEQuantConfig:
         - w1_zp: Optional w1 zero points for int4/int8 quantization.
         - w2_zp: Optional w2 zero points for int4/int8 quantization.
         """
-        assert (
-            not isinstance(quant_dtype, str)
-            or quant_dtype == "nvfp4"
-            or quant_dtype == "mxfp4"
-        )
+        assert not isinstance(quant_dtype, str) or quant_dtype in {
+            "nvfp4",
+            "mxfp4",
+            "mxfp6_e3m2",
+            "mxfp6_e2m3",
+        }
+        assert not isinstance(weight_dtype, str) or weight_dtype in {
+            "nvfp4",
+            "mxfp4",
+            "mxfp6_e3m2",
+            "mxfp6_e2m3",
+        }
+
+        if weight_dtype is None:
+            weight_dtype = quant_dtype
+
         a_shape, w_shape = _quant_flags_to_group_shape(
             quant_dtype, per_act_token_quant, per_out_ch_quant, block_shape
         )
@@ -407,10 +442,10 @@ class FusedMoEQuantConfig:
             _a1=FusedMoEQuantDesc(quant_dtype, a_shape, a1_scale, a1_gscale),
             _a2=FusedMoEQuantDesc(quant_dtype, a_shape, a2_scale, a2_gscale),
             _w1=FusedMoEQuantDesc(
-                quant_dtype, w_shape, w1_scale, g1_alphas, w1_zp, w1_bias
+                weight_dtype, w_shape, w1_scale, g1_alphas, w1_zp, w1_bias
             ),
             _w2=FusedMoEQuantDesc(
-                quant_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
+                weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
             ),
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
@@ -482,9 +517,11 @@ def mxfp4_w4a16_moe_quant_config(
     )
 
 
-def mxfp4_w4a4_moe_quant_config(
+def ocp_mx_moe_quant_config(
+    quant_dtype: str,
     w1_scale: Union[torch.Tensor, "PrecisionConfig"],
     w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    weight_dtype: Optional[str] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     w1_bias: Optional[torch.Tensor] = None,
@@ -494,8 +531,10 @@ def mxfp4_w4a4_moe_quant_config(
     """
     Construct a quant config for mxfp4 activations and mxfp4 weights.
     """
+    assert quant_dtype in OCP_MX_DTYPES
     return FusedMoEQuantConfig.make(
-        "mxfp4",
+        quant_dtype=quant_dtype,
+        weight_dtype=weight_dtype,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         a1_scale=a1_scale,
