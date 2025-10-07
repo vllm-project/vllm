@@ -169,14 +169,6 @@ def test_allowed_token_ids(llm):
         _ = llm.generate(PROMPT, SamplingParams(allowed_token_ids=[10000000]))
 
 
-def test_priority(llm):
-    """Check that we reject requests with priority."""
-
-    # Reject all allowed token ids
-    with pytest.raises(ValueError):
-        _ = llm.generate(PROMPT, priority=[1])
-
-
 def test_seed(llm):
     """Check that seed impacts randomness."""
 
