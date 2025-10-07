@@ -235,8 +235,8 @@ def _support_torch_compile(
         # we may not have vllm_config so we only want to pass
         # vllm_config when it is available.
         sig = inspect.signature(old_init)
-        if 'vllm_config' in sig.parameters:
-            vllm_config = kwargs['vllm_config']
+        if "vllm_config" in sig.parameters:
+            vllm_config = kwargs["vllm_config"]
         else:
             vllm_config = get_current_vllm_config()
 
