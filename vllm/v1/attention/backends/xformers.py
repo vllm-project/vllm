@@ -3,32 +3,36 @@
 """Attention layer with XFormersAttention."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Optional
+from typing import Optional
 
 import torch
 
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionMetadata,
+    AttentionType,
+)
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata,
-    reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+    split_decodes_and_prefills,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 try:
     from xformers import ops as xops
     from xformers.ops.fmha.attn_bias import (
-        AttentionBias, PagedBlockDiagonalCausalWithOffsetPaddedKeysMask)
+        AttentionBias,
+        PagedBlockDiagonalCausalWithOffsetPaddedKeysMask,
+    )
 
     XFORMERS_AVAILABLE = True
 except ImportError:
     XFORMERS_AVAILABLE = False
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm import _custom_ops as ops
 
@@ -36,7 +40,6 @@ logger = init_logger(__name__)
 
 
 class XFormersAttentionBackend(AttentionBackend):
-
     accept_output_buffer: bool = True
 
     @classmethod
@@ -86,11 +89,12 @@ class XFormersAttentionBackend(AttentionBackend):
                 f"Head size {head_size} is not supported by {attn_type}. "
                 f"Supported head sizes are: {supported_head_sizes}. "
                 "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes.")
+                "FlexAttention backend which supports all head sizes."
+            )
 
     @staticmethod
     def get_name() -> str:
-        return "XFORMERS_VLLM_V1"
+        return "XFORMERS"
 
     @staticmethod
     def get_impl_cls() -> type["XFormersAttentionImpl"]:
@@ -106,6 +110,7 @@ class XFormersAttentionBackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
@@ -152,9 +157,9 @@ class XFormersAttentionMetadata:
             # metadata structure
             return self._cached_prefill_metadata
 
-        q_start_loc = self.query_start_loc[self.num_decodes:]
+        q_start_loc = self.query_start_loc[self.num_decodes :]
         q_seqlens = torch.diff(q_start_loc)
-        kv_seqlens = self.seq_lens[self.num_decodes:]
+        kv_seqlens = self.seq_lens[self.num_decodes :]
         # Construct & cache prefill-phase attention metadata structure
         self._cached_prefill_metadata = XFormersAttentionMetadata(
             num_actual_tokens=self.num_prefill_tokens,
@@ -162,8 +167,8 @@ class XFormersAttentionMetadata:
             query_start_loc=q_start_loc - q_start_loc[0],
             max_seq_len=int(kv_seqlens.max().item()),
             seq_lens=kv_seqlens,
-            block_table=self.block_table[self.num_decodes:],
-            slot_mapping=self.slot_mapping[self.num_decode_tokens:],
+            block_table=self.block_table[self.num_decodes :],
+            slot_mapping=self.slot_mapping[self.num_decode_tokens :],
         )
         return self._cached_prefill_metadata
 
@@ -179,25 +184,25 @@ class XFormersAttentionMetadata:
 
         q_start_loc = self.query_start_loc
         q_seqlens = torch.diff(q_start_loc)
-        decode_kv_seqlens = self.seq_lens[:self.num_decodes]
+        decode_kv_seqlens = self.seq_lens[: self.num_decodes]
         # Construct & cache decode-phase attention metadata structure
         self._cached_decode_metadata = XFormersAttentionMetadata(
             num_actual_tokens=self.num_decode_tokens,
-            max_query_len=int(q_seqlens[:self.num_decodes].max().item()),
-            query_start_loc=q_start_loc[:self.num_decodes + 1],
+            max_query_len=int(q_seqlens[: self.num_decodes].max().item()),
+            query_start_loc=q_start_loc[: self.num_decodes + 1],
             max_seq_len=int(decode_kv_seqlens.max().item()),
             seq_lens=decode_kv_seqlens,
-            block_table=self.block_table[:self.num_decodes],
-            slot_mapping=self.slot_mapping[:self.num_decode_tokens],
+            block_table=self.block_table[: self.num_decodes],
+            slot_mapping=self.slot_mapping[: self.num_decode_tokens],
             attn_bias=self.attn_bias,
         )
         return self._cached_decode_metadata
 
 
 class XFormersAttentionMetadataBuilder(
-        AttentionMetadataBuilder[XFormersAttentionMetadata]):
-
-    reorder_batch_threshold: ClassVar[int] = 1
+    AttentionMetadataBuilder[XFormersAttentionMetadata]
+):
+    reorder_batch_threshold: int = 1
 
     def __init__(
         self,
@@ -213,13 +218,6 @@ class XFormersAttentionMetadataBuilder(
         self._num_decodes = 0
         self._num_decode_tokens = 0
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(
-            input_batch,
-            scheduler_output,
-            decode_threshold=self.reorder_batch_threshold)
-
     def build(
         self,
         common_prefix_len: int,
@@ -228,8 +226,9 @@ class XFormersAttentionMetadataBuilder(
     ) -> XFormersAttentionMetadata:
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold))
+                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
+            )
+        )
 
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         q_start_loc = common_attn_metadata.query_start_loc
@@ -245,14 +244,13 @@ class XFormersAttentionMetadataBuilder(
             # Construct the decoder bias.
             decode_q_seqlens = q_seqlens[:num_decodes]
             decode_kv_seqlens = kv_seqlens[:num_decodes]
-            bias = (
-                PagedBlockDiagonalCausalWithOffsetPaddedKeysMask.from_seqlens(
-                    q_seqlen=decode_q_seqlens.tolist(),
-                    kv_seqlen=decode_kv_seqlens.tolist(),
-                    page_size=self.block_size,
-                    block_tables=block_table[:num_decodes],
-                    device=block_table.device,
-                ))
+            bias = PagedBlockDiagonalCausalWithOffsetPaddedKeysMask.from_seqlens(
+                q_seqlen=decode_q_seqlens.tolist(),
+                kv_seqlen=decode_kv_seqlens.tolist(),
+                page_size=self.block_size,
+                block_tables=block_table[:num_decodes],
+                device=block_table.device,
+            )
 
         return XFormersAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -271,7 +269,6 @@ class XFormersAttentionMetadataBuilder(
 
 
 class XFormersAttentionImpl(AttentionImpl):
-
     def __init__(
         self,
         num_heads: int,
@@ -288,8 +285,7 @@ class XFormersAttentionImpl(AttentionImpl):
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported in V0.")
         if alibi_slopes is not None:
-            raise NotImplementedError(
-                "XFormers does not support alibi slopes yet.")
+            raise NotImplementedError("XFormers does not support alibi slopes yet.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -312,10 +308,12 @@ class XFormersAttentionImpl(AttentionImpl):
         XFormersAttentionBackend.validate_head_size(head_size)
 
         if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "XFormersAttentionImpl.")
+            raise NotImplementedError(
+                "Encoder self-attention and "
+                "encoder/decoder cross-attention "
+                "are not implemented for "
+                "XFormersAttentionImpl."
+            )
 
     def forward(
         self,
@@ -346,7 +344,8 @@ class XFormersAttentionImpl(AttentionImpl):
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
-                " for XFormersAttentionImpl")
+                " for XFormersAttentionImpl"
+            )
 
         if attn_metadata is None:
             # Profiling run.
@@ -376,8 +375,7 @@ class XFormersAttentionImpl(AttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
         if prefill_meta := attn_metadata.prefill_metadata:
-            descale_shape = (prefill_meta.query_start_loc.shape[0] - 1,
-                             key.shape[1])
+            descale_shape = (prefill_meta.query_start_loc.shape[0] - 1, key.shape[1])
             unified_attention(
                 q=query[num_decode_tokens:num_actual_tokens],
                 k=key_cache,
@@ -402,36 +400,38 @@ class XFormersAttentionImpl(AttentionImpl):
             # Query for decode. KV is not needed because it is already cached.
             decode_query = query[:num_decode_tokens]
             # Reshape query to [1, B_T, G, H, D].
-            q = decode_query.view(1, -1, self.num_kv_heads,
-                                  self.num_queries_per_kv, self.head_size)
+            q = decode_query.view(
+                1, -1, self.num_kv_heads, self.num_queries_per_kv, self.head_size
+            )
             # Reshape the k and v caches to [1, Bkv_T, G, H, D]
-            cache_k = key_cache.view(1, -1, self.num_kv_heads, 1,
-                                     self.head_size).expand(
-                                         1,
-                                         -1,
-                                         self.num_kv_heads,
-                                         self.num_queries_per_kv,
-                                         self.head_size,
-                                     )
-            cache_v = value_cache.view(1, -1, self.num_kv_heads, 1,
-                                       self.head_size).expand(
-                                           1,
-                                           -1,
-                                           self.num_kv_heads,
-                                           self.num_queries_per_kv,
-                                           self.head_size,
-                                       )
+            cache_k = key_cache.view(
+                1, -1, self.num_kv_heads, 1, self.head_size
+            ).expand(
+                1,
+                -1,
+                self.num_kv_heads,
+                self.num_queries_per_kv,
+                self.head_size,
+            )
+            cache_v = value_cache.view(
+                1, -1, self.num_kv_heads, 1, self.head_size
+            ).expand(
+                1,
+                -1,
+                self.num_kv_heads,
+                self.num_queries_per_kv,
+                self.head_size,
+            )
 
             attn_bias = decode_meta.attn_bias
-            output[:
-                   num_decode_tokens] = xops.memory_efficient_attention_forward(
-                       q,
-                       cache_k,
-                       cache_v,
-                       attn_bias=attn_bias,
-                       p=0.0,
-                       scale=self.scale,
-                   ).view(decode_query.shape)
+            output[:num_decode_tokens] = xops.memory_efficient_attention_forward(
+                q,
+                cache_k,
+                cache_v,
+                attn_bias=attn_bias,
+                p=0.0,
+                scale=self.scale,
+            ).view(decode_query.shape)
 
         # Reshape the output tensor.
         return output

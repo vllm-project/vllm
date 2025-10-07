@@ -64,9 +64,8 @@ class NoOpEliminationPass(VllmInductorPass):
     out: "f16[s0, 4096]" = at[1]
     """
 
+    @VllmInductorPass.time_and_log
     def __call__(self, graph: torch.fx.Graph):
-        self.begin()
-        self.dump_graph(graph, "before_noop_elimination")
         count = 0
         # Remove no-op reshapes/views:
         for node in graph.nodes:
@@ -121,12 +120,11 @@ class NoOpEliminationPass(VllmInductorPass):
                     count += 1
 
         logger.debug("Removed %s no-op reshapes and slices", count)
-        self.dump_graph(graph, "after_noop_elimination")
-        self.end_and_log()
 
     # ---------------------- Reshape helpers ----------------------
-    def reshape_dims_equivalent(self, dim: Union[int, torch.fx.Node],
-                                i_dim: Union[int, SymInt]) -> bool:
+    def reshape_dims_equivalent(
+        self, dim: Union[int, torch.fx.Node], i_dim: Union[int, SymInt]
+    ) -> bool:
         """
         This function checks if two dimensions are equivalent.
         :param dim: The dimension arg to reshape/slice
@@ -156,6 +154,4 @@ class NoOpEliminationPass(VllmInductorPass):
         dims: Iterable[Union[int, torch.fx.Node]],
         i_dims: Iterable[Union[int, SymInt]],
     ) -> bool:
-        return all(
-            self.reshape_dims_equivalent(s, i_s)
-            for s, i_s in zip(dims, i_dims))
+        return all(self.reshape_dims_equivalent(s, i_s) for s, i_s in zip(dims, i_dims))
