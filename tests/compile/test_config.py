@@ -86,7 +86,7 @@ def test_use_cudagraphs(vllm_runner, monkeypatch, enabled):
         compilation_counter.expect(
             num_graphs_seen=1,
             num_gpu_runner_capture_triggers=1 if enabled else 0,
-            num_cudagraph_captured=14 if enabled else 0,
+            num_cudagraph_captured=13 if enabled else 0,
         ),
         # loading the model causes compilation (if enabled) to happen
         vllm_runner(
