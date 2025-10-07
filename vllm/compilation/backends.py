@@ -524,6 +524,7 @@ class VllmBackend:
         vllm_config = self.vllm_config
         # Minimal hashing here with existing utilities, reused below.
         from vllm.config.utils import hash_factors as _hash_factors
+
         env_factors = envs.compile_factors()
         env_hash = _hash_factors(env_factors)
         # Compute config/compiler/code hashes once and reuse
@@ -532,7 +533,8 @@ class VllmBackend:
         forward_code_files = list(sorted(self.compilation_config.traced_files))
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",
-            "\n".join(forward_code_files))
+            "\n".join(forward_code_files),
+        )
         hash_content = []
         for filepath in forward_code_files:
             hash_content.append(filepath)
@@ -546,8 +548,7 @@ class VllmBackend:
             except Exception:
                 logger.warning("Failed to read file %s", filepath)
                 continue
-        code_hash = hashlib.sha256(
-            "\n".join(hash_content).encode()).hexdigest()
+        code_hash = hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
         # Clear after consumption
         self.compilation_config.traced_files.clear()
         if not self.compilation_config.cache_dir:
@@ -557,11 +558,13 @@ class VllmBackend:
             # graph.
 
             factors = [env_hash, config_hash, code_hash, compiler_hash]
-            hash_key = hashlib.md5(str(factors).encode(),
-                                   usedforsecurity=False).hexdigest()[:10]
+            hash_key = hashlib.md5(
+                str(factors).encode(), usedforsecurity=False
+            ).hexdigest()[:10]
 
-            cache_dir = os.path.join(envs.VLLM_CACHE_ROOT,
-                                     "torch_compile_cache", hash_key)
+            cache_dir = os.path.join(
+                envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key
+            )
             self.compilation_config.cache_dir = cache_dir
 
         cache_dir = self.compilation_config.cache_dir

@@ -1406,12 +1406,18 @@ def compile_factors() -> dict[str, object]:
     """
 
     ignored_factors: set[str] = {
-        "MAX_JOBS", "VLLM_RPC_BASE_PATH", "VLLM_USE_MODELSCOPE",
-        "VLLM_RINGBUFFER_WARNING_INTERVAL", "LD_LIBRARY_PATH",
-        "VLLM_PATTERN_MATCH_DEBUG", "VLLM_SERVER_DEV_MODE",
-        "VLLM_DP_MASTER_IP", "VLLM_DP_MASTER_PORT",
-        "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "VLLM_CI_USE_S3",
-        "VLLM_MODEL_REDIRECT_PATH"
+        "MAX_JOBS",
+        "VLLM_RPC_BASE_PATH",
+        "VLLM_USE_MODELSCOPE",
+        "VLLM_RINGBUFFER_WARNING_INTERVAL",
+        "LD_LIBRARY_PATH",
+        "VLLM_PATTERN_MATCH_DEBUG",
+        "VLLM_SERVER_DEV_MODE",
+        "VLLM_DP_MASTER_IP",
+        "VLLM_DP_MASTER_PORT",
+        "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
+        "VLLM_CI_USE_S3",
+        "VLLM_MODEL_REDIRECT_PATH",
     }
 
     from vllm.config.utils import normalize_value

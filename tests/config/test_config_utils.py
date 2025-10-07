@@ -21,6 +21,7 @@ def _endswith_fqname(obj, suffix: str) -> bool:
 
 def _expected_path(p_str: str = ".") -> str:
     import pathlib
+
     p = pathlib.Path(p_str)
     return str(p.expanduser().resolve())
 
@@ -55,10 +56,7 @@ def test_hash_factors_deterministic():
         (b"ab", "6162"),
         (bytearray(b"ab"), "6162"),
         ([1, 2], (1, 2)),
-        ({
-            "b": 2,
-            "a": 1
-        }, (("a", 1), ("b", 2))),
+        ({"b": 2, "a": 1}, (("a", 1), ("b", 2))),
     ],
 )
 def test_normalize_value_matrix(inp, expected):
@@ -92,17 +90,15 @@ def test_normalize_value_path_normalization():
 def test_normalize_value_uuid_and_to_json():
     # Objects may normalize via uuid() or to_json_string().
     class HasUUID:
-
         def uuid(self):
             return "test-uuid"
 
     class ToJson:
-
         def to_json_string(self):
-            return "{\"x\":1}"
+            return '{"x":1}'
 
     assert normalize_value(HasUUID()) == "test-uuid"
-    assert normalize_value(ToJson()) == "{\"x\":1}"
+    assert normalize_value(ToJson()) == '{"x":1}'
 
 
 @pytest.mark.parametrize(

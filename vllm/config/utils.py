@@ -69,14 +69,15 @@ def normalize_value(x):
         qual = getattr(x, "__qualname__", getattr(x, "__name__", ""))
         return ".".join([p for p in (module, qual) if p]) or repr(x)
     if callable(x):
-        raise TypeError(
-            "normalize_value: function or callable instance unsupported")
+        raise TypeError("normalize_value: function or callable instance unsupported")
 
     # Torch dtype: stringify (torch.float64 -> "torch.float64").
     # Collisions with same literal ok; tag as ("torch.dtype", str(x)).
     t = type(x)
-    if getattr(t, "__module__", "") == "torch" and getattr(t, "__name__",
-                                                           "") == "dtype":
+    if (
+        getattr(t, "__module__", "") == "torch"
+        and getattr(t, "__name__", "") == "dtype"
+    ):
         return str(x)
 
     # Bytes
@@ -92,8 +93,7 @@ def normalize_value(x):
 
     # Containers (generic)
     if isinstance(x, Mapping):
-        return tuple(sorted(
-            (str(k), normalize_value(v)) for k, v in x.items()))
+        return tuple(sorted((str(k), normalize_value(v)) for k, v in x.items()))
     if isinstance(x, Set):
         return tuple(sorted(repr(normalize_value(v)) for v in x))
     if isinstance(x, Sequence) and not isinstance(x, (str, bytes, bytearray)):
@@ -113,8 +113,7 @@ def normalize_value(x):
     raise TypeError(f"normalize_value: unsupported type '{type(x).__name__}'")
 
 
-def get_hash_factors(config: ConfigT,
-                     ignored_factors: set[str]) -> dict[str, object]:
+def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, object]:
     """Gets the factors used for hashing a config class.
 
     - Includes all dataclass fields not in `ignored_factors`.
@@ -131,14 +130,14 @@ def get_hash_factors(config: ConfigT,
         except TypeError as e:
             raise TypeError(
                 f"get_hash_factors: unsupported type for key '{factor}' "
-                f"({type(value).__name__})") from e
+                f"({type(value).__name__})"
+            ) from e
     return factors
 
 
 def hash_factors(items: dict[str, object]) -> str:
     """Return a SHA-256 hex digest of the canonical items structure."""
-    return hashlib.sha256(json.dumps(items,
-                                     sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(items, sort_keys=True).encode()).hexdigest()
 
 
 def get_field(cls: ConfigType, name: str) -> Field:

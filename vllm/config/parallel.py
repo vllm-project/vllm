@@ -358,6 +358,7 @@ class ParallelConfig:
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
+
         factors = get_hash_factors(self, ignored_factors)
         # Explicitly include backend affecting env factor as before
         factors["VLLM_ALL2ALL_BACKEND"] = str(envs.VLLM_ALL2ALL_BACKEND)
