@@ -2962,6 +2962,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.model = CUDAGraphWrapper(
                 self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
             )
+            if hasattr(self, "drafter") and isinstance(
+                self.drafter, DraftModelProposer
+            ):
+                self.drafter.model = CUDAGraphWrapper(
+                    self.drafter.model,
+                    self.drafter.vllm_config,
+                    runtime_mode=CUDAGraphMode.FULL,
+                )
         elif self.parallel_config.enable_dbo:
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
                 self.model = UBatchWrapper(

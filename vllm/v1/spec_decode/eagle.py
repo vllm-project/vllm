@@ -287,7 +287,7 @@ class SpecDecodeBaseProposer:
             num_tokens=num_input_tokens,
         )
         if self.pass_cudagraph_args_to_forward_ctx:
-            update_batch_descriptor(cudagraph_args, num_input_tokens)
+            cudagraph_args = self.cudagraph_args(num_tokens=num_input_tokens)
             forward_ctx_kwargs.update(cudagraph_args)
 
         with set_forward_context(**forward_ctx_kwargs):
@@ -455,9 +455,7 @@ class SpecDecodeBaseProposer:
                 num_tokens=input_batch_size,
             )
             if self.pass_cudagraph_args_to_forward_ctx:
-                cudagraph_args = self.decoding_cudagraph_args(
-                    num_tokens=input_batch_size
-                )
+                cudagraph_args = self.cudagraph_args(num_tokens=input_batch_size)
                 forward_ctx_kwargs.update(cudagraph_args)
 
             with set_forward_context(**forward_ctx_kwargs):
@@ -494,8 +492,8 @@ class SpecDecodeBaseProposer:
     def model_returns_tuple(self) -> bool:
         return self.method not in ("mtp", "draft_model")
 
-    def decoding_cudagraph_args(self, num_tokens: int) -> "CudaGraphArgs":
-        batch_descriptor = BatchDescriptor(num_tokens=num_tokens, uniform_decode=True)
+    def cudagraph_args(self, num_tokens: int) -> "CudaGraphArgs":
+        batch_descriptor = BatchDescriptor(num_tokens=num_tokens, uniform_decode=False)
         cudagraph_runtime_mode, batch_descriptor = (
             self.runner.cudagraph_dispatcher.dispatch(batch_descriptor)
         )
