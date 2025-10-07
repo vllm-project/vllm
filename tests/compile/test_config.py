@@ -222,14 +222,14 @@ def test_splitting_ops_dynamic():
 def test_resolve_operator_overload():
     import torch
 
-    from vllm.config.compilation import _resolve_operator_overload
+    from vllm.compilation.partition_rules import _resolve_operator_overload
 
     # Test valid operator names in vLLM's dot notation
     assert _resolve_operator_overload("aten.mm.default") is torch.ops.aten.mm.default
     assert (
         _resolve_operator_overload("aten.addmm.default") is torch.ops.aten.addmm.default
     )
-    
+
     # Test invalid operator names
     with pytest.raises(ValueError):
         # Single word without namespace

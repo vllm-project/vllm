@@ -12,10 +12,7 @@ from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
-from vllm.compilation.partition_rules import (  # noqa: F401 re-exported for tests
-    _resolve_operator_overload,
-    inductor_partition_rule_context,
-)
+from vllm.compilation.partition_rules import inductor_partition_rule_context
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
