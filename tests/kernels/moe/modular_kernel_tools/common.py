@@ -278,6 +278,14 @@ class Config:
         if self.needs_pplx() and not has_pplx():  # noqa: SIM103
             return False, "Needs PPLX, but PPLX not available."
 
+        # from vllm.model_executor.layers.fused_moe.deepep_hybrid_prepare_finalize import (  # noqa: E501
+        #     DeepEPHybridPrepareAndFinalize)
+        # from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
+
+        # if (self.prepare_finalize_type == DeepEPHybridPrepareAndFinalize and
+        #     self.fused_experts_type != DeepGemmExperts):
+        #     return False
+
         return True, None
 
 
@@ -293,12 +301,12 @@ class WeightTensors:
     def describe(self):
         s = ""
         s += "== Weight Tensors: \n"
-        s += f" - {_describe_tensor(self.w1, 'w1')} \n"
-        s += f" - {_describe_tensor(self.w2, 'w2')} \n"
-        s += f" - {_describe_tensor(self.w1_scale, 'w1_scale')} \n"
-        s += f" - {_describe_tensor(self.w2_scale, 'w2_scale')} \n"
-        s += f" - {_describe_tensor(self.w1_gs, 'w1_gs')} \n"
-        s += f" - {_describe_tensor(self.w2_gs, 'w2_gs')} \n"
+        s += f" - {_describe_tensor(self.w1, 'w1')}\n"
+        s += f" - {_describe_tensor(self.w2, 'w2')}\n"
+        s += f" - {_describe_tensor(self.w1_scale, 'w1_scale')}\n"
+        s += f" - {_describe_tensor(self.w2_scale, 'w2_scale')}\n"
+        s += f" - {_describe_tensor(self.w1_gs, 'w1_gs')}\n"
+        s += f" - {_describe_tensor(self.w2_gs, 'w2_gs')}\n"
         return s
 
     def is_quantized(self) -> bool:
@@ -365,11 +373,11 @@ class RankTensors:
     def describe(self):
         s = ""
         s += "== Rank Tensors: \n"
-        s += f" - {_describe_tensor(self.hidden_states, 'HS')} \n"
-        s += f" - {_describe_tensor(self.hidden_states_scale, 'HS_scale')} \n"
-        s += f" - {_describe_tensor(self.topk_weights, 'topk_weights')} \n"
-        s += f" - {_describe_tensor(self.topk_ids, 'topk_ids')} \n"
-        s += f" - {_describe_tensor(self.expert_map, 'expert_map')} \n"
+        s += f" - {_describe_tensor(self.hidden_states, 'HS')}\n"
+        s += f" - {_describe_tensor(self.hidden_states_scale, 'HS_scale')}\n"
+        s += f" - {_describe_tensor(self.topk_weights, 'topk_weights')}\n"
+        s += f" - {_describe_tensor(self.topk_ids, 'topk_ids')}\n"
+        s += f" - {_describe_tensor(self.expert_map, 'expert_map')}\n"
         return s
 
     @staticmethod
@@ -557,6 +565,7 @@ def make_modular_kernel(
 ) -> mk.FusedMoEModularKernel:
     def next_power_of_2(x) -> int:
         import math
+
         if x == 0:
             return 1
         return int(2**math.ceil(math.log2(x)))
