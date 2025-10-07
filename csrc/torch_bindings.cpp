@@ -397,7 +397,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       " Tensor a_blockscale, Tensor b_blockscales, Tensor alphas,"
       " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()",
       {stride_tag});
-  ops.impl("cutlass_fp4_group_mm", torch::kCUDA, &cutlass_fp4_group_mm);
+  // conditionally compiled so impl registration is in source file
 
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization, as well as bias
@@ -729,6 +729,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
       "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
   cache_ops.impl("cp_gather_cache", torch::kCUDA, &cp_gather_cache);
+
+  cache_ops.def(
+      "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache, Tensor "
+      "slot_mapping, "
+      "int quant_block_size, str kv_cache_dtype) -> ()");
+  cache_ops.impl("indexer_k_quant_and_cache", torch::kCUDA,
+                 &indexer_k_quant_and_cache);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
