@@ -35,6 +35,7 @@ from vllm.utils import (
     current_stream,
     deprecate_kwargs,
     get_open_port,
+    get_open_ports_list,
     get_tcp_uri,
     is_lossless_cast,
     join_host_port,
@@ -153,6 +154,22 @@ def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
                 s2.bind(("localhost", get_open_port()))
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
                     s3.bind(("localhost", get_open_port()))
+
+
+@pytest.mark.parametrize("vllm_port_env", ["VLLM_PORT", "VLLM_DP_MASTER_PORT", ""])
+def test_get_open_port_list(vllm_port_env: str, monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as m:
+        vllm_port = 0
+        if vllm_port_env != "":
+            vllm_port = 5678
+            m.setenv(vllm_port_env, str(vllm_port))
+        port_list = get_open_ports_list(5)
+        assert 1 <= len(port_list) <= 5
+        for port in port_list:
+            if vllm_port_env != "":
+                assert vllm_port <= port < vllm_port + 10
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("localhost", port))
 
 
 # Tests for FlexibleArgumentParser

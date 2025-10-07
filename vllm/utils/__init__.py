@@ -913,7 +913,7 @@ def _get_open_ports(ports_to_try: Iterable[int] = (0,), max_count: int = 1) -> s
     return open_ports
 
 
-def get_open_port_list(max_count: int = 5) -> list[int]:
+def get_open_ports_list(max_count: int = 5) -> list[int]:
     """
     Find a maximum of `max_count` open ports. The range of acceptable port numbers
     if inferred from environment variables: VLLM_DP_MASTER_PORT and VLLM_PORT.
@@ -954,7 +954,7 @@ def get_open_port() -> int:
     """
     Special case of get_open_port_list with a single port
     """
-    return get_open_port_list(max_count=1)[0]
+    return get_open_ports_list(max_count=1)[0]
 
 
 def find_process_using_port(port: int) -> psutil.Process | None:
