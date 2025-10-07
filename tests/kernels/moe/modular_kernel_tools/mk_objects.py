@@ -307,18 +307,18 @@ if has_deep_gemm() and is_deep_gemm_supported():
         needs_matching_quant=True,
         needs_deep_gemm=True,
     )
-    register_experts(
-        TritonOrDeepGemmExperts,
-        standard_format,
-        common_float_and_int_types,
-        blocked_quantization_support=True,
-        supports_chunking=True,
-        supports_expert_map=True,
-        needs_matching_quant=True,
-        needs_deep_gemm=True,
-    )
+    # register_experts(
+    #     TritonOrDeepGemmExperts,
+    #     standard_format,
+    #     common_float_and_int_types,
+    #     blocked_quantization_support=True,
+    #     supports_chunking=True,
+    #     supports_expert_map=True,
+    #     needs_matching_quant=True,
+    #     needs_deep_gemm=True,
+    # )
 
-if cutlass_fp8_supported():
+if False and cutlass_fp8_supported():
     from vllm.model_executor.layers.fused_moe import (
         CutlassBatchedExpertsFp8,
         CutlassExpertsFp8,
@@ -341,9 +341,9 @@ if cutlass_fp8_supported():
         supports_expert_map=False,
     )
 
-if cutlass_fp4_supported():
-    from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp4
-
+if False and cutlass_fp4_supported():
+    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        CutlassExpertsFp4)
     register_experts(
         CutlassExpertsFp4,
         standard_format,

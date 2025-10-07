@@ -137,25 +137,26 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
          local_expert_routing_map,
          num_tokens) = self.handle
 
-        num_of_tokens_for_experts = num_of_tokens_for_experts.cpu()
+        #num_of_tokens_for_experts = num_of_tokens_for_experts.cpu()
 
-        print(f"STUFF\n"
-              f"rank_exp_offset = {self.rank_expert_offset}\n"
-              f"a={a1q.shape}/{a1q.dtype} -> {expert_x.shape}/{expert_x.dtype}\n"
-              f"topk_ids={topk_ids.shape}\n"
-              f"tok_for_exp={num_of_tokens_for_experts}\n"
-              f"probs={expert_probs.shape}\n"
-              f"lem shape={local_expert_routing_map.shape}, {local_expert_routing_map[:num_of_tokens_for_experts].shape}\n"
-              f"lem numel={local_expert_routing_map.nonzero().numel()}\n"
-              #f"lem={local_expert_routing_map}\n"
-              f"lem sum={local_expert_routing_map.sum(dim=1).shape}\n"
-              f"sparse_to_dense_map={sparse_to_dense_map.shape} {sparse_to_dense_map.dtype} {sparse_to_dense_map}\n"
-              f"rdma_to_attn_map={rdma_to_attn_map.shape} {rdma_to_attn_map.dtype} {rdma_to_attn_map}\n"
-              f"attn_to_rdma_map={attn_to_rdma_map.shape} {attn_to_rdma_map.dtype}\n"
-              f"num_tokens={num_tokens}\n"
-              )
+        if False:
+            print(f"STUFF\n"
+                  f"rank_exp_offset = {self.rank_expert_offset}\n"
+                  f"a={a1q.shape}/{a1q.dtype} -> {expert_x.shape}/{expert_x.dtype}\n"
+                  f"topk_ids={topk_ids.shape}\n"
+                  f"tok_for_exp={num_of_tokens_for_experts}\n"
+                  f"probs={expert_probs.shape}\n"
+                  f"lem shape={local_expert_routing_map.shape}, {local_expert_routing_map[:num_of_tokens_for_experts].shape}\n"
+                  f"lem numel={local_expert_routing_map.nonzero().numel()}\n"
+                  #f"lem={local_expert_routing_map}\n"
+                  f"lem sum={local_expert_routing_map.sum(dim=1).shape}\n"
+                  f"sparse_to_dense_map={sparse_to_dense_map.shape} {sparse_to_dense_map.dtype} {sparse_to_dense_map}\n"
+                  f"rdma_to_attn_map={rdma_to_attn_map.shape} {rdma_to_attn_map.dtype} {rdma_to_attn_map}\n"
+                  f"attn_to_rdma_map={attn_to_rdma_map.shape} {attn_to_rdma_map.dtype}\n"
+                  f"num_tokens={num_tokens}\n"
+                  )
 
-        local_expert_routing_map = local_expert_routing_map[:num_of_tokens_for_experts.item()]
+        #local_expert_routing_map = local_expert_routing_map[:num_of_tokens_for_experts.item()]
 
         # TBD
         new_topk_ids = None
@@ -202,7 +203,8 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
 
-        print(f"\nCOMBINE START({self.rank_expert_offset})\n")
+        if False:
+            print(f"\nCOMBINE START({self.rank_expert_offset})\n")
 
         combined_x, _ = self.buffer.combine(
             tensor=fused_expert_output,
@@ -210,7 +212,8 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             handle=self.handle,
         )
 
-        print(f"\nCOMBINE END({self.rank_expert_offset}) {combined_x.shape}/{combined_x.dtype}\n")
+        if False:
+            print(f"\nCOMBINE END({self.rank_expert_offset}) {combined_x.shape}/{combined_x.dtype}\n")
 
         # TODO(lucas): support this case with the refactored modular kernel
         # Respect inplace outputs.
