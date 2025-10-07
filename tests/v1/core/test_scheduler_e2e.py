@@ -4,11 +4,6 @@
 import pytest
 
 from vllm import LLM
-from vllm.platforms import current_platform
-
-# FIXME
-if current_platform.is_cpu():
-    pytest.skip("Process gets terminated on CPU")
 
 MODEL = "meta-llama/Llama-3.2-1B"
 PROMPT = "Hello my name is Robert and I"
