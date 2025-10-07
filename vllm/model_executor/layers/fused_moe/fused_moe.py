@@ -14,8 +14,6 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-
-# yapf: disable
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEQuantConfig,
@@ -25,8 +23,6 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     _valid_cutlass_block_scaled_grouped_gemm,
     run_cutlass_block_scaled_fused_experts,
 )
-
-# yapf: enable
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm,
     deep_gemm_moe_fp8,
@@ -1750,10 +1746,7 @@ def fused_experts_impl(
     else:
         raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
-    if inplace:
-        out_hidden_states = hidden_states
-    else:
-        out_hidden_states = torch.empty_like(hidden_states)
+    out_hidden_states = hidden_states if inplace else torch.empty_like(hidden_states)
 
     if use_mxfp4_w4a4:
         # Weight has to be dequantized for mxfp4 emulation.

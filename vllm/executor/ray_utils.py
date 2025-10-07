@@ -4,7 +4,7 @@
 import os
 import time
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import msgspec
 
@@ -59,7 +59,7 @@ try:
         def get_node_ip(self) -> str:
             return get_ip()
 
-        def get_node_and_gpu_ids(self) -> Tuple[str, List[int]]:
+        def get_node_and_gpu_ids(self) -> tuple[str, list[int]]:
             node_id = ray.get_runtime_context().get_node_id()
             device_key = vllm.platforms.current_platform.ray_device_key
             if not device_key:
@@ -72,7 +72,7 @@ try:
 
         def execute_model_spmd(
             self,
-            req_or_tuple: Union[bytes, Tuple[bytes, Optional[IntermediateTensors]]],
+            req_or_tuple: Union[bytes, tuple[bytes, Optional[IntermediateTensors]]],
         ) -> bytes:
             """Execute model in SPMD fashion: used only when SPMD worker and
             compiled DAG are both enabled.
@@ -126,10 +126,10 @@ try:
         def execute_model_ray(
             self,
             scheduler_output: Union[
-                "SchedulerOutput", Tuple["SchedulerOutput", "IntermediateTensors"]
+                "SchedulerOutput", tuple["SchedulerOutput", "IntermediateTensors"]
             ],
         ) -> Union[
-            "ModelRunnerOutput", Tuple["SchedulerOutput", "IntermediateTensors"]
+            "ModelRunnerOutput", tuple["SchedulerOutput", "IntermediateTensors"]
         ]:
             # This method is used by Ray Compiled Graph to execute the model,
             # and it needs a special logic of self.setup_device_if_necessary()
@@ -156,7 +156,7 @@ try:
                 output = output.get_output()
             return output
 
-        def override_env_vars(self, vars: Dict[str, str]):
+        def override_env_vars(self, vars: dict[str, str]):
             os.environ.update(vars)
 
     ray_import_err = None
@@ -201,7 +201,7 @@ def _verify_bundles(
     # bundle_idx -> bundle (e.g., {"GPU": 1})
     bundles = pg_data["bundles"]
     # node_id -> List of bundle (e.g., {"GPU": 1})
-    node_id_to_bundle: Dict[str, List[Dict[str, float]]] = defaultdict(list)
+    node_id_to_bundle: dict[str, list[dict[str, float]]] = defaultdict(list)
 
     for bundle_idx, node_id in bundle_to_node_ids.items():
         node_id_to_bundle[node_id].append(bundles[bundle_idx])
@@ -383,7 +383,7 @@ def initialize_ray_cluster(
                 device_str,
             )
         # Create a new placement group
-        placement_group_specs: List[Dict[str, float]] = [
+        placement_group_specs: list[dict[str, float]] = [
             {device_str: 1.0} for _ in range(parallel_config.world_size)
         ]
 

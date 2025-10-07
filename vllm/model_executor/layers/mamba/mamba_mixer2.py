@@ -676,7 +676,6 @@ class MambaMixer2(MambaBase, CustomOp):
             hidden_states_p, B_p, C_p = split_hidden_states_B_C_fn(hidden_states_B_C_p)
 
             # 3. State Space Model sequence transformation
-
             # NOTE: final output is an in-place update of out tensor
             mamba_chunk_scan_combined_varlen(
                 hidden_states_p.view(
