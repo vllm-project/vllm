@@ -99,9 +99,6 @@ async def test_load(
     engine_args: AsyncEngineArgs,
     prompt: PromptType,
 ):
-    # TODO(rickyx): Remove monkeypatch once we have a better way to test V1
-    # so that in the future when we switch, we don't have to change all the
-    # tests.
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(engine_args)
