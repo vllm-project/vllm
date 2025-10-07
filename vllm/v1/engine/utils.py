@@ -354,15 +354,19 @@ class CoreEngineActorManager:
             dp_master_ip,
         )
         device_str = current_platform.ray_device_key
-        n_node_devices: list[int] = [int(node_resources[device_str]) for node_resources in nodes if device_str in node_resources]
+        n_node_devices: list[int] = [
+            int(node_resources[device_str])
+            for node_resources in nodes
+            if device_str in node_resources
+        ]
         max_device_per_node = max(n_node_devices)
 
         if max_device_per_node < world_size:
             # if we need multiple nodes per dp group, we require for now that
             # available nodes are homogenous
-            assert set(n_node_devices) == {
-                max_device_per_node
-            }, f"Nodes are not homogenous, {nodes}"
+            assert set(n_node_devices) == {max_device_per_node}, (
+                f"Nodes are not homogenous, {nodes}"
+            )
             assert len(nodes) * max_device_per_node == world_size * num_pg_to_create, (
                 f"Total available nodes {len(nodes)} and devices {max_device_per_node} "
                 f"do not match required world size {world_size} and data parallel size "
