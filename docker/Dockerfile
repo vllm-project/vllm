@@ -188,11 +188,38 @@ ARG SCCACHE_S3_NO_CREDENTIALS=0
 ARG VLLM_USE_PRECOMPILED=""
 ARG VLLM_MAIN_CUDA_VERSION=""
 
-# if USE_SCCACHE is set, use sccache to speed up compilation
+#  use sccache to speed up compilation
+# if USE_SCCACHE is set and SCCACHE_S3_NO_CREDENTIALS is set
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
-    if [ "$USE_SCCACHE" = "1" ]; then \
-        echo "Installing sccache..." \
+    --mount=type=secret,id=AWS_ACCESS_KEY_ID,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=AWS_SECRET_ACCESS_KEY,env=AWS_SECRET_ACCESS_KEY \
+    --mount=type=secret,id=AWS_SESSION_TOKEN,env=AWS_SESSION_TOKEN \
+    if [ "$USE_SCCACHE" = "1" ] && [ "$SCCACHE_S3_NO_CREDENTIALS" = "0" ]; then \
+        echo "Installing sccache with custom compilations..." \
+        && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
+        && tar -xzf sccache.tar.gz \
+        && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
+        && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
+        && if [ ! -z ${SCCACHE_ENDPOINT} ] ; then export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT} ; fi \
+        && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
+        && export SCCACHE_REGION=${SCCACHE_REGION_NAME} \
+        && export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} \
+        && export SCCACHE_IDLE_TIMEOUT=0 \
+        && export CMAKE_BUILD_TYPE=Release \
+        && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
+        && export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
+        && export VLLM_DOCKER_BUILD_CONTEXT=1 \
+        && sccache --show-stats \
+        && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
+        && sccache --show-stats; \
+    fi
+
+# if USE_SCCACHE is set and SCCACHE_S3_NO_CREDENTIALS is not set
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=.git,target=.git \
+    if [ "$USE_SCCACHE" = "1" ] && [ "$SCCACHE_S3_NO_CREDENTIALS" = "1" ]; then \
+        echo "Installing sccache with VLLM compilations..." \
         && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
         && tar -xzf sccache.tar.gz \
         && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
