@@ -30,10 +30,9 @@ class MedusaProposer:
         # Save config parameters
         self.vllm_config = vllm_config
         self.device = device
-        self.max_num_tokens = (
-            vllm_config.scheduler_config.max_num_batched_tokens)
-        self.hidden_size = vllm_config.speculative_config.\
-            draft_model_config.get_hidden_size(
+        self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.hidden_size = (
+            vllm_config.speculative_config.draft_model_config.get_hidden_size()
         )
         self.dtype = vllm_config.model_config.dtype
         self.eplb_state: Optional[EplbState] = None
@@ -54,24 +53,24 @@ class MedusaProposer:
         draft_tokens = [logit.argmax(dim=-1).tolist() for logit in logits]
         return [list(row) for row in zip(*draft_tokens)]
 
-    def load_model(self,
-                   target_model: nn.Module,
-                   eep_scale_up: bool = False) -> None:
+    def load_model(self, target_model: nn.Module, eep_scale_up: bool = False) -> None:
         from vllm.compilation.backends import set_model_tag
+
         with set_model_tag("medusa_head"):
-            self.model = get_model(vllm_config=self.vllm_config,
-                                   model_config=self.vllm_config.
-                                   speculative_config.draft_model_config)
+            self.model = get_model(
+                vllm_config=self.vllm_config,
+                model_config=self.vllm_config.speculative_config.draft_model_config,
+            )
         assert not is_mixture_of_experts(self.model)
 
     @torch.inference_mode()
-    def dummy_run(self,
-                  num_tokens: int,
-                  skip_eplb: bool = False,
-                  is_profile: bool = False) -> None:
-        hidden_states = torch.zeros((self.max_num_tokens, self.hidden_size),
-                                    dtype=self.dtype,
-                                    device=self.device)
-        with set_forward_context(None, self.vllm_config,
-                                 num_tokens=num_tokens):
+    def dummy_run(
+        self, num_tokens: int, skip_eplb: bool = False, is_profile: bool = False
+    ) -> None:
+        hidden_states = torch.zeros(
+            (self.max_num_tokens, self.hidden_size),
+            dtype=self.dtype,
+            device=self.device,
+        )
+        with set_forward_context(None, self.vllm_config, num_tokens=num_tokens):
             self.model(hidden_states)

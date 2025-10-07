@@ -2,7 +2,7 @@
 
 In vLLM's V1 architecture, `torch.compile` is enabled by default and is a critical part of the framework. This document gives a simple walk-through example to show how to understand the `torch.compile` usage.
 
-Throughout the example, we will run a common Llama model using v1, and turn on debug level logging to show all the details. The command to be used is `VLLM_USE_V1=1 VLLM_LOGGING_LEVEL=DEBUG vllm serve meta-llama/Llama-3.2-1B`.
+Throughout the example, we will run a common Llama model, and turn on debug level logging to show all the details. The command to be used is `VLLM_LOGGING_LEVEL=DEBUG vllm serve meta-llama/Llama-3.2-1B`.
 
 ## Compilation Cache
 
@@ -16,7 +16,7 @@ vLLM will take all the available factors into consideration, and decide a direct
 
 The factors considered include:
 
-- All the related configs (see the `compute_hash` functions in the [config.py](gh-file:vllm/config.py))
+- All the related configs (see the `compute_hash` functions in their respective configs in the [config folder](gh-file:vllm/config))
 - PyTorch configs (see the `compute_hash` functions in the [compiler_interface.py](gh-file:vllm/compilation/compiler_interface.py))
 - The model's forward function and the relevant functions called by the forward function (see below)
 
