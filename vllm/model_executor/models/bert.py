@@ -629,7 +629,6 @@ class SPLADESparsePooler(Pooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return PoolingParamsUpdate(requires_token_ids=True)
 
-    @torch.no_grad()
     def forward(
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
@@ -649,7 +648,7 @@ class SPLADESparsePooler(Pooler):
         B = len(hs_list)
         H = hs_list[0].size(-1)
 
-        raw_lens = getattr(pooling_metadata, "prompt_lens", None)
+        raw_lens = pooling_metadata.prompt_lens
 
         def _fallback_lens_from_hs():
             return [int(h.size(0)) for h in hs_list]
@@ -724,12 +723,7 @@ class SPLADESparsePooler(Pooler):
                 torch.isneginf(pooled), torch.zeros_like(pooled), pooled
             )
 
-        outs: list[torch.Tensor] = []
-        for i in range(B):
-            vec = pooled[i].to(torch.float32).contiguous().view(-1)  # [V]
-            outs.append(vec)
-
-        return outs
+        return pooled.contiguous()
 
 
 @default_pooling_type("CLS")
