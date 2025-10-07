@@ -607,7 +607,9 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
       }
     }
   }
+#ifndef USE_ROCM
   __syncwarp();
+#endif
 
   if (head_idx >= head_dim || token_idx >= num_tokens) {
     return;
