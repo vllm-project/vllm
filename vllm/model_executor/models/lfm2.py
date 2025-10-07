@@ -71,14 +71,14 @@ class Lfm2MLP(nn.Module):
             output_sizes=[ff_dim] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj",
+            prefix=f"{prefix}.w1",
         )
         self.w2 = RowParallelLinear(
             input_size=ff_dim,
             output_size=dim,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.down_proj",
+            prefix=f"{prefix}.w2",
         )
         self.act_fn = SiluAndMul()
 
@@ -484,13 +484,15 @@ class Lfm2ForCausalLM(
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
-        assert (not cache_config.enable_prefix_caching
-                ), "Lfm2 currently does not support prefix caching"
+        assert not cache_config.enable_prefix_caching, (
+            "Lfm2 currently does not support prefix caching"
+        )
 
         super().__init__()
         self.config = config
-        self.model = Lfm2Model(vllm_config=vllm_config,
-                               prefix=maybe_prefix(prefix, "model"))
+        self.model = Lfm2Model(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
 
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = self.config.vocab_size

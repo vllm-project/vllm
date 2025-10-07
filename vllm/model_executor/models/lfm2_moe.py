@@ -6,42 +6,60 @@ from typing import Any, Optional
 import torch
 import torch.nn as nn
 
-from vllm import envs
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
-                         get_current_vllm_config)
-from vllm.distributed import (get_ep_group, get_pp_group,
-                              get_tensor_model_parallel_world_size)
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed import (
+    get_ep_group,
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateDtypeCalculator, MambaStateShapeCalculator)
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+)
 from vllm.model_executor.layers.mamba.short_conv import ShortConv
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+    DEFAULT_VOCAB_PADDING_SIZE,
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Lfm2MoeConfig
 
-from .interfaces import (HasInnerState, IsHybrid, MixtureOfExperts,
-                         SupportsLoRA, SupportsPP, SupportsQuant)
-from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
-                    is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+from .interfaces import (
+    HasInnerState,
+    IsHybrid,
+    MixtureOfExperts,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsQuant,
+)
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    extract_layer_index,
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+)
 
 
 class Lfm2MoeMlp(nn.Module):
-
     def __init__(
         self,
         dim: int,
@@ -55,14 +73,14 @@ class Lfm2MoeMlp(nn.Module):
             output_sizes=[ff_dim] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj",
+            prefix=f"{prefix}.w1",
         )
         self.w2 = RowParallelLinear(
             input_size=ff_dim,
             output_size=dim,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.down_proj",
+            prefix=f"{prefix}.w2",
         )
         self.act_fn = SiluAndMul()
 
@@ -74,7 +92,6 @@ class Lfm2MoeMlp(nn.Module):
 
 
 class Lfm2MoeSparseMoeBlock(nn.Module):
-
     def __init__(
         self,
         config: Lfm2MoeConfig,
@@ -94,7 +111,8 @@ class Lfm2MoeSparseMoeBlock(nn.Module):
         if self.tp_size > self.n_routed_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {self.n_routed_experts}.")
+                f"the number of experts {self.n_routed_experts}."
+            )
 
         # Load balancing settings.
         vllm_config = get_current_vllm_config()
@@ -103,23 +121,25 @@ class Lfm2MoeSparseMoeBlock(nn.Module):
 
         self.n_logical_experts = self.n_routed_experts
         self.n_redundant_experts = eplb_config.num_redundant_experts
-        self.n_physical_experts = (self.n_logical_experts +
-                                   self.n_redundant_experts)
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        self.physical_expert_start = (self.ep_rank *
-                                      self.n_local_physical_experts)
-        self.physical_expert_end = (self.physical_expert_start +
-                                    self.n_local_physical_experts)
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = (
+            self.physical_expert_start + self.n_local_physical_experts
+        )
 
-        self.gate = ReplicatedLinear(config.hidden_size,
-                                     config.num_experts,
-                                     bias=False,
-                                     quant_config=quant_config,
-                                     prefix=f"{prefix}.gate")
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            config.num_experts,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate",
+        )
         if config.use_expert_bias:
             self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(self.n_routed_experts, dtype=torch.float32))
+                torch.empty(self.n_routed_experts, dtype=torch.float32)
+            )
         else:
             self.gate.e_score_correction_bias = None
 
@@ -138,7 +158,8 @@ class Lfm2MoeSparseMoeBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             scoring_func="sigmoid",
-            e_score_correction_bias=self.gate.e_score_correction_bias)
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         orig_shape = hidden_states.shape
@@ -147,19 +168,20 @@ class Lfm2MoeSparseMoeBlock(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits) * self.routed_scaling_factor
+        final_hidden_states = (
+            self.experts(hidden_states=hidden_states, router_logits=router_logits)
+            * self.routed_scaling_factor
+        )
 
         if self.tp_size > 1:
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
-                final_hidden_states)
+                final_hidden_states
+            )
 
         return final_hidden_states.view(orig_shape)
 
 
 class Lfm2MoeAttention(nn.Module):
-
     def __init__(
         self,
         config: Lfm2MoeConfig,
@@ -256,7 +278,6 @@ class Lfm2MoeAttention(nn.Module):
 
 
 class Lfm2MoeAttentionDecoderLayer(nn.Module):
-
     def __init__(
         self,
         config: Lfm2MoeConfig,
@@ -275,11 +296,12 @@ class Lfm2MoeAttentionDecoderLayer(nn.Module):
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
-                config, "original_max_position_embeddings", None):
+            config, "original_max_position_embeddings", None
+        ):
             rope_scaling["original_max_position_embeddings"] = (
-                config.original_max_position_embeddings)
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+                config.original_max_position_embeddings
+            )
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
 
         self.self_attn = Lfm2MoeAttention(
             config=config,
@@ -324,16 +346,13 @@ class Lfm2MoeAttentionDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.operator_norm(hidden_states)
         else:
-            hidden_states, residual = self.operator_norm(
-                hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions,
-                                       hidden_states=hidden_states)
+            hidden_states, residual = self.operator_norm(hidden_states, residual)
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         hidden_states, residual = self.ffn_norm(hidden_states, residual)
         return self.feed_forward(hidden_states), residual
 
 
 class Lfm2MoeShortConvDecoderLayer(nn.Module):
-
     def __init__(
         self,
         config: Lfm2MoeConfig,
@@ -383,8 +402,7 @@ class Lfm2MoeShortConvDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.operator_norm(hidden_states)
         else:
-            hidden_states, residual = self.operator_norm(
-                hidden_states, residual)
+            hidden_states, residual = self.operator_norm(hidden_states, residual)
         output = torch.empty_like(hidden_states)
         self.conv(
             hidden_states,
@@ -397,7 +415,6 @@ class Lfm2MoeShortConvDecoderLayer(nn.Module):
 
 @support_torch_compile
 class Lfm2MoeModel(nn.Module):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -412,21 +429,26 @@ class Lfm2MoeModel(nn.Module):
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
-        lora_vocab = ((lora_config.lora_extra_vocab_size *
-                       (lora_config.max_loras or 1)) if lora_config else 0)
+        lora_vocab = (
+            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
+            if lora_config
+            else 0
+        )
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size)
+            self.vocab_size, config.hidden_size, org_num_embeddings=config.vocab_size
+        )
 
         def get_layer(prefix: str):
             layer_idx = extract_layer_index(prefix)
             is_attn = self.config.layer_types[layer_idx] == "full_attention"
-            layer_class = (Lfm2MoeAttentionDecoderLayer
-                           if is_attn else Lfm2MoeShortConvDecoderLayer)
+            layer_class = (
+                Lfm2MoeAttentionDecoderLayer
+                if is_attn
+                else Lfm2MoeShortConvDecoderLayer
+            )
             return layer_class(
                 config,
                 layer_idx,
@@ -438,14 +460,14 @@ class Lfm2MoeModel(nn.Module):
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers")
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+            config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
+        )
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size
+        )
 
         if get_pp_group().is_last_rank:
-            self.embedding_norm = RMSNorm(config.hidden_size,
-                                          eps=config.norm_eps)
+            self.embedding_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
         else:
             self.embedding_norm = PPMissingLayer()
 
@@ -470,17 +492,16 @@ class Lfm2MoeModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in self.layers[self.start_layer : self.end_layer]:
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
             )
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-                "residual": residual
-            })
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
         hidden_states, _ = self.embedding_norm(hidden_states, residual)
         return hidden_states
 
@@ -490,10 +511,10 @@ class Lfm2MoeModel(nn.Module):
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
             num_experts=self.config.num_experts,
-            num_redundant_experts=self.num_redundant_experts)
+            num_redundant_experts=self.num_redundant_experts,
+        )
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
@@ -505,23 +526,21 @@ class Lfm2MoeModel(nn.Module):
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
-
             if "expert_bias" in name:
-                name = name.replace("expert_bias",
-                                    "gate.e_score_correction_bias")
+                name = name.replace("expert_bias", "gate.e_score_correction_bias")
 
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue
 
-                if (("feed_forward.experts." in name)
-                        and name not in params_dict):
+                if ("feed_forward.experts." in name) and name not in params_dict:
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
-                if ((name.endswith(".bias") or name.endswith("_bias"))
-                        and name not in params_dict):
+                if (
+                    name.endswith(".bias") or name.endswith("_bias")
+                ) and name not in params_dict:
                     continue
                 # Skip layers on other devices.
                 if is_pp_missing_parameter(name, self):
@@ -544,36 +563,48 @@ class Lfm2MoeModel(nn.Module):
                         continue
 
                     # Skip loading extra bias for GPTQ models.
-                    if ((name.endswith(".bias") or name.endswith("_bias"))
-                            and name not in params_dict):
+                    if (
+                        name.endswith(".bias") or name.endswith("_bias")
+                    ) and name not in params_dict:
                         continue
                     param = params_dict[name]
 
                     weight_loader = param.weight_loader
-                    weight_loader(param,
-                                  loaded_weight,
-                                  name,
-                                  shard_id=shard_id,
-                                  expert_id=expert_id)
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                    )
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
-                    if ((name.endswith(".bias") or name.endswith("_bias"))
-                            and name not in params_dict):
+                    if (
+                        name.endswith(".bias") or name.endswith("_bias")
+                    ) and name not in params_dict:
                         continue
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
 
-class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
-                         IsHybrid, SupportsQuant, MixtureOfExperts):
+class Lfm2MoeForCausalLM(
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsPP,
+    IsHybrid,
+    SupportsQuant,
+    MixtureOfExperts,
+):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -598,7 +629,6 @@ class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, ...]:
-
         return MambaStateDtypeCalculator.short_conv_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
@@ -609,11 +639,10 @@ class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[tuple[int, int]]:
-        """ Calculate shapes for LFM2's convolutional cache.
+        """Calculate shapes for LFM2's convolutional cache.
 
         Args:
             vllm_config: vLLM config
-            use_v1: Get shapes for V1 (or V0)
 
         Returns:
             Tuple containing:
@@ -633,15 +662,15 @@ class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
-        assert (not cache_config.enable_prefix_caching
-                ), "Lfm2Moe currently does not support prefix caching"
-        assert envs.VLLM_USE_V1, (
-            "Lfm2MoeForCausalLM doesn't support vLLM v0. Please enable v1")
+        assert not cache_config.enable_prefix_caching, (
+            "Lfm2Moe currently does not support prefix caching"
+        )
 
         super().__init__()
         self.config = config
-        self.model = Lfm2MoeModel(vllm_config=vllm_config,
-                                  prefix=maybe_prefix(prefix, "model"))
+        self.model = Lfm2MoeModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
 
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = self.config.vocab_size
@@ -656,8 +685,9 @@ class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                     DEFAULT_VOCAB_PADDING_SIZE
                     # We need bigger padding if using lora for kernel
                     # compatibility
-                    if not lora_config else
-                    lora_config.lora_vocab_padding_size),
+                    if not lora_config
+                    else lora_config.lora_vocab_padding_size
+                ),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
@@ -665,11 +695,13 @@ class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         else:
             self.lm_head = PPMissingLayer()
 
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size)
+        self.logits_processor = LogitsProcessor(
+            self.unpadded_vocab_size, config.vocab_size
+        )
 
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
+            self.model.make_empty_intermediate_tensors
+        )
 
         # Set MoE hyperparameters
         self.expert_weights = []
@@ -681,14 +713,16 @@ class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                 continue
 
             assert isinstance(
-                layer,
-                (Lfm2MoeAttentionDecoderLayer, Lfm2MoeShortConvDecoderLayer))
+                layer, (Lfm2MoeAttentionDecoderLayer, Lfm2MoeShortConvDecoderLayer)
+            )
             if isinstance(layer.feed_forward, Lfm2MoeSparseMoeBlock):
                 example_layer = layer.feed_forward
                 self.moe_layers.append(layer.feed_forward.experts)
 
         if example_layer is None:
-            raise RuntimeError("No Qwen3MoE layer found in the model.layers.")
+            raise RuntimeError(
+                "No Lfm2MoeSparseMoeBlock layer found in the model.layers."
+            )
 
         self.num_moe_layers = len(self.moe_layers)
         self.num_expert_groups = 1
@@ -726,8 +760,7 @@ class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = (num_physical_experts -
-                                      self.num_logical_experts)
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
         for layer in self.model.layers:
             if isinstance(layer.feed_forward, Lfm2MoeSparseMoeBlock):
                 moe = layer.feed_forward
@@ -744,20 +777,19 @@ class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
 

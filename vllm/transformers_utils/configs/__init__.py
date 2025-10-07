@@ -47,6 +47,7 @@ __all__ = [
     "EAGLEConfig",
     "RWConfig",
     "JAISConfig",
+    "Lfm2MoeConfig",
     "MedusaConfig",
     "MiDashengLMConfig",
     "MLPSpeculatorConfig",
@@ -64,5 +65,4 @@ __all__ = [
     "Step3VisionEncoderConfig",
     "Step3TextConfig",
     "Qwen3NextConfig",
-    "Lfm2MoeConfig",
 ]
