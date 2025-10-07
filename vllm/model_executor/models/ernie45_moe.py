@@ -23,8 +23,7 @@
 # limitations under the License.
 """Inference-only ErineMoE model compatible with HuggingFace weights."""
 
-import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from itertools import islice
 from typing import Any, Optional, Union
 
@@ -35,8 +34,11 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import (get_ep_group, get_pp_group,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import (
+    get_ep_group,
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -61,10 +63,15 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
-from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
-                    is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    extract_layer_index,
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -123,8 +130,7 @@ class Ernie4_5_MoeMoE(nn.Module):
         self.layer_idx = layer_idx
         self.tp_size = get_tensor_model_parallel_world_size()
 
-        self.moe_num_shared_experts = getattr(config, "moe_num_shared_experts",
-                                              None)
+        self.moe_num_shared_experts = getattr(config, "moe_num_shared_experts", None)
         self.ep_group = get_ep_group().device_group
         self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
@@ -138,15 +144,13 @@ class Ernie4_5_MoeMoE(nn.Module):
 
         self.n_redundant_experts = parallel_config.num_redundant_experts
         self.n_logical_experts = self.n_routed_experts
-        self.n_physical_experts = (self.n_logical_experts +
-                                   self.n_redundant_experts)
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = (self.ep_rank *
-                                      self.n_local_physical_experts)
-        self.physical_expert_end = (self.physical_expert_start +
-                                    self.n_local_physical_experts)
-        self.has_shared_experts = (getattr(config, "moe_num_shared_experts", 0)
-                                   > 0)
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = (
+            self.physical_expert_start + self.n_local_physical_experts
+        )
+        self.has_shared_experts = getattr(config, "moe_num_shared_experts", 0) > 0
 
         if self.tp_size > config.moe_num_experts:
             raise ValueError(
@@ -178,7 +182,7 @@ class Ernie4_5_MoeMoE(nn.Module):
             prefix=f"{prefix}.experts",
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.n_redundant_experts
+            num_redundant_experts=self.n_redundant_experts,
         )
 
         if self.has_shared_experts:
@@ -363,10 +367,10 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
             and layer_idx <= moe_layer_end_index
         ):
             self.mlp = Ernie4_5_MoeMoE(
-              config=config,
-              quant_config=quant_config,
-              prefix=f"{prefix}.mlp",
-              enable_eplb=enable_eplb
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+                enable_eplb=enable_eplb,
             )
         else:
             self.mlp = Ernie4_5_MoeMLP(
@@ -609,8 +613,7 @@ class Ernie4_5_MoeModel(nn.Module):
         return loaded_params
 
 
-class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
-                              MixtureOfExperts):
+class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -656,10 +659,13 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
 
         # Set MoE hyperparameters
         moe_layers_indices = [
-            i for i in range(config.num_hidden_layers)
-            if (i >= config.moe_layer_start_index
-                and i <= config.moe_layer_end_index and (i + 1) %
-                config.moe_layer_interval == 0)
+            i
+            for i in range(config.num_hidden_layers)
+            if (
+                i >= config.moe_layer_start_index
+                and i <= config.moe_layer_end_index
+                and (i + 1) % config.moe_layer_interval == 0
+            )
         ]
         self.num_moe_layers = len(moe_layers_indices)
         self.num_expert_groups = 1
@@ -676,8 +682,7 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
                 self.moe_layers.append(layer.mlp.experts)
 
         if example_moe is None:
-            raise RuntimeError(
-                "No Ernie4_5_MoeMoE layer found in model.layers.")
+            raise RuntimeError("No Ernie4_5_MoeMoE layer found in model.layers.")
 
         self.num_logical_experts = example_moe.n_logical_experts
         self.num_physical_experts = example_moe.n_physical_experts
@@ -710,8 +715,7 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
         assert self.num_local_physical_experts == num_local_physical_experts
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = (num_physical_experts -
-                                      self.num_logical_experts)
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
         for layer in self.model.layers:
             if isinstance(layer.mlp, Ernie4_5_MoeMoE):
                 moe = layer.mlp
