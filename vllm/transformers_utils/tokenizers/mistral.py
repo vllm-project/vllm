@@ -475,7 +475,7 @@ class MistralTokenizer(TokenizerBase):
                 self.tokenizer.id_to_byte_piece(token_id, SpecialTokenPolicy.KEEP)
                 if token_id not in self.all_special_ids
                 else self.tokenizer.decode([token_id], SpecialTokenPolicy.KEEP)
-                for token_id in ids
+                for token_id in ids_kept
             ]
 
         return tokens
