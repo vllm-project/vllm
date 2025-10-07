@@ -160,6 +160,28 @@ class EngineCore:
             vllm_config, mm_registry
         )
 
+        # If a KV connector is initialized for scheduler, we want to collect
+        # handshake metadata from all workers so the connector in the scheduler
+        # will have the full context 
+        if self.scheduler.get_kv_connector() is not None:
+            # Collect and store KV connector xfer metadata from workers
+            # (after KV cache registration)
+            xfer_handshake_metadata = self.model_executor.get_kv_connector_handshake_metadata()
+
+            if xfer_handshake_metadata:
+                # xfer_handshake_metadata is list of dicts from workers
+                # Each dict already has structure {dp_rank: {tp_rank: metadata}}
+                # Merge all worker dicts into a single dict
+                content: dict[int, dict[int, dict[int, Any]]] = {}
+                for worker_dict in xfer_handshake_metadata:
+                    if worker_dict is not None:
+                        # Deep merge nested dictionaries instead of overwrite
+                        for dp_rank, tp_dict in worker_dict.items():
+                            if dp_rank not in content:
+                                content[dp_rank] = {}
+                            content[dp_rank].update(tp_dict)
+                self.scheduler.get_kv_connector().set_xfer_handshake_metadata(content)
+
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
         # schedule and execute batches, and is required by pipeline parallelism

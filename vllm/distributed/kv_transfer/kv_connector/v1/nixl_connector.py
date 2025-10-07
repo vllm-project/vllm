@@ -27,6 +27,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
 )
@@ -88,12 +89,7 @@ _NIXL_SUPPORTED_DEVICE = {
 _NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
 
 
-class NixlAgentMetadata(
-    msgspec.Struct,
-    omit_defaults=True,  # type: ignore[call-arg]
-    # required for @cached_property.
-    dict=True,
-):
+class NixlAgentMetadata(KVConnectorHandshakeMetadata):
     engine_id: str
     agent_metadata: bytes
     kv_caches_base_addr: list[int]
@@ -217,6 +213,16 @@ class NixlConnector(KVConnectorBase_V1):
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
+    
+    def set_xfer_handshake_metadata(self, metadata: dict[int, dict[int, dict]]) -> None:
+        """
+        Set the KV connector handshake metadata for this connector.
+
+        Args:
+            metadata (dict): the handshake metadata to set.
+        """
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.set_xfer_handshake_metadata(metadata)
 
     ############################################################
     # Worker Side Methods
@@ -276,6 +282,21 @@ class NixlConnector(KVConnectorBase_V1):
     def shutdown(self):
         if self.connector_worker is not None:
             self.connector_worker.shutdown()
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.shutdown()
+
+    def get_handshake_metadata(self) -> Optional[KVConnectorHandshakeMetadata]:
+        """
+        Get the KVConnector handshake metadata for this connector.
+        This metadata is used for out-of-band connector handshake
+        between P/D workers.
+
+        Returns:
+            KVConnectorHandshakeMetadata: the handshake metadata.
+            None if no handshake metadata is available.
+        """
+        assert self.connector_worker is not None
+        return self.connector_worker.xfer_handshake_metadata
 
 
 class NixlConnectorScheduler:
@@ -286,13 +307,13 @@ class NixlConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-        self.side_channel_port = (
-            envs.VLLM_NIXL_SIDE_CHANNEL_PORT
-            + vllm_config.parallel_config.data_parallel_rank
-            * vllm_config.parallel_config.tensor_parallel_size
-        )
+        self.side_channel_port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT
         self.use_host_buffer = vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
         logger.info("Initializing NIXL Scheduler %s", engine_id)
+
+        # Background thread for handling new handshake requests.
+        self._nixl_handshake_listener_t: Optional[threading.Thread] = None
+        self._encoded_xfer_handshake_metadata: dict[int, dict[int, Any]] = {}
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -305,6 +326,67 @@ class NixlConnectorScheduler:
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[ReqId] = set()
+
+    def shutdown(self):
+        if self._nixl_handshake_listener_t is not None:
+            self._nixl_handshake_listener_t.join(timeout=0)
+            self._nixl_handshake_listener_t = None
+
+    def set_xfer_handshake_metadata(self, metadata: dict[int, dict[int, dict]]) -> None:
+        """
+        Set the KV connector handshake metadata for this connector.
+
+        Args:
+            metadata (dict): the handshake metadata to set.
+        """
+        encoded_data = {}
+        for dp_rank, tp_metadata in metadata.items():
+            encoded_data[dp_rank] = {}
+            for tp_rank, rank_metadata in tp_metadata.items():
+                encoder = msgspec.msgpack.Encoder()
+                encoded_data[dp_rank][tp_rank] = encoder.encode(rank_metadata)
+                logger.debug("Dp rank %d, Tp rank %d: Size of encoded NixlAgentMetadata: %s bytes",
+                     dp_rank, tp_rank, str(len(encoded_data[dp_rank][tp_rank])))
+        self._encoded_xfer_handshake_metadata = encoded_data
+
+        # Only start the listener when we have metadata to serve.
+        if self._nixl_handshake_listener_t is None:
+            ready_event = threading.Event()
+            self._nixl_handshake_listener_t = threading.Thread(
+                target=self._nixl_handshake_listener,
+                args=(encoded_data, ready_event, self.side_channel_port),
+                daemon=True,
+                name="nixl_handshake_listener",
+            )
+            self._nixl_handshake_listener_t.start()
+            ready_event.wait()  # Wait for listener ZMQ socket to be ready.
+
+    @staticmethod
+    def _nixl_handshake_listener(
+        encoded_data: dict[int, dict[int, Any]],
+        ready_event: threading.Event,
+        port: int,
+    ):
+        """Background thread for getting new NIXL handshakes."""
+        # NOTE(rob): this is a simple implementation. We will move
+        # to a better approach via HTTP endpoint soon.
+
+        # Listen for new requests for metadata.
+        host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        path = make_zmq_path("tcp", host, port)
+        logger.debug("Starting listening on path: %s", path)
+        with zmq_ctx(zmq.ROUTER, path) as sock:
+            ready_event.set()
+            while True:
+                identity, _, msg = sock.recv_multipart()
+                # Decode the message which contains (GET_META_MSG, rank)
+                msg, target_dp_rank, target_tp_rank = msgspec.msgpack.decode(msg)
+                logger.debug("Received message for dp rank %s tp rank %s", target_dp_rank, target_tp_rank)
+                if msg != GET_META_MSG:
+                    logger.warning(
+                        "Connection listener got unexpected message %s", msg)
+                sock.send_multipart(
+                    (identity, b"", encoded_data[target_dp_rank][target_tp_rank]))
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -536,16 +618,6 @@ class NixlConnectorWorker:
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
-        # NIXL handshake port.
-        # NOTE(rob): Within a DP group, each DP rank gets its own
-        # base port (which is sent in the KVTransferParams).
-        # Each TP rank listens/queries on the base_port + tp_rank.
-        self.side_channel_port: int = (
-            envs.VLLM_NIXL_SIDE_CHANNEL_PORT
-            + vllm_config.parallel_config.data_parallel_rank
-            * vllm_config.parallel_config.tensor_parallel_size
-        )
-
         # Metadata.
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -614,8 +686,8 @@ class NixlConnectorWorker:
         # Set of requests that have been part of a batch, regardless of status.
         self._reqs_to_process: set[ReqId] = set()
 
-        # Background thread for handling new handshake requests.
-        self._nixl_handshake_listener_t: Optional[threading.Thread] = None
+        # Handshake metadata of this worker for NIXL transfers.
+        self.xfer_handshake_metadata: Optional[NixlAgentMetadata] = None
         # Background thread for initializing new NIXL handshakes.
         self._handshake_initiation_executor = ThreadPoolExecutor(
             # NIXL is not guaranteed to be thread-safe, limit 1 worker.
@@ -659,34 +731,6 @@ class NixlConnectorWorker:
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         self.xfer_stats = NixlKVConnectorStats()
 
-    @staticmethod
-    def _nixl_handshake_listener(
-        metadata: NixlAgentMetadata,
-        ready_event: threading.Event,
-        base_port: int,
-        tp_rank: int,
-    ):
-        """Background thread for getting new NIXL handshakes."""
-        # NOTE(rob): this is a simple implementation. We will move
-        # to a better approach via HTTP endpoint soon.
-
-        encoder = msgspec.msgpack.Encoder()
-        encoded_data = encoder.encode(metadata)
-        size_in_bytes = len(encoded_data)
-        logger.debug("Size of encoded NixlAgentMetadata: %s bytes", str(size_in_bytes))
-
-        # Listen for new requests for metadata.
-        host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-        path = make_zmq_path("tcp", host, base_port + tp_rank)
-        logger.debug("Starting listening on path: %s", path)
-        with zmq_ctx(zmq.ROUTER, path) as sock:
-            ready_event.set()
-            while True:
-                identity, _, msg = sock.recv_multipart()
-                if msg != GET_META_MSG:
-                    logger.warning("Connection listener got unexpected message %s", msg)
-                sock.send_multipart((identity, b"", encoded_data))
-
     def _nixl_handshake(
         self,
         host: str,
@@ -705,15 +749,18 @@ class NixlConnectorWorker:
         # Handshake only with the remote TP rank that current local rank will
         # pull from. With homogeneous TP it happens to be the same rank_i.
         tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
-        p_remote_rank = self.tp_rank // tp_ratio
-        path = make_zmq_path("tcp", host, port + p_remote_rank)
+        p_remote_tp_rank = self.tp_rank // tp_ratio
+        path = make_zmq_path("tcp", host, port)
         logger.debug(
-            "Querying metadata on path: %s at remote rank %s", path, p_remote_rank
+            "Querying metadata on path: %s at remote tp rank %s", path, p_remote_tp_rank
         )
+         # [WIP] gluo: using dp_rank 0 data (standard for disaggregated prefill-decode) is sufficient?
+        p_remote_dp_rank = 0
 
         # Send query for the request.
         with zmq_ctx(zmq.REQ, path) as sock:
-            sock.send(GET_META_MSG)
+            msg = msgspec.msgpack.encode((GET_META_MSG, p_remote_dp_rank, p_remote_tp_rank))
+            sock.send(msg)
             metadata_bytes = sock.recv()
             decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
             metadata = decoder.decode(metadata_bytes)
@@ -732,7 +779,7 @@ class NixlConnectorWorker:
 
             # Register Remote agent.
             remote_agent_name = self.add_remote_agent(
-                metadata, p_remote_rank, remote_tp_size
+                metadata, p_remote_tp_rank, remote_tp_size
             )
             setup_agent_time = time.perf_counter()
             logger.debug(
@@ -741,7 +788,7 @@ class NixlConnectorWorker:
             )
 
         # Remote rank -> agent name.
-        return {p_remote_rank: remote_agent_name}
+        return {p_remote_tp_rank: remote_agent_name}
 
     def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """
@@ -973,7 +1020,7 @@ class NixlConnectorWorker:
             assert len(self.block_window_per_layer) == self.num_layers
 
         # After KV Caches registered, listen for new connections.
-        metadata = NixlAgentMetadata(
+        self.xfer_handshake_metadata = NixlAgentMetadata(
             engine_id=self.engine_id,
             agent_metadata=self.nixl_wrapper.get_agent_metadata(),
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
@@ -982,15 +1029,6 @@ class NixlConnectorWorker:
             attn_backend_name=self.backend_name,
             kv_cache_layout=self.kv_cache_layout,
         )
-        ready_event = threading.Event()
-        self._nixl_handshake_listener_t = threading.Thread(
-            target=self._nixl_handshake_listener,
-            args=(metadata, ready_event, self.side_channel_port, self.tp_rank),
-            daemon=True,
-            name="nixl_handshake_listener",
-        )
-        self._nixl_handshake_listener_t.start()
-        ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 
     def add_remote_agent(
         self,
@@ -1528,9 +1566,6 @@ class NixlConnectorWorker:
     def shutdown(self):
         """Shutdown the connector worker."""
         self._handshake_initiation_executor.shutdown(wait=False)
-        if self._nixl_handshake_listener_t is not None:
-            self._nixl_handshake_listener_t.join(timeout=0)
-            self._nixl_handshake_listener_t = None
         for handles in self._recving_transfers.values():
             for handle, _ in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)

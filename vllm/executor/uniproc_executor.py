@@ -4,7 +4,7 @@ import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import cached_property
 from multiprocessing import Lock
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -92,6 +92,10 @@ class UniProcExecutor(ExecutorBase):
             future = Future[Any]()
             future.set_exception(e)
         return [future]
+
+    def get_kv_connector_handshake_metadata(self) -> List[Optional[Dict]]:
+        """Get KV connector handshake metadata from all workers."""
+        return self.collective_rpc("get_kv_connector_handshake_metadata")
 
     def check_health(self) -> None:
         # UniProcExecutor will always be healthy as long as
