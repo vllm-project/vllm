@@ -408,7 +408,7 @@ class OvisProcessor(ProcessorMixin):
             crops.insert(0, image)
         pixel_values = torch.cat([_preprocess(crop, side) for crop in crops], dim=0)
         image_placeholders = self.construct_image_placeholders(grid)
-        return pixel_values, image_placeholders, grid
+        return torch.tensor(pixel_values), image_placeholders, torch.tensor(grid)
 
     def batch_decode(self, *args, **kwargs):
         """
