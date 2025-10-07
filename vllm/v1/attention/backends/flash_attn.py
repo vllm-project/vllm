@@ -803,7 +803,8 @@ def cascade_attention(
         q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
         k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
-        # s_aux is incorporated into prefix_lse inside the GPU kernel, enabling its effect during the final attention merge.
+        # s_aux is incorporated into prefix_lse inside the GPU kernel,
+        # enabling its effect during the final attention merge.
         s_aux=s_aux,
     )
 
