@@ -62,38 +62,34 @@ IMAGE_PAD_TOKEN_ID_MAP = {
 class Ovis2_5ImagePatchInputs(TensorSchema):
     """
     Dimensions:
-        - batch_patches: Batch size * number of patches
+        - bnp: Batch size * number of images * number of patches
         - patch_size: patch_size_x * patch_size_y * num_channels
         - patch_indicators: Batch size * (number of patches + 1)
-        - patches_per_image: List of number of total patches for each image
-          in the batch.
-        - batch: Batch size
+        - bn: Batch size * number of images
     """
 
     type: Literal["image_patches"]
-    flat_data: Annotated[torch.Tensor, TensorShape("batch_patches", "patch_size")]
+    flat_data: Annotated[torch.Tensor, TensorShape("bnp", "patch_size")]
     indicator_tokens: Annotated[torch.Tensor, TensorShape("patch_indicators")]
-    patches_per_image: Annotated[list[int], TensorShape("num_patches_per_image")]
-    grids: Annotated[torch.Tensor, TensorShape("batch", 3)]
+    patches_per_item: Annotated[list[int], TensorShape("bn")]
+    grids: Annotated[torch.Tensor, TensorShape("bn", 3)]
     # This is used to restore the first two dimensions of `flat_data`.
 
 
 class Ovis2_5VideoPatchInputs(TensorSchema):
     """
     Dimensions:
-        - batch_patches: Batch size * number of patches
+        - bnp: Batch size * number of videos * number of patches
         - patch_size: patch_size_x * patch_size_y * num_channels
         - patch_indicators: Batch size * (number of patches + 1)
-        - patches_per_image: List of number of total patches for each image
-          in the batch.
-        - batch: Batch size
+        - bn: Batch size * number of videos
     """
 
-    type: Literal["image_patches"]
-    flat_data: Annotated[torch.Tensor, TensorShape("batch_patches", "patch_size")]
+    type: Literal["video_patches"]
+    flat_data: Annotated[torch.Tensor, TensorShape("bnp", "patch_size")]
     indicator_tokens: Annotated[torch.Tensor, TensorShape("patch_indicators")]
-    patches_per_image: Annotated[list[int], TensorShape("num_patches_per_image")]
-    grids: Annotated[torch.Tensor, TensorShape("batch", 3)]
+    patches_per_item: Annotated[list[int], TensorShape("bn")]
+    grids: Annotated[torch.Tensor, TensorShape("bn", 3)]
     # This is used to restore the first two dimensions of `flat_data`.
 
 
@@ -508,7 +504,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
             return Ovis2_5ImagePatchInputs(
                 type="image_patches",
                 flat_data=flatten_bn(pixel_values, concat=True),
-                patches_per_image=[
+                patches_per_item=[
                     x.shape[0] // (self.config.vit_config.hidden_stride**2)
                     for x in pixel_values
                 ],
@@ -542,7 +538,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
             return Ovis2_5VideoPatchInputs(
                 type="video_patches",
                 flat_data=flatten_bn(pixel_values, concat=True),
-                patches_per_image=[
+                patches_per_item=[
                     x.shape[0] // (self.config.vit_config.hidden_stride**2)
                     for x in pixel_values
                 ],
@@ -552,13 +548,13 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
         raise AssertionError("This line should be unreachable.")
 
-    def _process_image_input(
-        self, image_input: Union[Ovis2_5ImagePatchInputs, Ovis2_5VideoPatchInputs]
+    def _process_visual_input(
+        self, visual_input: Union[Ovis2_5ImagePatchInputs, Ovis2_5VideoPatchInputs]
     ) -> MultiModalEmbeddings:
-        image_patches_flat = image_input["flat_data"]
-        patches_per_image = image_input["patches_per_image"]
-        indicator_tokens = image_input["indicator_tokens"]
-        grid_thws = image_input["grids"]
+        image_patches_flat = visual_input["flat_data"]
+        patches_per_image = visual_input["patches_per_item"]
+        indicator_tokens = visual_input["indicator_tokens"]
+        grid_thws = visual_input["grids"]
 
         indicator_per_image = list(
             map(lambda x: 2 if x > 1 else x + 2, patches_per_image)
@@ -620,11 +616,11 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                vision_embeddings = self._process_image_input(image_input)
+                vision_embeddings = self._process_visual_input(image_input)
                 multimodal_embeddings += vision_embeddings
             if modality == "videos":
                 video_input = modalities["videos"]
-                video_embeddings = self._process_image_input(video_input)
+                video_embeddings = self._process_visual_input(video_input)
                 multimodal_embeddings += video_embeddings
 
         return multimodal_embeddings

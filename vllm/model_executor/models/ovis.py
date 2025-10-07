@@ -217,18 +217,17 @@ class VisualTokenizer(torch.nn.Module):
 class OvisImagePatchInputs(TensorSchema):
     """
     Dimensions:
-        - batch_patches: Batch size * number of patches
+        - bnp: Batch size * number of images * number of patches
         - h: Height of each patch
         - w: Width of each patch
         - patch_indicators: Batch size * (number of patches + 1)
-        - patches_per_image: List of number of total patches for each image
-          in the batch.
+        - bn: Batch size * number of images
     """
 
     type: Literal["image_patches"]
-    flat_data: Annotated[torch.Tensor, TensorShape("batch_patches", 3, "h", "w")]
+    flat_data: Annotated[torch.Tensor, TensorShape("bnp", 3, "h", "w")]
     indicator_tokens: Annotated[torch.Tensor, TensorShape("patch_indicators")]
-    patches_per_image: Annotated[list[int], TensorShape("num_patches_per_image")]
+    patches_per_image: Annotated[list[int], TensorShape("bn")]
     # This is used to restore the first two dimensions of `flat_data`.
 
 
