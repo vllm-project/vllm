@@ -31,7 +31,7 @@ class CompilationMode:
     NO_COMPILATION = 0
     STOCK_TORCH_COMPILE = 1
     DYNAMO_TRACE_ONCE = 2
-    PIECEWISE = 3
+    VLLM_COMPILE = 3
 
 
 class CUDAGraphMode(enum.Enum):
@@ -171,15 +171,29 @@ class CompilationConfig:
 
     # Top-level Compilation control
     level: int | None = None
+    """
+    This level field is deprecated. Please use mode. Currently all levels are
+    mapped to mode.
+    The compilation modes:
+
+    - None: If None, we will select the default compilation level.
+      For V1 engine this is 3, for V0 engine this is 0.
+    - 0: NONE, no compilation.
+    - 1: STOCK_TORCH_COMPILE, dynamo as is with inductor on by default.
+    - 2: DYNAMO_TRACE_ONCE.
+    - 3: VLLM_COMPILE, piecewise compilation."""
+
+    # Top-level Compilation control
+    mode: Optional[int] = None
     """The level of compilation:
 
     - None: If None, we will select the default compilation level.
       For V1 engine this is 3, for V0 engine this is 0.
-    - 0: no compilation.
-    - 1: dynamo as is.
-    - 2: dynamo once.
-    - 3: piecewise compilation."""
-    debug_dump_path: Path | None = None
+    - 0: NONE.
+    - 1: STOCK_TORCH_COMPILE.
+    - 2: DYNAMO_TRACE_ONCE.
+    - 3: VLLM_COMPILE, piecewise compilation."""
+    debug_dump_path: Optional[Path] = None
     """The path to dump the debug information."""
     cache_dir: str = ""
     """The directory to store the compiled graph, to accelerate Inductor
@@ -477,6 +491,15 @@ class CompilationConfig:
         return value
 
     def __post_init__(self) -> None:
+        if self.level is not None:
+            logger.warning(
+                "level is deprecated, use mode instead."
+                "If both level and mode are given,"
+                "only mode will be used."
+            )
+        if self.mode is not None:
+            self.level = self.mode
+
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
