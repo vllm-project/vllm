@@ -225,7 +225,7 @@ class RMSNorm(CustomOp):
 
         variance = x_var.pow(2).mean(dim=-1, keepdim=True)
 
-        x = x * torch.rsqrt(variance + self.epsilon)
+        x = x * torch.rsqrt(variance + self.variance_epsilon)
         x = x.to(orig_dtype)
         if self.has_weight:
             x = x * self.weight
@@ -267,8 +267,8 @@ class RMSNorm(CustomOp):
                     output,
                     x,
                     residual,
-                    self.weight.data,
                     residual_out,
+                    self.weight.data,
                     self.variance_epsilon,
                 )
                 return output, residual_out
@@ -325,12 +325,12 @@ class GemmaRMSNorm(CustomOp):
     ) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(hidden_size))
-        self.epsilon = eps
+        self.variance_epsilon = eps
 
     @staticmethod
     def forward_static(
         weight: torch.Tensor,
-        epsilon: float,
+        variance_epsilon: float,
         x: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
@@ -342,7 +342,7 @@ class GemmaRMSNorm(CustomOp):
 
         x = x.float()
         variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + epsilon)
+        x = x * torch.rsqrt(variance + variance_epsilon)
         # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
         # See https://github.com/huggingface/transformers/pull/29402
         x = x * (1.0 + weight.float())
@@ -389,7 +389,7 @@ class PolyNorm(CustomOp):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.ones(3) / 3)
         self.bias = torch.nn.Parameter(torch.zeros(1))
-        self.epsilon = eps
+        self.variance_epsilon = eps
 
     def _norm(self, x):
         return x / torch.sqrt(x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon)
