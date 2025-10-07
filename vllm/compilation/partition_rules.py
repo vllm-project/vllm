@@ -48,6 +48,9 @@ def inductor_partition_rule_context(op_names: list[str]):
     def _always_partition(*_args, **_kwargs):
         return True
 
+    # Save current state before registering
+    saved_rules = inductor_scheduler._custom_should_partition_fns.copy()
+
     for overload in overloads:
         inductor_scheduler.register_should_partition_rule(
             overload,
@@ -59,6 +62,7 @@ def inductor_partition_rule_context(op_names: list[str]):
     try:
         yield
     finally:
-        logger.debug(
-            "Partition rules remain registered; PyTorch does not expose a clear API."
-        )
+        # Clear and restore previous state
+        inductor_scheduler._custom_should_partition_fns.clear()
+        inductor_scheduler._custom_should_partition_fns.update(saved_rules)
+        logger.debug("Restored previous partition rules state.")
