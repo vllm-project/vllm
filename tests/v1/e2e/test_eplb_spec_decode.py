@@ -11,8 +11,9 @@ from vllm.distributed import cleanup_dist_env_and_memory
 
 def create_test_prompts() -> list[str]:
     return [
-        "A robot may not injure a human being", "To be or not to be,",
-        "What is the meaning of life?"
+        "A robot may not injure a human being",
+        "To be or not to be,",
+        "What is the meaning of life?",
     ]
 
 
@@ -21,10 +22,13 @@ def sampling_config():
     return SamplingParams(temperature=0, max_tokens=10, ignore_eos=False)
 
 
-@pytest.mark.parametrize("model_setup", [
-    ("meta-llama/Llama-4-Scout-17B-16E-Instruct", 4),
-],
-                         ids=["llama4"])
+@pytest.mark.parametrize(
+    "model_setup",
+    [
+        ("meta-llama/Llama-4-Scout-17B-16E-Instruct", 4),
+    ],
+    ids=["llama4"],
+)
 def test_eplb_model(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
@@ -42,8 +46,8 @@ def test_eplb_model(
             max_model_len=2048,
             enable_expert_parallel=True,
             num_redundant_experts=tp_size,
-            eplb_window_size=1000,
-            eplb_step_interval=3000,
+            eplb_window_size=4,
+            eplb_step_interval=16,
             eplb_log_balancedness=True,
             enable_eplb=True,
             load_format="dummy",
@@ -57,17 +61,28 @@ def test_eplb_model(
 
 
 @pytest.mark.parametrize(
-    "model_setup", [
-        ("eagle", "eagle618/deepseek-v3-random",
-         "eagle618/eagle-deepseek-v3-random", 4),
+    "model_setup",
+    [
+        (
+            "eagle",
+            "eagle618/deepseek-v3-random",
+            "eagle618/eagle-deepseek-v3-random",
+            4,
+        ),
         ("deepseek_mtp", "eagle618/deepseek-v3-random", None, 4),
         ("qwen3_next_mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 4),
         pytest.param(
-            ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-             "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
-            marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
+            (
+                "eagle",
+                "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+                "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+                4,
+            ),
+            marks=pytest.mark.skip(reason="Skipping due to CI OOM issues"),
+        ),
     ],
-    ids=["deepseek_eagle", "deepseek_mtp", "qwen3_next_mtp", "llama4_eagle"])
+    ids=["deepseek_eagle", "deepseek_mtp", "qwen3_next_mtp", "llama4_eagle"],
+)
 def test_eplb_spec_decode(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,

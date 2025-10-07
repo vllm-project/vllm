@@ -11,7 +11,6 @@ import torch.nn as nn
 
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig, get_layers_from_vllm_config
-from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -58,7 +57,6 @@ class EagleProposer:
         self.method = self.speculative_config.method
 
         self.runner = runner
-        self.eplb_state: Optional[EplbState] = None
         self.device = device
 
         self.dtype = vllm_config.model_config.dtype
@@ -1016,8 +1014,6 @@ class EagleProposer:
     def dummy_run(
         self,
         num_tokens: int,
-        skip_eplb: bool = False,
-        is_profile: bool = False,
     ) -> None:
         with set_forward_context(None, self.vllm_config, num_tokens=num_tokens):
             if self.supports_mm_inputs:

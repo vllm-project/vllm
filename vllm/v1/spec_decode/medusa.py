@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
@@ -35,7 +33,6 @@ class MedusaProposer:
             vllm_config.speculative_config.draft_model_config.get_hidden_size()
         )
         self.dtype = vllm_config.model_config.dtype
-        self.eplb_state: Optional[EplbState] = None
         self.device = device
 
     def propose(
@@ -64,9 +61,7 @@ class MedusaProposer:
         assert not is_mixture_of_experts(self.model)
 
     @torch.inference_mode()
-    def dummy_run(
-        self, num_tokens: int, skip_eplb: bool = False, is_profile: bool = False
-    ) -> None:
+    def dummy_run(self, num_tokens: int) -> None:
         hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
