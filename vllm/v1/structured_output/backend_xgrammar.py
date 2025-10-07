@@ -114,18 +114,6 @@ class XgrammarBackend(StructuredOutputBackend):
             ctx = self.compiler.compile_regex(grammar_spec)
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
             s_tag = json.loads(grammar_spec)
-            tags = [
-                xgr.StructuralTagItem(
-                    begin=s["begin"],
-                    schema=json.dumps(s["schema"]),
-                    end=s["end"],
-                )
-                for s in s_tag["structures"]
-            ]
-            structural_tag = xgr.StructuralTag.from_legacy_structural_tag(
-                tags, s_tag["triggers"]
-            )
-            ctx = self.compiler.compile_structural_tag(structural_tag)
             if "structures" in s_tag:
                 # Falling back to deprecated method of compiling structural tag
                 tags = [
@@ -136,7 +124,10 @@ class XgrammarBackend(StructuredOutputBackend):
                     )
                     for s in s_tag["structures"]
                 ]
-                ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
+                structural_tag = xgr.StructuralTag.from_legacy_structural_tag(
+                    tags, s_tag["triggers"]
+                )
+                ctx = self.compiler.compile_structural_tag(structural_tag)
             else:
                 ctx = self.compiler.compile_structural_tag(grammar_spec)
         else:
@@ -367,7 +358,10 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                     )
                     for s in s_tag["structures"]
                 ]
-                xgr.Grammar.from_structural_tag(tags, s_tag["triggers"])
+                structural_tag = xgr.StructuralTag.from_legacy_structural_tag(
+                    tags, s_tag["triggers"]
+                )
+                xgr.Grammar.from_structural_tag(structural_tag)
             else:
                 xgr.Grammar.from_structural_tag(so_params.structural_tag)
         except Exception as e:
