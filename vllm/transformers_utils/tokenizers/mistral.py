@@ -416,19 +416,23 @@ class MistralTokenizer(TokenizerBase):
             )
 
             regular_tokens: list[str] = []
+            decoded_list: list[str] = []
             decoded = ""
 
             for token in tokens:
                 if token in to_decode_special_tokens:
-                    decoded += self.tokenizer.decode(
-                        regular_tokens, SpecialTokenPolicy.IGNORE
+                    decoded_list.append(
+                        self.tokenizer.decode(regular_tokens, SpecialTokenPolicy.IGNORE)
                     )
+                    decoded_list.append(token)
                     regular_tokens = []
-                    decoded += token
                 else:
                     regular_tokens.append(token)
 
-            decoded += self.tokenizer.decode(regular_tokens, SpecialTokenPolicy.IGNORE)
+            decoded_list.append(
+                self.tokenizer.decode(regular_tokens, SpecialTokenPolicy.IGNORE)
+            )
+            decoded = "".join(decoded_list)
 
         return decoded
 
