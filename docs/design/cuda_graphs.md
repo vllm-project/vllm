@@ -21,9 +21,9 @@ In this document we will discuss the:
 
 ## Motivation
 
-In the past, using the [torch.compile integration](torch_compile.md), we achieved a balance between performance and attention operation compatibility using piecewise compilation (+piecewise CUDA Graphs). However, when users enabled full CUDA Graphs, which relies on no-splitting compilation, the experience was all-or-nothing. CUDA Graphs was tightly coupled to compilation so lost the flexibility to choose supported attention backends (i.e., cascade attention is incompatible with CUDA Graphs). Many attention backends also weren’t ready for unified "full" CUDA Graphs capture (e.g., only FlashAttention 3 supports it currently) or only support CUDA Graphs for pure decode batches (e.g., Flashinfer, FlashMLA, and Mamba, etc.). That may lead to confusing performance/compatibility tradeoffs, inconsistent CUDA Graphs supports, and increasingly complex code structures.
+Initial piecewise compilation was built to allow piecewise cudagraph capture, excluding cudagraph-unsupported operations (mainly attention). This allowed some speedup from cudagraphs while maintaining compatibility with all attention backends. We later added support for "full cudagraphs" by not compiling piecewise, so that we could further reduce the latency in cases where attention supported cudagraphs. However, this tight coupling between compilation and cudagraph capture led to an all-or-nothing experience with little flexibility. Many attention backends also weren’t ready for unified "full" CUDA Graphs capture (e.g., only FlashAttention 3 supports it currently) or only support CUDA Graphs for pure decode batches (e.g., Flashinfer, FlashMLA, and Mamba, etc.). That led to confusing performance/compatibility tradeoffs, inconsistent CUDA Graphs support, and increasingly complex code structure.
 
-So we seek a more fine-grained CUDA Graphs solution that can:
+This led us to seek a more fine-grained CUDA Graphs solution with the following features:```
 
 * Be explicitly aware of whether a batch is prefill/uniform decode/mixed and should capture/replay the CUDA Graphs accordingly. It should do this because a unified full CUDA Graph for different cases of the same batchsize is usually infeasible (e.g., for many attention backends).
 * Capture full CUDA Graphs while maintaining the ability to use piecewise CUDA Graphs. i.e, can dispatch CUDA Graph-incompatible routines (e.g., cascade attention or mixed prefill/decode batches for some attention backends) into piecewise CUDA Graphs.
@@ -37,10 +37,10 @@ We also found that when a batch cannot hit a full CUDA Graph, the host-side eage
 [CUDAGraphMode][vllm.config.compilation.CUDAGraphMode] is the single knob you tune in `CompilationConfig.cudagraph_mode`:
 
 * `NONE` — turn CUDA Graphs off. Good for debugging.
-* `PIECEWISE` —  a single-mode strategy (and past default). It is the most flexible: attention or other CUDA Graphs-incompatible operations stay eager, everything else goes into CUDA Graphs.
+* `PIECEWISE` —  a single-mode strategy (and past default). It is the most flexible: attention or other CUDA Graphs-incompatible operations stay eager, everything else goes into CUDA Graphs. Requires piecewise compilation.
 * `FULL` — a single-mode strategy, which only captures full CUDA Graphs for non-uniform batches, then uniform-decode batches reuse the CUDA Graph of non-uniform batch of the same batch_size, since they are compatible; can be good for small models or workloads with small prompts.
-* `FULL_DECODE_ONLY` — full CUDA Graph for uniform decode, eager run for prefill/mixed etc; suitable for decode instances in a P/D setup where prefill is not as important, so we can save some memory.
-* `FULL_AND_PIECEWISE` — (default mode) full CUDA Graph for uniform decode, piecewise CUDA Graphs for others; generally the most performant setting, especially for low latency with small models or MoEs.
+* `FULL_DECODE_ONLY` — full CUDA Graph for uniform decode, no cudagraph for prefill/mixed etc; suitable for decode instances in a P/D setup where prefill is not as important, this way we can save the memory needed for `PIECEWISE` CUDA Graphs.
+* `FULL_AND_PIECEWISE` — (default mode) full CUDA Graph for uniform decode, piecewise CUDA Graphs for others; generally the most performant setting, especially for low latency with small models or MoEs, but also requires the most memory and takes the longest to capture.
 
 Defaults: If you’re on v1 with piecewise compilation, we default to `FULL_AND_PIECEWISE` for better performance, (for pooling models, it's still `PIECEWISE`). Otherwise, e.g. if piecewise compilation unavailable, we default to `NONE`.
 
@@ -49,10 +49,10 @@ While `NONE` , `PIECEWISE`, and `FULL` are single-mode configurations and simply
 !!! note
     We also fuse the subset `NONE`, `PIECEWISE`, and `FULL` modes as the concrete runtime modes for CUDA Graphs dispatching, which means they are treated as one of the modes for prefill/mixed or uniform-decode phase at runtime.
 
-With the new feature, cascade attention is supported by all Cudagraph modes now (if the attention backend supports it), though cascade attention itself is not cudagraph compatible.  Batches that use cascade attention will be dispatched to `PIECEWISE` runtime mode if we have a corresponding piecewise cudagraph at runtime; otherwise, they will be dispatched to `NONE` runtime mode.
+While cascade attention is not cudagraph compatible, it is now compatible with all possible cudagraph mode configurations. If a batch uses cascade attention, it always gets dispatched to `PIECEWISE` mode if available (otherwise `NONE`).
 
 !!! note
-    Not all CUDA Graphs modes are compatible with every attention backend. For convenience, we alias `FULL` mode to `FULL_AND_PIECEWISE` (`-O 3`) or `FULL_DECODE_ONLY` (`-O 0`) for attention backends that support CUDA Graphs for only pure decode or uniform decode.
+    Not all CUDA Graph modes are compatible with every attention backend. We automatically "downgrade" modes to the closest supported mode. For example, if a backend only supports CUDA Graphs for pure decode/uniform batches, we convert `FULL` to `FULL_AND_PIECEWISE` if piecewise compilation is enabled, and `FULL_DECODE_ONLY` otherwise.
 
 ## Detailed Design
 
@@ -93,7 +93,7 @@ The goal of this structure is to uniquely identify a (padded) batch with minimal
 
 ### `CudagraphDispatcher`
 
-The [CudagraphDispatcher][vllm.v1.cudagraph_dispatcher.CudagraphDispatcher] takes responsibility for maintaining two sets of valid dispatching keys, one set for `FULL` runtime mode and one set for `PIECEWISE` runtime mode, and dispatches the correct runtime mode and the dispatching keys before executing the model's forwards. It will take in the initial key (a rough batch_descriptor for the padded input) and return the selected runtime mode and the final batch_descriptor, then tell the CUDAGraphWarpper instances that decision through forward contexts.  We should notice that CudagraphDispatcher is the only source of truth for available CUDA Graphs keys, and the CUDAGraphWrapper instances could have less logic and unquestioningly trust the forward context on what CUDA Graphs to dispatch to.
+The [CudagraphDispatcher][vllm.v1.cudagraph_dispatcher.CudagraphDispatcher] takes responsibility for maintaining two sets of valid dispatching keys, one set for `FULL` runtime mode and one set for `PIECEWISE` runtime mode, and dispatches the correct runtime mode and the dispatching keys before executing the model's forwards. It will take in the initial key (a rough batch_descriptor for the padded input) and return the selected runtime mode and the final batch_descriptor, then tell the CUDAGraphWarpper instances that decision through forward contexts. Notice that `CudagraphDispatcher` is the only source of truth for available CUDA Graph keys and `CUDAGraphWrapper` instances can blindly trust the forward context on what CUDA Graphs to dispatch to. This lets us simplify the wrapper code and centralize the logic in the dispatcher.
 
 The dispatching keys are initialized through the dispatcher's `initialize_cudagraph_keys` method, which is called by the gpu_model_runner after all possible attention backends are initialized. This is where we can get much fancier in the future and “prepare” all kinds of CUDA Graphs combinations. For now, we just append available keys based on the valid combos of `decode_mode`/`mixed_mode` of `cudagraph_mode` and `cudagraph_capture_sizes` in the compilation config.
 
@@ -123,7 +123,7 @@ A [CUDAGraphWrapper][vllm.compilation.cuda_graph.CUDAGraphWrapper] instance wrap
 3. Otherwise, i.e., the runtime_mode matches the mode of the wrapper, the wrapper will perform CUDA Graphs capture (if key does not exist, create
 a new entry and cache it) or replay (if key exists in the cache).
 
-The above steps are based on the assumption that the CUDA Graphs wrapper would directly trust what’s in the forward context (controlled by the dispatcher) without any fallback behavior. See the implementation [here](https://github.com/vllm-project/vllm/blob/f751e50b7a2aae3110d83ed0d88202fc91b3e78a/vllm/compilation/cuda_graph.py#L106).
+The above steps are based on the assumption that the CUDA Graphs wrapper would directly trust what’s in the forward context (controlled by the dispatcher). This lets us simplify and cenralize the logic, reducing the complexity as well as the risk of mismatched state between the wrappers and the dispatcher. It also allows reusing the wrapper class for both `FULL` and `PIECEWISE` runtime modes. See the implementation [here](https://github.com/vllm-project/vllm/blob/f751e50b7a2aae3110d83ed0d88202fc91b3e78a/vllm/compilation/cuda_graph.py#L106).
 
 #### Nested Wrapper design
 
@@ -132,13 +132,13 @@ The core mechanism of making a full CUDA Graphs and piecewise CUDA Graphs coexis
 The flow chart below should clearly describe how it works.
 ![wrapper_flow](../assets/design/cuda_graphs/wrapper_flow.png)
 
-Therefore, for a `FULL` runtime mode, it is safe to capture/replay a full CUDA Graph since the piecewise wrapper is not activated. The situation is similar for `PIECEWISE` mode, as there are no conflicts between the `FULL` mode wrapper and `PIECEWISE` mode wrappers.  For the `NONE` runtime mode, both `FULL` and `PIECEWISE` wrappers would not be activated, so an eager execution is passed.
+Therefore, for a `FULL` runtime mode, it is safe to capture/replay a full CUDA Graph since the piecewise wrapper is not activated. The situation is similar for `PIECEWISE` mode, as there are no conflicts between the `FULL` mode wrapper and `PIECEWISE` mode wrappers.  For the `NONE` runtime mode, both `FULL` and `PIECEWISE` wrappers would not be activated, so we simply fall through to eager execution.
 
 ### Full CUDA Graph capturing & warm-up
 
-The CUDA Graphs capturing happens on the first call runner's `dummy_run` in a non-`NONE` runtime mode. For full CUDA Graphs capture (pass `FULL` runtime mode), the core idea of explicitly capturing different cases (i.e., prefill/mixed batch or uniform_decode batch ) is to tell the underlying attention backend to launch the desired kernel routines (i.e., may launch different kernels or combos for different cases) via carefully crafting the attn_metadatas. To distinguish prefill/mixed batch or uniform_decode batch, the most important property is the `max_query_len` in attn_metadata (true for most attention backends). we set it to the desired uniform_query_len for uniform_decode otherwise we make it just the `num_tokens` for a non-uniform_decode batch.
+The CUDA Graphs capturing happens when the runner first calls the model forward (using `_dummy_run`) with a non-`NONE` runtime mode. For full CUDA Graph capture, we explicitly capture different cases (i.e., prefill/mixed batch or uniform_decode batch) by properly setting attention metadata to make sure the underlying attention backends launch the desired kernel routines. To distinguish prefill/mixed batch or uniform_decode batch, the most important property is the `max_query_len` in attn_metadata (true for most attention backends). We set it to the desired `uniform_query_len` for uniform_decode otherwise we make it just the `num_tokens` for a non-uniform_decode batch.
 
-The CUDA Graphs wrapper no longer manages the warm-up logic. The warm-up process is now controlled directly by the GPU model runner, where the `NONE` runtime mode is assigned to play an eager execution for warm-up. When warming up for a full CUDA Graph, it is also important to pass `force_attention=True` to the `dummy_run` function to explicitly warm up the attention backends.
+The CUDA Graphs wrapper no longer manages the warm-up logic. The warm-up process is now controlled directly by the GPU model runner, where the `NONE` runtime mode is assigned to play an eager execution for warm-up. When warming up for a full CUDA Graph, it is also important to explicitly run attention during the warmup `dummy_run` call.
 
 ## CUDA Graphs Compatibility of Attention Backends
 
@@ -219,13 +219,15 @@ Legacy `use_cudagraph` and `full_cuda_graph` are unified by `cudagraph_mode`:
 
 * `use_cudagraph=False` → `NONE`.
 * `use_cudagraph=True` and `full_cuda_graph=False` → `PIECEWISE`.
-* `full_cuda_graph=True` → directly set `FULL` and account for the graceful fallback policy.
+* `full_cuda_graph=True` → directly set `FULL` and rely on the graceful fallback policy.
 
 As they are deprecated and will be removed in the next major or minor release, i.e., v0.11.0 or v1.0.0, we recommend using cudagraph_mode instead.
 
-### NOTE for attention ops fusion
+### Piecewise compilation and full graph custom passes (attention fusion, sequence parallelism)
 
-Attention ops fusion is compatible with piecewise cudagraph only when using inductor graph partition, i.e., passing `--compilation_config '{"use_inductor_graph_partition":true}'` (Note: this is an experimental and will be available after Pytorch version>=2.9). Otherwise, piecewise cudagraph does not support attention fusion by vllm custom graph partition. In the later case (which is also current state), we should set `splitting_ops=[]` in compilation_config to retain an complete FX graph for custom pass, and use cudagraph_mode = "FULL" or "FULL_DECODE_ONLY" when enabling attention fusion, since the default behavior of cudagraph_mode != `NONE` is always keeping the attention ops in the splitting_ops to get a piecewise FX graph. The good news is that the above tuning is automatically settled when `pass_config.enable_attn_fusion==True` and no users' explicit configs.
+Unfortunately, some custom compile passes have to see the whole graph to be effective and hence aren't compatible with piecewise compilation. This includes `AttnFusionPass` and `SequenceParallelismPass`. As a short-term solution, we automatically disable piecewise compilation (by setting `splitting_ops=[]`) when attention fusion is enabled. We use CUDA Graph modes `FULL` or `FULL_DECODE_ONLY` (depending on backend support). However, this leads to another optimization incompatibility and confusing performance tradeoffs.
+
+Long term, we've added the ability to partition the graph in Inductor instead of right after Dynamo. It can be enabled with `CompilationConfig.use_inductor_graph_partition=True` but is currently experimental and only available with `torch>=2.9`. This also increases compilation time as it has to compile the whole graph and cannot reuse piecewise compilation artifacts. Once vLLM supports 2.9, we plan to make this the default approach as it will also speed up piecewise cudagraph capture.
 
 ## About the Performance
 
