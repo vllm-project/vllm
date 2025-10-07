@@ -1104,7 +1104,7 @@ class Qwen3XMLToolParser(ToolParser):
                     while len(self.prev_tool_call_arr) <= tool_index:
                         self.prev_tool_call_arr.append({
                             "name": "",
-                            "arguments": {}
+                            "arguments": ""
                         })
                     while len(self.streamed_args_for_tool) <= tool_index:
                         self.streamed_args_for_tool.append("")
