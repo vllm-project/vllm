@@ -88,7 +88,7 @@ from packaging import version
 from packaging.version import Version
 from torch.library import Library
 from transformers.tokenization_utils_base import BatchEncoding
-from typing_extensions import Never, ParamSpec, TypeIs, assert_never, deprecated
+from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
@@ -200,44 +200,6 @@ class Counter:
 
     def reset(self) -> None:
         self.counter = 0
-
-
-@deprecated("PyObjectCache is deprecated and will be removed in v0.13.")
-class PyObjectCache:
-    """Used to cache python objects to avoid object allocations
-    across scheduler iterations.
-    """
-
-    def __init__(self, obj_builder):
-        self._obj_builder = obj_builder
-        self._index = 0
-
-        self._obj_cache = []
-        for _ in range(128):
-            self._obj_cache.append(self._obj_builder())
-
-    def _grow_cache(self):
-        # Double the size of the cache
-        num_objs = len(self._obj_cache)
-        for _ in range(num_objs):
-            self._obj_cache.append(self._obj_builder())
-
-    def get_object(self):
-        """Returns a pre-allocated cached object. If there is not enough
-        objects, then the cache size will double.
-        """
-        if self._index >= len(self._obj_cache):
-            self._grow_cache()
-            assert self._index < len(self._obj_cache)
-
-        obj = self._obj_cache[self._index]
-        self._index += 1
-
-        return obj
-
-    def reset(self):
-        """Makes all cached-objects available for the next scheduler iteration."""
-        self._index = 0
 
 
 @cache
