@@ -86,7 +86,7 @@ class EagleProposer:
         self.use_cuda_graph = False
 
         compilation_config = self.vllm_config.compilation_config
-        if compilation_config.level == CompilationMode.PIECEWISE:
+        if compilation_config.level == CompilationMode.VLLM_COMPILE:
             cudagraph_mode = compilation_config.cudagraph_mode
             if cudagraph_mode != CUDAGraphMode.NONE and not cudagraph_mode.has_mode(
                 CUDAGraphMode.PIECEWISE

@@ -4013,7 +4013,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f"with {min_cg_builder_name} backend (support: "
                 f"{min_cg_support})"
             )
-            if self.compilation_config.level == CompilationMode.PIECEWISE and (
+            if self.compilation_config.level == CompilationMode.VLLM_COMPILE and (
                 self.compilation_config.splitting_ops_contain_attention()
                 or self.compilation_config.use_inductor_graph_partition
             ):

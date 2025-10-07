@@ -43,7 +43,7 @@ class CudagraphDispatcher:
             not_use_piecewise_compilation
             or self.compilation_config.is_attention_compiled_piecewise()
         ), (
-            "Compilation level should be CompilationMode.PIECEWISE when "
+            "Compilation level should be CompilationMode.VLLM_COMPILE when "
             "cudagraph_mode piecewise cudagraphs is used, "
             "and attention should be in splitting_ops or "
             "inductor splitting should be used. "

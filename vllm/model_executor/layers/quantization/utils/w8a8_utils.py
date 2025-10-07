@@ -419,7 +419,7 @@ class Fp8LinearOp:
         if pad_output is None:
             config = get_current_vllm_config().compilation_config
             pad_output = (
-                config.level < CompilationMode.PIECEWISE
+                config.level < CompilationMode.VLLM_COMPILE
                 and self.preferred_backend == "torch"
             )
 

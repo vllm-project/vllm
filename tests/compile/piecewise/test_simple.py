@@ -61,7 +61,7 @@ def _run_simple_model(
 ):
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationMode.PIECEWISE,
+            level=CompilationMode.VLLM_COMPILE,
             use_cudagraph=True,
             use_inductor=use_inductor,
             splitting_ops=splitting_ops,

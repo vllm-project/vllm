@@ -252,7 +252,7 @@ class CpuPlatform(Platform):
         vllm_config.compilation_config.cudagraph_capture_sizes = []
 
         compilation_config = vllm_config.compilation_config
-        if vllm_config.compilation_config.level == CompilationMode.PIECEWISE:
+        if vllm_config.compilation_config.level == CompilationMode.VLLM_COMPILE:
             # Note: vLLM V1 is using PIECEWISE level compilation, which will
             # take time to compile kernels just-in-time with the inductor
             # backend. For CPU CI tests, most of them are executed fast and

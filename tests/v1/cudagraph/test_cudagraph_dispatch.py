@@ -42,7 +42,7 @@ def _create_vllm_config(
     mock_config.parallel_config = ParallelConfig()
 
     # Mimic the behavior of VllmConfig.__post_init__()
-    if compilation_config.level == CompilationMode.PIECEWISE:
+    if compilation_config.level == CompilationMode.VLLM_COMPILE:
         compilation_config.set_splitting_ops_for_v1()
 
     return mock_config
@@ -59,7 +59,7 @@ class TestCudagraphDispatcher:
             # Test case 2: Full CG for uniform batches, no CG for mixed
             (2, "FULL_DECODE_ONLY", CompilationMode.NO_COMPILATION),
             # Test case 3: Piecewise for all
-            (3, "PIECEWISE", CompilationMode.PIECEWISE),
+            (3, "PIECEWISE", CompilationMode.VLLM_COMPILE),
         ],
     )
     def test_dispatcher(self, cudagraph_mode_str, compilation_level):
@@ -242,7 +242,7 @@ class TestCudagraphIntegration:
     def setup_method(self):
         # only FULL mode for non-uniform batches
         self.comp_config = CompilationConfig(
-            level=CompilationMode.PIECEWISE,
+            level=CompilationMode.VLLM_COMPILE,
             cudagraph_mode="FULL",
             cudagraph_capture_sizes=[10, 20],
         )

@@ -219,7 +219,7 @@ def all_reduce_fusion_pass_on_test_model(
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationMode.PIECEWISE, custom_ops=["+rms_norm", "+quant_fp8"]
+            level=CompilationMode.VLLM_COMPILE, custom_ops=["+rms_norm", "+quant_fp8"]
         )
     )
     vllm_config.compilation_config.pass_config = PassConfig(

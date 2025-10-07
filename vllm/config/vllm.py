@@ -314,7 +314,7 @@ class VllmConfig:
                     self.model_config is not None
                     and not self.model_config.enforce_eager
                 ):
-                    self.compilation_config.level = CompilationMode.PIECEWISE
+                    self.compilation_config.level = CompilationMode.VLLM_COMPILE
                 else:
                     self.compilation_config.level = CompilationMode.NO_COMPILATION
 
@@ -350,7 +350,7 @@ class VllmConfig:
             if self.compilation_config.cudagraph_mode is None:
                 if (
                     envs.VLLM_USE_V1
-                    and self.compilation_config.level == CompilationMode.PIECEWISE
+                    and self.compilation_config.level == CompilationMode.VLLM_COMPILE
                 ):
                     # default to full and piecewise for most models
                     self.compilation_config.cudagraph_mode = (
@@ -489,7 +489,7 @@ class VllmConfig:
         # Do this after all the updates to compilation_config.level
         if (
             envs.VLLM_USE_V1
-            and self.compilation_config.level == CompilationMode.PIECEWISE
+            and self.compilation_config.level == CompilationMode.VLLM_COMPILE
         ):
             self.compilation_config.set_splitting_ops_for_v1()
 
@@ -508,8 +508,8 @@ class VllmConfig:
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
-                assert self.compilation_config.level == CompilationMode.PIECEWISE, (
-                    "Compilation level should be CompilationMode.PIECEWISE "
+                assert self.compilation_config.level == CompilationMode.VLLM_COMPILE, (
+                    "Compilation level should be CompilationMode.VLLM_COMPILE "
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
@@ -837,7 +837,7 @@ def set_current_vllm_config(
 
         if (
             check_compile
-            and vllm_config.compilation_config.level == CompilationMode.PIECEWISE
+            and vllm_config.compilation_config.level == CompilationMode.VLLM_COMPILE
             and compilation_counter.num_models_seen == num_models_seen
         ):
             # If the model supports compilation,

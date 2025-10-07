@@ -124,7 +124,7 @@ def test_compile_correctness(
         for comp_level in [
             CompilationMode.STOCK_TORCH_COMPILE,
             CompilationMode.DYNAMO_TRACE_ONCE,
-            CompilationMode.PIECEWISE,
+            CompilationMode.VLLM_COMPILE,
         ]:
             for level in [CompilationLevel.NO_COMPILATION, comp_level]:
                 all_args.append(

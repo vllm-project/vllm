@@ -114,7 +114,7 @@ def test_fusion_rmsnorm_quant(
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationMode.PIECEWISE,
+            level=CompilationMode.VLLM_COMPILE,
             custom_ops=["+rms_norm", "+quant_fp8"],
             pass_config=PassConfig(enable_fusion=True, enable_noop=True),
         )

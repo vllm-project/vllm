@@ -50,7 +50,7 @@ def test_noop_elimination(dtype, num_tokens, hidden_size, buffer_size):
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationMode.PIECEWISE,
+            level=CompilationMode.VLLM_COMPILE,
             pass_config=PassConfig(enable_noop=True),
         )
     )
@@ -98,7 +98,7 @@ def test_non_noop_slice_preserved():
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationMode.PIECEWISE,
+            level=CompilationMode.VLLM_COMPILE,
             pass_config=PassConfig(enable_noop=True),
         )
     )
