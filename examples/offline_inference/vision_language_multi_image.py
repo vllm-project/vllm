@@ -713,7 +713,10 @@ def load_ovis2_5(question: str, image_urls: list[str]) -> ModelRequestData:
     placeholders = "\n".join(
         f"Image-{i}: <image>\n" for i, _ in enumerate(image_urls, start=1)
     )
-    prompt = f"<|im_start|>user\n\n{placeholders}\n{question}<|im_end|>\n<|im_start|>assistant\n"
+    prompt = (
+        f"<|im_start|>user\n\n{placeholders}\n{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
 
     return ModelRequestData(
         engine_args=engine_args,
