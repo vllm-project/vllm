@@ -62,6 +62,7 @@ from vllm.model_executor.models.qwen2_audio import (
     _get_feat_extract_output_lengths,
 )
 from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalDataParser
+from vllm.model_executor.utils import split_list_into_ranges
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,
@@ -447,7 +448,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         t_index = (
             torch.arange(grid_t) * video_second_per_grid_t * tokens_per_second
         ).long()
-        t_index_split_chunk = cls._split_list_into_ranges(t_index, t_ntoken_per_chunk)
+        t_index_split_chunk = split_list_into_ranges(t_index, t_ntoken_per_chunk)
 
         updates = [audio_start_token_id]
         added_audio_len = 0
@@ -465,14 +466,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         updates.extend([audio_end_token_id])
 
         return updates
-
-    @staticmethod
-    def _split_list_into_ranges(lst: torch.Tensor, interval: int) -> list[list[int]]:
-        ranges: list[list[int]] = [[] for _ in range((max(lst) // interval) + 1)]
-        for num in lst:
-            index = num // interval
-            ranges[index].append(num)
-        return ranges
 
     def _get_prompt_updates(
         self,
@@ -992,14 +985,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    @staticmethod
-    def _split_list_into_ranges(lst: torch.Tensor, interval: int) -> list[list[int]]:
-        ranges: list[list[int]] = [[] for _ in range((max(lst) // interval) + 1)]
-        for num in lst:
-            index = num // interval
-            ranges[index].append(num)
-        return ranges
-
     @classmethod
     def get_mrope_input_positions(
         cls,
@@ -1142,7 +1127,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                     * second_per_grid_ts[video_idx]
                     * tokens_per_second
                 ).long()
-                t_index_split_chunk = cls._split_list_into_ranges(
+                t_index_split_chunk = split_list_into_ranges(
                     t_index, t_ntoken_per_chunk
                 )
                 place_num = (((audio_seqlen - 1) // 2 + 1 - 2) // 2 + 1) + 2
