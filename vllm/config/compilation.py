@@ -338,17 +338,11 @@ class CompilationConfig:
     """Custom inductor passes, see PassConfig for more details"""
 
     max_cudagraph_capture_size: int = field(default=None)  # type: ignore
-    """Used to specify the max cudagraph capture size. 
-    1. if it's provided and cudagraph_capture_sizes is not configured,
-    then cudagraph_capture_sizes would follow the pattern: 
-        [1, 2, 4] + [i for i in range(8, max_cudagraph_capture_size + 1, 8)]
-    2. if it's None but cudagraph_capture_sizes is configured, then it would be 
-    max value of the cudagraph_capture_sizes.
-    3. if it's None and cudagraph_capture_sizes is not configured, then the 
-    default value is min(max_num_seqs * 2, 512) and cudagraph_capture_sizes 
-    would be configured the same as the first case. 
-    4. if both this term and cudagraph_capture_sizes are configured, we simply
-    check whether they are consistent.
+    """The maximum cudagraph capture size.
+    
+    If cudagraph_capture_sizes is specified, this will be set to the largest size in that list (or checked for consistency if specified). If cudagraph_capture_sizes is not specified, the list sizes of sizes is generated automatically following the pattern: 
+        [1, 2, 4] + list(range(8, 256, 8)) + list(range(256, max_cudagraph_capture_size + 1, 16))
+    If not specified, max_cudagraph_capture_size is set to min(max_num_seqs * 2, 512) by default.
 
     Note: the default value is min(max_num_seqs * 2, 512).
     This voids OOM in tight memory scenarios with small max_num_seqs, and
