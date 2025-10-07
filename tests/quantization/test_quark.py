@@ -199,6 +199,7 @@ WIKITEXT_ACCURACY_CONFIGS = [
 ]
 
 
+@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
 @pytest.mark.parametrize("config", WIKITEXT_ACCURACY_CONFIGS)
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
