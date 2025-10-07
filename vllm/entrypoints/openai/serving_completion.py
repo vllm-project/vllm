@@ -518,7 +518,7 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompt_tokens = 0
         num_generated_tokens = 0
         kv_transfer_params = None
-        last_final_res = None  # choose latest stats from the batch of outputs
+        last_final_res = None
         for final_res in final_res_batch:
             last_final_res = final_res
             prompt_token_ids = final_res.prompt_token_ids
