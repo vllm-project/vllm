@@ -32,7 +32,8 @@ from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
 from vllm.model_executor.utils import get_packed_modules_mapping
-from vllm.utils import LRUCache, is_pin_memory_available
+from vllm.utils import is_pin_memory_available
+from vllm.utils.cache import LRUCache
 
 logger = init_logger(__name__)
 
