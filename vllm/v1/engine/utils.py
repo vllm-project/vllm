@@ -343,6 +343,7 @@ class CoreEngineActorManager:
         world_size = vllm_config.parallel_config.world_size
         placement_groups: list[PlacementGroup] = []
         local_dp_ranks: list[int] = []
+
         dp_master_ip_key = f"node:{dp_master_ip}"
         nodes = sorted(
             available_resources.values(), key=lambda x: dp_master_ip_key not in x
@@ -353,41 +354,87 @@ class CoreEngineActorManager:
             dp_master_ip,
         )
         device_str = current_platform.ray_device_key
+        max_device_per_node = max(
+            int(node_resources[device_str]) for node_resources in nodes
+        )
+
+        if max_device_per_node < world_size:
+            # if we need multiple nodes per dp group, we require for now that
+            # available nodes are homogenous
+            assert set(int(node_resources[device_str]) for node_resources in nodes) == {
+                max_device_per_node
+            }, f"Nodes are not homogenous, {nodes}"
+            assert len(nodes) * max_device_per_node == world_size * num_pg_to_create, (
+                f"Total available nodes {len(nodes)} and devices {max_device_per_node} "
+                f"do not match required world size {world_size} and data parallel size "
+                f"{num_pg_to_create}"
+            )
+            assert local_engine_count == 1, (
+                f"data-parallel-size-local {local_engine_count} must be 1 if we "
+                "need multiple nodes per dp group"
+            )
+
+            nodes_per_pg_group = world_size // max_device_per_node
+            placement_stategy = "PACK"
+        else:
+            nodes_per_pg_group = 1
+            placement_stategy = "STRICT_PACK"
+
         for node_resources in nodes:
             if device_str not in node_resources:
                 continue
-            # For now, each DP rank can only be assigned to one node
-            # TODO(rui): support allocating a single DP rank
-            # to multiple nodes
-            available_engine_count = int(node_resources[device_str]) // world_size
-            if dp_master_ip_key in node_resources:
+
+            available_engine_count = (
+                int(node_resources[device_str]) * nodes_per_pg_group
+            ) // world_size
+            is_master_ip = dp_master_ip_key in node_resources
+
+            if is_master_ip:
                 assert available_engine_count >= local_engine_count, (
                     "Not enough resources to allocate DP ranks "
                     f"on DP master node {dp_master_ip}"
                 )
-                for i in range(local_engine_count):
-                    bundles = [
-                        {device_str: 1.0, "node:" + dp_master_ip: 0.001}
-                    ] * world_size + [{"CPU": 1.0}]
-                    pg = ray.util.placement_group(
-                        name=f"dp_rank_{len(placement_groups)}",
-                        strategy="STRICT_PACK",
-                        bundles=bundles,
-                    )
-                    placement_groups.append(pg)
-                    local_dp_ranks.append(i)
+                num_engines = local_engine_count
             else:
-                for i in range(available_engine_count):
-                    if len(placement_groups) == num_pg_to_create:
-                        break
-                    bundles = [{device_str: 1.0}] * world_size + [{"CPU": 1.0}]
-                    pg = ray.util.placement_group(
-                        name=f"dp_rank_{len(placement_groups)}",
-                        strategy="STRICT_PACK",
-                        bundles=bundles,
+                num_engines = available_engine_count
+
+            for i in range(num_engines):
+                if len(placement_groups) == num_pg_to_create:
+                    assert not is_master_ip, (
+                        f"The DP master node (ip: {dp_master_ip_key}) cannot "
+                        f"place more than {len(num_pg_to_create)} groups"
                     )
-                    placement_groups.append(pg)
-                    local_dp_ranks.append(i)
+                    break
+
+                master_device_dict = {device_str: 1.0, "node:" + dp_master_ip: 0.001}
+                device_dict = {device_str: 1.0}
+                cpu_dict = {"CPU": 1.0}
+                n_device_per_node = (
+                    world_size if nodes_per_pg_group == 1 else max_device_per_node
+                )
+
+                # If we need multiple nodes per DP group we might have both "master ip"
+                # devices and "worker ip" devices in the same bundle
+                # => [{GPU: 1.0, "node:127.01.10.109": 0.001}, ...,
+                #                                  {GPU: 1.0}, ...., {CPU: 2.0}]
+                # If we only need one node, we will have either only "master ip"
+                # devices or "worker ip" devices in the same bundle
+                bundles = (
+                    [master_device_dict] * int(is_master_ip) * n_device_per_node
+                    + [device_dict]
+                    * (nodes_per_pg_group - int(is_master_ip))
+                    * n_device_per_node
+                    + [cpu_dict] * nodes_per_pg_group
+                )
+
+                pg = ray.util.placement_group(
+                    name=f"dp_rank_{len(placement_groups)}",
+                    strategy=placement_stategy,
+                    bundles=bundles,
+                )
+                placement_groups.append(pg)
+                local_dp_ranks.append(i)
+
         if len(placement_groups) < num_pg_to_create:
             raise ValueError(
                 f"Not enough resources to allocate {num_pg_to_create} "
