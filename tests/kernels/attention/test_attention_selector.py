@@ -226,9 +226,6 @@ def test_fp32_fallback(device: str):
 
 def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
     """Test FlashAttn validation."""
-    # TODO: When testing for v1, pipe in `use_v1` as an argument to
-    # get_attn_backend
-
     pytest.skip(
         "Skipping as current backend selector does not "
         "handle fallbacks when a backend is set via env var."
