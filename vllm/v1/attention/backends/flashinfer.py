@@ -1209,8 +1209,8 @@ def fast_plan_decode(
             head_dim,
             False,  # causal
             window_left,
-            -1,
-            False,
+            -1,  # fixed_split_size
+            False,  # disable_split_kv
         )
     except Exception as e:
         raise RuntimeError(f"Error in tensor core plan: {e}") from e
