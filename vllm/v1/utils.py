@@ -387,13 +387,12 @@ def record_function_or_nullcontext(name: str) -> AbstractContextManager:
         return _PROFILER_FUNC(name)
 
     func = contextlib.nullcontext
-    if envs.VLLM_LITE_PROFILER_LOG_PATH is not None:
+    if envs.VLLM_LITE_PROFILER_LOG_PATH:
         func = scope_function
     elif envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
         func = record_function
     elif envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
         import nvtx
-
         func = nvtx.annotate
 
     _PROFILER_FUNC = func

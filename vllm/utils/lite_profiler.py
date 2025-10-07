@@ -8,8 +8,9 @@ import json
 import logging
 import os
 import sys
-import threading
 import time
+from logging.handlers import MemoryHandler
+from types import TracebackType
 from typing import Optional
 
 import vllm.envs as envs
@@ -25,13 +26,17 @@ class LiteScope:
         self._start_time: Optional[float] = None
 
     def __enter__(self) -> None:
-        self._start_time = time.monotonic()
-        return None
+        self._start_time = time.perf_counter()
 
-    def __exit__(self, exc_type, exc, exc_tb) -> bool:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
         if self._start_time is not None and exc_type is None:
-            elapsed_seconds = time.monotonic() - self._start_time
-            elapsed_ns = int(elapsed_seconds * 1_000_000_000)
+            elapsed_seconds = time.perf_counter() - self._start_time
+            elapsed_ns = int(elapsed_seconds * 1e9)
             self._profiler._log_function_duration(self._name, elapsed_ns)
         return False
 
@@ -40,33 +45,17 @@ class LiteProfiler:
     """Lite profiler that logs function durations directly."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
         self._logger = init_logger("vllm.lite_profiler")
-        self._handler: Optional[logging.FileHandler] = None
-        self._initialize_log_handler()
-
-        # We use a buffer to avoid frequent writes to the log file.
-        self._buffer: list[str] = []
-        self._buffer_limit = 64
-        self._flush_interval_s = 0.5
-        self._last_flush_time = time.monotonic()
-        atexit.register(self._flush_buffer)
-
-    def _initialize_log_handler(self) -> None:
         log_path = envs.VLLM_LITE_PROFILER_LOG_PATH
-        if log_path is None:
-            return
-
-        with self._lock:
-            # Delete existing log file if it exists
-            if os.path.exists(log_path):
-                os.remove(log_path)
-
-            handler = logging.FileHandler(log_path)
-            handler.setFormatter(logging.Formatter("%(message)s"))
-            self._logger.addHandler(handler)
+        if log_path:
+            file_handler = logging.FileHandler(log_path, mode="w")
+            file_handler.setFormatter(logging.Formatter("%(message)s"))
+            self._handler = MemoryHandler(capacity=2048,
+                                          flushLevel=logging.ERROR,
+                                          target=file_handler)
+            self._logger.addHandler(self._handler)
             self._logger.propagate = False
-            self._handler = handler
+            atexit.register(self._handler.flush)
 
     def scope(self, name: str):
         return LiteScope(self, name)
@@ -80,34 +69,13 @@ class LiteProfiler:
         }
 
         message = json.dumps(payload, separators=(",", ":"))
-        # Instead of directly writing to the log file, we add the message
-        # to a buffer and flush the buffer periodically. This avoids
-        # frequent writes to the log file, which can be expensive.
-        # We also limit the size of the buffer to avoid excessive memory
-        # usage.
-        with self._lock:
-            self._buffer.append(message)
-            if (len(self._buffer) >= self._buffer_limit
-                    or (time.monotonic() - self._last_flush_time)
-                    >= self._flush_interval_s):
-                self._flush_buffer_locked()
+        self._logger.info(
+            message)  # Will be buffered and flushed by MemoryHandler
 
-    def _flush_buffer_locked(self) -> None:
-        if not self._buffer or self._handler is None:
-            return
-
-        stream = self._handler.stream
-        if stream is None:
-            return
-
-        stream.write("\n".join(self._buffer) + "\n")
-        stream.flush()
-        self._buffer.clear()
-        self._last_flush_time = time.monotonic()
-
-    def _flush_buffer(self) -> None:
-        with self._lock:
-            self._flush_buffer_locked()
+    def flush(self) -> None:
+        """Explicitly flush the buffer to the file."""
+        if hasattr(self, "_handler"):
+            self._handler.flush()
 
 
 # Global variable to store the single LiteProfiler instance
@@ -128,7 +96,7 @@ def scope_function(name: str):
     return _lite_profiler.scope(name)
 
 
-def emit_lite_profiler_report() -> None:
+def maybe_emit_lite_profiler_report() -> None:
     """Print a lite-profiler summary when profiling is enabled."""
 
     log_path = envs.VLLM_LITE_PROFILER_LOG_PATH

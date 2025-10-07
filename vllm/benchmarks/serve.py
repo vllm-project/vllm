@@ -45,7 +45,7 @@ from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
                                        write_to_json)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils.lite_profiler import emit_lite_profiler_report
+from vllm.utils.lite_profiler import maybe_emit_lite_profiler_report
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -1332,6 +1332,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
     
-    emit_lite_profiler_report()
+    maybe_emit_lite_profiler_report()
 
     return result_json

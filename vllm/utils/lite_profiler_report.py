@@ -10,7 +10,6 @@ whose values are ``{"ns": int}``.
 from __future__ import annotations
 
 import json
-import os
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from typing import TextIO
@@ -92,12 +91,11 @@ MODEL_EVENTS = [
 
 
 def _compute_table_rows(
-    name: str,
     event_ns_sum: dict[str, int],
     events: Sequence[str],
 ) -> list[str]:
     total_ns = sum(event_ns_sum.get(event, 0) for event in events)
-    cells = [name]
+    cells = []
     for event in events:
         cells.append(_format_duration_ns(event_ns_sum.get(event, 0), total_ns))
     total_seconds = total_ns / 1_000_000_000 if total_ns else 0.0
@@ -105,21 +103,19 @@ def _compute_table_rows(
     return cells
 
 
-def _print_breakdown_tables(name: str, event_ns_sum: dict[str, int], *,
+def _print_breakdown_tables(event_ns_sum: dict[str, int], *,
                             stream: TextIO) -> None:
     for title, events in (
         ("Top-level pipeline events", TOP_EVENTS),
         ("Model events breakdown (only includes the main key events)",
          MODEL_EVENTS),
     ):
-        headers = ["Log", *events, "TOTAL"]
-        rows = [_compute_table_rows(name, event_ns_sum, events)]
+        headers = [*events, "TOTAL"]
+        rows = [_compute_table_rows(event_ns_sum, events)]
         _render_table(title, headers, rows, stream=stream)
 
 
 def summarize_log(log_path: str, *, stream: TextIO) -> None:
     event_ns = _extract_event_ns([log_path])
     event_ns_sum = _sum_events(event_ns)
-    _print_breakdown_tables(os.path.basename(log_path),
-                            event_ns_sum,
-                            stream=stream)
+    _print_breakdown_tables(event_ns_sum, stream=stream)

@@ -746,8 +746,7 @@ class EngineCoreProc(EngineCore):
             if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
                 logger.debug("EngineCore waiting for work.")
                 waited = True
-            with record_function_or_nullcontext("Input:Wait"):
-                req = self.input_queue.get()
+            req = self.input_queue.get()
             with record_function_or_nullcontext("Input:Process"):
                 self._handle_client_request(*req)
 
