@@ -699,6 +699,9 @@ class Lfm2MoeForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         self.num_routed_experts = example_layer.n_routed_experts
         self.num_redundant_experts = example_layer.n_redundant_experts
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
     def set_eplb_state(
         self,
         expert_load_view: torch.Tensor,
