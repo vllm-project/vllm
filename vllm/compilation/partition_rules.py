@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import contextlib
 
-import torch
-from torch._library.utils import parse_namespace
-from torch._ops import OpOverload, OpOverloadPacket
+from torch._library.utils import lookup_op
 
 from vllm.logger import init_logger
 
@@ -15,41 +13,24 @@ logger = init_logger(__name__)
 
 
 def _resolve_operator_overload(op_name: str):
-    # Convert vLLM's dot notation (e.g., "aten.addmm.default")
-    # to PyTorch's double-colon notation (e.g., "aten::addmm::default")
-    # that parse_namespace expects
-    pytorch_format = op_name.replace(".", "::")
-    namespace, operator, overload = parse_namespace(pytorch_format)
-    target_overload = overload or "default"
-
+    """Resolve vLLM operator name to torch.ops OpOverload.
+    
+    Uses PyTorch's lookup_op utility.
+    Example: "aten.addmm.default" -> torch.ops.aten.addmm.default
+    """
+    if "." not in op_name:
+        raise ValueError(f"Invalid operator name: {op_name}")
+    
+    # Convert vLLM format to PyTorch format (only first dot)
+    # "aten.addmm.default" -> "aten::addmm.default"
+    namespace, rest = op_name.split(".", 1)
+    pytorch_qualname = f"{namespace}::{rest}"
+    
+    # Use PyTorch's official lookup_op
     try:
-        namespace_obj = getattr(torch.ops, namespace)
-        operator_obj = getattr(namespace_obj, operator)
-    except AttributeError as exc:
-        if not hasattr(torch.ops, namespace):
-            raise ValueError(f"Unknown operator namespace '{namespace}'") from exc
-        raise ValueError(f"Unknown operator '{namespace}::{operator}'") from exc
-
-    if isinstance(operator_obj, OpOverload):
-        if overload not in ("default", ""):
-            raise ValueError(
-                f"Operator '{namespace}::{operator}' has no overload '{overload}'"
-            )
-        return operator_obj
-
-    if isinstance(operator_obj, OpOverloadPacket):
-        try:
-            return getattr(operator_obj, target_overload)
-        except AttributeError as exc:
-            raise ValueError(
-                f"Operator '{namespace}::{operator}' has no overload "
-                f"'{target_overload}'"
-            ) from exc
-
-    try:
-        return getattr(operator_obj, target_overload)
-    except (AttributeError, TypeError) as exc:
-        raise ValueError(f"Unsupported operator type for '{op_name}'") from exc
+        return lookup_op(pytorch_qualname)
+    except Exception as exc:
+        raise ValueError(f"Failed to resolve operator '{op_name}': {exc}") from exc
 
 
 @contextlib.contextmanager
