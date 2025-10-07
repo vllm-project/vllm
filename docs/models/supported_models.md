@@ -576,6 +576,7 @@ These models primarily support the [`LLM.encode`](./pooling_models.md#llmencode)
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|-----------------------------|-----------------------------------------|---------------------|
 | `BertForTokenClassification` | bert-based | `boltuix/NeuroBERT-NER` (see note), etc. |  |  | ✅︎ |
+| `ModernBertForTokenClassification` | ModernBERT-based | `disham993/electrical-ner-ModernBERT-base` |  |  | ✅︎ |
 
 !!! note
     Named Entity Recognition (NER) usage, please refer to <gh-file:examples/offline_inference/pooling/ner.py>, <gh-file:examples/online_serving/pooling/ner.py>.

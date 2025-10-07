@@ -527,6 +527,9 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "ModernBertForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-reranker-modernbert-base"
     ),
+    "ModernBertForTokenClassification": _HfExamplesInfo(
+        "disham993/electrical-ner-ModernBERT-base"
+    ),
     "RobertaForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/quora-roberta-base"
     ),
