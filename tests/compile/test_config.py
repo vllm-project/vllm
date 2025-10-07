@@ -6,15 +6,16 @@ import vllm
 from vllm.compilation.counter import compilation_counter
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import CompilationLevel
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils import _is_torch_equal_or_newer, is_torch_equal_or_newer
 
 
 def test_version():
-    assert is_torch_equal_or_newer("2.8.0.dev20250624+cu128", "2.8.0.dev")
-    assert is_torch_equal_or_newer("2.8.0a0+gitc82a174", "2.8.0.dev")
-    assert is_torch_equal_or_newer("2.8.0", "2.8.0.dev")
-    assert is_torch_equal_or_newer("2.8.1", "2.8.0.dev")
-    assert not is_torch_equal_or_newer("2.7.1", "2.8.0.dev")
+    # Test the version comparison logic using the private function
+    assert _is_torch_equal_or_newer("2.8.0.dev20250624+cu128", "2.8.0.dev")
+    assert _is_torch_equal_or_newer("2.8.0a0+gitc82a174", "2.8.0.dev")
+    assert _is_torch_equal_or_newer("2.8.0", "2.8.0.dev")
+    assert _is_torch_equal_or_newer("2.8.1", "2.8.0.dev")
+    assert not _is_torch_equal_or_newer("2.7.1", "2.8.0.dev")
 
 
 def test_use_cudagraphs_dynamic(monkeypatch):

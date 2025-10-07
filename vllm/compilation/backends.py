@@ -15,6 +15,7 @@ import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
+from vllm.compilation.inductor_pass import pass_context
 from vllm.compilation.partition_rules import inductor_partition_rule_context
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
@@ -78,14 +79,17 @@ class CompilerManager:
         return self.compiler.compute_hash(vllm_config)
 
     @contextmanager
-    def compile_context(self):
-        """Provide compilation context (e.g. partition rules)."""
-        if self.compilation_config.use_inductor_graph_partition:
-            inductor_partition_ops = self.compilation_config.splitting_ops or []
-            with inductor_partition_rule_context(inductor_partition_ops):
+    def compile_context(self, runtime_shape: Optional[int] = None):
+        """Provide compilation context for the duration of compilation to set
+        any torch global properties we want to scope to a single Inductor
+        compilation (e.g. partition rules, pass context)."""
+        with pass_context(runtime_shape):
+            if self.compilation_config.use_inductor_graph_partition:
+                inductor_partition_ops = self.compilation_config.splitting_ops or []
+                with inductor_partition_rule_context(inductor_partition_ops):
+                    yield
+            else:
                 yield
-        else:
-            yield
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
@@ -209,7 +213,7 @@ class CompilerManager:
         else:
             maybe_key = f"artifact_shape_{runtime_shape}_subgraph_{graph_index}"
 
-        with self.compile_context():
+        with self.compile_context(runtime_shape):
             compiled_graph, handle = self.compiler.compile(
                 graph,
                 example_inputs,
