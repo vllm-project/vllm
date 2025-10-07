@@ -928,6 +928,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input,
                 activation,
                 enable_eplb,
+                eplb_record_metrics,
                 expert_load_view,
                 logical_to_physical_map,
                 logical_replica_count,
