@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 
-from typing import Callable, List, Optional, cast
+from typing import Callable, Optional, cast
 
 import torch
 import torch.nn as nn

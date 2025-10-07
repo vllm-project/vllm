@@ -32,6 +32,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.tpu import TPUModelLoader
 from vllm.model_executor.models.interfaces import (
