@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from .abstract_tool_parser import ToolParser, ToolParserManager
+from .apertus_tool_parser import ApertusToolParser
 from .deepseekv3_tool_parser import DeepSeekV3ToolParser
 from .deepseekv31_tool_parser import DeepSeekV31ToolParser
 from .glm4_moe_tool_parser import Glm4MoeModelToolParser
@@ -25,7 +26,6 @@ from .qwen3xml_tool_parser import Qwen3XMLToolParser
 from .seed_oss_tool_parser import SeedOssToolParser
 from .step3_tool_parser import Step3ToolParser
 from .xlam_tool_parser import xLAMToolParser
-from .apertus_tool_parser import ApertusToolParser
 
 __all__ = [
     "ToolParser",
