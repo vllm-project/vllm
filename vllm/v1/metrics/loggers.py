@@ -58,8 +58,8 @@ class LoggingStatLogger(StatLoggerBase):
         # TODO: Make the interval configurable.
         self.prefix_caching_metrics = PrefixCachingMetrics()
         self.spec_decoding_logging = SpecDecodingLogging()
-        kv_tranfer_config = self.vllm_config.kv_transfer_config
-        self.kv_connector_logging = KVConnectorLogging(kv_tranfer_config)
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        self.kv_connector_logging = KVConnectorLogging(kv_transfer_config)
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
 

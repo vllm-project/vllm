@@ -47,13 +47,13 @@ class KVConnectorStats:
 
 
 class KVConnectorLogging:
-    def __init__(self, kv_tranfer_config: KVTransferConfig):
+    def __init__(self, kv_transfer_config: KVTransferConfig):
         # This should be called on frontend process.
         assert not has_kv_transfer_group()
         # Instantiate the connector's stats class.
-        if kv_tranfer_config and kv_tranfer_config.kv_connector:
+        if kv_transfer_config and kv_transfer_config.kv_connector:
             self.connector_cls = KVConnectorFactory.get_connector_class(
-                kv_tranfer_config
+                kv_transfer_config
             )
         self.reset()
 
