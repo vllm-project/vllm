@@ -38,8 +38,8 @@ test_params_full_cudagraph = []
 MLA_backends = ["FlashMLA", "FlashAttentionMLA", "CutlassMLA"]
 for mla_backend in MLA_backends:
     test_params_full_cudagraph.append(
-        pytest.param(
-            ("deepseek-ai/DeepSeek-V2-Lite", backend_configs[mla_backend])))
+        pytest.param(("deepseek-ai/DeepSeek-V2-Lite", backend_configs[mla_backend]))
+    )
 
 # Qwen/Qwen2-1.5B-Instruct with other backends
 other_backend_configs = [
@@ -47,7 +47,8 @@ other_backend_configs = [
 ]
 for backend_config in other_backend_configs:
     test_params_full_cudagraph.append(
-        pytest.param(("Qwen/Qwen2-1.5B-Instruct", backend_config)))
+        pytest.param(("Qwen/Qwen2-1.5B-Instruct", backend_config))
+    )
 
 
 @pytest.fixture(scope="class")
@@ -55,8 +56,10 @@ def llm_pair(request):
     model, backend_config = request.param
 
     # Dynamically skip test if GPU capability is not met
-    if backend_config.specific_gpu_arch and backend_config.specific_gpu_arch\
-        != current_platform.get_device_capability():
+    if (
+        backend_config.specific_gpu_arch
+        and backend_config.specific_gpu_arch != current_platform.get_device_capability()
+    ):
         if backend_config.specific_gpu_arch == (9, 0):
             pytest.skip("Only Hopper GPUs support FA3 and FlashMLA")
         elif backend_config.specific_gpu_arch == (10, 0):
@@ -76,8 +79,7 @@ def llm_pair(request):
             trust_remote_code=True,
             max_model_len=1024,
             max_num_seqs=128,
-            compilation_config=\
-                CompilationConfig(**backend_config.comp_config),
+            compilation_config=CompilationConfig(**backend_config.comp_config),
             generation_config="vllm",
             seed=42,
         )
@@ -113,20 +115,22 @@ class TestFullCUDAGraph:
     meaning there would be multiple LLM instances hogging memory simultaneously.
     """
 
-    @pytest.mark.parametrize(("batch_size", "max_tokens"), [
-        (1, 10),
-        (7, 10),
-        (16, 10),
-        (25, 10),
-        (32, 10),
-        (45, 10),
-        (64, 10),
-        (123, 10),
-        (8, 5),
-        (8, 30),
-    ])
-    def test_full_cudagraph(self, batch_size, max_tokens,
-                            llm_pair: tuple[LLM, LLM]):
+    @pytest.mark.parametrize(
+        ("batch_size", "max_tokens"),
+        [
+            (1, 10),
+            (7, 10),
+            (16, 10),
+            (25, 10),
+            (32, 10),
+            (45, 10),
+            (64, 10),
+            (123, 10),
+            (8, 5),
+            (8, 30),
+        ],
+    )
+    def test_full_cudagraph(self, batch_size, max_tokens, llm_pair: tuple[LLM, LLM]):
         """
         Test various batch sizes and max_tokens to ensure that the
         full cudagraph compilation works for padded cases too.
@@ -137,26 +141,34 @@ class TestFullCUDAGraph:
         prompts = ["the quick brown fox"] * batch_size
         # Use purely greedy decoding to avoid top-p truncation sensitivity
         # that can amplify tiny numeric differences across runtimes.
-        sampling_params = SamplingParams(temperature=0.0,
-                                         max_tokens=max_tokens,
-                                         top_p=1.0)
+        sampling_params = SamplingParams(
+            temperature=0.0, max_tokens=max_tokens, top_p=1.0
+        )
 
         piecewise_responses = piecewise_llm.generate(prompts, sampling_params)
         full_responses = full_cudagraph_llm.generate(prompts, sampling_params)
 
         # Check that all responses are the same
-        for piecewise_res, full_res in zip(piecewise_responses,
-                                           full_responses):
-            assert piecewise_res.outputs[0].text.lower() == \
-                full_res.outputs[0].text.lower()
+        for piecewise_res, full_res in zip(piecewise_responses, full_responses):
+            assert (
+                piecewise_res.outputs[0].text.lower()
+                == full_res.outputs[0].text.lower()
+            )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
 def test_full_cudagraph_with_invalid_backend():
-    with temporary_environ({
-            "VLLM_USE_V1": "1",
-            "VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION"
-            # Flex_Attention is not supported with full cuda graph
-    }), pytest.raises(RuntimeError):
-        LLM(model="Qwen/Qwen2-1.5B-Instruct",
-            compilation_config=CompilationConfig(cudagraph_mode="FULL"))
+    with (
+        temporary_environ(
+            {
+                "VLLM_USE_V1": "1",
+                "VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION",
+                # Flex_Attention is not supported with full cuda graph
+            }
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        LLM(
+            model="Qwen/Qwen2-1.5B-Instruct",
+            compilation_config=CompilationConfig(cudagraph_mode="FULL"),
+        )
