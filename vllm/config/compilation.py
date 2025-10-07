@@ -223,8 +223,8 @@ class CompilationConfig:
     - When use_inductor_graph_partition=True:
         These ops are used to register Inductor partition rules. The graph
         partitioning happens at Inductor codegen time after all passes and
-        fusions are finished, allowing better optimization while still
-        excluding these ops from cudagraphs.
+        fusions are finished, allowing compilation and custom passes to operate
+        on the full graph while still excluding these ops from cudagraphs.
 
     If None, defaults to attention ops for piecewise cudagraphs.
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
@@ -392,16 +392,17 @@ class CompilationConfig:
     model code, e.g., Attention, FusedMOE when dp_size>1."""
 
     # Attention ops; used for piecewise cudagraphs
+    # Use PyTorch operator format: "namespace::name"
     _attention_ops: ClassVar[list[str]] = [
-        "vllm.unified_attention",
-        "vllm.unified_attention_with_output",
-        "vllm.mamba_mixer2",
-        "vllm.mamba_mixer",
-        "vllm.short_conv",
-        "vllm.linear_attention",
-        "vllm.plamo2_mamba_mixer",
-        "vllm.gdn_attention",
-        "vllm.sparse_attn_indexer",
+        "vllm::unified_attention",
+        "vllm::unified_attention_with_output",
+        "vllm::mamba_mixer2",
+        "vllm::mamba_mixer",
+        "vllm::short_conv",
+        "vllm::linear_attention",
+        "vllm::plamo2_mamba_mixer",
+        "vllm::gdn_attention",
+        "vllm::sparse_attn_indexer",
     ]
 
     def compute_hash(self) -> str:
@@ -720,6 +721,13 @@ class CompilationConfig:
         assert self.pass_config.enable_attn_fusion
         if not self.splitting_ops:
             self.splitting_ops = list(self._attention_ops)
+        else:
+            # Validate that attention ops are not in user-provided splitting_ops
+            if self.splitting_ops_contain_attention():
+                raise ValueError(
+                    "attention ops should not be in splitting_ops "
+                    "when enable_attn_fusion is True"
+                )
 
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and any(
@@ -727,23 +735,17 @@ class CompilationConfig:
         )
 
     def is_attention_compiled_piecewise(self) -> bool:
-        use_fx_graph_piecewise_compilation = (
-            self.level == CompilationLevel.PIECEWISE
-            and self.splitting_ops_contain_attention()
-        )
+        if not self.splitting_ops_contain_attention():
+            return False
 
-        inductor_used = (
-            self.level == CompilationLevel.PIECEWISE and self.backend == "inductor"
-        ) or (
-            self.level >= CompilationLevel.DYNAMO_AS_IS and self.backend == "inductor"
-        )
-        use_inductor_piecewise_compilation = (
-            inductor_used
-            and self.use_inductor_graph_partition
-            and self.splitting_ops_contain_attention()
-        )
+        if not self.use_inductor_graph_partition:
+            # Dynamo-level FX split case
+            return self.level == CompilationLevel.PIECEWISE
 
-        return use_fx_graph_piecewise_compilation or use_inductor_piecewise_compilation
+        # Inductor partition case
+        return (
+            self.level > CompilationLevel.NO_COMPILATION and self.backend == "inductor"
+        )
 
     def custom_op_log_check(self):
         """

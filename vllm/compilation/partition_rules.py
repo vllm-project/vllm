@@ -16,11 +16,11 @@ def _resolve_operator_overload(op_name: str):
     """Resolve operator name to torch.ops OpOverload.
 
     Uses PyTorch's lookup_op utility.
-    
+
     Args:
         op_name: Operator name in PyTorch format "namespace::name.overload"
                  Example: "aten::addmm.default"
-    
+
     Returns:
         torch.ops OpOverload object
     """

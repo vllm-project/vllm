@@ -153,12 +153,12 @@ def test_splitting_ops_dynamic():
             compilation_config=CompilationConfig(
                 level=CompilationLevel.PIECEWISE,
                 use_inductor_graph_partition=True,
-                splitting_ops=["vllm.unified_attention"],
+                splitting_ops=["vllm::unified_attention"],
             )
         )
         # with inductor partition we use splitting_ops directly for
         # partition rules
-        assert config.compilation_config.splitting_ops == ["vllm.unified_attention"]
+        assert config.compilation_config.splitting_ops == ["vllm::unified_attention"]
 
     # When attn_fusion pass enabled, splitting_ops now default to attention ops.
     config = VllmConfig(
@@ -199,17 +199,14 @@ def test_resolve_operator_overload():
 
     from vllm.compilation.partition_rules import _resolve_operator_overload
 
-    # Test valid operator names in vLLM's dot notation
-    assert _resolve_operator_overload("aten.mm.default") is torch.ops.aten.mm.default
+    # Test valid operator names in PyTorch's :: notation
+    assert _resolve_operator_overload("aten::mm.default") is torch.ops.aten.mm.default
     assert (
-        _resolve_operator_overload("aten.addmm.default") is torch.ops.aten.addmm.default
+        _resolve_operator_overload("aten::addmm.default")
+        is torch.ops.aten.addmm.default
     )
 
     # Test invalid operator names
     with pytest.raises(ValueError):
-        # Single word without namespace
-        _resolve_operator_overload("flash_attention")
-
-    with pytest.raises(ValueError):
         # Non-existent operator
-        _resolve_operator_overload("aten.nonexistent_op")
+        _resolve_operator_overload("aten::nonexistent_op.default")
