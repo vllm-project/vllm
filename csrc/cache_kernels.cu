@@ -572,6 +572,7 @@ __global__ void indexer_k_quant_and_cache_kernel(
   }
 }
 
+template <int BLOCK_Y_SIZE>
 __global__ void cp_gather_indexer_k_quant_cache_kernel(
     const char* __restrict__ kv_cache,  // [num_blocks, block_size,
                                         // cache_stride]
@@ -581,42 +582,39 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
     const int* __restrict__ block_table,  // [batch_size, num_blocks]
     const int* __restrict__ cu_seq_lens,  // [batch_size + 1]
     const int batch_size,                 // batch size
-    const int token_stride,               // stride for each token in dst_k
-    const int head_dim,                   // dimension of each head
-    const int block_stride,               // stride for each block in kv_cache
-    const int cache_token_stride,         // stride for each token in kv_cache
-    const int cache_block_size,  // num_tokens for each block in kv_cache
-    const int num_blocks,        // number of blocks
-    const int quant_block_size   // quantization block size
+    const int64_t token_stride,           // stride for each token in dst_k
+    const int64_t head_dim,               // dimension of each head
+    const int64_t block_stride,           // stride for each block in kv_cache
+    const int64_t cache_token_stride,     // stride for each token in kv_cache
+    const int64_t cache_block_size,  // num_tokens for each block in kv_cache
+    const int num_blocks,            // number of blocks
+    const int num_tokens,            // number of tokens
+    const int quant_block_size       // quantization block size
 ) {
   constexpr int VEC_SIZE = sizeof(float4) / sizeof(char);
-  const int64_t token_idx = blockIdx.x;
-  const int64_t head_idx = (blockIdx.y * blockDim.y * blockDim.x +
-                            threadIdx.y * blockDim.x + threadIdx.x) *
-                           VEC_SIZE;
+  const int token_idx = blockIdx.x * blockDim.y + threadIdx.y;
+  const int head_idx = (blockIdx.y * blockDim.x + threadIdx.x) * VEC_SIZE;
   // Find batch index within a block
-  __shared__ int batch_idx;
-  for (int iter = 0;
-       iter < cuda_utils::ceil_div(batch_size, int(blockDim.x * blockDim.y));
+  __shared__ int batch_idx[BLOCK_Y_SIZE];
+  for (int iter = 0; iter < cuda_utils::ceil_div(batch_size, int(blockDim.x));
        iter++) {
-    int tid =
-        iter * blockDim.x * blockDim.y + threadIdx.y * blockDim.x + threadIdx.x;
+    int tid = iter * blockDim.x + threadIdx.x;
     if (tid < batch_size) {
       const int seq_start = cu_seq_lens[tid];
       const int seq_end = cu_seq_lens[tid + 1];
       if (token_idx >= seq_start && token_idx < seq_end) {
-        batch_idx = tid;
+        batch_idx[threadIdx.y] = tid;
       }
     }
   }
-  __syncthreads();
+  __syncwarp();
 
-  if (head_idx >= head_dim) {
+  if (head_idx >= head_dim || token_idx >= num_tokens) {
     return;
   }
-  const int64_t inbatch_seq_idx = token_idx - cu_seq_lens[batch_idx];
-  const int64_t block_idx =
-      block_table[batch_idx * num_blocks + inbatch_seq_idx / cache_block_size];
+  const int inbatch_seq_idx = token_idx - cu_seq_lens[batch_idx[threadIdx.y]];
+  const int block_idx = block_table[batch_idx[threadIdx.y] * num_blocks +
+                                    inbatch_seq_idx / cache_block_size];
   const int64_t src_block_offset = block_idx * block_stride;
   const int64_t cache_inblock_offset =
       (inbatch_seq_idx % cache_block_size) * head_dim + head_idx;
@@ -1236,6 +1234,21 @@ void indexer_k_quant_and_cache(
   DISPATCH_BY_KV_CACHE_DTYPE(k.dtype(), "fp8_e4m3",
                              CALL_INDEXER_K_QUANT_AND_CACHE);
 }
+
+// Macro to dispatch the kernel based on the data amount.
+#define CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(BLOCK_Y_SIZE)                  \
+  vllm::cp_gather_indexer_k_quant_cache_kernel<BLOCK_Y_SIZE>                \
+      <<<dim3((num_tokens + BLOCK_Y_SIZE - 1) / BLOCK_Y_SIZE,               \
+              (head_dim + 8 * vec_size - 1) / (8 * vec_size)),              \
+         dim3(8, BLOCK_Y_SIZE), 0, stream>>>(                               \
+          reinterpret_cast<char*>(kv_cache.data_ptr()),                     \
+          reinterpret_cast<char*>(dst_k.data_ptr()),                        \
+          reinterpret_cast<char*>(dst_scale.data_ptr()),                    \
+          block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
+          batch_size, dst_k.stride(0), dst_k.size(1), kv_cache.stride(0),   \
+          kv_cache.stride(1), kv_cache.size(1), block_table.size(1),        \
+          num_tokens, quant_block_size);
+
 void cp_gather_indexer_k_quant_cache(
     const torch::Tensor& kv_cache,  // [num_blocks, block_size, cache_stride]
     torch::Tensor& dst_k,           // [num_tokens, head_dim]
@@ -1261,17 +1274,20 @@ void cp_gather_indexer_k_quant_cache(
               "head_dim must be divisible by quant_block_size");
 
   constexpr int vec_size = 16;
-  dim3 grid(num_tokens, (head_dim + 128 * vec_size - 1) / (128 * vec_size));
-  dim3 block(8, 16);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(kv_cache));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  vllm::cp_gather_indexer_k_quant_cache_kernel<<<grid, block, 0, stream>>>(
-      reinterpret_cast<char*>(kv_cache.data_ptr()),
-      reinterpret_cast<char*>(dst_k.data_ptr()),
-      reinterpret_cast<char*>(dst_scale.data_ptr()),
-      block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(),
-      batch_size, dst_k.stride(0), dst_k.size(1), kv_cache.stride(0),
-      kv_cache.stride(1), kv_cache.size(1), block_table.size(1),
-      quant_block_size);
+  if (num_tokens < 32) {
+    CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(1);
+  } else if (num_tokens < 64) {
+    CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(2);
+  } else if (num_tokens < 128) {
+    CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(4);
+  } else if (num_tokens < 256) {
+    CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(8);
+  } else if (num_tokens < 512) {
+    CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(16);
+  } else {
+    CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(32);
+  }
 }
