@@ -357,18 +357,9 @@ class Fp8LinearMethod(LinearMethodBase):
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None
         self.act_q_static = self.quant_config.activation_scheme == "static"
-        if self.weight_block_size:
-            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
-        else:
-            # Use per-token quantization for better perf if dynamic and cutlass
-            if not self.act_q_static and cutlass_fp8_supported():
-                self.act_q_group_shape = GroupShape.PER_TOKEN
-            else:
-                self.act_q_group_shape = GroupShape.PER_TENSOR
-
         if self.block_quant:
             assert not self.act_q_static
-            assert self.weight_block_size is not None
+            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
             self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
                 weight_group_shape=GroupShape(*self.weight_block_size),
                 act_quant_group_shape=self.act_q_group_shape,
@@ -376,6 +367,11 @@ class Fp8LinearMethod(LinearMethodBase):
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
         else:
+            # Use per-token quantization for better perf if dynamic and cutlass
+            if not self.act_q_static and cutlass_fp8_supported():
+                self.act_q_group_shape = GroupShape.PER_TOKEN
+            else:
+                self.act_q_group_shape = GroupShape.PER_TENSOR
             self.fp8_linear = Fp8LinearOp(
                 act_quant_static=self.act_q_static,
                 act_quant_group_shape=self.act_q_group_shape,
@@ -402,7 +398,6 @@ class Fp8LinearMethod(LinearMethodBase):
         layer.weight_block_size = None
 
         if self.block_quant:
-            assert self.weight_block_size is not None
             layer.weight_block_size = self.weight_block_size
             validate_fp8_block_shape(
                 layer,
@@ -448,7 +443,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.register_parameter("weight_scale", scale)
             else:
                 assert not self.act_q_static
-                assert self.weight_block_size is not None
                 scale = create_fp8_scale_parameter(
                     BlockQuantScaleParameter,
                     output_partition_sizes,
@@ -544,8 +538,6 @@ class Fp8LinearMethod(LinearMethodBase):
             )
 
         if self.block_quant:
-            assert self.weight_block_size is not None
-
             return self.w8a8_block_fp8_linear.apply(
                 input=x,
                 weight=layer.weight,
@@ -618,7 +610,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
         if self.block_quant:
-            assert self.weight_block_size is not None
             layer.weight_block_size = self.weight_block_size
             tp_size = get_tensor_model_parallel_world_size()
             block_n, block_k = (
