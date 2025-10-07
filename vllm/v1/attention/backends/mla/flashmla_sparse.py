@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Optional
 
@@ -49,12 +48,6 @@ structured as:
 -   **Last 128 bytes:** The "RoPE" part, containing 64 `bfloat16` values. This 
     part is not quantized for accuracy.
 """
-
-
-def _lse2_to_lse(lse_base2: torch.Tensor) -> torch.Tensor:
-    # Convert base-2 LSE to natural-log LSE
-    # Keep FP32 for numerical stability during the merge.
-    return lse_base2.to(torch.float32) * math.log(2.0)
 
 
 class FlashMLASparseBackend(AttentionBackend):
