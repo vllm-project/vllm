@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from typing import Optional
 
 from vllm.logger import init_logger
-from vllm.v1.metrics.reader import get_metrics_snapshot
+from vllm.v1.metrics.reader import Gauge, get_metrics_snapshot
 
 logger = init_logger(__name__)
 
@@ -92,8 +92,8 @@ def get_named_metrics_from_prometheus() -> list[tuple[str, float]]:
     for metric in metrics:
         orca_name = prometheus_to_orca_metrics.get(metric.name)
         # If this metric is mapped into ORCA, then add it to the report.
-        # Note: Only Gauge and Counter metrics are currently supported.
-        if orca_name is not None:
+        # Note: Only Gauge metrics are currently supported.
+        if orca_name is not None and isinstance(metric, Gauge):
             named_metrics.append((str(orca_name), float(metric.value)))
     return named_metrics
 
