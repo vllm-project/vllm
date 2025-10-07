@@ -699,12 +699,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Update the cached states.
 
             req_state.num_computed_tokens = num_computed_tokens
+            req_index = self.input_batch.req_id_to_index.get(req_id)
 
             if not is_last_rank:
                 # When using PP, the scheduler sends the sampled tokens back,
                 # because there's no direct communication between the first-
                 # stage worker and the last-stage worker.
                 new_token_ids = req_data.new_token_ids[i]
+                assert new_token_ids is not None
                 # Add the sampled token(s) from the previous step (if any).
                 # This doesn't include "unverified" tokens like spec tokens.
                 num_new_tokens = (
@@ -715,12 +717,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     req_state.output_token_ids.append(new_token_ids[-1])
                 elif num_new_tokens > 0:
                     req_state.output_token_ids.extend(new_token_ids[-num_new_tokens:])
-            elif num_output_tokens < len(req_state.output_token_ids):
+            elif req_data.new_token_ids:
+                new_token_ids = req_data.new_token_ids[i]
+                if new_token_ids is not None:
+                    # This is a resumed request during async scheduling. We must
+                    # recover the output token ids.
+                    assert req_index is None
+                    req_state.output_token_ids = new_token_ids
+
+            if is_last_rank and num_output_tokens < len(req_state.output_token_ids):
                 # Some output tokens were discarded due to a sync-KV-load
                 # failure. Align the cached state.
                 del req_state.output_token_ids[num_output_tokens:]
 
-                req_index = self.input_batch.req_id_to_index.get(req_id)
                 if req_index is not None:
                     old_end_idx = self.input_batch.num_tokens_no_spec[req_index]
                     end_idx = (
@@ -745,13 +754,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
 
-            req_index = self.input_batch.req_id_to_index.get(req_id)
             if req_index is None:
                 # The request is not in the persistent batch.
                 # The request was either preempted and resumed later, or was not
                 # scheduled in the previous step and needs to be added again.
                 reqs_to_add.append(req_state)
                 continue
+
+            assert not resumed_from_preemption
 
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = num_computed_tokens
@@ -763,6 +773,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if not is_last_rank:
                 # Add new_token_ids to token_ids_cpu.
                 start_token_index = num_computed_tokens
+                assert new_token_ids is not None
                 end_token_index = num_computed_tokens + len(new_token_ids)
                 self.input_batch.token_ids_cpu[
                     req_index, start_token_index:end_token_index

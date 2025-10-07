@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 from vllm.logger import init_logger
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
@@ -47,3 +48,28 @@ class AsyncScheduler(Scheduler):
                 request, request.num_computed_tokens - request.num_output_placeholders
             )
         return new_token_ids, stopped
+
+    def _make_cached_request_data(
+        self,
+        running_reqs: list[Request],
+        resumed_reqs: list[Request],
+        num_scheduled_tokens: dict[str, int],
+        spec_decode_tokens: dict[str, list[int]],
+        req_to_new_blocks: dict[str, KVCacheBlocks],
+    ) -> CachedRequestData:
+        cached_request_data = super()._make_cached_request_data(
+            running_reqs,
+            resumed_reqs,
+            num_scheduled_tokens,
+            spec_decode_tokens,
+            req_to_new_blocks,
+        )
+        if resumed_reqs:
+            # Include all output token ids for any resumed requests
+            # since these aren't updated in the model runner in the
+            # async scheduling case.
+            cached_request_data.new_token_ids = [None] * len(running_reqs)
+            cached_request_data.new_token_ids.extend(
+                list(req.output_token_ids) for req in resumed_reqs
+            )
+        return cached_request_data

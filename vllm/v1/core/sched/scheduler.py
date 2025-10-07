@@ -707,7 +707,7 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks],
     ) -> CachedRequestData:
         req_ids: list[str] = []
-        new_token_ids: list[list[int]] = []
+        new_token_ids: list[list[int] | None] = []
         new_block_ids: list[tuple[list[int], ...] | None] = []
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
