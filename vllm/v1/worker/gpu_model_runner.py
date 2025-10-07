@@ -2529,20 +2529,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # Only do CUDA graph dispatch and padding when enabled
             if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-                # Detect uniform decode batches for CUDA graph optimization
-                is_pure_decode = (
-                    not scheduler_output.scheduled_new_reqs
-                    and scheduler_output.num_scheduled_tokens
+                uniform_decode = (
+                    max_num_scheduled_tokens == self.uniform_decode_query_len
+                    and (
+                        scheduler_output.total_num_scheduled_tokens
+                        == self.input_batch.num_reqs * max_num_scheduled_tokens
+                    )
                 )
-                if is_pure_decode:
-                    num_tokens_per_req = list(
-                        scheduler_output.num_scheduled_tokens.values()
-                    )
-                    uniform_decode = all(
-                        n == self.uniform_decode_query_len for n in num_tokens_per_req
-                    )
-                else:
-                    uniform_decode = False
 
                 batch_descriptor = BatchDescriptor(
                     num_tokens=num_input_tokens,
