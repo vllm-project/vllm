@@ -67,7 +67,8 @@ class EPLBConfig:
     @property
     def eplb_record_metrics(self) -> bool:
         return self.eplb_save_dir is not None or (
-            self.eplb_save_dir is None and self.eplb_load_path is None)
+            self.eplb_save_dir is None and self.eplb_load_path is None
+        )
 
 
 @config

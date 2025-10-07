@@ -51,13 +51,15 @@ from .rebalance_execute import rearrange_expert_weights_inplace
 logger = init_logger(__name__)
 
 
-def save_eplb_state(tensor: torch.Tensor, save_dir: Path,
-                    dir_iter: int) -> None:
+def save_eplb_state(tensor: torch.Tensor, save_dir: Path, dir_iter: int) -> None:
     try:
         file_path = f"{save_dir}/global_expert_load_window_i{dir_iter}.safetensors"  # noqa: E501
-        torch.save({
-            "global_expert_load_window": tensor,
-        }, file_path)
+        torch.save(
+            {
+                "global_expert_load_window": tensor,
+            },
+            file_path,
+        )
         logger.info("Successfully saved to %s.", file_path)
     except Exception as e:
         logger.error("An error occurred while saving the tensor: %s.", e)
@@ -305,7 +307,8 @@ class EplbState:
         else:
             # Set the initial progress of rearrangement to 3/4
             expert_rearrangement_step = max(
-                0, eplb_step_interval - eplb_step_interval // 4)
+                0, eplb_step_interval - eplb_step_interval // 4
+            )
 
         if global_expert_load is not None:
             ep_group = get_ep_group().device_group
@@ -496,10 +499,10 @@ class EplbState:
             time_start = time.perf_counter()
             logger.info("Rearranging experts %s...", "(profile)" if is_profile else "")
 
-        if (self.eplb_load_path is not None
-                and self.expert_rearrangement_step == 0):
-            global_expert_load_window = load_eplb_state(
-                self.eplb_load_path).to(self.physical_to_logical_map.device)
+        if self.eplb_load_path is not None and self.expert_rearrangement_step == 0:
+            global_expert_load_window = load_eplb_state(self.eplb_load_path).to(
+                self.physical_to_logical_map.device
+            )
         elif global_expert_load is None:
             # Map the physical expert load to global logical experts
             logical_expert_load_window = torch.zeros(
@@ -535,10 +538,15 @@ class EplbState:
             global_expert_load_window = logical_expert_load_window.sum(dim=0)
             all_reduce(global_expert_load_window, group=ep_group)
 
-            if (is_main_rank and self.eplb_save_dir is not None
-                    and not is_profile and self.expert_rearrangement_step > 0):
-                save_eplb_state(global_expert_load_window, self.eplb_save_dir,
-                                self.save_dir_iter)
+            if (
+                is_main_rank
+                and self.eplb_save_dir is not None
+                and not is_profile
+                and self.expert_rearrangement_step > 0
+            ):
+                save_eplb_state(
+                    global_expert_load_window, self.eplb_save_dir, self.save_dir_iter
+                )
                 self.save_dir_iter += 1
 
             if not execute_shuffle:

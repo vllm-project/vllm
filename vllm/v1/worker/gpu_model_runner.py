@@ -1978,11 +1978,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         if not self.parallel_config.enable_eplb:
             return
-        if (is_profile and self.parallel_config.eplb_config.eplb_load_path
-                is not None):
+        if is_profile and self.parallel_config.eplb_config.eplb_load_path is not None:
             return
-        if self.parallel_config.eplb_config.eplb_load_path is not None and \
-            self.parallel_config.eplb_config.eplb_save_dir is None:
+        if (
+            self.parallel_config.eplb_config.eplb_load_path is not None
+            and self.parallel_config.eplb_config.eplb_save_dir is None
+        ):
             return
 
         assert self.eplb_state is not None

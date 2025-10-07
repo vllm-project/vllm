@@ -9,6 +9,7 @@ import json
 import sys
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Annotated,
