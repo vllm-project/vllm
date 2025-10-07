@@ -2059,7 +2059,7 @@ def copy_blocks(
     value_caches: list[torch.Tensor],
     block_mapping: torch.Tensor,
 ) -> None:
-
+    torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
 def copy_blocks_mla(kv_caches: list[torch.Tensor], block_mapping: torch.Tensor) -> None:
     torch.ops._C_cache_ops.copy_blocks_mla(kv_caches, block_mapping)
