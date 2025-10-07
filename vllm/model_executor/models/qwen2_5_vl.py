@@ -1085,6 +1085,8 @@ class Qwen2_5_VLForConditionalGeneration(
         second_per_grid_ts: list[float],
         context_len: int = 0,
         seq_len: Optional[int] = None,
+        audio_feature_lengths: Optional[torch.Tensor] = None,
+        use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
         """Get mrope input positions and delta value."""
 
