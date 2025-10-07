@@ -730,7 +730,7 @@ class CompilationConfig:
                 )
 
     def splitting_ops_contain_attention(self) -> bool:
-        return self.splitting_ops is not None and all(
+        return self.splitting_ops is not None and any(
             op in self.splitting_ops for op in self._attention_ops
         )
 
