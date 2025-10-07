@@ -1108,7 +1108,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         return True
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                       global_num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
         if not self.quant_config.is_checkpoint_nvfp4_serialized:
@@ -1121,6 +1120,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         weight_dtype = torch.uint8
         weight_scale_dtype = torch.float8_e4m3fn
         weight_loader = extra_weight_attrs.get("weight_loader")
+        global_num_experts = extra_weight_attrs.get("global_num_experts")
         # GEMM 1
         w13_weight = ModelWeightParameter(
             data=torch.empty(
@@ -1312,8 +1312,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                                              requires_grad=False)
 
         # Common processing for input scales and alphas
-        w13_input_scale = layer.w13_input_scale.max().to(
-            torch.float32).expand(layer.num_experts)
+        w13_input_scale = layer.w13_input_scale.max().to(torch.float32).expand(
+            layer.num_experts)
         layer.g1_alphas = Parameter(
             (w13_input_scale * w13_weight_scale_2).to(torch.float32),
             requires_grad=False)
@@ -1323,7 +1323,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             (1 / w13_input_scale).to(torch.float32), requires_grad=False)
 
         # GEMM 2 processing
-        w2_input_scale = layer.w2_input_scale.max().to(torch.float32).expand(layer.num_experts)
+        w2_input_scale = layer.w2_input_scale.max().to(torch.float32).expand(
+            layer.num_experts)
         layer.g2_alphas = Parameter(
             (w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
             requires_grad=False)
