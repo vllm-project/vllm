@@ -14,16 +14,15 @@ from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
 # Asymmetrically quantized models, stored in GPTQ v1/v2 format
 # MODELS = [(model_id, checkpoint_format, enable_thinking)]
 MODELS = [
-    ('BitDistiller/Qwen-8B-w2g64-gptq', 'gptq_v2', True),
-    ('BitDistiller/Llama-3.1-8B-Instruct-w2g64-gptq', 'gptq_v2', False),
+    ("BitDistiller/Qwen-8B-w2g64-gptq", "gptq_v2", True),
+    ("BitDistiller/Llama-3.1-8B-Instruct-w2g64-gptq", "gptq_v2", False),
 ]
 
 
-@pytest.mark.parametrize("model_id, checkpoint_format, enable_thinking",
-                         MODELS)
-def test_model_load(vllm_runner, model_id, checkpoint_format, enable_thinking,
-                    monkeypatch):
-
+@pytest.mark.parametrize("model_id, checkpoint_format, enable_thinking", MODELS)
+def test_model_load(
+    vllm_runner, model_id, checkpoint_format, enable_thinking, monkeypatch
+):
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
@@ -36,13 +35,12 @@ def test_model_load(vllm_runner, model_id, checkpoint_format, enable_thinking,
         def check_model(model_id):
             for name, submodule in model_id.named_modules():
                 # Could check more modules if necessary
-                if name == 'model_id.layers.0.self_attn.qkv_proj':
-                    assert isinstance(submodule.quant_method,
-                                      linear_method_cls)
+                if name == "model_id.layers.0.self_attn.qkv_proj":
+                    assert isinstance(submodule.quant_method, linear_method_cls)
 
                     config = submodule.quant_method.quant_config
                     assert config.checkpoint_format == checkpoint_format
-                    if checkpoint_format == 'gptq_v2':
+                    if checkpoint_format == "gptq_v2":
                         assert submodule.quant_method.use_gptq_gemm_v2
 
                     # Just break since currently we only check 1 module
@@ -52,27 +50,20 @@ def test_model_load(vllm_runner, model_id, checkpoint_format, enable_thinking,
         llm.apply_model(check_model)
 
 
-@pytest.mark.parametrize("model_id, checkpoint_format, enable_thinking",
-                         MODELS)
-def test_model_inference(vllm_runner, model_id, checkpoint_format,
-                         enable_thinking):
-
-    # Prepare prompt to test the model_id's generation result.
+@pytest.mark.parametrize("model_id, checkpoint_format, enable_thinking", MODELS)
+def test_model_inference(vllm_runner, model_id, checkpoint_format, enable_thinking):
+    # Prepare prompt to test the model_id"s generation result.
     prompt = "What is the meaning of life?"
-    messages = [{
-        "role": "system",
-        "content": "You are a helpful assistant."
-    }, {
-        "role": "user",
-        "content": prompt
-    }]
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": prompt},
+    ]
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     text = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,
-        enable_thinking=
-        enable_thinking,  # This will only apply to thinking models
+        enable_thinking=enable_thinking,  # This will only apply to thinking models
     )
 
     with vllm_runner(model_id, dtype=torch.float16, max_model_len=512) as llm:
@@ -98,7 +89,7 @@ def test_model_inference(vllm_runner, model_id, checkpoint_format,
 
         # Normal text should be mostly letters with reasonable spacing
         # Some magic numbers, could be adjusted
-        return (0.5 <= letter_ratio <= 0.9 and 0.01 <= space_ratio <= 0.3)
+        return 0.5 <= letter_ratio <= 0.9 and 0.01 <= space_ratio <= 0.3
 
     # Apply some simple checks for giberish output
     assert has_normal_char_distribution(output[0][1], 5)
