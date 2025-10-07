@@ -93,5 +93,3 @@ def test_model_inference(vllm_runner, model_id, checkpoint_format, enable_thinki
 
     # Apply some simple checks for giberish output
     assert has_normal_char_distribution(output[0][1], 5)
-    # Also print the output text to check
-    print(f"{output[0][1]}")
