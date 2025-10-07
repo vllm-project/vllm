@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-import vllm
 from vllm.compilation.counter import compilation_counter
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import CompilationLevel
@@ -41,8 +40,6 @@ def test_custom_op():
 # may be influenced by other tests.
 @pytest.mark.parametrize("val", ["1"])
 def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
-    assert vllm.envs.VLLM_USE_V1
-
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", val)
@@ -68,8 +65,6 @@ def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
 @pytest.mark.forked
 @pytest.mark.parametrize("enabled", [True, False])
 def test_use_cudagraphs(vllm_runner, monkeypatch, enabled):
-    assert vllm.envs.VLLM_USE_V1
-
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 

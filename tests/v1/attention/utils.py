@@ -305,7 +305,6 @@ full_cg_backend_configs = {
     "CutlassMLA": BackendConfig(
         name="CutlassMLA",
         env_vars={
-            "VLLM_USE_V1": "1",
             "VLLM_ATTENTION_BACKEND": "CUTLASS_MLA",
             "FORCE_NUM_KV_SPLITS": "1",  # TODO: remove this when hang issue is fixed
         },
