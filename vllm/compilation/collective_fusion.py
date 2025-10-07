@@ -169,15 +169,23 @@ class ScaledMMReduceScatterPattern(BasePattern):
             scale_a: torch.Tensor,
             scale_b: torch.Tensor,
         ) -> torch.Tensor:
+            # Calculate output shape: input @ mat2 with scatter_dim reduced
+            output_shape = [*input.shape[:-1], mat2.shape[1]]
+            scatter_dim = 0
             gemm_rs = torch.ops.symm_mem.fused_scaled_matmul_reduce_scatter(
                 input,
                 mat2,
                 scale_a,
                 scale_b,
                 "avg",
-                scatter_dim=0,
-                out_dtype=self.dtype,
-                group_name=self.tp.device_group.group_name,
+                scatter_dim,  # orig_scatter_dim
+                scatter_dim,  # scatter_dim_after_maybe_reshape
+                self.tp.device_group.group_name,
+                output_shape,
+                None,  # bias
+                None,  # result_scale
+                self.dtype,  # out_dtype
+                False,  # use_fast_accum
             )
 
             return gemm_rs
@@ -296,15 +304,23 @@ class CutlassScaledMMReduceScatterPattern(BasePattern):
             scale_b: torch.Tensor,
             cutlass_mm_output: torch.Tensor,
         ) -> torch.Tensor:
+            # Calculate output shape: input @ mat2 with scatter_dim reduced
+            output_shape = [*input.shape[:-1], mat2.shape[1]]
+            scatter_dim = 0
             gemm_rs = torch.ops.symm_mem.fused_scaled_matmul_reduce_scatter(
                 input,
                 mat2,
                 scale_a,
                 scale_b,
                 "avg",
-                scatter_dim=0,
-                out_dtype=self.dtype,
-                group_name=self.tp.device_group.group_name,
+                scatter_dim,  # orig_scatter_dim
+                scatter_dim,  # scatter_dim_after_maybe_reshape
+                self.tp.device_group.group_name,
+                output_shape,
+                None,  # bias
+                None,  # result_scale
+                self.dtype,  # out_dtype
+                False,  # use_fast_accum
             )
 
             return gemm_rs
