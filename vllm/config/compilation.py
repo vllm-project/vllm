@@ -274,11 +274,13 @@ class CompilationConfig:
     more modes may be added.
     """
     use_cudagraph: bool = True
-    """Whether to use cudagraph inside compilation.
-    - False: cudagraph inside compilation is not used.
+    """Whether to use cudagraph inside compilation:
+
+    - False: cudagraph inside compilation is not used.\n
     - True: cudagraph inside compilation is used. It requires
         that all input buffers have fixed addresses, and all
         splitting ops write their outputs to input buffers.
+
     In the vLLM V1 Engine, this flag only applies for
     CompilationLevel.PIECEWISE (aka -O3).
     Note that this is orthogonal to the cudagraph capture logic
@@ -293,8 +295,9 @@ class CompilationConfig:
     Only after that, the execution will be recorded, and the recorded
     cudagraph will be used for subsequent runs."""
     cudagraph_capture_sizes: Optional[list[int]] = None
-    """Sizes to capture cudagraph.
-    - None (default): capture sizes are inferred from vllm config.
+    """Sizes to capture cudagraph:
+
+    - None (default): capture sizes are inferred from vllm config.\n
     - list[int]: capture sizes are specified as given."""
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for
@@ -343,10 +346,11 @@ class CompilationConfig:
     If cudagraph_capture_sizes is specified, this will be set to the largest 
     size in that list (or checked for consistency if specified). If 
     cudagraph_capture_sizes is not specified, the list sizes of sizes is 
-    generated automatically following the pattern: 
+    generated automatically following the pattern:
+
         [1, 2, 4] + list(range(8, 256, 8)) + list(
         range(256, max_cudagraph_capture_size + 1, 16))
-    
+
     If not specified, max_cudagraph_capture_size is set to min(max_num_seqs*2,
     512) by default. This voids OOM in tight memory scenarios with small 
     max_num_seqs, and prevents capture of many large graphs (>512) that would
