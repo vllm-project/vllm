@@ -66,10 +66,10 @@ def run_model(
 
 
 def test_ignore_torch_compile_decorator():
-    # piecewise
+    # vllmcompile
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationMode.PIECEWISE,
+            level=CompilationMode.VLLM_COMPILE,
             use_cudagraph=True,
             splitting_ops=["silly.attention"],
             cudagraph_capture_sizes=[1, 2],
@@ -184,7 +184,7 @@ def test_conditional_compile_enable_if():
             kv_sharing_fast_prefill=True,
         ),
         compilation_config=CompilationConfig(
-            level=CompilationMode.PIECEWISE,
+            level=CompilationMode.VLLM_COMPILE,
             use_cudagraph=True,
             splitting_ops=["silly.attention"],
             cudagraph_capture_sizes=[1, 2],
@@ -216,7 +216,7 @@ def test_conditional_compile_enable_if():
             kv_sharing_fast_prefill=False,
         ),
         compilation_config=CompilationConfig(
-            level=CompilationMode.PIECEWISE,
+            level=CompilationMode.VLLM_COMPILE,
             use_cudagraph=True,
             splitting_ops=["silly.attention"],
             cudagraph_capture_sizes=[1, 2],

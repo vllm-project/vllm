@@ -124,7 +124,7 @@ def test_compile_correctness(
 
         for level in [
             CompilationMode.NO_COMPILATION,
-            CompilationMode.PIECEWISE,
+            CompilationMode.VLLM_COMPILE,
         ]:
             all_args.append(final_args + [f"-O{level}"])
             all_envs.append({})

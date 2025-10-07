@@ -190,13 +190,13 @@ def run_model(
         return output.cpu()
 
 
-def test_multi_graph_piecewise_compile_outputs_equal():
+def test_multi_graph_vllmcompile_compile_outputs_equal():
     outputs = []
 
-    # piecewise compile
+    # vllmcompile compile
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationMode.PIECEWISE,
+            level=CompilationMode.VLLM_COMPILE,
             use_cudagraph=True,
             splitting_ops=["silly.attention"],
             cudagraph_capture_sizes=[1, 2],
@@ -265,7 +265,7 @@ def test_multi_graph_piecewise_compile_outputs_equal():
     # piecewise compile without CUDA graph
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationMode.PIECEWISE,
+            level=CompilationMode.VLLM_COMPILE,
             use_cudagraph=False,
             splitting_ops=["silly.attention"],
         )
