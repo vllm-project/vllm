@@ -225,6 +225,10 @@ _CROSS_ENCODER_MODELS = {
         "modernbert",
         "ModernBertForSequenceClassification",
     ),
+    "ModernBertForTokenClassification": (
+        "modernbert",
+        "ModernBertForTokenClassification",
+    ),
     "RobertaForSequenceClassification": ("roberta", "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": (
         "roberta",
