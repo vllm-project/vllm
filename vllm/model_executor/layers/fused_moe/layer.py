@@ -1243,6 +1243,7 @@ class FusedMoE(CustomOp):
             states_shape: tuple[int, ...]
             logits_shape: tuple[int, ...]
 
+            # Note here we use `num_experts` which is logical expert count
             if vllm_config.parallel_config.enable_dbo:
                 states_shape = (2, moe.max_num_tokens, self.hidden_size)
                 logits_shape = (2, moe.max_num_tokens, num_experts)
@@ -1254,7 +1255,6 @@ class FusedMoE(CustomOp):
                 states_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
             )
 
-            # Note here we use `num_experts` which is logical expert count
             self.batched_router_logits = torch.zeros(
                 logits_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
             )
