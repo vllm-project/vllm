@@ -359,8 +359,9 @@ class CoreEngineActorManager:
             for node_resources in nodes
             if device_str in node_resources
         ]
+        if not n_node_devices:
+            raise ValueError(f"No {device_str} found in Ray cluster.")
         max_device_per_node = max(n_node_devices)
-        assert max_device_per_node > 0, f"No {device_str} found in Ray cluster."
 
         if max_device_per_node < world_size:
             # if we need multiple nodes per dp group, we require for now that
@@ -368,9 +369,9 @@ class CoreEngineActorManager:
             assert set(n_node_devices) == {max_device_per_node}, (
                 f"Nodes are not homogenous, {nodes}"
             )
-            assert len(nodes) * max_device_per_node == world_size * num_pg_to_create, (
-                f"Total available nodes {len(nodes)} and devices {max_device_per_node} "
-                f"do not match required world size {world_size} and data parallel size "
+            assert len(nodes) * max_device_per_node >= world_size * num_pg_to_create, (
+                f"Not enough total available nodes ({len(nodes)}) and devices per node ({max_device_per_node}) "
+                f"to satisfy required world size {world_size} and data parallel size "
                 f"{num_pg_to_create}"
             )
             assert local_engine_count == 1, (
