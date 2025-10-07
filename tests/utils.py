@@ -8,6 +8,7 @@ import functools
 import importlib
 import json
 import os
+import random
 import signal
 import subprocess
 import sys
@@ -32,20 +33,29 @@ from typing_extensions import ParamSpec
 
 import vllm.envs as envs
 from tests.models.utils import TextTextLogprobs
-from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment)
+from vllm.distributed import (
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import (FlexibleArgumentParser, GB_bytes,
-                        cuda_device_count_stateless, get_open_port)
+from vllm.utils import (
+    FlexibleArgumentParser,
+    GB_bytes,
+    cuda_device_count_stateless,
+    get_open_port,
+)
 
 if current_platform.is_rocm():
-    from amdsmi import (amdsmi_get_gpu_vram_usage,
-                        amdsmi_get_processor_handles, amdsmi_init,
-                        amdsmi_shut_down)
+    from amdsmi import (
+        amdsmi_get_gpu_vram_usage,
+        amdsmi_get_processor_handles,
+        amdsmi_init,
+        amdsmi_shut_down,
+    )
 
     @contextmanager
     def _nvml():
@@ -55,9 +65,12 @@ if current_platform.is_rocm():
         finally:
             amdsmi_shut_down()
 elif current_platform.is_cuda():
-    from vllm.third_party.pynvml import (nvmlDeviceGetHandleByIndex,
-                                         nvmlDeviceGetMemoryInfo, nvmlInit,
-                                         nvmlShutdown)
+    from vllm.third_party.pynvml import (
+        nvmlDeviceGetHandleByIndex,
+        nvmlDeviceGetMemoryInfo,
+        nvmlInit,
+        nvmlShutdown,
+    )
 
     @contextmanager
     def _nvml():
@@ -80,58 +93,61 @@ VLLM_PATH = Path(__file__).parent.parent
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
 
-    def _start_server(self, model: str, vllm_serve_args: list[str],
-                      env_dict: Optional[dict[str, str]]) -> None:
-        """Subclasses override this method to customize server process launch
-        """
+    def _start_server(
+        self, model: str, vllm_serve_args: list[str], env_dict: Optional[dict[str, str]]
+    ) -> None:
+        """Subclasses override this method to customize server process launch"""
         env = os.environ.copy()
         # the current process might initialize cuda,
         # to be safe, we should use spawn method
-        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if env_dict is not None:
             env.update(env_dict)
+        serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
+        print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(
-            ["vllm", "serve", model, *vllm_serve_args],
+            serve_cmd,
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
 
-    def __init__(self,
-                 model: str,
-                 vllm_serve_args: list[str],
-                 *,
-                 env_dict: Optional[dict[str, str]] = None,
-                 seed: Optional[int] = 0,
-                 auto_port: bool = True,
-                 max_wait_seconds: Optional[float] = None,
-                 override_hf_configs: Optional[dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        vllm_serve_args: list[str],
+        *,
+        env_dict: Optional[dict[str, str]] = None,
+        seed: Optional[int] = 0,
+        auto_port: bool = True,
+        max_wait_seconds: Optional[float] = None,
+        override_hf_configs: Optional[dict[str, Any]] = None,
+    ) -> None:
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
-                raise ValueError("You have manually specified the port "
-                                 "when `auto_port=True`.")
+                raise ValueError(
+                    "You have manually specified the port when `auto_port=True`."
+                )
 
             # No need for a port if using unix sockets
             if "--uds" not in vllm_serve_args:
                 # Don't mutate the input args
-                vllm_serve_args = vllm_serve_args + [
-                    "--port", str(get_open_port())
-                ]
+                vllm_serve_args = vllm_serve_args + ["--port", str(get_open_port())]
         if seed is not None:
             if "--seed" in vllm_serve_args:
-                raise ValueError("You have manually specified the seed "
-                                 f"when `seed={seed}`.")
+                raise ValueError(
+                    f"You have manually specified the seed when `seed={seed}`."
+                )
 
             vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
 
         if override_hf_configs is not None:
             vllm_serve_args = vllm_serve_args + [
                 "--hf-overrides",
-                json.dumps(override_hf_configs)
+                json.dumps(override_hf_configs),
             ]
 
-        parser = FlexibleArgumentParser(
-            description="vLLM's remote OpenAI server.")
+        parser = FlexibleArgumentParser(description="vLLM's remote OpenAI server.")
         subparsers = parser.add_subparsers(required=False, dest="subparser")
         parser = ServeSubcommand().subparser_init(subparsers)
         args = parser.parse_args(["--model", model, *vllm_serve_args])
@@ -140,11 +156,10 @@ class RemoteOpenAIServer:
             self.host = None
             self.port = None
         else:
-            self.host = str(args.host or 'localhost')
+            self.host = str(args.host or "localhost")
             self.port = int(args.port)
 
-        self.show_hidden_metrics = \
-            args.show_hidden_metrics_for_version is not None
+        self.show_hidden_metrics = args.show_hidden_metrics_for_version is not None
 
         # download the model before starting the server to avoid timeout
         is_local = os.path.isdir(model)
@@ -158,8 +173,7 @@ class RemoteOpenAIServer:
 
         self._start_server(model, vllm_serve_args, env_dict)
         max_wait_seconds = max_wait_seconds or 240
-        self._wait_for_server(url=self.url_for("health"),
-                              timeout=max_wait_seconds)
+        self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
 
     def __enter__(self):
         return self
@@ -179,8 +193,11 @@ class RemoteOpenAIServer:
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check
         start = time.time()
-        client = (httpx.Client(transport=httpx.HTTPTransport(
-            uds=self.uds)) if self.uds else requests)
+        client = (
+            httpx.Client(transport=httpx.HTTPTransport(uds=self.uds))
+            if self.uds
+            else requests
+        )
         while True:
             try:
                 if client.get(url).status_code == 200:
@@ -196,13 +213,15 @@ class RemoteOpenAIServer:
 
                 time.sleep(0.5)
                 if time.time() - start > timeout:
-                    raise RuntimeError(
-                        "Server failed to start in time.") from None
+                    raise RuntimeError("Server failed to start in time.") from None
 
     @property
     def url_root(self) -> str:
-        return (f"http://{self.uds.split('/')[-1]}"
-                if self.uds else f"http://{self.host}:{self.port}")
+        return (
+            f"http://{self.uds.split('/')[-1]}"
+            if self.uds
+            else f"http://{self.host}:{self.port}"
+        )
 
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
@@ -220,42 +239,47 @@ class RemoteOpenAIServer:
     def get_async_client(self, **kwargs):
         if "timeout" not in kwargs:
             kwargs["timeout"] = 600
-        return openai.AsyncOpenAI(base_url=self.url_for("v1"),
-                                  api_key=self.DUMMY_API_KEY,
-                                  max_retries=0,
-                                  **kwargs)
+        return openai.AsyncOpenAI(
+            base_url=self.url_for("v1"),
+            api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
+        )
 
 
 class RemoteOpenAIServerCustom(RemoteOpenAIServer):
     """Launch test server with custom child process"""
 
-    def _start_server(self, model: str, vllm_serve_args: list[str],
-                      env_dict: Optional[dict[str, str]]) -> None:
+    def _start_server(
+        self, model: str, vllm_serve_args: list[str], env_dict: Optional[dict[str, str]]
+    ) -> None:
         self.proc: Process = Process(
-            target=self.child_process_fxn,
-            args=(env_dict, model,
-                  vllm_serve_args))  # type: ignore[assignment]
+            target=self.child_process_fxn, args=(env_dict, model, vllm_serve_args)
+        )  # type: ignore[assignment]
         self.proc.start()
 
-    def __init__(self,
-                 model: str,
-                 vllm_serve_args: list[str],
-                 child_process_fxn: Callable[
-                     [Optional[dict[str, str]], str, list[str]], None],
-                 *,
-                 env_dict: Optional[dict[str, str]] = None,
-                 seed: Optional[int] = 0,
-                 auto_port: bool = True,
-                 max_wait_seconds: Optional[float] = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        vllm_serve_args: list[str],
+        child_process_fxn: Callable[[Optional[dict[str, str]], str, list[str]], None],
+        *,
+        env_dict: Optional[dict[str, str]] = None,
+        seed: Optional[int] = 0,
+        auto_port: bool = True,
+        max_wait_seconds: Optional[float] = None,
+    ) -> None:
         """Store custom child process function then invoke superclass
         constructor which will indirectly launch it."""
         self.child_process_fxn = child_process_fxn
-        super().__init__(model=model,
-                         vllm_serve_args=vllm_serve_args,
-                         env_dict=env_dict,
-                         seed=seed,
-                         auto_port=auto_port,
-                         max_wait_seconds=max_wait_seconds)
+        super().__init__(
+            model=model,
+            vllm_serve_args=vllm_serve_args,
+            env_dict=env_dict,
+            seed=seed,
+            auto_port=auto_port,
+            max_wait_seconds=max_wait_seconds,
+        )
 
     def _poll(self) -> Optional[int]:
         return self.proc.exitcode
@@ -277,17 +301,18 @@ def _test_completion(
     results = []
 
     # test with text prompt
-    completion = client.completions.create(model=model,
-                                           prompt=prompt,
-                                           max_tokens=5,
-                                           temperature=0.0)
+    completion = client.completions.create(
+        model=model, prompt=prompt, max_tokens=5, temperature=0.0
+    )
 
-    results.append({
-        "test": "single_completion",
-        "text": completion.choices[0].text,
-        "finish_reason": completion.choices[0].finish_reason,
-        "usage": completion.usage,
-    })
+    results.append(
+        {
+            "test": "single_completion",
+            "text": completion.choices[0].text,
+            "finish_reason": completion.choices[0].finish_reason,
+            "usage": completion.usage,
+        }
+    )
 
     # test using token IDs
     completion = client.completions.create(
@@ -297,43 +322,42 @@ def _test_completion(
         temperature=0.0,
     )
 
-    results.append({
-        "test": "token_ids",
-        "text": completion.choices[0].text,
-        "finish_reason": completion.choices[0].finish_reason,
-        "usage": completion.usage,
-    })
+    results.append(
+        {
+            "test": "token_ids",
+            "text": completion.choices[0].text,
+            "finish_reason": completion.choices[0].finish_reason,
+            "usage": completion.usage,
+        }
+    )
 
     # test seeded random sampling
-    completion = client.completions.create(model=model,
-                                           prompt=prompt,
-                                           max_tokens=5,
-                                           seed=33,
-                                           temperature=1.0)
+    completion = client.completions.create(
+        model=model, prompt=prompt, max_tokens=5, seed=33, temperature=1.0
+    )
 
-    results.append({
-        "test": "seeded_sampling",
-        "text": completion.choices[0].text,
-        "finish_reason": completion.choices[0].finish_reason,
-        "usage": completion.usage,
-    })
+    results.append(
+        {
+            "test": "seeded_sampling",
+            "text": completion.choices[0].text,
+            "finish_reason": completion.choices[0].finish_reason,
+            "usage": completion.usage,
+        }
+    )
 
     # test seeded random sampling with multiple prompts
-    completion = client.completions.create(model=model,
-                                           prompt=[prompt, prompt],
-                                           max_tokens=5,
-                                           seed=33,
-                                           temperature=1.0)
+    completion = client.completions.create(
+        model=model, prompt=[prompt, prompt], max_tokens=5, seed=33, temperature=1.0
+    )
 
-    results.append({
-        "test":
-        "seeded_sampling",
-        "text": [choice.text for choice in completion.choices],
-        "finish_reason":
-        [choice.finish_reason for choice in completion.choices],
-        "usage":
-        completion.usage,
-    })
+    results.append(
+        {
+            "test": "seeded_sampling",
+            "text": [choice.text for choice in completion.choices],
+            "finish_reason": [choice.finish_reason for choice in completion.choices],
+            "usage": completion.usage,
+        }
+    )
 
     # test simple list
     batch = client.completions.create(
@@ -343,11 +367,13 @@ def _test_completion(
         temperature=0.0,
     )
 
-    results.append({
-        "test": "simple_list",
-        "text0": batch.choices[0].text,
-        "text1": batch.choices[1].text,
-    })
+    results.append(
+        {
+            "test": "simple_list",
+            "text0": batch.choices[0].text,
+            "text1": batch.choices[1].text,
+        }
+    )
 
     # test streaming
     batch = client.completions.create(
@@ -364,10 +390,12 @@ def _test_completion(
         choice = chunk.choices[0]
         texts[choice.index] += choice.text
 
-    results.append({
-        "test": "streaming",
-        "texts": texts,
-    })
+    results.append(
+        {
+            "test": "streaming",
+            "texts": texts,
+        }
+    )
 
     return results
 
@@ -380,19 +408,19 @@ def _test_completion_close(
     results = []
 
     # test with text prompt
-    completion = client.completions.create(model=model,
-                                           prompt=prompt,
-                                           max_tokens=1,
-                                           logprobs=5,
-                                           temperature=0.0)
+    completion = client.completions.create(
+        model=model, prompt=prompt, max_tokens=1, logprobs=5, temperature=0.0
+    )
 
     logprobs = completion.choices[0].logprobs.top_logprobs[0]
     logprobs = {k: round(v, 2) for k, v in logprobs.items()}
 
-    results.append({
-        "test": "completion_close",
-        "logprobs": logprobs,
-    })
+    results.append(
+        {
+            "test": "completion_close",
+            "logprobs": logprobs,
+        }
+    )
 
     return results
 
@@ -404,26 +432,21 @@ def _test_chat(
 ):
     results = []
 
-    messages = [{
-        "role": "user",
-        "content": [{
-            "type": "text",
-            "text": prompt
-        }]
-    }]
+    messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
 
     # test with text prompt
-    chat_response = client.chat.completions.create(model=model,
-                                                   messages=messages,
-                                                   max_tokens=5,
-                                                   temperature=0.0)
+    chat_response = client.chat.completions.create(
+        model=model, messages=messages, max_tokens=5, temperature=0.0
+    )
 
-    results.append({
-        "test": "completion_close",
-        "text": chat_response.choices[0].message.content,
-        "finish_reason": chat_response.choices[0].finish_reason,
-        "usage": chat_response.usage,
-    })
+    results.append(
+        {
+            "test": "completion_close",
+            "text": chat_response.choices[0].message.content,
+            "finish_reason": chat_response.choices[0].finish_reason,
+            "usage": chat_response.usage,
+        }
+    )
 
     return results
 
@@ -442,11 +465,13 @@ def _test_embeddings(
         encoding_format="float",
     )
 
-    results.append({
-        "test": "single_embedding",
-        "embedding": embeddings.data[0].embedding,
-        "usage": embeddings.usage,
-    })
+    results.append(
+        {
+            "test": "single_embedding",
+            "embedding": embeddings.data[0].embedding,
+            "usage": embeddings.usage,
+        }
+    )
 
     return results
 
@@ -459,74 +484,75 @@ def _test_image_text(
     results = []
 
     # test pure text input
-    messages = [{
-        "role":
-        "user",
-        "content": [
-            {
-                "type": "text",
-                "text": "How do you feel today?"
-            },
-        ],
-    }]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "How do you feel today?"},
+            ],
+        }
+    ]
 
-    chat_completion = client.chat.completions.create(model=model_name,
-                                                     messages=messages,
-                                                     temperature=0.0,
-                                                     max_tokens=1,
-                                                     logprobs=True,
-                                                     top_logprobs=5)
+    chat_completion = client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        temperature=0.0,
+        max_tokens=1,
+        logprobs=True,
+        top_logprobs=5,
+    )
     top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
 
     for x in top_logprobs:
         x.logprob = round(x.logprob, 2)
 
-    results.append({
-        "test": "pure_text",
-        "logprobs": top_logprobs,
-    })
+    results.append(
+        {
+            "test": "pure_text",
+            "logprobs": top_logprobs,
+        }
+    )
 
-    messages = [{
-        "role":
-        "user",
-        "content": [
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": image_url
-                }
-            },
-            {
-                "type": "text",
-                "text": "What's in this image?"
-            },
-        ],
-    }]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "What's in this image?"},
+            ],
+        }
+    ]
 
-    chat_completion = client.chat.completions.create(model=model_name,
-                                                     messages=messages,
-                                                     temperature=0.0,
-                                                     max_tokens=1,
-                                                     logprobs=True,
-                                                     top_logprobs=5)
+    chat_completion = client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        temperature=0.0,
+        max_tokens=1,
+        logprobs=True,
+        top_logprobs=5,
+    )
     top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
 
-    results.append({
-        "test": "text_image",
-        "logprobs": top_logprobs,
-    })
+    results.append(
+        {
+            "test": "text_image",
+            "logprobs": top_logprobs,
+        }
+    )
 
     return results
 
 
-def compare_two_settings(model: str,
-                         arg1: list[str],
-                         arg2: list[str],
-                         env1: Optional[dict[str, str]] = None,
-                         env2: Optional[dict[str, str]] = None,
-                         *,
-                         method: str = "generate",
-                         max_wait_seconds: Optional[float] = None) -> None:
+def compare_two_settings(
+    model: str,
+    arg1: list[str],
+    arg2: list[str],
+    env1: Optional[dict[str, str]] = None,
+    env2: Optional[dict[str, str]] = None,
+    *,
+    method: str = "generate",
+    max_wait_seconds: Optional[float] = None,
+) -> None:
     """
     Launch API server with two different sets of arguments/environments
     and compare the results of the API calls.
@@ -548,12 +574,14 @@ def compare_two_settings(model: str,
     )
 
 
-def compare_all_settings(model: str,
-                         all_args: list[list[str]],
-                         all_envs: list[Optional[dict[str, str]]],
-                         *,
-                         method: str = "generate",
-                         max_wait_seconds: Optional[float] = None) -> None:
+def compare_all_settings(
+    model: str,
+    all_args: list[list[str]],
+    all_envs: list[Optional[dict[str, str]]],
+    *,
+    method: str = "generate",
+    max_wait_seconds: Optional[float] = None,
+) -> None:
     """
     Launch API server with several different sets of arguments/environments
     and compare the results of the API calls with the first set of arguments.
@@ -603,21 +631,22 @@ def compare_all_settings(model: str,
             args = args + ["--load-format", envs.VLLM_TEST_FORCE_LOAD_FORMAT]
         compare_results: list = []
         results = ref_results if i == 0 else compare_results
-        with RemoteOpenAIServer(model,
-                                args,
-                                env_dict=env,
-                                max_wait_seconds=max_wait_seconds) as server:
+        with RemoteOpenAIServer(
+            model, args, env_dict=env, max_wait_seconds=max_wait_seconds
+        ) as server:
             client = server.get_client()
 
             # test models list
             models = client.models.list()
             models = models.data
             served_model = models[0]
-            results.append({
-                "test": "models_list",
-                "id": served_model.id,
-                "root": served_model.root,
-            })
+            results.append(
+                {
+                    "test": "models_list",
+                    "id": served_model.id,
+                    "root": served_model.root,
+                }
+            )
 
             if method == "generate":
                 results += _test_completion(client, model, prompt, token_ids)
@@ -627,8 +656,9 @@ def compare_all_settings(model: str,
                 results += _test_chat(client, model, prompt)
             elif method == "generate_with_image":
                 results += _test_image_text(
-                    client, model,
-                    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png"
+                    client,
+                    model,
+                    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
                 )
             elif method == "encode":
                 results += _test_embeddings(client, model, prompt)
@@ -641,8 +671,7 @@ def compare_all_settings(model: str,
                 ref_envs = all_envs[0]
                 compare_args = all_args[i]
                 compare_envs = all_envs[i]
-                for ref_result, compare_result in zip(ref_results,
-                                                      compare_results):
+                for ref_result, compare_result in zip(ref_results, compare_results):
                     ref_result = copy.deepcopy(ref_result)
                     compare_result = copy.deepcopy(compare_result)
                     if "embedding" in ref_result and method == "encode":
@@ -653,7 +682,8 @@ def compare_all_settings(model: str,
                         )
                         assert sim >= 0.999, (
                             f"Embedding for {model=} are not the same.\n"
-                            f"cosine_similarity={sim}\n")
+                            f"cosine_similarity={sim}\n"
+                        )
                         del ref_result["embedding"]
                         del compare_result["embedding"]
                     assert ref_result == compare_result, (
@@ -661,7 +691,8 @@ def compare_all_settings(model: str,
                         f"{ref_args=} {ref_envs=}\n"
                         f"{compare_args=} {compare_envs=}\n"
                         f"{ref_result=}\n"
-                        f"{compare_result=}\n")
+                        f"{compare_result=}\n"
+                    )
 
 
 def init_test_distributed_environment(
@@ -676,7 +707,8 @@ def init_test_distributed_environment(
         world_size=pp_size * tp_size,
         rank=rank,
         distributed_init_method=distributed_init_method,
-        local_rank=local_rank)
+        local_rank=local_rank,
+    )
     ensure_model_parallel_initialized(tp_size, pp_size)
 
 
@@ -698,13 +730,17 @@ def multi_process_parallel(
     os.environ["RAY_RUNTIME_ENV_IGNORE_GITIGNORE"] = "1"
     ray.init(
         runtime_env={
-            "working_dir":
-            VLLM_PATH,
+            "working_dir": VLLM_PATH,
             "excludes": [
-                "build", ".git", "cmake-build-*", "shellcheck", "dist",
-                "ep_kernels_workspace"
-            ]
-        })
+                "build",
+                ".git",
+                "cmake-build-*",
+                "shellcheck",
+                "dist",
+                "ep_kernels_workspace",
+            ],
+        }
+    )
 
     distributed_init_port = get_open_port()
     refs = []
@@ -716,7 +752,8 @@ def multi_process_parallel(
                 pp_size,
                 rank,
                 distributed_init_port,
-            ), )
+            ),
+        )
     ray.get(refs)
 
     ray.shutdown()
@@ -745,11 +782,13 @@ def get_physical_device_indices(devices):
 
 
 @_nvml()
-def wait_for_gpu_memory_to_clear(*,
-                                 devices: list[int],
-                                 threshold_bytes: Optional[int] = None,
-                                 threshold_ratio: Optional[float] = None,
-                                 timeout_s: float = 120) -> None:
+def wait_for_gpu_memory_to_clear(
+    *,
+    devices: list[int],
+    threshold_bytes: Optional[int] = None,
+    threshold_ratio: Optional[float] = None,
+    timeout_s: float = 120,
+) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
     # context.
@@ -770,29 +809,33 @@ def wait_for_gpu_memory_to_clear(*,
                 gb_used = mem_info.used / 2**30
                 gb_total = mem_info.total / 2**30
             output_raw[device] = (gb_used, gb_total)
-            output[device] = f'{gb_used:.02f}/{gb_total:.02f}'
+            output[device] = f"{gb_used:.02f}/{gb_total:.02f}"
 
-        print('gpu memory used/total (GiB): ', end='')
+        print("gpu memory used/total (GiB): ", end="")
         for k, v in output.items():
-            print(f'{k}={v}; ', end='')
-        print('')
+            print(f"{k}={v}; ", end="")
+        print("")
 
         if threshold_bytes is not None:
             is_free = lambda used, total: used <= threshold_bytes / 2**30
-            threshold = f"{threshold_bytes/2**30} GiB"
+            threshold = f"{threshold_bytes / 2**30} GiB"
         else:
             is_free = lambda used, total: used / total <= threshold_ratio
             threshold = f"{threshold_ratio:.2f}"
 
         dur_s = time.time() - start_time
         if all(is_free(used, total) for used, total in output_raw.values()):
-            print(f'Done waiting for free GPU memory on devices {devices=} '
-                  f'({threshold=}) {dur_s=:.02f}')
+            print(
+                f"Done waiting for free GPU memory on devices {devices=} "
+                f"({threshold=}) {dur_s=:.02f}"
+            )
             break
 
         if dur_s >= timeout_s:
-            raise ValueError(f'Memory of devices {devices=} not free after '
-                             f'{dur_s=:.02f} ({threshold=})')
+            raise ValueError(
+                f"Memory of devices {devices=} not free after "
+                f"{dur_s=:.02f} ({threshold=})"
+            )
 
         time.sleep(5)
 
@@ -800,8 +843,7 @@ def wait_for_gpu_memory_to_clear(*,
 _P = ParamSpec("_P")
 
 
-def fork_new_process_for_each_test(
-        func: Callable[_P, None]) -> Callable[_P, None]:
+def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, None]:
     """Decorator to fork a new process for each test function.
     See https://github.com/vllm-project/vllm/issues/7053 for more details.
     """
@@ -815,11 +857,15 @@ def fork_new_process_for_each_test(
 
         # Create a unique temporary file to store exception info from child
         # process. Use test function name and process ID to avoid collisions.
-        with tempfile.NamedTemporaryFile(
+        with (
+            tempfile.NamedTemporaryFile(
                 delete=False,
-                mode='w+b',
+                mode="w+b",
                 prefix=f"vllm_test_{func.__name__}_{os.getpid()}_",
-                suffix=".exc") as exc_file, ExitStack() as delete_after:
+                suffix=".exc",
+            ) as exc_file,
+            ExitStack() as delete_after,
+        ):
             exc_file_path = exc_file.name
             delete_after.callback(os.remove, exc_file_path)
 
@@ -837,6 +883,7 @@ def fork_new_process_for_each_test(
                     os._exit(0)
                 except Exception as e:
                     import traceback
+
                     tb_string = traceback.format_exc()
 
                     # Try to serialize the exception object first
@@ -844,18 +891,18 @@ def fork_new_process_for_each_test(
                     try:
                         # First, try to pickle the actual exception with
                         # its traceback.
-                        exc_to_serialize = {'pickled_exception': e}
+                        exc_to_serialize = {"pickled_exception": e}
                         # Test if it can be pickled
                         cloudpickle.dumps(exc_to_serialize)
                     except (Exception, KeyboardInterrupt):
                         # Fall back to string-based approach.
                         exc_to_serialize = {
-                            'exception_type': type(e).__name__,
-                            'exception_msg': str(e),
-                            'traceback': tb_string,
+                            "exception_type": type(e).__name__,
+                            "exception_msg": str(e),
+                            "traceback": tb_string,
                         }
                     try:
-                        with open(exc_file_path, 'wb') as f:
+                        with open(exc_file_path, "wb") as f:
                             cloudpickle.dump(exc_to_serialize, f)
                     except Exception:
                         # Fallback: just print the traceback.
@@ -867,8 +914,7 @@ def fork_new_process_for_each_test(
                 pgid = os.getpgid(pid)
                 _pid, _exitcode = os.waitpid(pid, 0)
                 # ignore SIGTERM signal itself
-                old_signal_handler = signal.signal(signal.SIGTERM,
-                                                   signal.SIG_IGN)
+                old_signal_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
                 # kill all child processes
                 os.killpg(pgid, signal.SIGTERM)
                 # restore the signal handler
@@ -877,12 +923,15 @@ def fork_new_process_for_each_test(
                     # Try to read the exception from the child process
                     exc_info = {}
                     if os.path.exists(exc_file_path):
-                        with contextlib.suppress(Exception), \
-                            open(exc_file_path, 'rb') as f:
+                        with (
+                            contextlib.suppress(Exception),
+                            open(exc_file_path, "rb") as f,
+                        ):
                             exc_info = cloudpickle.load(f)
 
-                    if (original_exception :=
-                            exc_info.get('pickled_exception')) is not None:
+                    if (
+                        original_exception := exc_info.get("pickled_exception")
+                    ) is not None:
                         # Re-raise the actual exception object if it was
                         # successfully pickled.
                         assert isinstance(original_exception, Exception)
@@ -900,33 +949,33 @@ def fork_new_process_for_each_test(
                     raise AssertionError(
                         f"function {func.__name__} failed when called with"
                         f" args {args} and kwargs {kwargs}"
-                        f" (exit code: {_exitcode})") from None
+                        f" (exit code: {_exitcode})"
+                    ) from None
 
     return wrapper
 
 
-def spawn_new_process_for_each_test(
-        f: Callable[_P, None]) -> Callable[_P, None]:
-    """Decorator to spawn a new process for each test function.
-    """
+def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
+    """Decorator to spawn a new process for each test function."""
 
     @functools.wraps(f)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
         # Check if we're already in a subprocess
-        if os.environ.get('RUNNING_IN_SUBPROCESS') == '1':
+        if os.environ.get("RUNNING_IN_SUBPROCESS") == "1":
             # If we are, just run the function directly
             return f(*args, **kwargs)
 
         import torch.multiprocessing as mp
+
         with suppress(RuntimeError):
-            mp.set_start_method('spawn')
+            mp.set_start_method("spawn")
 
         # Get the module
         module_name = f.__module__
 
         # Create a process with environment variable set
         env = os.environ.copy()
-        env['RUNNING_IN_SUBPROCESS'] = '1'
+        env["RUNNING_IN_SUBPROCESS"] = "1"
 
         with tempfile.TemporaryDirectory() as tempdir:
             output_filepath = os.path.join(tempdir, "new_process.tmp")
@@ -936,29 +985,29 @@ def spawn_new_process_for_each_test(
 
             cmd = [sys.executable, "-m", f"{module_name}"]
 
-            returned = subprocess.run(cmd,
-                                      input=input_bytes,
-                                      capture_output=True,
-                                      env=env)
+            returned = subprocess.run(
+                cmd, input=input_bytes, capture_output=True, env=env
+            )
 
             # check if the subprocess is successful
             try:
                 returned.check_returncode()
             except Exception as e:
                 # wrap raised exception to provide more information
-                raise RuntimeError(f"Error raised in subprocess:\n"
-                                   f"{returned.stderr.decode()}") from e
+                raise RuntimeError(
+                    f"Error raised in subprocess:\n{returned.stderr.decode()}"
+                ) from e
 
     return wrapper
 
 
 def create_new_process_for_each_test(
-    method: Optional[Literal["spawn", "fork"]] = None
+    method: Optional[Literal["spawn", "fork"]] = None,
 ) -> Callable[[Callable[_P, None]], Callable[_P, None]]:
     """Creates a decorator that runs each test function in a new process.
 
     Args:
-        method: The process creation method. Can be either "spawn" or "fork". 
+        method: The process creation method. Can be either "spawn" or "fork".
                If not specified, it defaults to "spawn" on ROCm and XPU
                platforms and "fork" otherwise.
 
@@ -969,8 +1018,7 @@ def create_new_process_for_each_test(
         use_spawn = current_platform.is_rocm() or current_platform.is_xpu()
         method = "spawn" if use_spawn else "fork"
 
-    assert method in ["spawn",
-                      "fork"], "Method must be either 'spawn' or 'fork'"
+    assert method in ["spawn", "fork"], "Method must be either 'spawn' or 'fork'"
 
     if method == "fork":
         return fork_new_process_for_each_test
@@ -1054,7 +1102,7 @@ async def completions_with_server_args(
     max_wait_seconds: int = 240,
     max_tokens: Union[int, list] = 5,
 ) -> list[Completion]:
-    '''Construct a remote OpenAI server, obtain an async client to the
+    """Construct a remote OpenAI server, obtain an async client to the
     server & invoke the completions API to obtain completions.
 
     Args:
@@ -1070,7 +1118,7 @@ async def completions_with_server_args(
 
     Returns:
       OpenAI Completion instance
-    '''
+    """
 
     if isinstance(max_tokens, int):
         max_tokens = [max_tokens] * len(prompts)
@@ -1078,17 +1126,21 @@ async def completions_with_server_args(
     assert len(max_tokens) == len(prompts)
 
     outputs = None
-    with RemoteOpenAIServer(model_name,
-                            server_cli_args,
-                            max_wait_seconds=max_wait_seconds) as server:
+    with RemoteOpenAIServer(
+        model_name, server_cli_args, max_wait_seconds=max_wait_seconds
+    ) as server:
         client = server.get_async_client()
-        outputs = [ client.completions.create(model=model_name,
-                                              prompt=[p],
-                                              temperature=0,
-                                              stream=False,
-                                              max_tokens=max_tok,
-                                              logprobs=num_logprobs) \
-                    for p, max_tok in zip(prompts, max_tokens) ]
+        outputs = [
+            client.completions.create(
+                model=model_name,
+                prompt=[p],
+                temperature=0,
+                stream=False,
+                max_tokens=max_tok,
+                logprobs=num_logprobs,
+            )
+            for p, max_tok in zip(prompts, max_tokens)
+        ]
         outputs = await asyncio.gather(*outputs)
 
     assert outputs is not None, "Completion API call failed."
@@ -1097,24 +1149,31 @@ async def completions_with_server_args(
 
 
 def get_client_text_generations(completions: list[Completion]) -> list[str]:
-    '''Extract generated tokens from the output of a
+    """Extract generated tokens from the output of a
     request made to an Open-AI-protocol completions endpoint.
-    '''
+    """
     assert all([len(x.choices) == 1 for x in completions])
     return [x.choices[0].text for x in completions]
 
 
 def get_client_text_logprob_generations(
-        completions: list[Completion]) -> list[TextTextLogprobs]:
-    '''Operates on the output of a request made to an Open-AI-protocol
+    completions: list[Completion],
+) -> list[TextTextLogprobs]:
+    """Operates on the output of a request made to an Open-AI-protocol
     completions endpoint; obtains top-rank logprobs for each token in
     each {class}`SequenceGroup`
-    '''
+    """
     text_generations = get_client_text_generations(completions)
-    text = ''.join(text_generations)
-    return [(text_generations, text,
-             (None if x.logprobs is None else x.logprobs.top_logprobs))
-            for completion in completions for x in completion.choices]
+    text = "".join(text_generations)
+    return [
+        (
+            text_generations,
+            text,
+            (None if x.logprobs is None else x.logprobs.top_logprobs),
+        )
+        for completion in completions
+        for x in completion.choices
+    ]
 
 
 def has_module_attribute(module_name, attribute_name):
@@ -1130,16 +1189,19 @@ def has_module_attribute(module_name, attribute_name):
 
 def get_attn_backend_list_based_on_platform() -> list[str]:
     if current_platform.is_cuda():
-        return ["FLASH_ATTN_VLLM_V1", "TRITON_ATTN_VLLM_V1", "TREE_ATTN"]
+        return ["FLASH_ATTN", "TRITON_ATTN", "TREE_ATTN"]
     elif current_platform.is_rocm():
-        attn_backend_list = ["TRITON_ATTN_VLLM_V1"]
+        attn_backend_list = ["TRITON_ATTN"]
         try:
             import aiter  # noqa: F401
-            attn_backend_list.append("FLASH_ATTN_VLLM_V1")
+
+            attn_backend_list.append("FLASH_ATTN")
         except Exception:
-            print("Skip FLASH_ATTN_VLLM_V1 on ROCm as aiter is not installed")
+            print("Skip FLASH_ATTN on ROCm as aiter is not installed")
 
         return attn_backend_list
+    elif current_platform.is_xpu():
+        return ["FLASH_ATTN", "TRITON_ATTN"]
     else:
         raise ValueError("Unsupported platform")
 
@@ -1147,6 +1209,54 @@ def get_attn_backend_list_based_on_platform() -> list[str]:
 @contextmanager
 def override_cutlass_fp8_supported(value: bool):
     with patch(
-            "vllm.model_executor.layers.quantization.utils.w8a8_utils.cutlass_fp8_supported",
-            return_value=value):
+        "vllm.model_executor.layers.quantization.utils.w8a8_utils.cutlass_fp8_supported",
+        return_value=value,
+    ):
         yield
+
+
+def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):
+    """
+    Generate prompts which a bunch of assignments,
+    then asking for the value of one of them.
+    The prompt is just under 10k tokens; sliding window is 4k
+    so the answer is outside sliding window, but should still be correct.
+    Args:
+        batch_size: number of prompts to generate
+        ln_range: an argument to control the length of the prompt
+    """
+    prompts: list[str] = []
+    answer: list[int] = []
+    indices: list[int] = []
+    random.seed(1)
+    for _ in range(batch_size):
+        idx = random.randint(30, 90)
+        indices.append(idx)
+        prompt = (
+            "```python\n# We set a number of variables, "
+            + f"x{idx} will be important later\n"
+        )
+        ln = random.randint(*ln_range)
+        for k in range(30, ln):
+            v = random.randint(10, 99)
+            if k == idx:
+                answer.append(v)
+            prompt += f"x{k} = {v}\n"
+        prompt += f"# Now, we check the value of x{idx}:\n"
+        prompt += f"assert x{idx} == "
+        prompts.append(prompt)
+    return prompts, answer, indices
+
+
+def check_answers(
+    indices: list[int], answer: list[int], outputs: list[str], accept_rate: float = 0.7
+):
+    answer2 = [int(text[0:2].strip()) for text in outputs]
+    print(list(zip(indices, zip(answer, answer2))))
+    numok = 0
+    for a1, a2 in zip(answer, answer2):
+        if a1 == a2:
+            numok += 1
+    frac_ok = numok / len(answer)
+    print(f"Num OK: {numok}/{len(answer)} {frac_ok}")
+    assert frac_ok >= accept_rate

@@ -10,7 +10,6 @@ if TYPE_CHECKING:
 
 
 class TokenizerBase(ABC):
-
     @property
     @abstractmethod
     def all_special_tokens_extended(self) -> list[str]:
@@ -61,6 +60,11 @@ class TokenizerBase(ABC):
     def max_token_id(self) -> int:
         raise NotImplementedError()
 
+    @property
+    @abstractmethod
+    def truncation_side(self) -> str:
+        raise NotImplementedError()
+
     def __len__(self) -> int:
         return self.vocab_size
 
@@ -93,18 +97,22 @@ class TokenizerBase(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def encode(self,
-               text: str,
-               truncation: Optional[bool] = None,
-               max_length: Optional[int] = None,
-               add_special_tokens: Optional[bool] = None) -> list[int]:
+    def encode(
+        self,
+        text: str,
+        truncation: Optional[bool] = None,
+        max_length: Optional[int] = None,
+        add_special_tokens: Optional[bool] = None,
+    ) -> list[int]:
         raise NotImplementedError()
 
     @abstractmethod
-    def apply_chat_template(self,
-                            messages: list["ChatCompletionMessageParam"],
-                            tools: Optional[list[dict[str, Any]]] = None,
-                            **kwargs) -> list[int]:
+    def apply_chat_template(
+        self,
+        messages: list["ChatCompletionMessageParam"],
+        tools: Optional[list[dict[str, Any]]] = None,
+        **kwargs,
+    ) -> list[int]:
         raise NotImplementedError()
 
     @abstractmethod
@@ -112,9 +120,9 @@ class TokenizerBase(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def decode(self,
-               ids: Union[list[int], int],
-               skip_special_tokens: bool = True) -> str:
+    def decode(
+        self, ids: Union[list[int], int], skip_special_tokens: bool = True
+    ) -> str:
         raise NotImplementedError()
 
     @abstractmethod

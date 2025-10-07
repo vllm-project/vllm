@@ -20,17 +20,8 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "../cuda_compat.h"
-
-#ifndef USE_ROCM
-    #include <cub/util_type.cuh>
-    #include <cub/cub.cuh>
-    #include <cuda/std/functional>
-    using AddOp = cuda::std::plus<float>;
-#else
-    #include <hipcub/util_type.hpp>
-    #include <hipcub/hipcub.hpp>
-    using AddOp = cub::Sum; 
-#endif
+#include "../cub_helpers.h"
+#include "../core/batch_invariant.hpp"
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -79,7 +70,7 @@ __launch_bounds__(TPB) __global__
         threadData = max(static_cast<float>(input[idx]), threadData);
     }
 
-    const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
+    const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, CubMaxOp());
     if (threadIdx.x == 0)
     {
         float_max = maxElem;
@@ -94,7 +85,7 @@ __launch_bounds__(TPB) __global__
         threadData += exp((static_cast<float>(input[idx]) - float_max));
     }
 
-    const auto Z = BlockReduce(tmpStorage).Reduce(threadData, AddOp());
+    const auto Z = BlockReduce(tmpStorage).Reduce(threadData, CubAddOp());
 
     if (threadIdx.x == 0)
     {
@@ -415,7 +406,8 @@ void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, f
     using Constants = detail::TopkConstants<EXPERTS, BYTES_PER_LDG, WARP_SIZE_PARAM>;
     static constexpr int VPT = Constants::VPT;
     static constexpr int ROWS_PER_WARP = Constants::ROWS_PER_WARP;
-    const int num_warps = (num_rows + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
+    const bool batch_invariant_launch = vllm::vllm_kernel_override_batch_invariant();
+    const int num_warps = batch_invariant_launch ? 32 : (num_rows + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
     const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
 
     dim3 block_dim(WARP_SIZE_PARAM, WARPS_PER_TB);

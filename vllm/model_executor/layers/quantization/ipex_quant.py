@@ -9,17 +9,25 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 from vllm._ipex_ops import ipex_ops as ops
-from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
-                                                  FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                               UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.layers.quantization.awq import (AWQLinearMethod,
-                                                         is_layer_skipped_awq)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
-from vllm.model_executor.layers.quantization.fp8 import (Fp8Config,
-                                                         Fp8LinearMethod)
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEMethodBase,
+    FusedMoeWeightScaleSupported,
+)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    LinearMethodBase,
+    UnquantizedLinearMethod,
+)
+from vllm.model_executor.layers.quantization import (
+    QuantizationConfig,
+    QuantizationMethods,
+)
+from vllm.model_executor.layers.quantization.awq import (
+    AWQLinearMethod,
+    is_layer_skipped_awq,
+)
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -56,17 +64,22 @@ class IPEXConfig(QuantizationConfig):
         self.pack_factor = 32 // self.weight_bits
 
         if self.weight_bits not in [4]:
-            raise ValueError(f"IPEX quantization supports weight bits [4], "
-                             f"but got {self.weight_bits}.")
+            raise ValueError(
+                f"IPEX quantization supports weight bits [4], "
+                f"but got {self.weight_bits}."
+            )
 
         if self.method not in ["awq", "gptq"]:
-            raise ValueError(f"IPEX quantization supports [awq, gptq], "
-                             f"but got {self.method}.")
+            raise ValueError(
+                f"IPEX quantization supports [awq, gptq], but got {self.method}."
+            )
 
     def __repr__(self) -> str:
-        return (f"IPEXConfig(method={self.method},"
-                f"weight_bits={self.weight_bits}, "
-                f"group_size={self.group_size})")
+        return (
+            f"IPEXConfig(method={self.method},"
+            f"weight_bits={self.weight_bits}, "
+            f"group_size={self.group_size})"
+        )
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -92,24 +105,24 @@ class IPEXConfig(QuantizationConfig):
         method = cls.get_from_keys(config, ["quant_method"]).lower()
         if method == "awq":
             weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
-            group_size = cls.get_from_keys(config,
-                                           ["q_group_size", "group_size"])
+            group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
             modules_to_not_convert = cls.get_from_keys_or(
-                config, ["modules_to_not_convert"], None)
-            return cls(method, weight_bits, group_size, modules_to_not_convert,
-                       False, False)
+                config, ["modules_to_not_convert"], None
+            )
+            return cls(
+                method, weight_bits, group_size, modules_to_not_convert, False, False
+            )
         # otherwise for gptq
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
-        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
-                                                 default=False)
+        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
         desc_act = cls.get_from_keys_or(config, ["desc_act"], default=False)
-        return cls(method, weight_bits, group_size, [], desc_act,
-                   lm_head_quantized)
+        return cls(method, weight_bits, group_size, [], desc_act, lm_head_quantized)
 
     @classmethod
     def override_quantization_method(
-            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
+        cls, hf_quant_cfg, user_quant
+    ) -> Optional[QuantizationMethods]:
         if not current_platform.is_cpu() and not current_platform.is_xpu():
             return None
 
@@ -120,8 +133,9 @@ class IPEXConfig(QuantizationConfig):
 
         return None
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["LinearMethodBase"]:
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> Optional["LinearMethodBase"]:
         if isinstance(layer, LinearBase):
             if self.method == "awq":
                 if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
@@ -133,8 +147,7 @@ class IPEXConfig(QuantizationConfig):
 
 
 class IPEXGPTQLinearMethod(GPTQLinearMethod):
-    """GPTQ linear method using IPEX for the CPU/XPU backend.
-    """
+    """GPTQ linear method using IPEX for the CPU/XPU backend."""
 
     def __init__(self, quant_config: IPEXConfig):
         self.quant_config = quant_config  # type: ignore
@@ -144,18 +157,20 @@ class IPEXGPTQLinearMethod(GPTQLinearMethod):
 
         try:
             import intel_extension_for_pytorch as ipex
-            if version.parse(
-                    ipex.__version__) < version.parse(MIN_IPEX_VERSION):
+
+            if version.parse(ipex.__version__) < version.parse(MIN_IPEX_VERSION):
                 raise ImportError(
                     "intel_extension_for_pytorch version is "
                     "wrong. Please install "
-                    f"intel_extension_for_pytorch>={MIN_IPEX_VERSION}.")
+                    f"intel_extension_for_pytorch>={MIN_IPEX_VERSION}."
+                )
         except ImportError as err:
             raise ImportError(
                 "Please install "
                 f"intel_extension_for_pytorch>={MIN_IPEX_VERSION} via "
                 f"`pip install intel_extension_for_pytorch>={MIN_IPEX_VERSION}`"
-                " to use IPEX-AWQ linear method.") from err
+                " to use IPEX-AWQ linear method."
+            ) from err
         # Using the compute dtype (lowp_mode) as INT8 to leverage instructions
         # with better performance.
         lowp_mode = ipex.quantization.WoqLowpMode.INT8
@@ -172,32 +187,34 @@ class IPEXGPTQLinearMethod(GPTQLinearMethod):
         )
         layer.ipex_output_size = layer.qweight.shape[-1]
         g_idx = layer.g_idx if self.quant_config.desc_act else None
-        layer.ipex_qlinear = ipex.llm.quantization.woq_linear. \
-            IPEXWeightOnlyQuantizedLinear.from_weight(
-            layer.qweight,
-            layer.scales,
-            layer.qzeros,
-            layer.qweight.size(0),
-            layer.ipex_output_size,
-            qconfig=qconfig,
-            g_idx=g_idx,
-            bias=bias,
-            group_size=self.quant_config.group_size,
-            quant_method=IPEXConfig.IPEX_QUANT_METHOD_MAP["gptq"]
+        layer.ipex_qlinear = (
+            ipex.llm.quantization.woq_linear.IPEXWeightOnlyQuantizedLinear.from_weight(
+                layer.qweight,
+                layer.scales,
+                layer.qzeros,
+                layer.qweight.size(0),
+                layer.ipex_output_size,
+                qconfig=qconfig,
+                g_idx=g_idx,
+                bias=bias,
+                group_size=self.quant_config.group_size,
+                quant_method=IPEXConfig.IPEX_QUANT_METHOD_MAP["gptq"],
+            )
         )
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])
         out = layer.ipex_qlinear(reshaped_x)
-        return out.reshape(x.shape[:-1] + (layer.ipex_output_size, ))
+        return out.reshape(x.shape[:-1] + (layer.ipex_output_size,))
 
 
 class IPEXAWQLinearMethod(AWQLinearMethod):
-    """AWQ linear method using IPEX for the CPU/XPU backend.
-    """
+    """AWQ linear method using IPEX for the CPU/XPU backend."""
 
     def __init__(self, quant_config: IPEXConfig):
         self.quant_config = quant_config  # type: ignore
@@ -209,18 +226,20 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
 
         try:
             import intel_extension_for_pytorch as ipex
-            if version.parse(
-                    ipex.__version__) < version.parse(MIN_IPEX_VERSION):
+
+            if version.parse(ipex.__version__) < version.parse(MIN_IPEX_VERSION):
                 raise ImportError(
                     "intel_extension_for_pytorch version is "
                     "wrong. Please install "
-                    f"intel_extension_for_pytorch>={MIN_IPEX_VERSION}.")
+                    f"intel_extension_for_pytorch>={MIN_IPEX_VERSION}."
+                )
         except ImportError as err:
             raise ImportError(
                 "Please install "
                 f"intel_extension_for_pytorch>={MIN_IPEX_VERSION} via "
                 f"`pip install intel_extension_for_pytorch>={MIN_IPEX_VERSION}`"
-                " to use IPEX-AWQ linear method.") from err
+                " to use IPEX-AWQ linear method."
+            ) from err
 
         # Using the compute dtype (lowp_mode) as INT8 to leverage instructions
         # with better performance.
@@ -237,104 +256,117 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
             group_size=self.quant_config.group_size,
         )
 
-        layer.ipex_output_size = layer.qweight.size(
-            1) * self.quant_config.pack_factor
-        layer.ipex_qlinear = ipex.llm.quantization.woq_linear. \
-            IPEXWeightOnlyQuantizedLinear.from_weight(
-            layer.qweight,
-            layer.scales,
-            layer.qzeros,
-            layer.qweight.size(0),
-            layer.ipex_output_size,
-            qconfig=qconfig,
-            bias=bias,
-            group_size=self.quant_config.group_size,
-            quant_method=IPEXConfig.IPEX_QUANT_METHOD_MAP["awq"]  # type: ignore
+        layer.ipex_output_size = layer.qweight.size(1) * self.quant_config.pack_factor
+        layer.ipex_qlinear = (
+            ipex.llm.quantization.woq_linear.IPEXWeightOnlyQuantizedLinear.from_weight(
+                layer.qweight,
+                layer.scales,
+                layer.qzeros,
+                layer.qweight.size(0),
+                layer.ipex_output_size,
+                qconfig=qconfig,
+                bias=bias,
+                group_size=self.quant_config.group_size,
+                quant_method=IPEXConfig.IPEX_QUANT_METHOD_MAP["awq"],  # type: ignore
+            )
         )
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])
         out = layer.ipex_qlinear(reshaped_x)
-        return out.reshape(x.shape[:-1] + (layer.ipex_output_size, ))
+        return out.reshape(x.shape[:-1] + (layer.ipex_output_size,))
 
 
 class XPUFp8LinearMethod(Fp8LinearMethod):
-
     def __init__(self, quant_config: Fp8Config):
         super().__init__(quant_config)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # If checkpoint not serialized fp8, quantize the weights.
         if not self.quant_config.is_checkpoint_fp8_serialized:
-            qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
-                                                         scale=None)
+            qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
             # Update the layer with the new values.
             layer.weight = Parameter(qweight, requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.input_scale = None
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         weight = layer.weight.data
         weight_scale = layer.weight_scale.data
-        output = torch.ops.torch_ipex.fp8_gemm_w8a16(x, weight, True,
-                                                     weight_scale, bias)
+        output = torch.ops.torch_ipex.fp8_gemm_w8a16(
+            x, weight, True, weight_scale, bias
+        )
         return output
 
 
 class XPUFp8MoEMethod(FusedMoEMethodBase):
-
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
         super().__init__(layer.moe_config)
         self.quant_config = quant_config
 
-    def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
-                       intermediate_size_per_partition: int,
-                       params_dtype: torch.dtype, **extra_weight_attrs):
-
+    def create_weights(
+        self,
+        layer: Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
         layer.intermediate_size_per_partition = intermediate_size_per_partition
         layer.hidden_size = hidden_size
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
         # WEIGHTS
-        w13_weight = torch.nn.Parameter(torch.empty(
-            num_experts,
-            2 * intermediate_size_per_partition,
-            hidden_size,
-            dtype=params_dtype),
-                                        requires_grad=False)
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
-        w2_weight = torch.nn.Parameter(torch.empty(
-            num_experts,
-            hidden_size,
-            intermediate_size_per_partition,
-            dtype=params_dtype),
-                                       requires_grad=False)
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
         # Allocate 2 scales for w1 and w3 respectively.
         # They will be combined to a single scale after weight loading.
-        w13_weight_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                         2,
-                                                         dtype=torch.float32),
-                                              requires_grad=False)
-        w2_weight_scale = torch.nn.Parameter(torch.ones(num_experts,
-                                                        dtype=torch.float32),
-                                             requires_grad=False)
+        w13_weight_scale = torch.nn.Parameter(
+            torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
+        )
+        w2_weight_scale = torch.nn.Parameter(
+            torch.ones(num_experts, dtype=torch.float32), requires_grad=False
+        )
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
         extra_weight_attrs.update(
-            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
+        )
         # INPUT_SCALES
         layer.w13_input_scale = None
         layer.w2_input_scale = None
@@ -342,29 +374,30 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         if not self.quant_config.is_checkpoint_fp8_serialized:
             fp8_dtype = current_platform.fp8_dtype()
-            w13_weight = torch.empty_like(layer.w13_weight.data,
-                                          dtype=fp8_dtype)
+            w13_weight = torch.empty_like(layer.w13_weight.data, dtype=fp8_dtype)
             w2_weight = torch.empty_like(layer.w2_weight.data, dtype=fp8_dtype)
 
             # Re-initialize w13_scale because we directly quantize
             # merged w13 weights and generate a single scaling factor.
-            layer.w13_weight_scale = torch.nn.Parameter(torch.ones(
-                layer.local_num_experts,
-                dtype=torch.float32,
-                device=w13_weight.device),
-                                                        requires_grad=False)
+            layer.w13_weight_scale = torch.nn.Parameter(
+                torch.ones(
+                    layer.local_num_experts,
+                    dtype=torch.float32,
+                    device=w13_weight.device,
+                ),
+                requires_grad=False,
+            )
             for expert in range(layer.local_num_experts):
-                w13_weight[expert, :, :], layer.w13_weight_scale[
-                    expert] = ops.scaled_fp8_quant(
-                        layer.w13_weight.data[expert, :, :])
-                w2_weight[expert, :, :], layer.w2_weight_scale[
-                    expert] = ops.scaled_fp8_quant(
-                        layer.w2_weight.data[expert, :, :])
-            layer.w13_weight = torch.nn.Parameter(w13_weight,
-                                                  requires_grad=False)
-            layer.w2_weight = torch.nn.Parameter(w2_weight,
-                                                 requires_grad=False)
+                w13_weight[expert, :, :], layer.w13_weight_scale[expert] = (
+                    ops.scaled_fp8_quant(layer.w13_weight.data[expert, :, :])
+                )
+                w2_weight[expert, :, :], layer.w2_weight_scale[expert] = (
+                    ops.scaled_fp8_quant(layer.w2_weight.data[expert, :, :])
+                )
+            layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
         import intel_extension_for_pytorch as ipex
+
         layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
             layer.w13_weight,
             layer.w2_weight,
@@ -374,6 +407,11 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
             a2_scale_inv=layer.w2_input_scale,
             use_prepack=True,
         )
+
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> Optional[FusedMoEQuantConfig]:
+        return None
 
     def apply(
         self,
