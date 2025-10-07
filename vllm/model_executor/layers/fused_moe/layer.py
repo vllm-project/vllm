@@ -283,6 +283,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> Optional[FusedMoEQuantConfig]:
         raise NotImplementedError
 
+    @property
+    def using_modular_kernel(self) -> bool:
+        return self.fused_experts is not None
+
     @abstractmethod
     def apply(
         self,
@@ -2203,7 +2207,7 @@ class FusedMoE(CustomOp):
             return self.forward_impl_chunked(hidden_states, router_logits)
 
         do_naive_dispatch_combine: bool = (
-            self.dp_size > 1 and self.quant_method.fused_experts is None
+            self.dp_size > 1 and not self.quant_method.using_modular_kernel
         )
 
         # If there are shared experts but we are not using a modular kernel, the
