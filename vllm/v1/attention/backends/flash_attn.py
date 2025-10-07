@@ -803,7 +803,6 @@ def cascade_attention(
         q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
         k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
-        s_aux=s_aux,
     )
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
@@ -828,8 +827,22 @@ def cascade_attention(
         q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
         k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
-        s_aux=s_aux,
     )
 
     # Merge prefix and suffix outputs, and store the result in output.
-    merge_attn_states(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
+    if s_aux is not None:
+        # Apply sink attention: add a learned logit (s_aux) with zero value contribution.
+        # This adjusts softmax normalization but does not affect output values.
+        sink_output = torch.zeros_like(suffix_output)  # Shape: (num_tokens, num_heads, head_size)
+        sink_lse = s_aux.unsqueeze(1).repeat(1, num_tokens)  # Same lse for all tokens. shape: (num_heads, num_tokens)
+        output_lse = torch.zeros_like(suffix_lse)
+        output_buffer = torch.zeros_like(suffix_output)
+
+        # First merge prefix and suffix attention outputs
+        merge_attn_states(output_buffer, prefix_output, prefix_lse, suffix_output, suffix_lse, output_lse)
+
+        # Then merge with sink, contributing only to normalization. It is mathematically equivalent.
+        merge_attn_states(output, output_buffer, output_lse, sink_output, sink_lse)
+    else:
+        # Merge prefix and suffix attention normally
+        merge_attn_states(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
