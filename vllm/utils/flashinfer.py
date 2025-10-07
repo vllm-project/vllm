@@ -269,11 +269,6 @@ def use_trtllm_attention(
 
     # Must use TRTLLM attention if query is FP8 quantized
     if q_dtype == current_platform.fp8_dtype():
-        if has_sinks:
-            raise RuntimeError(
-                "TRTLLM FP8-qkv kernel is not supported for attention sinks. "
-                "Use kv_cache_dtype=auto for now."
-            )
         logger.info_once("Using TRTLLM attention (query is quantized).")
         return True
 
