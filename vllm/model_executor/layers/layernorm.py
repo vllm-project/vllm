@@ -67,56 +67,56 @@ def poly_norm(
 
 
 def rocm_aiter_rms_norm_impl(
-    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
+    input: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
 ) -> torch.Tensor:
     import aiter as rocm_aiter
 
-    if x.dim() > 2:
-        x_original_shape = x.shape
-        x = x.reshape(-1, x_original_shape[-1])
-        x = rocm_aiter.rms_norm(x, weight, variance_epsilon)
-        return x.reshape(x_original_shape)
+    if input.dim() > 2:
+        x_original_shape = input.shape
+        input = input.reshape(-1, x_original_shape[-1])
+        input = rocm_aiter.rms_norm(input, weight, variance_epsilon)
+        return input.reshape(x_original_shape)
 
     return rocm_aiter.rms_norm(input, weight, variance_epsilon)
 
 
 def rocm_aiter_rmsnorm2d_fwd_with_add_impl(
-    output: torch.Tensor,
+    out: torch.Tensor,
     input: torch.Tensor,
     residual: torch.Tensor,
     residual_out: torch.Tensor,
     weight: torch.Tensor,
-    epsilon: float,
+    variance_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     import aiter as rocm_aiter
 
     rocm_aiter.rmsnorm2d_fwd_with_add(
-        output,  # output
+        out,  # output
         input,  # input
         residual,  # residual input
         residual_out,  # residual output
         weight,
-        epsilon,
+        variance_epsilon,
     )
 
-    return output, residual_out
+    return out, residual_out
 
 
 def rocm_aiter_rms_norm_fake(
-    input: torch.Tensor, weight: torch.Tensor, epsilon: float
+    input: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
 ) -> torch.Tensor:
     return torch.empty_like(input)
 
 
 def rocm_aiter_rmsnorm2d_fwd_with_add_fake(
-    output: torch.Tensor,
+    out: torch.Tensor,
     input: torch.Tensor,
     residual: torch.Tensor,
     residual_out: torch.Tensor,
     weight: torch.Tensor,
-    epsilon: float,
+    variance_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return output, residual_out
+    return out, residual_out
 
 
 if current_platform.is_rocm():
@@ -130,7 +130,7 @@ if current_platform.is_rocm():
     direct_register_custom_op(
         op_name="rocm_aiter_rmsnorm2d_fwd_with_add",
         op_func=rocm_aiter_rmsnorm2d_fwd_with_add_impl,
-        mutates_args=["output", "residual_out"],
+        mutates_args=["out", "residual_out"],
         fake_impl=rocm_aiter_rmsnorm2d_fwd_with_add_fake,
     )
 
@@ -248,7 +248,7 @@ class RMSNorm(CustomOp):
                 x, residual, self.weight.data, self.variance_epsilon
             )
         else:
-            return rms_norm(x, self.weight.data, self.epsilon)
+            return rms_norm(x, self.weight.data, self.variance_epsilon)
 
     def forward_hip(
         self,
@@ -294,18 +294,18 @@ class RMSNorm(CustomOp):
                 x,
                 residual,
                 self.weight.data,
-                self.epsilon,
+                self.variance_epsilon,
             )
             return x, residual
         return ops.rms_norm(
             x,
             self.weight.data,
-            self.epsilon,
+            self.variance_epsilon,
         )
 
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
-        s += f", eps={self.epsilon}"
+        s += f", eps={self.variance_epsilon}"
         return s
 
 

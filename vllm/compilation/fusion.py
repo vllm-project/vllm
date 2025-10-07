@@ -271,7 +271,10 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
         ):
             if is_rocm_aiter_rmsnorm_enabled():
                 at1 = auto_functionalized(
-                    ROCM_AITER_RMS_OP, input=input, weight=weight, epsilon=self.epsilon
+                    ROCM_AITER_RMS_OP,
+                    input=input,
+                    weight=weight,
+                    variance_epsilon=self.epsilon,
                 )
             else:
                 at1 = auto_functionalized(
@@ -297,11 +300,11 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
             if is_rocm_aiter_rmsnorm_enabled():
                 at = auto_functionalized(
                     self.FUSED_OP,
-                    output=result_rms,
+                    out=result,
                     input=input,
                     weight=weight,
-                    scale=scale,
-                    epsilon=self.epsilon,
+                    yscale=scale,
+                    variance_epsilon=self.epsilon,
                 )
             else:
                 at = auto_functionalized(
@@ -353,6 +356,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
     def register(self, pm_pass: PatternMatcherPass):
         def pattern(
             result: torch.Tensor,
+            result_rms: torch.Tensor,
             input: torch.Tensor,
             residual: torch.Tensor,
             weight: torch.Tensor,
@@ -361,12 +365,12 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
             if is_rocm_aiter_rmsnorm_enabled():
                 at = auto_functionalized(
                     ROCM_AITER_RMS_ADD_OP,
-                    output=result,
+                    out=result_rms,
                     input=input,
                     residual=residual,
                     residual_out=torch.empty_like(residual),
                     weight=weight,
-                    epsilon=self.epsilon,
+                    variance_epsilon=self.epsilon,
                 )
             else:
                 at = auto_functionalized(
@@ -385,6 +389,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
 
         def replacement(
             result: torch.Tensor,
+            result_rms: torch.Tensor,
             input: torch.Tensor,
             residual: torch.Tensor,
             weight: torch.Tensor,
@@ -393,13 +398,13 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
             if is_rocm_aiter_rmsnorm_enabled():
                 at = auto_functionalized(
                     self.FUSED_OP,
-                    output=result,
+                    out=result,
                     input=input,
                     residual_in=residual,
                     residual_out=torch.empyt_like(residual),
                     weight=weight,
-                    scale=scale,
-                    epsilon=self.epsilon,
+                    yscale=scale,
+                    variance_epsilon=self.epsilon,
                 )
             else:
                 at = auto_functionalized(
@@ -418,6 +423,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
 
         inputs = [
             torch.empty(5, 4, device="cuda", dtype=self.quant_dtype),  # result
+            empty_bf16(5, 4),  # result_rms
             empty_bf16(5, 4),  # input
             empty_bf16(5, 4),  # residual
             empty_bf16(1, 5),  # weight
@@ -469,6 +475,8 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
         self.matched_count = self.patterns.apply(graph)
+        print("found pattern count:")
+        print(self.matched_count)
         logger.debug("Replaced %s patterns", self.matched_count)
 
     def uuid(self) -> Any:
