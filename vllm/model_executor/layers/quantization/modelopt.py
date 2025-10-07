@@ -1116,7 +1116,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                              " dynamic quantization is not supported.")
 
         layer.num_experts = num_experts
-        layer.num_global_num_expertsexperts = global_num_experts
         layer.params_dtype = params_dtype
         layer.quant_config = self.quant_config
         weight_dtype = torch.uint8
@@ -1313,24 +1312,25 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                                              requires_grad=False)
 
         # Common processing for input scales and alphas
-        w13_input_scale = layer.w13_input_scale.max(dim=1).values.max(dim=0).values.to(
-            torch.float32)
+        w13_input_scale = layer.w13_input_scale.max().to(
+            torch.float32).expand(layer.num_experts)
         layer.g1_alphas = Parameter(
             (w13_input_scale * w13_weight_scale_2).to(torch.float32),
             requires_grad=False)
 
         # This is for quantization, so we need to invert it.
         layer.w13_input_scale_quant = Parameter(
-            (1 / w13_input_scale).expand(layer.num_experts).to(torch.float32), requires_grad=False)
+            (1 / w13_input_scale).to(torch.float32), requires_grad=False)
 
         # GEMM 2 processing
+        w2_input_scale = layer.w2_input_scale.max().to(torch.float32).expand(layer.num_experts)
         layer.g2_alphas = Parameter(
-            (layer.w2_input_scale.max(dim=0).values * layer.w2_weight_scale_2).to(torch.float32),
+            (w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
             requires_grad=False)
 
         # This is for quantization, so we need to invert it.
         layer.w2_input_scale_quant = Parameter(
-            (1 / layer.w2_input_scale.max(dim=0).values).expand(layer.num_experts).to(torch.float32), requires_grad=False)
+            (1 / w2_input_scale).to(torch.float32), requires_grad=False)
 
         # TensorRT-LLM specific processing
         if self.allow_flashinfer and \
