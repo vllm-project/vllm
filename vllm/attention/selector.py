@@ -12,7 +12,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import _Backend, backend_name_to_enum
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import STR_BACKEND_ENV_VAR, resolve_obj_by_qualname
@@ -169,7 +169,7 @@ def _cached_get_attn_backend(
                 "backend setting."
             )
             backend_by_config = backend_by_config.removesuffix("_VLLM_V1")
-        selected_backend = _Backend.backend_name_to_enum(backend_by_config)
+        selected_backend = backend_name_to_enum(backend_by_config)
         if selected_backend is None:
             raise ValueError(
                 f"Invalid attention backend: '{backend_by_config}'. "
