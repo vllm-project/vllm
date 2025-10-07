@@ -448,6 +448,6 @@ class ModernBertForTokenClassification(nn.Module):
             inputs_embeds=inputs_embeds,
             intermediate_tensors=intermediate_tensors,
         )
-        hidden_states = self.head(hidden_states)
+        hidden_states = self.drop(self.head(hidden_states))
         hidden_states = hidden_states.to(self.head_dtype)
         return self.classifier(hidden_states)
