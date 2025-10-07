@@ -4234,11 +4234,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 raise ValueError(
                     f"Unknown attention type: {attn_module.attn_type}")
 
-        # Include MLA attention layers which are not instances of `Attention`.
-        # These layers still need KV cache specs; treat them as full attention
-        # with `use_mla=True` and a single KV head.
-        mla_layers = get_layers_from_vllm_config(self.vllm_config,
-                                                 MLAAttention)
+        mla_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         for layer_name, mla_module in mla_layers.items():
             if layer_name in kv_cache_spec:
                 continue
