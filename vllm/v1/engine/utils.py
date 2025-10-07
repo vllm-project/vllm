@@ -369,8 +369,13 @@ class CoreEngineActorManager:
             assert set(n_node_devices) == {max_device_per_node}, (
                 f"Nodes are not homogenous, {nodes}"
             )
+            assert world_size % max_device_per_node == 0, (
+                f"For multi-node data parallel groups, world_size ({world_size}) must "
+                f"be a multiple of number of devices per node ({max_device_per_node})."
+            )
             assert len(nodes) * max_device_per_node >= world_size * num_pg_to_create, (
-                f"Not enough total available nodes ({len(nodes)}) and devices per node ({max_device_per_node}) "
+                f"Not enough total available nodes ({len(nodes)}) and devices per node"
+                f" ({max_device_per_node}) "
                 f"to satisfy required world size {world_size} and data parallel size "
                 f"{num_pg_to_create}"
             )
