@@ -956,6 +956,8 @@ class Scheduler(SchedulerInterface):
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
+            if isinstance(generated_token_ids, int):
+                generated_token_ids = [generated_token_ids]
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
@@ -1029,7 +1031,9 @@ class Scheduler(SchedulerInterface):
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
-                        new_token_ids=new_token_ids,
+                        new_token_ids=new_token_ids[0]
+                        if len(new_token_ids) == 1
+                        else new_token_ids,
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
