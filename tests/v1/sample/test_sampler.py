@@ -388,7 +388,9 @@ def test_sampler_allowed_token_ids(
     )
     sampling_metadata.allowed_token_ids_mask = mask
     sampler = Sampler()
-    logits = sampler.apply_allowed_token_ids(fake_logits, sampling_metadata)
+    logits = sampler.apply_logits_processors(
+        fake_logits, sampling_metadata, predict_bonus_token=False
+    )
     logits = logits.cpu()
     for batch_idx in range(batch_size):
         logits_for_req = logits[batch_idx]
@@ -430,8 +432,8 @@ def test_sampler_bad_words(
         sampling_metadata, VOCAB_SIZE
     )
     sampler = Sampler()
-    logits = sampler.apply_bad_words(
-        fake_logits, sampling_metadata, sampling_metadata.output_token_ids
+    logits = sampler.apply_logits_processors(
+        fake_logits, sampling_metadata, predict_bonus_token=False
     )
     logits = logits.cpu()
     for batch_idx in range(batch_size):
