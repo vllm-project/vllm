@@ -257,6 +257,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 "alibi_slopes, sliding_window, logits_soft_cap"
             )
 
+        self.dcp_world_size: Optional[int]
         from aiter import flash_attn_varlen_func
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
@@ -492,7 +493,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 q_nope, q_pe = q.split(
                     [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
                 )
-                print(q_nope.shape, k_c_normed.unsqueeze(1).shape)
                 q = fused_qk_rope_cat_and_cache_mla(
                     q_nope,
                     q_pe,
