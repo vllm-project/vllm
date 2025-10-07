@@ -37,6 +37,7 @@ def _get_device_and_group(parallel_config: ParallelConfig):
 
 def _run_ar(
     should_ubatch: bool,
+    should_dp_pad: bool,
     orig_num_tokens_per_ubatch: int,
     padded_num_tokens_per_ubatch: int,
     parallel_config: ParallelConfig,
@@ -44,10 +45,11 @@ def _run_ar(
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
-    tensor = torch.zeros(3, dp_size, device=device, dtype=torch.int32)
+    tensor = torch.zeros(4, dp_size, device=device, dtype=torch.int32)
     tensor[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
+    tensor[3][dp_rank] = 1 if should_dp_pad else 0
     dist.all_reduce(tensor, group=group)
     return tensor
 
@@ -76,6 +78,7 @@ def _synchronize_dp_ranks(
     num_tokens_unpadded: int,
     num_tokens_padded: int,
     should_attempt_ubatching: bool,
+    allow_dp_padding: bool,
     parallel_config: ParallelConfig,
 ) -> tuple[bool, Optional[torch.Tensor]]:
     """
@@ -100,17 +103,29 @@ def _synchronize_dp_ranks(
     # will run and if we are using ubatching or not.
     tensor = _run_ar(
         should_ubatch=should_attempt_ubatching,
+        should_dp_pad=allow_dp_padding,
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
         padded_num_tokens_per_ubatch=num_tokens_padded,
         parallel_config=parallel_config,
     )
 
-    # Ensure that each rank is processing the same nuber of tokens
     num_tokens_across_dp = tensor[1, :]
-    max_num_tokens = int(num_tokens_across_dp.max().item())
-    num_tokens_after_padding = torch.tensor(
-        [max_num_tokens] * len(num_tokens_across_dp), device="cpu", dtype=torch.int32
-    )
+    should_dp_pad = bool(torch.all(tensor[3] == 1).item())
+
+    # DP ranks should all have the same value for allow_padding
+    assert allow_dp_padding == should_dp_pad
+
+    if should_dp_pad:
+        # If DP padding is enabled, ensure that each rank is processing the same number
+        # of tokens
+        max_num_tokens = int(num_tokens_across_dp.max().item())
+        num_tokens_after_padding = torch.tensor(
+            [max_num_tokens] * len(num_tokens_across_dp),
+            device="cpu",
+            dtype=torch.int32,
+        )
+    else:
+        num_tokens_after_padding = num_tokens_across_dp
 
     should_ubatch = _post_process_ubatch(tensor)
 
@@ -118,22 +133,44 @@ def _synchronize_dp_ranks(
 
 
 def coordinate_batch_across_dp(
-    num_scheduled_tokens_per_request: np.ndarray,
     num_tokens_unpadded: int,
-    num_tokens_padded: int,
-    parallel_config: ParallelConfig,
     allow_microbatching: bool,
-    uniform_decode: bool,
+    allow_dp_padding: bool,
+    parallel_config: ParallelConfig,
+    num_tokens_padded: Optional[int] = None,
+    uniform_decode: Optional[bool] = None,
+    num_scheduled_tokens_per_request: Optional[np.ndarray] = None,
 ) -> tuple[Optional[UBatchSlices], Optional[torch.Tensor]]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
     should be split into microbatches.
 
+    Args:
+        num_tokens_unpadded: Number of tokens without accounting for padding
+
+        allow_microbatching: If microbatching should be attempted
+
+        allow_dp_padding: If all DP ranks should be padded up to the same value
+
+        parallel_config: The parallel config
+
+        num_tokens_padded: Number of tokens including any non-DP padding (CUDA graphs,
+        TP, etc)
+
+        uniform_decode: Only used if allow_microbatching is True. True if the batch
+        only contains single token decodes
+
+        num_scheduled_tokens_per_request: Only used if allow_microbatching is True. The
+        number of tokens per request.
+
     Returns: tuple[
         ubatch_slices: if this is set then all DP ranks have agreed to
         microbatch
+
         num_tokens_after_padding: A tensor containing the total number of
-        tokens per-microbatch for each DP rank including padding.
+        tokens per-microbatch for each DP rank including padding. Will be
+        padded up to the max value across all DP ranks when allow_dp_padding
+        is True.
     ]
 
     """
@@ -141,21 +178,25 @@ def coordinate_batch_across_dp(
         # Early exit.
         return None, None
 
-    # Check preconditions for microbatching
-    should_attempt_ubatching = check_ubatch_thresholds(
-        parallel_config,
-        num_tokens_unpadded,
-        uniform_decode=uniform_decode,
-    )
+    # If the caller has explicitly enabled microbatching.
+    should_attempt_ubatching = False
+    if allow_microbatching:
+        # Check preconditions for microbatching
+        assert uniform_decode is not None
+        should_attempt_ubatching = check_ubatch_thresholds(
+            parallel_config,
+            num_tokens_unpadded,
+            uniform_decode=uniform_decode,
+        )
 
-    # If the caller has explicitly disabled microbatching.
-    if not allow_microbatching:
-        should_attempt_ubatching = False
+    if num_tokens_padded is None:
+        num_tokens_padded = num_tokens_unpadded
 
     (should_ubatch, num_tokens_after_padding) = _synchronize_dp_ranks(
         num_tokens_unpadded,
         num_tokens_padded,
         should_attempt_ubatching,
+        allow_dp_padding,
         parallel_config,
     )
 
@@ -170,6 +211,7 @@ def coordinate_batch_across_dp(
     assert num_tokens_after_padding is not None
     token_split_point = int(num_tokens_after_padding[0].item()) // 2
 
+    assert num_scheduled_tokens_per_request is not None
     ubatch_slices = create_ubatch_slices(
         num_scheduled_tokens_per_request, token_split_point
     )
