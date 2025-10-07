@@ -9,37 +9,38 @@ from collections.abc import Mapping
 from typing import Optional
 
 from vllm.logger import init_logger
-from vllm.sequence import InbandEngineStats
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 
 logger = init_logger(__name__)
 
 
-def create_orca_header(metrics_format: str,
-                       named_metrics: list[tuple[str, float]],
-                       metadata_fields=None) -> Optional[Mapping[str, str]]:
+def create_orca_header(
+    metrics_format: str, named_metrics: list[tuple[str, float]], metadata_fields=None
+) -> Optional[Mapping[str, str]]:
     """
-    Creates ORCA headers named 'endpoint-load-metrics' in the specified format 
+    Creates ORCA headers named 'endpoint-load-metrics' in the specified format
     and adds custom metrics to named_metrics.
     ORCA headers format description: https://docs.google.com/document/d/1C1ybMmDKJIVlrbOLbywhu9iRYo4rilR-cT50OTtOFTs/edit?tab=t.0
     ORCA proto https://github.com/cncf/xds/blob/main/xds/data/orca/v3/orca_load_report.proto
 
     Parameters:
     - metrics_format (str): The format of the header ('TEXT', 'JSON').
-    - named_metrics (List[Tuple[str, float]]): List of tuples with metric names 
+    - named_metrics (List[Tuple[str, float]]): List of tuples with metric names
     and their corresponding double values.
-    - metadata_fields (list): List of additional metadata fields 
+    - metadata_fields (list): List of additional metadata fields
     (currently unsupported).
 
     Returns:
-    - Optional[Mapping[str,str]]: A dictionary with header key as 
-    'endpoint-load-metrics' and values as the ORCA header strings with 
+    - Optional[Mapping[str,str]]: A dictionary with header key as
+    'endpoint-load-metrics' and values as the ORCA header strings with
     format prefix and data in  with named_metrics in.
     """
 
     if metadata_fields:
-        logger.warning("Warning: `metadata_fields` are not supported in the"
-                       "ORCA response header yet.")
+        logger.warning(
+            "Warning: `metadata_fields` are not supported in the"
+            "ORCA response header yet."
+        )
 
     if metrics_format.lower() not in ["text", "json"]:
         logger.warning(
@@ -59,11 +60,13 @@ def create_orca_header(metrics_format: str,
     # output example:
     # endpoint-load-metrics: TEXT named_metrics.kv_cache_utilization=0.4
     if metrics_format.lower() == "text":
-        native_http_header = ", ".join([
-            f"named_metrics.{metric_name}={value}"
-            for metric_name, value in named_metrics
-            if isinstance(metric_name, str) and isinstance(value, float)
-        ])
+        native_http_header = ", ".join(
+            [
+                f"named_metrics.{metric_name}={value}"
+                for metric_name, value in named_metrics
+                if isinstance(metric_name, str) and isinstance(value, float)
+            ]
+        )
         header["endpoint-load-metrics"] = f"TEXT {native_http_header}"
 
     # output example:
@@ -76,35 +79,26 @@ def create_orca_header(metrics_format: str,
     return header
 
 
-def metrics_header(metrics: Optional[InbandEngineStats],
-                   metrics_format: str) -> Optional[Mapping[str, str]]:
+def metrics_header(metrics_format: str) -> Optional[Mapping[str, str]]:
     """
-    Creates ORCA headers named 'endpoint-load-metrics' in the specified format 
-    and adds `metrics` its named_metrics.
+    Creates ORCA headers named 'endpoint-load-metrics' in the specified format.
+    Metrics are collected from Prometheus using `get_named_metrics_from_prometheus()`.
+
     ORCA headers format description: https://docs.google.com/document/d/1C1ybMmDKJIVlrbOLbywhu9iRYo4rilR-cT50OTtOFTs/edit?tab=t.0
     ORCA proto https://github.com/cncf/xds/blob/main/xds/data/orca/v3/orca_load_report.proto
 
     Parameters:
-    - metrics (InbandEngineStats): Metrics collected by the Engine V0.
-    If None, then metrics are collected from Prometheus for Engine V1
-    using `get_named_metrics_from_prometheus()`.
     - metrics_format (str): The format of the header ('TEXT', 'JSON').
 
     Returns:
-    - Optional[Mapping[str,str]]: A dictionary with header key as 
-    'endpoint-load-metrics' and values as the ORCA header strings with 
+    - Optional[Mapping[str,str]]: A dictionary with header key as
+    'endpoint-load-metrics' and values as the ORCA header strings with
     format prefix and data in  with named_metrics in.
     """
     if not metrics_format:
         return None
-    named_metrics: list[tuple[str, float]] = []
-    if metrics is not None:
-        for metric, val in vars(metrics).items():
-            if isinstance(val, float) and metric != "now":
-                named_metrics.append((str(metric), float(val)))
-    else:
-        # Get named metrics from prometheus
-        named_metrics = get_named_metrics_from_prometheus()
+    # Get named metrics from prometheus.
+    named_metrics = get_named_metrics_from_prometheus()
     return create_orca_header(metrics_format, named_metrics)
 
 
@@ -123,14 +117,14 @@ def get_named_metrics_from_prometheus() -> list[tuple[str, float]]:
     # Map from prometheus metric names to ORCA named metrics.
     prometheus_to_orca_metrics = {
         "vllm:kv_cache_usage_perc": "kv_cache_usage_perc",
-        "vllm:num_requests_waiting": "num_requests_waiting"
+        "vllm:num_requests_waiting": "num_requests_waiting",
     }
     registry = get_prometheus_registry()
     metrics = list(registry.collect())
     for metric in metrics:
         orca_name = prometheus_to_orca_metrics.get(metric.name)
         # If this metric is mapped into orca, and has a sample, then report it.
-        if (orca_name is not None and metric.samples is not None):
+        if orca_name is not None and metric.samples is not None:
             sample = metric.samples[0]
             named_metrics.append((str(orca_name), float(sample.value)))
     return named_metrics

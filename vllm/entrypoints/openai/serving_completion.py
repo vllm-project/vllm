@@ -34,7 +34,6 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.sequence import InbandEngineStats
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import as_list, merge_async_iterators
 
@@ -520,18 +519,12 @@ class OpenAIServingCompletion(OpenAIServing):
         num_generated_tokens = 0
         kv_transfer_params = None
         last_final_res = None  # choose latest stats from the batch of outputs
-        latest_engine_stats: Optional[InbandEngineStats] = None
         for final_res in final_res_batch:
             last_final_res = final_res
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
             prompt_logprobs = clamp_prompt_logprobs(final_res.prompt_logprobs)
             prompt_text = final_res.prompt
-            if not latest_engine_stats or (
-                final_res.inband_engine_stats
-                and latest_engine_stats.now < final_res.inband_engine_stats.now
-            ):
-                latest_engine_stats = final_res.inband_engine_stats
 
             token_ids: GenericSequence[int]
             out_logprobs: Optional[GenericSequence[Optional[dict[int, Logprob]]]]
@@ -622,7 +615,6 @@ class OpenAIServingCompletion(OpenAIServing):
             choices=choices,
             usage=usage,
             kv_transfer_params=kv_transfer_params,
-            stats=latest_engine_stats,
         )
 
     def _create_completion_logprobs(

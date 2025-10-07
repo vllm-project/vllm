@@ -633,7 +633,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
     elif isinstance(generator, ChatCompletionResponse):
         return JSONResponse(
             content=generator.model_dump(),
-            headers=metrics_header(generator.stats, metrics_header_format),
+            headers=metrics_header(metrics_header_format),
         )
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
@@ -679,7 +679,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     elif isinstance(generator, CompletionResponse):
         return JSONResponse(
             content=generator.model_dump(),
-            headers=metrics_header(generator.stats, metrics_header_format),
+            headers=metrics_header(metrics_header_format),
         )
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
