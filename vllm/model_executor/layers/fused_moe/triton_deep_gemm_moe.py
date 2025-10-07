@@ -143,7 +143,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         apply_router_weight_on_input: bool,
     ):
         use_deep_gemm = self.allow_deep_gemm and (
-            _valid_deep_gemm(hidden_states, w1, w2) or is_deep_gemm_e8m0_used()
+            is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2)
         )
 
         experts = self.deep_gemm_expert if use_deep_gemm else self.triton_expert
