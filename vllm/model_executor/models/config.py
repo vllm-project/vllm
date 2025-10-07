@@ -287,7 +287,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config.mamba_block_size = model_config.max_model_len
 
         # TODO(@tdoublep) find a better way to do this than whitelist
-        MAMBA2_MODELS = [
+        MAMBA_MODELS = [
             "BambaForCausalLM",
             "FalconH1ForCausalLM",
             "GraniteMoeHybridForCausalLM",
@@ -295,12 +295,13 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             "NemotronHForCausalLM",
             "Zamba2ForCausalLM",
             "JambaForCausalLM",
+            "MambaForCausalLM",
         ]
         if cache_config.enable_prefix_caching:
-            if model_config.architecture in MAMBA2_MODELS:
+            if model_config.architecture in MAMBA_MODELS:
                 logger.info(
                     "Warning: Prefix caching is currently enabled. "
-                    "Its support for Mamba2 layers is experimental. "
+                    "Its support for Mamba layers is experimental. "
                     "Please report any issues you may observe."
                 )
             else:
