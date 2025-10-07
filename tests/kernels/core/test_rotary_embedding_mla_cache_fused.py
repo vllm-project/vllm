@@ -27,7 +27,6 @@ from vllm.platforms import current_platform
 @pytest.mark.parametrize("block_size", [16, 1024, 16384])
 @pytest.mark.parametrize("seed", [0])
 @pytest.mark.parametrize(
-    "device",
     "device", [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 )
 @torch.inference_mode()
@@ -140,7 +139,6 @@ def test_concat_and_cache_mla_rope_fused(
         kv_cache_dtype,
         kv_cache_scale,
     )
-
 
     if kv_cache_dtype == "fp8":
         result_temp = torch.empty_like(kv_cache, dtype=torch.float16)
