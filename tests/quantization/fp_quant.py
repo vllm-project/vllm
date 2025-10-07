@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test model set-up and inference for quantized HF models supported
- on the GPU backend using FPQuant.
+on the GPU backend using FPQuant.
 
- Validating the configuration and printing results for manual checking.
+Validating the configuration and printing results for manual checking.
 
- Run `pytest tests/quantization/test_fp_quant.py`.
+Run `pytest tests/quantization/test_fp_quant.py`.
 """
 
 import pytest
@@ -20,8 +20,10 @@ DTYPE = ["bfloat16"]
 EAGER = [True, False]
 
 
-@pytest.mark.skipif(not is_quant_method_supported("fp_quant"),
-                    reason="FPQuant is not supported on this GPU type.")
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp_quant"),
+    reason="FPQuant is not supported on this GPU type.",
+)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("eager", EAGER)
 def test_fpquant(vllm_runner, model, eager):

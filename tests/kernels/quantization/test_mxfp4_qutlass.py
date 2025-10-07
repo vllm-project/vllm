@@ -19,8 +19,7 @@
 import numpy as np
 import pytest
 import torch
-from compressed_tensors.transform.utils.hadamard import (
-    deterministic_hadamard_matrix)
+from compressed_tensors.transform.utils.hadamard import deterministic_hadamard_matrix
 
 from vllm._custom_ops import fusedQuantizeMx, matmul_mxf4_bf16_tn
 from vllm.platforms import current_platform
@@ -29,8 +28,10 @@ from vllm.qutlass_utils.utils import to_blocked
 if not torch.cuda.is_available():
     pytest.skip("CUDA required for these tests.", allow_module_level=True)
 
-if not (current_platform.has_device_capability(100)
-        or current_platform.has_device_capability(120)):
+if not (
+    current_platform.has_device_capability(100)
+    or current_platform.has_device_capability(120)
+):
     pytest.skip(
         reason="Tests require compute capability 10.0 (100) or 12.0 (120).",
         allow_module_level=True,
@@ -38,11 +39,11 @@ if not (current_platform.has_device_capability(100)
 
 
 # ----- Helpers -----
-def get_hadamard_matrix(group_size: int, dtype: torch.dtype,
-                        device: torch.device):
+def get_hadamard_matrix(group_size: int, dtype: torch.dtype, device: torch.device):
     return (
-        deterministic_hadamard_matrix(group_size, dtype=dtype, device=device) *
-        group_size**-0.5)
+        deterministic_hadamard_matrix(group_size, dtype=dtype, device=device)
+        * group_size**-0.5
+    )
 
 
 def _rtne_fp4(x: torch.Tensor):
@@ -77,8 +78,7 @@ def _rtne_fp4(x: torch.Tensor):
     inds = torch.bucketize(x, grid)
     lo, hi = (inds - 1).clamp(min=0, max=15), inds.clamp(min=0, max=15)
     g_lo, g_hi = grid[lo], grid[hi]
-    pick_hi = (g_hi - x
-               < x - g_lo) | (g_hi - x == x - g_lo) & (grid_int[hi] % 2 == 0)
+    pick_hi = (g_hi - x < x - g_lo) | (g_hi - x == x - g_lo) & (grid_int[hi] % 2 == 0)
     y = torch.where(pick_hi, g_hi, g_lo)
     y_int = torch.where(pick_hi, grid_int[hi], grid_int[lo])
     y_int_packed = (y_int[..., 1::2] & 0xF) << 4 | y_int[..., ::2] & 0xF
@@ -89,8 +89,9 @@ def _dq_fp4(x_e2m1: torch.Tensor, x_e8m0: torch.Tensor, alpha: float):
     device = x_e2m1.device
 
     x_e2m1_i32 = x_e2m1.view(dtype=torch.uint8).to(dtype=torch.int32)
-    x_e2m1_unpacked = torch.stack([x_e2m1_i32 & 0xF, (x_e2m1_i32 >> 4) & 0xF],
-                                  dim=-1).flatten(start_dim=-2)
+    x_e2m1_unpacked = torch.stack(
+        [x_e2m1_i32 & 0xF, (x_e2m1_i32 >> 4) & 0xF], dim=-1
+    ).flatten(start_dim=-2)
 
     grid_dq = torch.tensor(
         [
@@ -117,8 +118,9 @@ def _dq_fp4(x_e2m1: torch.Tensor, x_e8m0: torch.Tensor, alpha: float):
     x_fp4_dq = grid_dq[x_e2m1_unpacked]
     scales_dq = x_e8m0.to(torch.float64)
 
-    x_dq = (x_fp4_dq.unflatten(dim=-1, sizes=(-1, 32)) *
-            scales_dq[..., None]).flatten(start_dim=-2) / alpha
+    x_dq = (x_fp4_dq.unflatten(dim=-1, sizes=(-1, 32)) * scales_dq[..., None]).flatten(
+        start_dim=-2
+    ) / alpha
     return x_dq, x_fp4_dq, scales_dq
 
 
@@ -134,44 +136,45 @@ def _unpack_mask(clip_mask: torch.Tensor) -> torch.Tensor:
     return clip_mask_unpacked_dq
 
 
-def _forward_quantize_ref(x: torch.Tensor,
-                          h: torch.Tensor,
-                          rot_size: int,
-                          quest: bool = True):
+def _forward_quantize_ref(
+    x: torch.Tensor, h: torch.Tensor, rot_size: int, quest: bool = True
+):
     device = x.device
-    xh_ref64 = (x.unflatten(
-        dim=-1, sizes=(-1, rot_size)).to(dtype=torch.float64) @ h.reshape(
-            rot_size, rot_size).to(dtype=torch.float64)).flatten(start_dim=-2)
+    xh_ref64 = (
+        x.unflatten(dim=-1, sizes=(-1, rot_size)).to(dtype=torch.float64)
+        @ h.reshape(rot_size, rot_size).to(dtype=torch.float64)
+    ).flatten(start_dim=-2)
 
     if quest:
-        scales_ref64_ = (xh_ref64.unflatten(dim=-1, sizes=(-1, 32)).std(
-            dim=-1, correction=0) * (2.92247856 / 6.0) + 1e-8)
+        scales_ref64_ = (
+            xh_ref64.unflatten(dim=-1, sizes=(-1, 32)).std(dim=-1, correction=0)
+            * (2.92247856 / 6.0)
+            + 1e-8
+        )
     else:
         abs_max = xh_ref64.unflatten(dim=-1, sizes=(-1, 32)).abs().amax(dim=-1)
         scales_ref64_ = abs_max + 1e-8
 
-    xh_e8m0_ref = (scales_ref64_.log2().floor().exp2().to(
-        dtype=torch.float8_e8m0fnu))
+    xh_e8m0_ref = scales_ref64_.log2().floor().exp2().to(dtype=torch.float8_e8m0fnu)
     scales_ref64 = xh_e8m0_ref.to(dtype=torch.float64)
 
-    xh_scaled_ref64 = (xh_ref64.unflatten(dim=-1, sizes=(-1, 32)) /
-                       scales_ref64[..., None]).flatten(start_dim=-2)
+    xh_scaled_ref64 = (
+        xh_ref64.unflatten(dim=-1, sizes=(-1, 32)) / scales_ref64[..., None]
+    ).flatten(start_dim=-2)
     if not quest:
         xh_scaled_ref64 *= 3
 
     clip_mask_unpacked_ref = xh_scaled_ref64.abs() < 6.0
-    clip_mask_ref = torch.zeros(*x.shape[:-1],
-                                x.size(-1) // 8,
-                                dtype=torch.uint8,
-                                device=device)
+    clip_mask_ref = torch.zeros(
+        *x.shape[:-1], x.size(-1) // 8, dtype=torch.uint8, device=device
+    )
     for i in range(8):
-        clip_mask_ref |= (
-            clip_mask_unpacked_ref[..., i::8].to(dtype=torch.uint8) << i)
+        clip_mask_ref |= clip_mask_unpacked_ref[..., i::8].to(dtype=torch.uint8) << i
 
     xh_fp4_ref, xh_e2m1_ref = _rtne_fp4(xh_scaled_ref64)
-    xh_dq, xh_fp4_dq, scales_dq = _dq_fp4(xh_e2m1_ref,
-                                          xh_e8m0_ref,
-                                          alpha=1.0 if quest else 3.0)
+    xh_dq, xh_fp4_dq, scales_dq = _dq_fp4(
+        xh_e2m1_ref, xh_e8m0_ref, alpha=1.0 if quest else 3.0
+    )
     clip_mask_unpacked_dq = _unpack_mask(clip_mask_ref)
 
     assert xh_fp4_dq.equal(xh_fp4_ref)
@@ -235,8 +238,7 @@ def test_fused_quantization_absmax(rot_size: int):
     a_scale_block = to_blocked(a_e8m0)
     b_scale_block = to_blocked(b_e8m0)
     alpha = torch.tensor([1.0], device=device)
-    out = matmul_mxf4_bf16_tn(a_e2m1, b_e2m1, a_scale_block, b_scale_block,
-                              alpha)
+    out = matmul_mxf4_bf16_tn(a_e2m1, b_e2m1, a_scale_block, b_scale_block, alpha)
     assert out.equal(out_ref.to(dtype=out.dtype))
 
 
@@ -268,8 +270,7 @@ def test_fused_quantization_quest(rot_size: int):
     a_scale_block = to_blocked(a_e8m0, True)
     b_scale_block = to_blocked(b_e8m0, True)
     alpha = torch.tensor([1.0], device=device)
-    out = matmul_mxf4_bf16_tn(a_e2m1, b_e2m1, a_scale_block, b_scale_block,
-                              alpha)
+    out = matmul_mxf4_bf16_tn(a_e2m1, b_e2m1, a_scale_block, b_scale_block, alpha)
     assert out.equal(out_ref.to(dtype=out.dtype))
 
 
@@ -298,6 +299,5 @@ def test_llama_shapes(model: str, layer_idx: int, batch: int, had_size: int):
     a_scale_block = to_blocked(a_e8m0, True)
     b_scale_block = to_blocked(b_e8m0, True)
     alpha = torch.tensor([1.0], device=device)
-    out = matmul_mxf4_bf16_tn(a_e2m1, b_e2m1, a_scale_block, b_scale_block,
-                              alpha)
+    out = matmul_mxf4_bf16_tn(a_e2m1, b_e2m1, a_scale_block, b_scale_block, alpha)
     assert out.equal(out_ref.to(dtype=out.dtype))
