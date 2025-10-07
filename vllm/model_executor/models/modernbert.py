@@ -413,7 +413,6 @@ class ModernBertForTokenClassification(nn.Module):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "modernbert")
         )
         self.head = ModernBertPredictionHead(config)
-        self.drop = nn.Dropout(getattr(config, "classifier_dropout", 0.0))
         self.classifier = nn.Linear(
             config.hidden_size, config.num_labels, dtype=self.head_dtype
         )
@@ -431,7 +430,7 @@ class ModernBertForTokenClassification(nn.Module):
         return self.model.get_input_embeddings(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self, skip_prefixes=["drop"])
         loaded_params = loader.load_weights(weights)
         return loaded_params
 
@@ -448,6 +447,6 @@ class ModernBertForTokenClassification(nn.Module):
             inputs_embeds=inputs_embeds,
             intermediate_tensors=intermediate_tensors,
         )
-        hidden_states = self.drop(self.head(hidden_states))
+        hidden_states = self.head(hidden_states)
         hidden_states = hidden_states.to(self.head_dtype)
         return self.classifier(hidden_states)
