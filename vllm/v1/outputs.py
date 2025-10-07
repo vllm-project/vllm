@@ -3,9 +3,10 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NamedTuple, Optional, TypeAlias, Union
+from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
 import torch
+from typing_extensions import TypeAlias
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
