@@ -253,10 +253,10 @@ class Worker(WorkerBase):
             self.model_runner.profile_run()
 
             msg = (
-                f"Initial free memory {GiB(self.init_snapshot.free_memory)} "
-                f"GiB, reserved {GiB(kv_cache_memory_bytes):.2f}GiB memory for "
+                f"Initial free memory {GiB(self.init_snapshot.free_memory):.2f} "
+                f"GiB, reserved {GiB(kv_cache_memory_bytes):.2f} GiB memory for "
                 "KV Cache as specified by kv_cache_memory_bytes config and "
-                "skipped memory profiling. This does does not respect the "
+                "skipped memory profiling. This does not respect the "
                 "gpu_memory_utilization config. Only use kv_cache_memory_bytes "
                 "config when you want manual control of KV cache memory "
                 "size. If OOM'ed, check the difference of initial free "
