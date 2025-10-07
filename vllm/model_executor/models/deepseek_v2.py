@@ -661,8 +661,6 @@ def sparse_attn_indexer(
                 logits.stride(0),
                 logits.stride(1),
             )
-
-            topk_indices -= chunk.cu_seqlen_ks[:, None]
             topk_indices_buffer[
                 chunk.token_start : chunk.token_end, : topk_indices.shape[-1]
             ] = topk_indices.to(dtype=torch.int32)

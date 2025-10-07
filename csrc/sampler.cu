@@ -118,12 +118,12 @@ static __global__ void topKPerRow(const float* logits, const int* rowStarts,
   int rowLen = rowEnd - rowStart;
 
   // Shortcut if the length of the row is smaller than Top-K. Indices are not
-  // sorted by their cor- responding logit.
+  // sorted by their corresponding logit.
   if (rowLen <= kTopK) {
     for (int rowIt = threadIdx.x; rowIt < rowLen;
          rowIt += kNumThreadsPerBlock) {
       int idx = rowStart + rowIt;
-      outIndices[rowIdx * kTopK + rowIt] = idx;
+      outIndices[rowIdx * kTopK + rowIt] = idx - rowStart;
       outLogits[rowIdx * kTopK + rowIt] =
           logits[rowIdx * stride0 + idx * stride1];
     }
@@ -278,7 +278,7 @@ static __global__ void topKPerRow(const float* logits, const int* rowStarts,
 #pragma unroll
   for (int ii = 0; ii < kNumTopKItemsPerThread; ++ii) {
     int offset = rowIdx * kTopK + ii * kNumThreadsPerBlock + threadIdx.x;
-    outIndices[offset] = topKIndices[ii];
+    outIndices[offset] = topKIndices[ii] - rowStart;
     outLogits[offset] = topKLogits[ii];
   }
 }
