@@ -144,7 +144,7 @@ def validate_request_params(request: "ChatCompletionRequest"):
         raise ValueError("chat_template is not supported for Mistral tokenizers.")
 
 
-def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
+def _tekken_token_to_id(tokenizer: "Tekkenizer", t: Union[str, bytes]) -> int:
     from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 
     assert isinstance(tokenizer, Tekkenizer), type(tokenizer)
