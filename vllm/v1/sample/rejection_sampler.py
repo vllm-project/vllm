@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.v1.outputs import TokenIDs, convert_to_token_ids
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -108,7 +109,7 @@ class RejectionSampler(nn.Module):
     def parse_output(
         output_token_ids: torch.Tensor,
         vocab_size: int,
-    ) -> list[list[int]]:
+    ) -> list[TokenIDs]:
         """Parse the output of the rejection sampler.
 
         Args:
@@ -127,7 +128,8 @@ class RejectionSampler(nn.Module):
             output_token_ids_np < vocab_size
         )
         outputs = [
-            row[valid_mask[i]].tolist() for i, row in enumerate(output_token_ids_np)
+            convert_to_token_ids(row[valid_mask[i]].tolist())
+            for i, row in enumerate(output_token_ids_np)
         ]
         return outputs
 

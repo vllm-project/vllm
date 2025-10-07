@@ -119,6 +119,9 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
     PoolerOutput,
     SamplerOutput,
+    TokenIDs,
+    convert_to_token_id_list,
+    get_token_count,
 )
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
@@ -2295,7 +2298,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> tuple[
         dict[str, int],
         Optional[LogprobsLists],
-        list[int | list[int]],
+        list[TokenIDs],
         dict[str, Optional[LogprobsTensors]],
         list[str],
         dict[str, int],
@@ -2334,12 +2337,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
         invalid_req_indices = []
+        valid_sampled_token_ids: list[TokenIDs]
         if not self.use_async_scheduling:
             # Get the valid generated tokens.
             max_gen_len = sampled_token_ids.shape[-1]
             if max_gen_len == 1:
                 # No spec decode tokens.
-                valid_sampled_token_ids = self._to_list(sampled_token_ids)
+                valid_sampled_token_ids = self._to_token_ids(sampled_token_ids)
             else:
                 # Includes spec decode tokens.
                 valid_sampled_token_ids = self.rejection_sampler.parse_output(
@@ -2378,10 +2382,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.use_async_scheduling:
                 sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
             else:
-                sampled_ids = valid_sampled_token_ids[req_idx]
-                sampled_ids = (
-                    [sampled_ids] if isinstance(sampled_ids, int) else sampled_ids
-                )
+                sampled_ids = convert_to_token_id_list(valid_sampled_token_ids[req_idx])
             if not sampled_ids:
                 continue
 
@@ -2749,7 +2750,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def propose_draft_token_ids(
         self,
         scheduler_output: "SchedulerOutput",
-        sampled_token_ids: Union[torch.Tensor, list[int | list[int]]],
+        sampled_token_ids: Union[torch.Tensor, list[TokenIDs]],
         sampling_metadata: SamplingMetadata,
         hidden_states: torch.Tensor,
         sample_hidden_states: torch.Tensor,
@@ -2782,8 +2783,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 for num_draft, tokens in zip(
                     spec_decode_metadata.num_draft_tokens, sampled_token_ids
                 ):
-                    index = offset - 1 + (1 if isinstance(tokens, int) else len(tokens))
-                    indices.append(index)
+                    indices.append(offset + get_token_count(tokens) - 1)
                     offset += num_draft + 1
                 indices = torch.tensor(indices, device=self.device)
                 hidden_states = sample_hidden_states[indices]
@@ -4590,7 +4590,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return kv_cache_spec
 
-    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[int]:
+    def _to_token_ids(self, sampled_token_ids: torch.Tensor) -> list[TokenIDs]:
         # This is a short term mitigation for issue mentioned in
         # https://github.com/vllm-project/vllm/issues/22754.
         # `tolist` would trigger a cuda wise stream sync, which

@@ -6,6 +6,7 @@ import numpy as np
 from numba import get_num_threads, jit, njit, prange, set_num_threads
 
 from vllm.config import VllmConfig
+from vllm.v1.outputs import TokenIDs, get_token_count
 
 
 class NgramProposer:
@@ -131,7 +132,7 @@ class NgramProposer:
 
     def propose(
         self,
-        sampled_token_ids: list[int | list[int]],
+        sampled_token_ids: list[TokenIDs],
         req_ids: list[str],
         num_tokens_no_spec: np.ndarray,
         token_ids_cpu: np.ndarray,
@@ -140,7 +141,7 @@ class NgramProposer:
         # find which requests need ngram proposals
         valid_ngram_requests = []
         for i, sampled_ids in enumerate(sampled_token_ids):
-            if not isinstance(sampled_ids, int) and len(sampled_ids) == 0:
+            if get_token_count(sampled_ids) == 0:
                 # Skip speculative decoding, if no tokens are sampled
                 continue
 
