@@ -115,7 +115,7 @@ def main(args):
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
-            "disable_padded_drafter_batch": disable_padded_drafter_batch,
+            "disable_padded_drafter_batch": args.disable_padded_drafter_batch,
         }
     elif args.method == "ngram":
         speculative_config = {
