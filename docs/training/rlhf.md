@@ -12,4 +12,5 @@ See the following basic examples to get started if you don't want to use an exis
 
 See the following notebooks showing how to use vLLM for GRPO:
 
+- [Efficient Online Training with GRPO and vLLM in TRL](https://huggingface.co/learn/cookbook/grpo_vllm_online_training)
 - [Qwen-3 4B GRPO using Unsloth + vLLM](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Qwen3_(4B)-GRPO.ipynb)
