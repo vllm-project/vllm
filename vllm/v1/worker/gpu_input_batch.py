@@ -835,14 +835,6 @@ class InputBatch:
         """
 
         req_lora_mapping = self.request_lora_mapping[: self.num_reqs]
-        padded_num_reqs = len(num_scheduled_tokens)
-        if padded_num_reqs > self.num_reqs:
-            padded_req_lora_mapping = np.zeros(
-                padded_num_reqs, dtype=req_lora_mapping.dtype
-            )
-            padded_req_lora_mapping[: self.num_reqs] = req_lora_mapping
-            req_lora_mapping = padded_req_lora_mapping
-
         prompt_lora_mapping = tuple(req_lora_mapping)
         token_lora_mapping = tuple(req_lora_mapping.repeat(num_scheduled_tokens))
         active_lora_requests: set[LoRARequest] = set(
