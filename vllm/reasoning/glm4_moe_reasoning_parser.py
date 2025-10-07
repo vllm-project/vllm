@@ -6,8 +6,7 @@ from typing import Optional, Union
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage)
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
@@ -26,26 +25,43 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
     from the model's output.
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
+        super().__init__(tokenizer, *args, **kwargs)
         self.think_start_token = "<think>"
         self.think_end_token = "</think>"
+        self.assistant_token = "<|assistant|>"
 
         if not self.model_tokenizer:
             raise ValueError(
                 "The model tokenizer must be passed to the ReasoningParser "
-                "constructor during construction.")
+                "constructor during construction."
+            )
 
         self.think_start_token_id = self.vocab.get(self.think_start_token)
         self.think_end_token_id = self.vocab.get(self.think_end_token)
-        if (self.think_start_token_id is None
-                or self.think_end_token_id is None):
+        self.assistant_token_id = self.vocab.get(self.assistant_token)
+        if (
+            self.think_start_token_id is None
+            or self.think_end_token_id is None
+            or self.assistant_token_id is None
+        ):
             raise RuntimeError(
                 "Glm4MoeModel reasoning parser could not locate "
-                "think start/end tokens in the tokenizer!")
+                "think start/end or assistant tokens in the tokenizer!"
+            )
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        return self.think_end_token_id in input_ids
+        """
+        GLM's chat template has <think></think> tokens after every
+        <|assistant|> token. Thus, we need to check if </think> is
+        after the most recent <|assistant|> token (if present).
+        """
+        for token_id in input_ids[::-1]:
+            if token_id == self.think_end_token_id:
+                return True
+            elif token_id == self.assistant_token_id:
+                return False
+        return False
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
@@ -54,7 +70,7 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         if self.think_end_token_id not in input_ids[:-1]:
             return []
         else:
-            return input_ids[input_ids.index(self.think_end_token_id) + 1:]
+            return input_ids[input_ids.index(self.think_end_token_id) + 1 :]
 
     def extract_reasoning_content_streaming(
         self,
@@ -74,9 +90,9 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         - 'xyz' goes to content
         """
         # Skip single special tokens
-        if len(delta_token_ids) == 1 and (delta_token_ids[0] in [
-                self.think_start_token_id, self.think_end_token_id
-        ]):
+        if len(delta_token_ids) == 1 and (
+            delta_token_ids[0] in [self.think_start_token_id, self.think_end_token_id]
+        ):
             return None
 
         if self.think_start_token_id in previous_token_ids:
@@ -85,9 +101,11 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
                 # extract reasoning content
                 end_index = delta_text.find(self.think_end_token)
                 reasoning_content = delta_text[:end_index]
-                content = delta_text[end_index + len(self.think_end_token):]
-                return DeltaMessage(reasoning_content=reasoning_content,
-                                    content=content if content else None)
+                content = delta_text[end_index + len(self.think_end_token) :]
+                return DeltaMessage(
+                    reasoning_content=reasoning_content,
+                    content=content if content else None,
+                )
             elif self.think_end_token_id in previous_token_ids:
                 # <think> in previous, </think> in previous,
                 # reasoning content continues
@@ -101,12 +119,14 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
                 # <think> in delta, </think> in delta, extract reasoning content
                 start_index = delta_text.find(self.think_start_token)
                 end_index = delta_text.find(self.think_end_token)
-                reasoning_content = delta_text[start_index +
-                                               len(self.think_start_token
-                                                   ):end_index]
-                content = delta_text[end_index + len(self.think_end_token):]
-                return DeltaMessage(reasoning_content=reasoning_content,
-                                    content=content if content else None)
+                reasoning_content = delta_text[
+                    start_index + len(self.think_start_token) : end_index
+                ]
+                content = delta_text[end_index + len(self.think_end_token) :]
+                return DeltaMessage(
+                    reasoning_content=reasoning_content,
+                    content=content if content else None,
+                )
             else:
                 # <think> in delta, no </think> in delta,
                 # reasoning content continues
@@ -116,7 +136,7 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
             return DeltaMessage(content=delta_text)
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+        self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from the model output.
@@ -130,22 +150,24 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         """
 
         # Check if the model output contains the <think> and </think> tokens.
-        if (self.think_start_token not in model_output
-                or self.think_end_token not in model_output):
+        if (
+            self.think_start_token not in model_output
+            or self.think_end_token not in model_output
+        ):
             return None, model_output
         # Check if the <think> is present in the model output, remove it
         # if it is present.
         model_output_parts = model_output.partition(self.think_start_token)
-        model_output = model_output_parts[2] if model_output_parts[
-            1] else model_output_parts[0]
+        model_output = (
+            model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
+        )
         # Check if the model output contains the </think> tokens.
         # If the end token is not found, return the model output as is.
         if self.think_end_token not in model_output:
             return None, model_output
 
         # Extract reasoning content from the model output.
-        reasoning_content, _, content = model_output.partition(
-            self.think_end_token)
+        reasoning_content, _, content = model_output.partition(self.think_end_token)
 
         final_content = content or None
         return reasoning_content, final_content

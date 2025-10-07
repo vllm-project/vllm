@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import enum
 import os
 import platform
@@ -17,12 +18,14 @@ from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
     from vllm.lora.request import LoRARequest
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils import FlexibleArgumentParser
 else:
+    _Backend = None
     ModelConfig = None
     VllmConfig = None
     LoRARequest = None
@@ -36,37 +39,6 @@ logger = init_logger(__name__)
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(uname()).lower()
-
-
-class _Backend(enum.Enum):
-    FLASH_ATTN = enum.auto()
-    FLASH_ATTN_VLLM_V1 = enum.auto()
-    TRITON_ATTN_VLLM_V1 = enum.auto()
-    XFORMERS = enum.auto()
-    ROCM_FLASH = enum.auto()
-    ROCM_AITER_MLA = enum.auto()  # Supported by V1
-    ROCM_AITER_MLA_VLLM_V1 = enum.auto()
-    ROCM_AITER_FA = enum.auto()  # used for ViT attn backend
-    TORCH_SDPA = enum.auto()
-    TORCH_SDPA_VLLM_V1 = enum.auto()
-    FLASHINFER = enum.auto()
-    FLASHINFER_VLLM_V1 = enum.auto()
-    FLASHINFER_MLA = enum.auto()
-    TRITON_MLA = enum.auto()  # Supported by V1
-    TRITON_MLA_VLLM_V1 = enum.auto()
-    CUTLASS_MLA = enum.auto()
-    FLASHMLA = enum.auto()  # Supported by V1
-    FLASHMLA_VLLM_V1 = enum.auto()
-    FLASH_ATTN_MLA = enum.auto()  # Supported by V1
-    PALLAS = enum.auto()
-    PALLAS_VLLM_V1 = enum.auto()
-    IPEX = enum.auto()
-    DUAL_CHUNK_FLASH_ATTN = enum.auto()
-    DIFFERENTIAL_FLASH_ATTN = enum.auto()
-    NO_ATTENTION = enum.auto()
-    FLEX_ATTENTION = enum.auto()
-    TREE_ATTN = enum.auto()
-    XFORMERS_VLLM_V1 = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
@@ -84,6 +56,7 @@ class CpuArchEnum(enum.Enum):
     ARM = enum.auto()
     POWERPC = enum.auto()
     S390X = enum.auto()
+    RISCV = enum.auto()
     OTHER = enum.auto()
     UNKNOWN = enum.auto()
 
@@ -183,8 +156,10 @@ class Platform:
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
         # a CPU-only placement group located on a GPU node.
-        if cls.device_control_env_var in os.environ and os.environ[
-                cls.device_control_env_var] != "":
+        if (
+            cls.device_control_env_var in os.environ
+            and os.environ[cls.device_control_env_var] != ""
+        ):
             device_ids = os.environ[cls.device_control_env_var].split(",")
             physical_device_id = device_ids[device_id]
             return int(physical_device_id)
@@ -192,15 +167,41 @@ class Platform:
             return device_id
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int,
-                             dtype: torch.dtype) -> _Backend:
+    def import_core_kernels(cls) -> None:
+        """Import any platform-specific C kernels."""
+        try:
+            import vllm._C  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._C: %r", e)
+
+    @classmethod
+    def try_import_moe_kernels(cls) -> bool:
+        """Import any platform-specific MoE kernels."""
+        with contextlib.suppress(ImportError):
+            import vllm._moe_C  # noqa: F401
+
+            return True
+        return False
+
+    @classmethod
+    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
+        from vllm.attention.backends.registry import _Backend
+
         return _Backend.TORCH_SDPA
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
-                             dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool, use_mla: bool,
-                             has_sink: bool) -> str:
+    def get_attn_backend_cls(
+        cls,
+        selected_backend: "_Backend",
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: Optional[str],
+        block_size: int,
+        use_v1: bool,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+    ) -> str:
         """Get the attention backend class of a device."""
         return ""
 
@@ -276,13 +277,6 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        """
-        Check if the current platform supports async output.
-        """
-        raise NotImplementedError
-
-    @classmethod
     def inference_mode(cls):
         """A device-specific wrapper of `torch.inference_mode`.
 
@@ -313,9 +307,9 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
-    def pre_register_and_update(cls,
-                                parser: Optional[FlexibleArgumentParser] = None
-                                ) -> None:
+    def pre_register_and_update(
+        cls, parser: Optional[FlexibleArgumentParser] = None
+    ) -> None:
         """
         Do some pre-registration or update action for the current platform.
 
@@ -358,11 +352,10 @@ class Platform:
         """
         Verify whether the quantization is supported by the current platform.
         """
-        if cls.supported_quantization and \
-            quant not in cls.supported_quantization:
+        if cls.supported_quantization and quant not in cls.supported_quantization:
             raise ValueError(
-                f"{quant} quantization is currently not supported in "
-                f"{cls.device_name}.")
+                f"{quant} quantization is currently not supported in {cls.device_name}."
+            )
 
     @classmethod
     def get_cpu_architecture(cls) -> CpuArchEnum:
@@ -380,6 +373,8 @@ class Platform:
             return CpuArchEnum.POWERPC
         elif machine == "s390x":
             return CpuArchEnum.S390X
+        elif machine.startswith("riscv"):
+            return CpuArchEnum.RISCV
 
         return CpuArchEnum.OTHER if machine else CpuArchEnum.UNKNOWN
 
@@ -389,15 +384,17 @@ class Platform:
         if in_wsl():
             # Pinning memory in WSL is not supported.
             # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-            logger.warning("Using 'pin_memory=False' as WSL is detected. "
-                           "This may slow down the performance.")
+            logger.warning(
+                "Using 'pin_memory=False' as WSL is detected. "
+                "This may slow down the performance."
+            )
             return False
         return True
 
     @classmethod
-    def get_current_memory_usage(cls,
-                                 device: Optional[torch.types.Device] = None
-                                 ) -> float:
+    def get_current_memory_usage(
+        cls, device: Optional[torch.types.Device] = None
+    ) -> float:
         """
         Return the memory usage in bytes.
         """
@@ -484,23 +481,10 @@ class Platform:
         from vllm.config import get_current_vllm_config
 
         parallel_config = get_current_vllm_config().parallel_config
-        return (envs.VLLM_USE_V1
-                or parallel_config.distributed_executor_backend
-                == "external_launcher")
-
-    @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        """Returns whether the current platform can support v1 for the supplied
-        model configuration.
-        """
-        return False
-
-    @classmethod
-    def default_v1(cls, model_config: ModelConfig) -> bool:
-        """
-        Returns whether the current platform supports v1 by default.
-        """
-        return cls.supports_v1(model_config)
+        return (
+            envs.VLLM_USE_V1
+            or parallel_config.distributed_executor_backend == "external_launcher"
+        )
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
@@ -531,8 +515,11 @@ class Platform:
         if device is not None and hasattr(device, key):
             return getattr(device, key)
         else:
-            logger.warning("Current platform %s does not have '%s'" \
-            " attribute.", self.device_type, key)
+            logger.warning(
+                "Current platform %s does not have '%s' attribute.",
+                self.device_type,
+                key,
+            )
             return None
 
     def get_global_graph_pool(self) -> Any:
@@ -573,8 +560,9 @@ class Platform:
         raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
-                                    model_config: "ModelConfig") -> bool:
+    def is_kv_cache_dtype_supported(
+        cls, kv_cache_dtype: str, model_config: "ModelConfig"
+    ) -> bool:
         """
         Returns if the kv_cache_dtype is supported by the current platform.
         """
@@ -593,6 +581,51 @@ class Platform:
         Returns if the hybrid kv cache is supported by the current platform.
         """
         return False
+
+    @classmethod
+    def support_static_graph_mode(cls) -> bool:
+        """
+        Returns if the graph mode is supported by the current platform.
+        """
+        return False
+
+    @classmethod
+    def use_sync_weight_loader(cls) -> bool:
+        """
+        Returns if the current platform needs to sync weight loader.
+        """
+        return False
+
+    @classmethod
+    def make_synced_weight_loader(cls, original_weight_loader):
+        """
+        Wrap the original weight loader to make it synced.
+        """
+        if not cls.use_sync_weight_loader():
+            return original_weight_loader
+
+        def _synced_weight_loader(param, *args, **kwargs):
+            out = original_weight_loader(param, *args, **kwargs)
+            if param.device != torch.device("cpu"):
+                torch._sync(param)
+            return out
+
+        return _synced_weight_loader
+
+    @classmethod
+    def get_nixl_supported_devices(cls) -> dict[str, tuple[str, ...]]:
+        """
+        Returns a mapping from device_type to a tuple of supported
+        kv_buffer_device for nixl.
+        """
+        return {}
+
+    @classmethod
+    def get_nixl_memory_type(cls) -> Optional[str]:
+        """
+        Returns the nixl memory type for the current platform.
+        """
+        return None
 
 
 class UnspecifiedPlatform(Platform):

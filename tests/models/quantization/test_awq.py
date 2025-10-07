@@ -11,12 +11,12 @@ from vllm.multimodal.image import rescale_image_size
 from ...conftest import IMAGE_ASSETS, ImageTestAssets, VllmRunner
 from ..utils import check_logprobs_close
 
-HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign":
-    "<|im_start|>User\n<image>\nWhat's the content in the center of the image?<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
-    "cherry_blossom":
-    "<|im_start|>User\n<image>\nWhat is the season?<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
-})
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
+    {
+        "stop_sign": "<|im_start|>User\n<image>\nWhat's the content in the center of the image?<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
+        "cherry_blossom": "<|im_start|>User\n<image>\nWhat is the season?<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
+    }
+)
 
 
 def run_awq_test(
@@ -34,10 +34,13 @@ def run_awq_test(
 ):
     images = [asset.pil_image for asset in image_assets]
 
-    inputs_per_image = [(
-        [prompt for _ in size_factors],
-        [rescale_image_size(image, factor) for factor in size_factors],
-    ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    inputs_per_image = [
+        (
+            [prompt for _ in size_factors],
+            [rescale_image_size(image, factor) for factor in size_factors],
+        )
+        for image, prompt in zip(images, HF_IMAGE_PROMPTS)
+    ]
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
@@ -45,37 +48,42 @@ def run_awq_test(
     # will hurt multiprocessing backend with fork method (the default method).
 
     # max_model_len should be greater than image_feature_size
-    with vllm_runner(source_model,
-                     max_model_len=4096,
-                     dtype=dtype,
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True) as vllm_model:
+    with vllm_runner(
+        source_model,
+        max_model_len=4096,
+        dtype=dtype,
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend=distributed_executor_backend,
+        enforce_eager=True,
+        default_torch_num_threads=1,
+    ) as vllm_model:
         source_outputs_per_image = [
-            vllm_model.generate_greedy_logprobs(prompts,
-                                                max_tokens,
-                                                num_logprobs=num_logprobs,
-                                                images=images)
+            vllm_model.generate_greedy_logprobs(
+                prompts, max_tokens, num_logprobs=num_logprobs, images=images
+            )
             for prompts, images in inputs_per_image
         ]
 
-    with vllm_runner(quant_model,
-                     quantization="awq",
-                     max_model_len=4096,
-                     dtype=dtype,
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     enforce_eager=True) as vllm_model:
+    with vllm_runner(
+        quant_model,
+        quantization="awq",
+        max_model_len=4096,
+        dtype=dtype,
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend=distributed_executor_backend,
+        enforce_eager=True,
+        default_torch_num_threads=1,
+    ) as vllm_model:
         quant_outputs_per_image = [
-            vllm_model.generate_greedy_logprobs(prompts,
-                                                max_tokens,
-                                                num_logprobs=num_logprobs,
-                                                images=images)
+            vllm_model.generate_greedy_logprobs(
+                prompts, max_tokens, num_logprobs=num_logprobs, images=images
+            )
             for prompts, images in inputs_per_image
         ]
 
-    for source_outputs, quant_outputs in zip(source_outputs_per_image,
-                                             quant_outputs_per_image):
+    for source_outputs, quant_outputs in zip(
+        source_outputs_per_image, quant_outputs_per_image
+    ):
         # TODO: Check whether using original CLIPVisionModel can improve
         # consistency against HF
         check_logprobs_close(
@@ -107,13 +115,16 @@ def run_awq_test(
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @torch.inference_mode()
-def test_awq_models(vllm_runner, image_assets, source_model, quant_model,
-                    size_factors, dtype, max_tokens, num_logprobs,
-                    monkeypatch) -> None:
-
-    # Test V1: this test hangs during setup on single-scale input.
-    # TODO: fixure out why and re-enable this on V1.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
+def test_awq_models(
+    vllm_runner,
+    image_assets,
+    source_model,
+    quant_model,
+    size_factors,
+    dtype,
+    max_tokens,
+    num_logprobs,
+) -> None:
     run_awq_test(
         vllm_runner,
         image_assets,
