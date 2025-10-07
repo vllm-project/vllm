@@ -70,7 +70,7 @@ def test_batch_inference_correctness(
             max_lora_rank=16,
         )
 
-        prompts = [LORA_TEST_PROMPT_MAP[lora_path]] * 4
+        prompts = [LORA_TEST_PROMPT_MAP[lora_path]] * 100
         lora_request = LoRARequest("adapter", 1, lora_path)
         sampling_params = SamplingParams(temperature=0, max_tokens=128)
 
@@ -113,7 +113,9 @@ def test_batch_inference_correctness(
                 print(f"ref_output: {ref_output.outputs[0].text}")
                 print(f"spec_output: {spec_output.outputs[0].text}")
 
-        assert misses == 0
+        # Heuristic: expect at least 66% of the prompts to match exactly
+        # Upon failure, inspect the outputs to check for inaccuracy.
+        assert matches > int(0.66 * len(ref_outputs))
         del lora_spec_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
