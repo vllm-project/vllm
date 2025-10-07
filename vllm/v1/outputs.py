@@ -86,8 +86,7 @@ class KVConnectorOutput:
     finished_recving: set[str] | None = None
     kv_connector_stats: KVConnectorStats | None = None
     # IDs of externally computed KV blocks that failed to load.
-    # Requests referencing these blocks should be rescheduled to recompute them
-    # or aborted, depending on kv_load_retry_policy.
+    # Requests referencing these blocks should be rescheduled to recompute them.
     invalid_block_ids: set[int] = field(default_factory=set)
 
     def is_empty(self):
