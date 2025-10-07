@@ -58,7 +58,7 @@ class TorchCompileWrapperWithCustomDispatcher:
         # subclasses can use this to switch between the custom dispatcher
         # and the default Dynamo guard mechanism.
         self.use_custom_dispatcher: bool = (
-            compilation_level >= CompilationMode.DYNAMO_ONCE
+            compilation_level >= CompilationMode.DYNAMO_TRACE_ONCE
         )
 
     def __call__(self, *args, **kwargs):

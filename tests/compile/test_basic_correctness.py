@@ -143,7 +143,7 @@ def test_compile_correctness(
         for level in [
             CompilationMode.NO_COMPILATION,
             CompilationMode.STOCK_TORCH_COMPILE,
-            CompilationMode.DYNAMO_ONCE,
+            CompilationMode.DYNAMO_TRACE_ONCE,
         ]:
             all_args.append(final_args + [f"-O{level}"])
             all_envs.append({})
