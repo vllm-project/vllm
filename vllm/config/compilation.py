@@ -8,7 +8,7 @@ from dataclasses import asdict, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
 
-from pydantic import Field, TypeAdapter, field_validator
+from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
@@ -340,7 +340,7 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    max_cudagraph_capture_size: int = Field(None, gt=0)  # type: ignore
+    max_cudagraph_capture_size: int = None  # type: ignore
     """The maximum cudagraph capture size.
     
     If cudagraph_capture_sizes is specified, this will be set to the largest 

@@ -652,6 +652,9 @@ class VllmConfig:
                 max_cudagraph_capture_size = min(
                     self.scheduler_config.max_num_seqs * 2, 512
                 )
+            assert max_cudagraph_capture_size >= 1, (
+                "Maximum cudagraph size should be greater than or equal to 1."
+            )
             batch_size_capture_list = [
                 i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
             ]
