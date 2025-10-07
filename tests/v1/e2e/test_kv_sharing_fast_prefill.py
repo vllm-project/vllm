@@ -81,8 +81,6 @@ def test_kv_sharing_fast_prefill(
     )
 
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-
         # Make scheduling deterministic for reproducibility
         m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 

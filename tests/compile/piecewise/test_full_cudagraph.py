@@ -66,7 +66,6 @@ def llm_pair(request):
             pytest.skip("Only Blackwell GPUs support Cutlass MLA")
 
     env_vars = {
-        "VLLM_USE_V1": "1",
         # Force native sampler to avoid potential nondeterminism in FlashInfer
         # when per-request generators are not used in V1.
         "VLLM_USE_FLASHINFER_SAMPLER": "0",
@@ -161,7 +160,6 @@ def test_full_cudagraph_with_invalid_backend():
     with (
         temporary_environ(
             {
-                "VLLM_USE_V1": "1",
                 "VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION",
                 # Flex_Attention is not supported with full cuda graph
             }

@@ -303,7 +303,6 @@ def test_attention_quant_pattern(
     model_class: type[AttentionQuantPatternModel],
     backend: _Backend,
     use_inductor_graph_partition: bool,
-    monkeypatch,
     dist_init,
     caplog_vllm,
 ):
@@ -311,8 +310,6 @@ def test_attention_quant_pattern(
 
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
-
-    monkeypatch.setenv("VLLM_USE_V1", "1")
 
     device = torch.device("cuda:0")
     torch.manual_seed(42)

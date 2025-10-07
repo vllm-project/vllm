@@ -37,21 +37,8 @@ BADREQUEST_CASES = [
 ]
 
 
-@pytest.fixture(scope="module")
-def monkeypatch_module():
-    from _pytest.monkeypatch import MonkeyPatch
-
-    mpatch = MonkeyPatch()
-    yield mpatch
-    mpatch.undo()
-
-
 @pytest.fixture(scope="module", params=[True])
-def server_with_lora_modules_json(request, monkeypatch_module, zephyr_lora_files):
-    use_v1 = request.param
-    assert use_v1
-    monkeypatch_module.setenv("VLLM_USE_V1", "1")
-
+def server_with_lora_modules_json(request, zephyr_lora_files):
     # Define the json format LoRA module configurations
     lora_module_1 = {
         "name": "zephyr-lora",

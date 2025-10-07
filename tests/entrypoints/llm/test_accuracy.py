@@ -61,50 +61,34 @@ def run_test(model_name, more_args=None):
 TPU_TP_TEST_STR = ""  # "tensor_parallel_size=4"
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda() and not current_platform.is_tpu(),
-    reason="V1 is currently only supported on CUDA and TPU",
-)
 @pytest.mark.parametrize("model", MODEL_NAMES)
-def test_lm_eval_accuracy_v1_engine(model, monkeypatch: pytest.MonkeyPatch):
+def test_lm_eval_accuracy_v1_engine(model):
     """Run with the V1 Engine."""
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
+    more_args = None
+    if current_platform.is_tpu():
+        # Limit compilation time for TPU V1
 
-        more_args = None
-        if current_platform.is_tpu():
-            # Limit compilation time for TPU V1
+        more_args = "max_model_len=2048,max_num_seqs=64"
 
-            more_args = "max_model_len=2048,max_num_seqs=64"
+        # Add TP test (if provided)
+        if TPU_TP_TEST_STR:
+            more_args += ",{}".format(TPU_TP_TEST_STR)
 
-            # Add TP test (if provided)
-            if TPU_TP_TEST_STR:
-                more_args += ",{}".format(TPU_TP_TEST_STR)
-
-        run_test(model, more_args)
+    run_test(model, more_args)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda() and not current_platform.is_tpu(),
-    reason="V1 is currently only supported on CUDA and TPU",
-)
 @pytest.mark.parametrize("model", FP8_KV_MODEL_NAMES)
-def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(
-    model, monkeypatch: pytest.MonkeyPatch
-):
+def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(model):
     """Run with the V1 Engine."""
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
+    more_args = None
+    if current_platform.is_tpu():
+        # Limit compilation time for TPU V1
+        more_args = "max_model_len=2048,max_num_seqs=128,kv_cache_dtype=fp8"
 
-        more_args = None
-        if current_platform.is_tpu():
-            # Limit compilation time for TPU V1
-            more_args = "max_model_len=2048,max_num_seqs=128,kv_cache_dtype=fp8"
+        # Add TP test (if provided)
+        if TPU_TP_TEST_STR:
+            more_args += ",{}".format(TPU_TP_TEST_STR)
 
-            # Add TP test (if provided)
-            if TPU_TP_TEST_STR:
-                more_args += ",{}".format(TPU_TP_TEST_STR)
-
-        run_test(model, more_args)
+    run_test(model, more_args)

@@ -8,7 +8,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
-from vllm import envs
 
 
 class DummyPlatform(Platform):
@@ -19,10 +18,7 @@ class DummyPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        if envs.VLLM_USE_V1:
-            compilation_config = vllm_config.compilation_config
-            # Activate custom ops for v1.
-            compilation_config.custom_ops = ["all"]
+        vllm_config.compilation_config.custom_ops = ["all"]
 
     def get_attn_backend_cls(
         self,
