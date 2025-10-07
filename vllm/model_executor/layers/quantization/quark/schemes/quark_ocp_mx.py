@@ -1,21 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import cache
-from typing import Any, Callable, Optional
+from fractions import Fraction
+from functools import cache, partial
+from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn.functional as F
 
 from vllm import envs
-from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    OCP_MX_BLOCK_SIZE,
     dequant_mxfp4,
     quant_dequant_mxfp4,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
+    dequant_mxfp6,
+    quant_dequant_mxfp6,
+)
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    OCP_MX_BLOCK_SIZE,
+    OCP_MX_Scheme,
+)
 from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMParameter
 from vllm.platforms import current_platform
+
+from .quark_scheme import QuarkScheme
+
+logger = init_logger(__name__)
 
 
 @cache
@@ -96,14 +108,11 @@ try:
         fake_impl=gemm_with_dynamic_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
-
 except (ImportError, AttributeError):
     dynamic_mxfp4_quant = gemm_afp4wfp4 = None
 
-__all__ = ["QuarkW4A4MXFP4"]
 
-
-class QuarkW4A4MXFP4(QuarkScheme):
+class QuarkOCP_MX(QuarkScheme):
     def __init__(
         self, weight_quant_spec: dict[str, Any], input_quant_spec: dict[str, Any]
     ):
@@ -111,14 +120,86 @@ class QuarkW4A4MXFP4(QuarkScheme):
         self.qscheme = "per_group"
         self.weight_quant_spec = weight_quant_spec
         self.input_quant_spec = input_quant_spec
-        self.emulate = not current_platform.supports_mx()
+
+        self.weight_dtype = weight_quant_spec["dtype"].replace("fp", "mxfp")
+        self.input_dtype = input_quant_spec["dtype"].replace("fp", "mxfp")
+
+        self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
+            self.input_dtype, self.weight_dtype
+        )
+
+        if self.weight_dtype == "mxfp4":
+            self.packed_factor: Union[int, Fraction] = 2
+            self.dequant_func = dequant_mxfp4
+        else:
+            self.packed_factor = Fraction(numerator=8, denominator=6)
+            self.dequant_func = partial(
+                dequant_mxfp6, quant_dtype=self.weight_dtype.replace("mx", "")
+            )
+
+        if self.input_dtype == "mxfp4":
+            self.quant_dequant_func = quant_dequant_mxfp4
+        else:
+            self.quant_dequant_func = partial(
+                quant_dequant_mxfp6, quant_dtype=self.input_dtype.replace("mx", "")
+            )
+
+        self.static_input_scales = not input_quant_spec.get("is_dynamic")
+
+        if self.static_input_scales:
+            raise NotImplementedError(
+                "QuarkOCP_MX with static input scales is currently not "
+                "implemented. Please open an issue."
+            )
+
+        # TODO: integrate (or test) mixed-precision kernel.
+        self.emulate = not current_platform.supports_mx() or (
+            self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
+        )
+
         self.rocm_use_aiter_fp4_asm_gemm = is_rocm_aiter_fp4_asm_gemm_enabled()
+
         if not self.emulate and (dynamic_mxfp4_quant is None or gemm_afp4wfp4 is None):
             # Currently need these kernels if not emulating
             raise NotImplementedError(
                 f"{self.__class__.__name__} requires AITER to be installed "
                 "for non-emulation mode! Please refer to "
                 "https://github.com/ROCm/aiter for installation details."
+            )
+
+        if not current_platform.supports_mx():
+            logger.warning_once(
+                "The current platform does not support native MXFP4/MXFP6 "
+                "computation. Simulated weight dequantization and activation "
+                "QDQ (quantize and dequantize) will be used, with the linear "
+                "layers computed in high precision."
+            )
+
+        if current_platform.supports_mx() and (
+            self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
+        ):
+            logger.warning_once(
+                "The current platform supports native MXFP4/MXFP6 "
+                f"computation, but kernels for input_dtype={self.input_dtype} "
+                f"and weight_dtype={self.weight_dtype} are not yet integrated "
+                "in vLLM. Simulated weight dequantization and activation "
+                "QDQ (quantize and dequantize) will be used, with the linear "
+                "layers computed in high precision."
+            )
+
+    def get_packed_dim(self, dim: int, quant_dtype: str):
+        if quant_dtype == "mxfp4":
+            assert dim % 2 == 0
+            return dim // 2
+        elif quant_dtype in {"mxfp6_e3m2", "mxfp6_e2m3"}:
+            # FP6 packs 4 * 6 = 24 bits on 3 bytes.
+            assert (dim * 3) % 4 == 0
+            return (dim * 3) // 4
+        else:
+            raise NotImplementedError(
+                "Unsupported quant_dtype in QuarkOCP_MX.get_packed_dim, "
+                f"got quant_dtype={quant_dtype}. Something is wrong, please "
+                "open an issue."
             )
 
     @classmethod
@@ -132,37 +213,6 @@ class QuarkW4A4MXFP4(QuarkScheme):
             layer.weight_scale = torch.nn.Parameter(
                 layer.weight_scale.data, requires_grad=False
             )
-            try:
-                from quark.torch.export.nn.modules import realquantizer
-                from quark.torch.quantization.config.config import QuantizationSpec
-            except ImportError as err:
-                raise ImportError(
-                    "The package `amd-quark` is required to use AMD Quark "
-                    "MX-FP4 models. Please install it with `pip install "
-                    "amd-quark`."
-                ) from err
-
-            weight_quant_spec = QuantizationSpec.from_dict(self.weight_quant_spec)
-
-            weight_quantizer = realquantizer.get_real_quantizer(
-                qspec=weight_quant_spec,
-                quantizer=None,
-                real_quantized=True,
-                reorder=False,
-                float_dtype=self.out_dtype,
-                scale_shape=layer.weight_scale.shape,
-                zero_point_shape=None,
-            )
-            weight_quantizer.scale.data = layer.weight_scale.data
-
-            layer.weight = torch.nn.Parameter(
-                weight_quantizer(layer.weight.data).to(self.out_dtype),
-                requires_grad=False,
-            )
-            layer.weight_scale = None
-
-            # This call is necessary to release the scales memory.
-            torch.cuda.empty_cache()
         else:
             if self.rocm_use_aiter_fp4_asm_gemm:
                 # shuffle weight scale
@@ -204,13 +254,13 @@ class QuarkW4A4MXFP4(QuarkScheme):
         weight = PackedvLLMParameter(
             data=torch.empty(
                 output_size_per_partition,
-                input_size_per_partition // 2,
+                self.get_packed_dim(input_size_per_partition, self.weight_dtype),
                 dtype=torch.uint8,
             ),
             input_dim=1,
             output_dim=0,
             packed_dim=1,
-            packed_factor=2,
+            packed_factor=self.packed_factor,
             weight_loader=weight_loader,
         )
         layer.register_parameter("weight", weight)
@@ -235,9 +285,9 @@ class QuarkW4A4MXFP4(QuarkScheme):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.emulate:
-            dq_w = dequant_mxfp4(layer.weight, layer.weight_scale, x.dtype)
-            x = quant_dequant_mxfp4(x)
-            return F.linear(x, dq_w, bias)
+            dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
+            qdq_x = self.quant_dequant_func(x)
+            return F.linear(qdq_x, dq_w, bias)
         else:
             return torch.ops.vllm.gemm_with_dynamic_quant(
                 x,
