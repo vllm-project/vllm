@@ -141,29 +141,34 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_prompt_throughput = prompt_throughput
 
         # Format and print output.
-        log_fn(
-            "Engine %03d: "
-            "Avg prompt throughput: %.1f tokens/s, "
-            "Avg generation throughput: %.1f tokens/s, "
-            "Running: %d reqs, Waiting: %d reqs, "
-            "GPU KV cache usage: %.1f%%, "
+        log_parts = [
+            "Avg prompt throughput: %.1f tokens/s",
+            "Avg generation throughput: %.1f tokens/s",
+            "Running: %d reqs",
+            "Waiting: %d reqs",
+            "GPU KV cache usage: %.1f%%",
             "Prefix cache hit rate: %.1f%%",
-            self.engine_index,
+        ]
+        log_args = [
             prompt_throughput,
             generation_throughput,
             scheduler_stats.num_running_reqs,
             scheduler_stats.num_waiting_reqs,
             scheduler_stats.kv_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
+        ]
+        if self.last_mm_cache_stats:
+            log_parts.append("MM cache hit rate: %.1f%%")
+            log_args.append(self.mm_caching_metrics.hit_rate * 100)
+
+        log_fn(
+            "Engine %03d: " + ", ".join(log_parts),
+            self.engine_index,
+            *log_args,
         )
+
         self.spec_decoding_logging.log(log_fn=log_fn)
         self.kv_connector_logging.log(log_fn=log_fn)
-
-        if self.last_mm_cache_stats:
-            log_fn(
-                "MM cache hit rate: %.1f%%",
-                self.mm_caching_metrics.hit_rate * 100,
-            )
 
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:
