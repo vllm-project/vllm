@@ -1484,8 +1484,10 @@ class Scheduler(SchedulerInterface):
         total_tokens_to_reschedule += num_tokens_to_reschedule
 
         # Mark requests with async KV load failures; they will be rescheduled
-        # once loading completes
+        # once loading completes. Also mark them as finished so they can
+        # transition back to WAITING status.
         self.failed_recving_kv_req_ids |= async_affected_req_ids
+        self.finished_recving_kv_req_ids |= async_affected_req_ids
 
         # --- Handle sync KV loads (running requests) ---
         sync_affected_req_ids, num_tokens_to_reschedule = (
