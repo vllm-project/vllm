@@ -46,8 +46,7 @@ class RequestLogger:
         )
 
         logger.info(
-            "Received request %s: params: %s, "
-            "lora_request: %s ",
+            "Received request %s: params: %s, lora_request: %s ",
             "cache_hit_threshold: %s.",
             request_id,
             params,

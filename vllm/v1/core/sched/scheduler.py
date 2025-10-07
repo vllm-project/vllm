@@ -428,10 +428,11 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
                     # Cache hit threshold in request overrides global setting
+                    scheduler_config = self.vllm_config.scheduler_config
                     cache_hit_threshold = (
                         request.cache_hit_threshold
                         if request.cache_hit_threshold is not None
-                        else self.vllm_config.scheduler_config.global_cache_hit_threshold  # noqa: E501
+                        else scheduler_config.global_cache_hit_threshold
                     )
 
                     # Check if cache hit is above threshold

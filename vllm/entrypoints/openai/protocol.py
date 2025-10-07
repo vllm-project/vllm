@@ -1308,7 +1308,7 @@ class CompletionRequest(OpenAIBaseModel):
         default=None,
         description="Minimum required KV-cache hit ratio to process the request.",
     )
-    
+
     vllm_xargs: dict[str, str | int | float] | None = Field(
         default=None,
         description=(

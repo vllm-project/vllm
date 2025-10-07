@@ -1279,7 +1279,7 @@ def test_cache_hit_threshold(
     # number of blocks hit in external cache per request
     request_external_hit_blocks: list[int],
     # optional cache_hit_threshold for each request
-    request_thresholds: list[Optional[float]],
+    request_thresholds: list[float | None],
     # bool per request indicating if it is expected to be scheduled
     request_expected_scehduled: list[bool],
 ):
@@ -1326,7 +1326,7 @@ def test_cache_hit_threshold(
 
 def _create_and_schedule_requests(
     request_num_tokens: list[int],
-    request_thresholds: list[Optional[float]],
+    request_thresholds: list[float | None],
     scheduler: Scheduler,
 ):
     num_requests = len(request_num_tokens)
@@ -1373,7 +1373,7 @@ def _insert_to_local_cache(request_local_hit_blocks, scheduler: Scheduler):
     scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
 
     # set threshold to 0.0 to ensure all are scheduled
-    zero_thresholds: list[Optional[float]] = [0.0] * num_total_requests
+    zero_thresholds: list[float | None] = [0.0] * num_total_requests
 
     # Only requests with local hits should run and populate the cache
     # We create all requests to make sure the correct tokens are cached
