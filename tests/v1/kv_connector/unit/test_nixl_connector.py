@@ -817,6 +817,13 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", str(timeout))
 
+    def run_test_and_cleanup():
+        llm = LLM(**llm_kwargs)
+        try:
+            _run_abort_timeout_test(llm, timeout)
+        finally:
+            llm.llm_engine.engine_core.shutdown()
+
     # Build runtime_env only if we're using Ray
     if distributed_executor_backend == "ray":
         with _make_fake_nixl_pkg() as working_dir:
@@ -829,15 +836,16 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
                 },
             }
             ray.init(runtime_env=runtime_env)
-
-            _run_abort_timeout_test(llm_kwargs, timeout)
+            try:
+                run_test_and_cleanup()
+            finally:
+                ray.shutdown()
     else:
-        _run_abort_timeout_test(llm_kwargs, timeout)
+        run_test_and_cleanup()
 
 
-def _run_abort_timeout_test(llm_kwargs: dict, timeout: int):
+def _run_abort_timeout_test(llm: LLM, timeout: int):
     """Helper function to run the abort timeout test logic."""
-    llm = LLM(**llm_kwargs)
     remote_prefill_opts = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
@@ -905,6 +913,13 @@ def test_abort_after_finish_on_prefiller(monkeypatch, distributed_executor_backe
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", str(timeout))
 
+    def run_test_and_cleanup():
+        llm = LLM(**llm_kwargs)
+        try:
+            _run_abort_timeout_test(llm, timeout)
+        finally:
+            llm.llm_engine.engine_core.shutdown()
+
     # Build runtime_env only if we're using Ray
     if distributed_executor_backend == "ray":
         with _make_fake_nixl_pkg() as working_dir:
@@ -917,15 +932,16 @@ def test_abort_after_finish_on_prefiller(monkeypatch, distributed_executor_backe
                 },
             }
             ray.init(runtime_env=runtime_env)
-
-            _run_abort_after_finish_test(llm_kwargs, timeout)
+            try:
+                run_test_and_cleanup()
+            finally:
+                ray.shutdown()
     else:
-        _run_abort_after_finish_test(llm_kwargs, timeout)
+        run_test_and_cleanup()
 
 
-def _run_abort_after_finish_test(llm_kwargs: dict, timeout: int):
+def _run_abort_after_finish_test(llm: LLM, timeout: int):
     """Helper function to run the abort after finish test."""
-    llm = LLM(**llm_kwargs)
     remote_prefill_opts = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
