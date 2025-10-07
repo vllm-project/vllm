@@ -621,13 +621,16 @@ class GLM4VForCausalLM(
 
     @classmethod
     def get_mrope_input_positions(
-        self,
+        cls,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
         image_grid_thw: Union[list[list[int]], torch.Tensor],
         video_grid_thw: Union[list[list[int]], torch.Tensor],
         context_len: int = 0,
         seq_len: Optional[int] = None,
+        second_per_grid_ts: Optional[list[float]] = None,
+        audio_feature_lengths: Optional[torch.Tensor] = None,
+        use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
         """Get mrope input positions and delta value for GLM4V."""
 
