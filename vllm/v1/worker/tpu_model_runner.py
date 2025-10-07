@@ -1210,7 +1210,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Append sampled tokens
             for i, req_state, seq_len in request_seq_lens:
                 token_id = valid_sampled_token_ids[i][0]
-                self.input_batch.token_ids_cpu[i, seq_len] = token_id
+                # Sampled token IDs might exceed the max model length by 1. This is
+                # legitimate as we can still sample 1 last token when the context
+                # length equals the max model length. Note that we do not need to
+                # cache this token ID as the sequence finishes after this step. The
+                # buffer token_ids_cpu is of size max model length only.
+                if seq_len < self.max_model_len:
+                    self.input_batch.token_ids_cpu[i, seq_len] = token_id
                 req_state.output_token_ids.append(token_id)
                 self.input_batch.num_tokens[i] += 1
 
@@ -1222,9 +1228,18 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ]
             self.input_batch.num_tokens[:num_reqs] += gen_lens
             for i, req_state, seq_len in request_seq_lens:
-                target_slice = slice(seq_len - gen_lens[i] + 1, seq_len + 1)
+                # Sampled token IDs might exceed the max model length by 1. This is
+                # legitimate as we can still sample 1 last token when the context
+                # length equals the max model length. Note that we do not need to
+                # cache this token ID as the sequence finishes after this step. The
+                # buffer token_ids_cpu is of size max model length only.
+                start_idx = seq_len - gen_lens[i] + 1
+                n_tokens_cache = gen_lens[i]
+                if seq_len >= self.max_model_len:
+                    n_tokens_cache -= 1
+                target_slice = slice(start_idx, (start_idx + n_tokens_cache))
                 self.input_batch.token_ids_cpu[i, target_slice] = (
-                    valid_sampled_token_ids[i]
+                    valid_sampled_token_ids[i][:n_tokens_cache]
                 )
                 req_state.output_token_ids.extend(valid_sampled_token_ids[i])
 
