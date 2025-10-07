@@ -8,13 +8,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import torch
-import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.v1.worker.ubatch_utils import UBatchSlices, is_second_ubatch_empty
+from vllm.v1.worker.ubatch_utils import UBatchSlices
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -88,128 +86,21 @@ class DPMetadata:
     local_sizes: Optional[list[int]] = None
 
     @staticmethod
-    def num_tokens_across_dp(
-        num_tokens: int, dp_size: int, dp_rank: int
-    ) -> torch.Tensor:
-        """
-        Gather the num_tokens across all DP ranks and return results in a
-        CPU tensor of size dp_size.
-        """
-        from vllm.distributed.parallel_state import get_dp_group
-
-        device = current_platform.device_type
-        group = get_dp_group().device_group
-
-        # Transfering this tensor from GPU to CPU will introduce a GPU sync
-        # point that could adversely affect performance of vllm with asynch
-        # scheduling. This environment variable exists to quickly disable
-        # this optimization if we run into this case.
-        if envs.VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION:
-            logger.info_once(
-                "Using CPU all reduce to syncronize DP padding between ranks."
-            )
-            device = "cpu"
-            group = get_dp_group().cpu_group
-        num_tokens_across_dp = [0] * dp_size
-        num_tokens_across_dp[dp_rank] = num_tokens
-        num_tokens_tensor = torch.tensor(
-            num_tokens_across_dp, device=device, dtype=torch.int32
-        )
-        dist.all_reduce(num_tokens_tensor, group=group)
-        return num_tokens_tensor.cpu()
-
-    # Get the cumulative tokens across sequence parallel ranks.
-    # In this case the input to the MoEs will be distributed w.r.t both
-    # DP and TP rank.
-    # When sp_size==1, this is just the cummulative num tokens across DP.
-    def cu_tokens_across_sp(self, sp_size: int) -> torch.Tensor:
-        num_tokens_across_sp_cpu = (
-            self.num_tokens_across_dp_cpu - 1 + sp_size
-        ) // sp_size
-        num_tokens_across_sp_cpu = num_tokens_across_sp_cpu.repeat_interleave(sp_size)
-        return torch.cumsum(num_tokens_across_sp_cpu, dim=0)
-
-    @staticmethod
-    def should_ubatch_across_dp(
-        should_ubatch: bool,
-        orig_num_tokens_per_ubatch: int,
-        padded_num_tokens_per_ubatch: int,
-        dp_size: int,
-        dp_rank: int,
-    ) -> tuple[bool, Optional[torch.Tensor]]:
-        """
-        1. Decides if each DP rank is going to microbatch. Either all ranks
-        run with microbatching or none of them do. If this function decides
-        not to run with microbatching. It will "abort" meaning that no padding
-        information will be returned to the caller. It will return (False, None)
-
-        2. Determines the total number of tokens that each rank will run.
-        All ranks will be padded out so that the run with the same number
-        of tokens
-
-        Returns: tuple[
-            should_ubatch: Are all DP ranks going to microbatch
-            num_tokens_after_padding: A tensor containing the total number of
-            tokens per-microbatch for each DP rank including padding. Will be
-            None if should_ubatch if False
-        ]
-        """
-
-        device = current_platform.device_type
-        tensor = torch.zeros(3, dp_size, device=device, dtype=torch.int32)
-        tensor[0][dp_rank] = orig_num_tokens_per_ubatch
-        tensor[1][dp_rank] = padded_num_tokens_per_ubatch
-        tensor[2][dp_rank] = 1 if should_ubatch else 0
-
-        from vllm.distributed.parallel_state import get_dp_group
-
-        dist.all_reduce(tensor, group=get_dp_group().device_group)
-
-        result: bool = bool(torch.all(tensor[2] == 1).item())
-        if not result:
-            return result, None
-
-        orig_num_tokens_tensor = tensor[0, :]
-        padded_num_tokens_tensor = tensor[1, :]
-
-        orig_min_num_tokens = int(orig_num_tokens_tensor.min().item())
-        padded_max_num_tokens = int(padded_num_tokens_tensor.max().item())
-        if is_second_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens):
-            logger.debug(
-                "Aborting ubatching %s %s", orig_min_num_tokens, padded_max_num_tokens
-            )
-            return False, None
-        return result, padded_num_tokens_tensor.cpu()
-
-    @staticmethod
     def make(
         parallel_config: ParallelConfig,
-        attn_metadata: Any,
         num_tokens: int,
-        num_tokens_across_dp_cpu: Optional[torch.Tensor] = None,
+        num_tokens_across_dp_cpu: torch.Tensor,
     ) -> "DPMetadata":
+        assert num_tokens_across_dp_cpu is not None
         assert parallel_config.data_parallel_size > 1
-        dp_size = parallel_config.data_parallel_size
         dp_rank = parallel_config.data_parallel_rank
-        if attn_metadata is not None and hasattr(attn_metadata, "num_prefill_tokens"):
-            # for v0 attention backends
-            batchsize = (
-                attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens
-            )
-        else:
-            # for v1 attention backends or no attn_metadata
-            batchsize = num_tokens
+        batchsize = num_tokens
 
         # If num_tokens_across_dp is None, it will be computed by all_reduce
         # Otherwise, num_tokens_across_dp[dp_rank] should be equal to batchsize
-        assert (
-            num_tokens_across_dp_cpu is None
-            or num_tokens_across_dp_cpu[dp_rank] == batchsize
-        ), f"{num_tokens_across_dp_cpu[dp_rank]} {batchsize}"
-        if num_tokens_across_dp_cpu is None:
-            num_tokens_across_dp_cpu = DPMetadata.num_tokens_across_dp(
-                batchsize, dp_size, dp_rank
-            )
+        assert num_tokens_across_dp_cpu[dp_rank] == batchsize, (
+            f"{num_tokens_across_dp_cpu[dp_rank]} {batchsize}"
+        )
         max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp_cpu)
         return DPMetadata(max_tokens_across_dp_cpu, num_tokens_across_dp_cpu)
 
@@ -376,11 +267,9 @@ def set_forward_context(
     if vllm_config.parallel_config.data_parallel_size > 1 and (
         attn_metadata is not None or num_tokens is not None
     ):
+        assert num_tokens_across_dp is not None
         dp_metadata = DPMetadata.make(
-            vllm_config.parallel_config,
-            attn_metadata,
-            num_tokens or 0,
-            num_tokens_across_dp,
+            vllm_config.parallel_config, num_tokens or 0, num_tokens_across_dp
         )
 
     forward_context = create_forward_context(
