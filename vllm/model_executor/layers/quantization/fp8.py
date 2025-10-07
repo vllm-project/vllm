@@ -442,7 +442,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 set_weight_attrs(scale, {"scale_type": "weight_scale"})
                 layer.register_parameter("weight_scale", scale)
             else:
-                assert not self.act_q_static
                 scale = create_fp8_scale_parameter(
                     BlockQuantScaleParameter,
                     output_partition_sizes,
@@ -467,7 +466,6 @@ class Fp8LinearMethod(LinearMethodBase):
         input_scale = None
         # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
-            assert not self.act_q_static
             size_k_first = False
 
             weight, weight_scale = process_fp8_weight_block_strategy(
