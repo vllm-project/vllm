@@ -9,6 +9,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+import os
+
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import get_pp_group
@@ -986,7 +988,146 @@ class EagleProposer:
         # share lm_head with the target model if needed
         # some model definition do not define lm_head explicitly
         # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.vllm_config.speculative_config.method != "eagle3":
+
+        ## if the quantized_lm_head_path exists, load the lm_head weights from there
+        lm_head_path = os.environ.get("QUANT_LM_HEAD_PATH", "")
+        if lm_head_path:
+            logger.info(f"Loading separate scaled FP8 LM head weights from: {lm_head_path}")
+            lm_head_state_dict = torch.load(lm_head_path, map_location="cpu")
+
+            # Check the data types in the loaded state dict
+            for name, param in lm_head_state_dict.items():
+                logger.info(f"Loaded parameter '{name}': dtype={param.dtype}, shape={param.shape}")
+
+            # Get config from target model (different models store config differently)
+            if hasattr(target_model, 'config'):
+                model_config = target_model.config
+            elif hasattr(target_model, 'model_config'):
+                model_config = target_model.model_config
+            elif hasattr(target_model, 'hf_config'):
+                model_config = target_model.hf_config
+            else:
+                # Fallback to vllm_config
+                model_config = self.vllm_config.model_config.hf_config
+                logger.warning("Could not find model config, using vllm_config.model_config.hf_config")
+            
+            # EAGLE model doesn't have lm_head - create one with manual FP8 per-channel handling
+            # Use vLLM's standard FP8 quantization to enable CUTLASS kernels
+            # This requires proper FP8 layer configuration, not manual handling
+            from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+            from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+            
+            # Create FP8 quantization config for per-channel quantization
+            fp8_config = Fp8Config(is_checkpoint_fp8_serialized=True,
+                                activation_scheme=None
+                                )
+
+            # Create ParallelLMHead WITH FP8 quantization config to enable CUTLASS
+            # Note: For CUTLASS, we need weight shape [K, N] = [hidden_size, vocab_size]
+            # But ParallelLMHead expects (num_embeddings, embedding_dim) = (vocab_size, hidden_size)
+            # The FP8 layer will handle the transpose internally for CUTLASS
+            self.model.lm_head = ParallelLMHead(
+                model_config.vocab_size,
+                model_config.hidden_size,
+                bias=False,
+                quant_config=fp8_config,  # Enable FP8 quantization for CUTLASS
+                prefix="lm_head"
+            )
+            
+            # IMPORTANT: Store vllm_config on the layer for Fp8ParallelLMHeadMethod to access
+            # This is needed for CUDA graph batch size padding in fp8_tma_linear
+            self.model.lm_head.vllm_config = self.vllm_config
+
+            # Log the initialized weight shape to understand CUTLASS expectations
+            logger.info(f"Initialized LM head weight shape: {self.model.lm_head.weight.shape}")
+            logger.info(f"Initialized LM head weight scale shape: {self.model.lm_head.weight_scale.shape}")
+
+            # Override the output dtype in the FP8 layer to ensure CUTLASS compatibility
+            if hasattr(self.model.lm_head, 'quant_method') and hasattr(self.model.lm_head.quant_method, 'out_dtype'):
+                print(f"Original FP8 output dtype: {self.model.lm_head.quant_method.out_dtype}")
+                target_dtype = self.dtype if self.dtype in [torch.bfloat16, torch.float16] else torch.bfloat16
+                self.model.lm_head.quant_method.out_dtype = target_dtype
+                logger.info(f"Set FP8 output dtype to {target_dtype} for CUTLASS compatibility")
+
+            # Load weights using vLLM's FP8 weight loading mechanism
+            from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+            
+            for name, loaded_weight in lm_head_state_dict.items():
+                param_name = name
+                if name.startswith("lm_head."):
+                    param_name = name[8:]  # Remove "lm_head." prefix
+                
+                if param_name == "weight":
+                    assert loaded_weight.shape == (model_config.vocab_size, model_config.hidden_size), \
+                        f"Expected weight shape {(model_config.vocab_size, model_config.hidden_size)}, but got {loaded_weight.shape}"
+                    assert loaded_weight.dtype == torch.float8_e4m3fn, \
+                        f"Expected weight dtype torch.float8_e4m3fn, but got {loaded_weight.dtype}"   
+
+                    # Use the layer's weight_loader for proper FP8 setup
+                    weight_loader = getattr(self.model.lm_head.weight, "weight_loader", default_weight_loader)
+                    weight_loader(self.model.lm_head.weight, loaded_weight)
+                    logger.info(f"Loaded FP8 weight for CUTLASS: {loaded_weight.shape}, dtype: {loaded_weight.dtype}")
+                elif param_name == "weight_scale":
+                    # Log original weight_scale shape
+                    logger.info(f"Loaded weight_scale shape: {loaded_weight.shape}")
+                    
+                    if loaded_weight.dim() == 2 and loaded_weight.shape[1] == 1:
+                        loaded_weight = loaded_weight.squeeze(1)  # [vocab_size, 1] -> [vocab_size]
+                        logger.info(f"Squeezed weight_scale to: {loaded_weight.shape}")
+
+                    logger.info(f"Per-channel weight_scale for {loaded_weight.shape[0]} output channels (vocab_size)")
+
+                    # Set weight_scale as parameter for FP8 layer
+                    if hasattr(self.model.lm_head, 'weight_scale'):
+                        logger.info(f"Setting existing weight_scale parameter for CUTLASS: {loaded_weight.shape}")
+                        if self.model.lm_head.weight_scale.shape != loaded_weight.shape:
+                            logger.warning(f"Existing weight_scale shape {self.model.lm_head.weight_scale.shape} does not match loaded shape {loaded_weight.shape}. Overwriting.")
+                            self.model.lm_head.weight_scale = torch.nn.Parameter(loaded_weight, requires_grad=False)
+                            assert self.model.lm_head.weight_scale.dtype == loaded_weight.dtype, "weight_scale dtype mismatch after overwrite"
+                            continue
+                        weight_loader = getattr(self.model.lm_head.weight_scale, "weight_loader", default_weight_loader)
+                        weight_loader(self.model.lm_head.weight_scale, loaded_weight)
+                    else:
+                        # Create weight_scale parameter if it doesn't exist
+                        logger.info(f"Creating new weight_scale parameter for CUTLASS: {loaded_weight.shape}")
+                        self.model.lm_head.weight_scale = torch.nn.Parameter(loaded_weight, requires_grad=False)
+
+                    logger.info(f"Loaded per-channel weight_scale for CUTLASS: {loaded_weight.shape}, dtype: {loaded_weight.dtype}")
+                else:
+                    logger.warning(f"Parameter {param_name} not found in FP8 lm_head")
+
+            # Move lm_head to the same device as the target model
+            device = next(target_model.parameters()).device
+            logger.info(f"Moving FP8 lm_head (CUTLASS-enabled) to device: {device}")
+            self.model.lm_head = self.model.lm_head.to(device)
+
+            # Debug final tensor shapes for CUTLASS compatibility
+            logger.info("=== Final CUTLASS Configuration Debug ===")
+            logger.info(f"Final weight shape: {self.model.lm_head.weight.shape}")
+            logger.info(f"Final weight dtype: {self.model.lm_head.weight.dtype}")
+            if hasattr(self.model.lm_head, 'weight_scale'):
+                logger.info(f"Final weight_scale shape: {self.model.lm_head.weight_scale.shape}")
+                logger.info(f"Final weight_scale dtype: {self.model.lm_head.weight_scale.dtype}")
+            if hasattr(self.model.lm_head, 'quant_method'):
+                logger.info(f"FP8 quant_method type: {type(self.model.lm_head.quant_method)}")
+                if hasattr(self.model.lm_head.quant_method, 'out_dtype'):
+                    logger.info(f"FP8 output dtype: {self.model.lm_head.quant_method.out_dtype}")
+            logger.info("==========================================")
+
+            # vLLM's FP8 ParallelLMHead will automatically use CUTLASS kernels
+            # No need to override compute_logits - let vLLM handle FP8 computation
+            logger.info("Using vLLM's built-in FP8 layer - CUTLASS kernels will be used automatically")
+            
+            # Log final quantization setup
+            logger.info(f"Final LM head weight dtype: {self.model.lm_head.weight.dtype}")
+            logger.info(f"Final LM head weight shape: {self.model.lm_head.weight.shape}")
+            if hasattr(self.model.lm_head, 'weight_scale'):
+                logger.info(f"Per-channel weight_scale shape: {self.model.lm_head.weight_scale.shape}")
+                logger.info("Successfully loaded Eagle model with CUTLASS FP8 per-channel quantization")
+            else:
+                logger.warning("No weight_scale found - check quantization setup")
+        
+        elif self.vllm_config.speculative_config.method != "eagle3":
             if hasattr(target_language_model, "lm_head"):
                 logger.info("Loading EAGLE LM head weights from the target model.")
                 self.model.lm_head = target_language_model.lm_head

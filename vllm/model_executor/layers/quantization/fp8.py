@@ -31,6 +31,7 @@ from vllm.model_executor.layers.linear import (
     LinearMethodBase,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -101,6 +102,155 @@ if TYPE_CHECKING:
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
+
+
+def fp8_tma_linear(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+):
+    """Optimized FP8 TMA linear function with CUDA graph capture support.
+
+    Args:
+        layer: Layer instance for accessing vLLM config and persistent buffers
+        x: Input tensor in BF16 format
+        weight: Weight tensor in FP8E4M3FN format (already transposed)
+        weight_scale: Per-channel weight scales in BF16 format
+        input_scale: Optional input scale (not used currently)
+        bias: Optional bias tensor
+
+    Returns:
+        Output tensor in BF16 format
+    """
+    try:
+        # Import TMA kernel
+
+        from vllm.model_executor.layers.quantization.kernels.scaled_mm.tma_persistent_gemm import (
+            matmul_tma_persistent
+        )
+
+        # Weight should already be FP8
+        assert weight.dtype == torch.float8_e4m3fn, f"Expected FP8 weight, got {weight.dtype}"
+        
+        # Handle input shapes
+        x_2d = x
+        num_tokens = x_2d.shape[0]
+        
+        # Initialize persistent buffers if not available
+        if layer is not None and hasattr(layer, 'cudagraph_batch_sizes'):
+            # Simple padding to next power of 2 up to max batch size
+            M_cap = num_tokens
+            for size in layer.cudagraph_batch_sizes:
+                if num_tokens <= size:
+                    M_cap = size
+                    break
+            
+            # CUDA graph capture and replay for TMA persistent kernel
+            if M_cap <= layer.cudagraph_batch_sizes[-1]:
+                graph_key = M_cap  # Simple batch size key since weight is fixed
+                
+                if graph_key not in layer._tma_graphs:
+                    # TMA kernel format preparation
+                    if weight.shape[1] != x_2d.shape[1]:
+                        weight_for_tma = weight.T
+                    else:
+                        weight_for_tma = weight
+                    
+                    # Create input/output buffers for this batch size and weight
+                    padded_input_shape = (M_cap, x_2d.shape[1])
+                    output_shape = (M_cap, weight_for_tma.shape[0])
+                    
+                    layer._tma_inputs[graph_key] = torch.zeros(
+                        padded_input_shape, dtype=x.dtype, device=x.device
+                    )
+                    layer._tma_outputs[graph_key] = torch.zeros(
+                        output_shape, dtype=torch.bfloat16, device=x.device
+                    )
+                    layer._tma_weights[graph_key] = weight_for_tma
+                    layer._tma_weight_scales[graph_key] = weight_scale
+                    
+                    # Create memory pool and stream for stable capture
+                    memory_pool = None
+                    try:
+                        if hasattr(torch.cuda, 'memory_pool'):
+                            memory_pool = torch.cuda.memory_pool()
+                    except Exception:
+                        memory_pool = None
+                    
+                    stream = torch.cuda.Stream()
+                    
+                    # Capture the graph
+                    layer._tma_graphs[graph_key] = torch.cuda.CUDAGraph()
+                    if memory_pool is not None:
+                        with torch.cuda.graph(layer._tma_graphs[graph_key], pool=memory_pool, stream=stream):
+                            layer._tma_outputs[graph_key] = matmul_tma_persistent(
+                                layer._tma_inputs[graph_key],
+                                layer._tma_weights[graph_key],
+                                layer._tma_weight_scales[graph_key],
+                                input_scale=input_scale,
+                                bias=bias
+                            )
+                    else:
+                        # Fallback for older PyTorch versions without memory_pool
+                        with torch.cuda.graph(layer._tma_graphs[graph_key], stream=stream):
+                            layer._tma_outputs[graph_key] = matmul_tma_persistent(
+                                layer._tma_inputs[graph_key],
+                                layer._tma_weights[graph_key],
+                                layer._tma_weight_scales[graph_key],
+                                input_scale=input_scale,
+                                bias=bias
+                            )
+                
+                # Copy input data to buffer
+                if M_cap > num_tokens:
+                    layer._tma_inputs[graph_key][:num_tokens] = x_2d
+                else:
+                    layer._tma_inputs[graph_key].copy_(x_2d)
+                
+                # Replay the graph
+                layer._tma_graphs[graph_key].replay()
+                
+                # Get output and slice back to actual size if padded
+                if M_cap > num_tokens:
+                    output_2d = layer._tma_outputs[graph_key][:num_tokens]
+                else:
+                    output_2d = layer._tma_outputs[graph_key]
+            else:
+                # Fallback for large batch sizes - use TMA kernel without graph
+                if weight.shape[1] != x_2d.shape[1]:
+                    weight_for_tma = weight.T
+                else:
+                    weight_for_tma = weight
+                
+                output_2d = matmul_tma_persistent(
+                    x_2d, weight_for_tma, weight_scale,
+                    input_scale=input_scale,
+                    bias=bias
+                )
+        else:
+            # Fallback for cases without layer context
+            if weight.shape[1] != x_2d.shape[1]:
+                weight_for_tma = weight.T
+            else:
+                weight_for_tma = weight
+            
+            output_2d = matmul_tma_persistent(
+                x_2d, weight_for_tma, weight_scale,
+                input_scale=input_scale,
+                bias=bias
+            )
+        
+        return output_2d
+        
+    except ImportError as e:
+        logger.warning(f"TMA kernel not available ({e}), falling back to regular linear")
+        return torch.nn.functional.linear(x, weight, bias)
+    except Exception as e:
+        logger.warning(f"TMA kernel failed ({e}), falling back to regular linear")
+        return torch.nn.functional.linear(x, weight, bias)
 
 
 class Fp8MoeBackend(Enum):
@@ -296,6 +446,8 @@ class Fp8Config(QuantizationConfig):
             return Fp8MoEMethod(self, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
+        elif isinstance(layer, ParallelLMHead):
+            return Fp8ParallelLMHeadMethod(self, layer)
         return None
 
     def get_cache_scale(self, name: str) -> Optional[str]:
@@ -1280,3 +1432,213 @@ class Fp8KVCacheMethod(BaseKVCacheMethod):
 
     def __init__(self, quant_config: Fp8Config):
         super().__init__(quant_config)
+
+
+class Fp8ParallelLMHeadMethod(LinearMethodBase):
+    """ParallelLMHead method for FP8 with customized TMA persistent GEMM kernel.
+    
+    This method supports FP8 weights with per-channel quantization for the LM head,
+    using a customized TMA persistent GEMM kernel for improved performance.
+    
+    Only supports:
+    - FP8E4M3FN weight dtype (serialized checkpoint)
+    - Per-channel weight quantization (one scale per output channel/vocab token)
+    - BF16 activation (no activation quantization)
+    - BF16 output
+    
+    Args:
+        quant_config: The FP8 quantization config.
+        layer: The ParallelLMHead layer instance.
+    """
+
+    def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
+        self.quant_config = quant_config
+        self.layer = layer
+        self.out_dtype = torch.bfloat16  # LM head outputs logits in BF16
+        
+        # Get vllm_config from the layer (should be set by EAGLE proposer before this method is called)
+        # This is needed for CUDA graph batch size padding in fp8_tma_linear
+        self.vllm_config = getattr(layer, 'vllm_config', None)
+        if self.vllm_config is None:
+            logger.warning(
+                "vllm_config not found on ParallelLMHead layer. "
+                "CUDA graph optimization in fp8_tma_linear may not work correctly. "
+                "Make sure to set layer.vllm_config before creating the layer."
+            )
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        """Create FP8 weights for ParallelLMHead with per-channel scaling."""
+        maybe_create_device_identity()
+
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        # WEIGHT - FP8E4M3FN format
+        if self.quant_config.is_checkpoint_fp8_serialized:
+            weight = create_fp8_weight_parameter(
+                output_size_per_partition, input_size_per_partition, weight_loader
+            )
+        else:
+            raise ValueError(
+                "Fp8ParallelLMHeadMethod requires FP8-serialized checkpoint. "
+                "Non-serialized checkpoints are not supported."
+            )
+        layer.register_parameter("weight", weight)
+
+        # WEIGHT SCALE - Per-channel (one scale per output/vocab dimension)
+        from vllm.model_executor.parameter import ChannelQuantScaleParameter
+        
+        scale = ChannelQuantScaleParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                dtype=torch.bfloat16,  # Use BF16 for scales to match TMA kernel
+            ),
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        scale[:] = torch.finfo(torch.bfloat16).min
+        set_weight_attrs(scale, {"scale_type": "weight_scale"})
+        layer.register_parameter("weight_scale", scale)
+
+        # INPUT ACTIVATION SCALE - Not used (no activation quantization)
+        layer.register_parameter("input_scale", None)
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        """Process FP8 weights after loading from checkpoint."""
+        weight = layer.weight.data
+        weight_scale = layer.weight_scale.data
+        
+        # Ensure weight is in FP8E4M3FN format
+        assert weight.dtype == torch.float8_e4m3fn, \
+            f"Expected FP8E4M3FN weight, got {weight.dtype}"
+        
+        # Ensure weight_scale is in BF16 format for TMA kernel compatibility
+        if weight_scale.dtype != torch.bfloat16:
+            logger.info(f"Converting weight_scale from {weight_scale.dtype} to bfloat16")
+            weight_scale = weight_scale.to(torch.bfloat16)
+        
+        # Ensure per-channel scale shape: [output_size_per_partition] or [output_size_per_partition, 1]
+        if weight_scale.dim() == 2 and weight_scale.shape[1] == 1:
+            weight_scale = weight_scale.squeeze(1)
+            logger.info(f"Squeezed weight_scale to shape: {weight_scale.shape}")
+        
+        assert weight_scale.dim() == 1, \
+            f"Expected 1D weight_scale, got {weight_scale.dim()}D with shape {weight_scale.shape}"
+        assert weight_scale.shape[0] == weight.shape[0], \
+            f"Weight scale shape {weight_scale.shape} doesn't match weight output dim {weight.shape[0]}"
+        
+        # Update layer with processed parameters
+        layer.weight = Parameter(weight, requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        
+        logger.info(
+            f"Processed Fp8ParallelLMHead weights: "
+            f"weight shape={weight.shape}, dtype={weight.dtype}, "
+            f"weight_scale shape={weight_scale.shape}, dtype={weight_scale.dtype}"
+        )
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Apply FP8 quantized linear transformation using TMA persistent GEMM kernel with CUDA graph support.
+        
+        This method uses the fp8_tma_linear function which provides:
+        - CUDA graph capture and replay for reduced kernel launch overhead
+        - TMA persistent GEMM kernel for optimal performance
+        - Automatic batch size padding for graph capture
+        - Fallback to non-graph execution for large batches
+        
+        Args:
+            layer: The ParallelLMHead layer instance
+            x: Input tensor [batch_size, hidden_size] in BF16 format
+            bias: Optional bias tensor (not used for LM head)
+        
+        Returns:
+            Output logits [batch_size, vocab_size_per_partition] in BF16 format
+        """
+        # Ensure input is in BF16 format
+        if x.dtype != torch.bfloat16:
+            logger.warning(f"Converting input from {x.dtype} to bfloat16 for TMA kernel")
+            x = x.to(torch.bfloat16)
+        
+        # Initialize CUDA graph buffers if not already present
+        if not hasattr(layer, '_tma_graphs'):
+            layer._tma_graphs = {}
+            layer._tma_inputs = {}
+            layer._tma_outputs = {}
+            layer._tma_weights = {}
+            layer._tma_weight_scales = {}
+            
+            # Get CUDA graph batch sizes from vllm config if available
+            if hasattr(self, 'vllm_config') and hasattr(self.vllm_config, 'compilation_config'):
+                layer.cudagraph_batch_sizes = list(reversed(
+                    self.vllm_config.compilation_config.cudagraph_capture_sizes
+                ))
+            else:
+                # Default batch sizes for CUDA graph capture
+                layer.cudagraph_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+                logger.info_once(
+                    f"Using default CUDA graph batch sizes for ParallelLMHead: "
+                    f"{layer.cudagraph_batch_sizes}"
+                )
+        
+        # Use fp8_tma_linear function with CUDA graph support
+        try:
+            # Call fp8_tma_linear with CUDA graph support
+            # This function handles:
+            # - CUDA graph capture and replay
+            # - Batch size padding
+            # - Buffer management
+            # - TMA kernel invocation
+            output = fp8_tma_linear(
+                layer=layer,
+                x=x,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
+                input_scale=None,  # No activation quantization
+                bias=bias,
+            )
+            
+            return output
+                
+        except Exception as e:
+            logger.warning(
+                f"TMA persistent GEMM kernel (with CUDA graph) failed: {e}. "
+                f"Falling back to standard FP8 kernel."
+            )
+        
+        # Fallback to standard vLLM FP8 kernel
+        logger.warning_once("Using fallback FP8 kernel instead of TMA persistent GEMM")
+        
+        # Use vLLM's standard FP8 linear operator
+        fp8_linear = Fp8LinearOp(
+            act_quant_static=False,
+            act_quant_group_shape=GroupShape.PER_TENSOR,
+        )
+        
+        return fp8_linear.apply(
+            input=x,
+            weight=layer.weight,
+            weight_scale=layer.weight_scale,
+            out_dtype=self.out_dtype,
+            input_scale=None,
+            bias=bias,
+        )
