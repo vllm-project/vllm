@@ -321,6 +321,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Lfm2ForCausalLM": _HfExamplesInfo(
         "LiquidAI/LFM2-1.2B", min_transformers_version="4.54"
     ),
+    "Lfm2MoeForCausalLM": _HfExamplesInfo(
+        "LiquidAI/LFM2-8B-A1B", min_transformers_version="4.58"
+    ),
     "LlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-3.2-1B-Instruct",
         extras={
