@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
-    VLLM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -96,7 +95,6 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
-    VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION: bool = False
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
@@ -109,6 +107,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
+    VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -476,10 +475,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower()
         in ("true", "1")
     ),
-    # Use AITER triton unified attention for V1 attention
-    "VLLM_USE_AITER_UNIFIED_ATTENTION": lambda: (
-        os.getenv("VLLM_USE_AITER_UNIFIED_ATTENTION", "False").lower() in ("true", "1")
-    ),
     # Force vllm to use a specific flash-attention version (2 or 3), only valid
     # when using the flash-attention backend.
     "VLLM_FLASH_ATTN_VERSION": lambda: maybe_convert_int(
@@ -835,12 +830,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLED_KERNELS": lambda: []
     if "VLLM_DISABLED_KERNELS" not in os.environ
     else os.environ["VLLM_DISABLED_KERNELS"].split(","),
-    # Swaps the all reduce backend that we use to coordinate the DP padding
-    # information from NCCL to gloo.
-    "VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION": lambda: (
-        os.getenv("VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION", "False").lower()
-        in ("true", "1")
-    ),
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")
@@ -896,6 +885,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_FP8BMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "True").lower() in ("true", "1")
+    ),
+    # Use AITER triton unified attention for V1 attention
+    "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", "False").lower()
+        in ("true", "1")
     ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (
@@ -1437,7 +1431,6 @@ def compute_hash() -> str:
         "VLLM_FUSED_MOE_CHUNK_SIZE",
         "VLLM_FLASHINFER_MOE_BACKEND",
         "VLLM_V1_USE_PREFILL_DECODE_ATTENTION",
-        "VLLM_USE_AITER_UNIFIED_ATTENTION",
         "VLLM_ATTENTION_BACKEND",
         "VLLM_USE_FLASHINFER_SAMPLER",
         "VLLM_DISABLED_KERNELS",
@@ -1465,6 +1458,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
         "VLLM_ROCM_USE_TRITON_ROPE",
         "VLLM_ROCM_USE_AITER_FP8BMM",
+        "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION",
         "VLLM_ROCM_USE_SKINNY_GEMM",
         "VLLM_ROCM_FP8_PADDING",
         "VLLM_ROCM_MOE_PADDING",

@@ -83,7 +83,8 @@ def sample_complex_json_schema():
                 "type": "array",
                 "items": {
                     "type": "string",
-                    "pattern": "^[a-z]{1,10}$",  # Combining length and pattern restrictions
+                    # Combining length and pattern restrictions
+                    "pattern": "^[a-z]{1,10}$",
                 },
             },
         },
