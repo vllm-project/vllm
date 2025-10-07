@@ -21,18 +21,7 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
 @pytest.fixture(scope="module")
-def monkeypatch_module():
-    from _pytest.monkeypatch import MonkeyPatch
-
-    mpatch = MonkeyPatch()
-    yield mpatch
-    mpatch.undo()
-
-
-@pytest.fixture(scope="module")
-def server(monkeypatch_module, zephyr_lora_files):  # noqa: F811
-    monkeypatch_module.setenv("VLLM_USE_V1", "1")
-
+def server(zephyr_lora_files):  # noqa: F811
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
