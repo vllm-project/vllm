@@ -67,12 +67,14 @@ class Ovis2_5ImagePatchInputs(TensorSchema):
         - patch_indicators: Batch size * (number of patches + 1)
         - patches_per_image: List of number of total patches for each image
           in the batch.
+        - batch: Batch size
     """
 
     type: Literal["image_patches"]
     flat_data: Annotated[torch.Tensor, TensorShape("batch_patches", "patch_size")]
     indicator_tokens: Annotated[torch.Tensor, TensorShape("patch_indicators")]
     patches_per_image: Annotated[list[int], TensorShape("num_patches_per_image")]
+    grids: Annotated[torch.Tensor, TensorShape("batch", 3)]
     # This is used to restore the first two dimensions of `flat_data`.
 
 
@@ -84,12 +86,14 @@ class Ovis2_5VideoPatchInputs(TensorSchema):
         - patch_indicators: Batch size * (number of patches + 1)
         - patches_per_image: List of number of total patches for each image
           in the batch.
+        - batch: Batch size
     """
 
     type: Literal["image_patches"]
     flat_data: Annotated[torch.Tensor, TensorShape("batch_patches", "patch_size")]
     indicator_tokens: Annotated[torch.Tensor, TensorShape("patch_indicators")]
     patches_per_image: Annotated[list[int], TensorShape("num_patches_per_image")]
+    grids: Annotated[torch.Tensor, TensorShape("batch", 3)]
     # This is used to restore the first two dimensions of `flat_data`.
 
 
