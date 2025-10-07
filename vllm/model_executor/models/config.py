@@ -294,6 +294,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             "Mamba2ForCausalLM",
             "NemotronHForCausalLM",
             "Zamba2ForCausalLM",
+            "JambaForCausalLM",
         ]
         if cache_config.enable_prefix_caching:
             if model_config.architecture in MAMBA2_MODELS:
@@ -383,7 +384,14 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # mamba2 kernels.
             chunk_size = model_config.get_mamba_chunk_size()
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
-            attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
+
+            if chunk_size is None:
+                # TODO(Josephasafg) Choose a more generic value
+                #  for the block size
+                attn_block_size = 256 * cdiv(attn_tokens_per_mamba_state, 256)
+            else:
+                attn_block_size = chunk_size * \
+                cdiv(attn_tokens_per_mamba_state, chunk_size)
             cache_config.mamba_block_size = attn_block_size
         else:
             # Without prefix caching, select minimum valid attention block size

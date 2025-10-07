@@ -375,6 +375,8 @@ def selective_scan_fn(
     cache_indices=None,
     has_initial_state=None,
     pad_slot_id=PAD_SLOT_ID,
+    return_intermediate_states=False,
+    block_size=256,
 ) -> torch.Tensor:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen)
@@ -397,7 +399,7 @@ def selective_scan_fn(
         x.shape=(dim,17)
     cache_indices: (batch) int32
         A tensor with each cell is a correspondent
-        input and output ssm_state index
+        ssm_state index (for both loading and storing states)
     has_initial_state: (batch) bool
         A tensor populated with ones and zeros,
         indicate if the ssm_state at the corresponding index should be
@@ -433,6 +435,25 @@ def selective_scan_fn(
     if C.dim() == 2 and query_start_loc is not None:
         C = C.unsqueeze(0)
 
+    intermediate_states = None
+    if return_intermediate_states:
+        # Determine dimensions for intermediate states
+        # Shape: (batch_or_cache_lines, num_blocks, dim, dstate)
+        # where num_blocks depends on sequence length and block size
+        batch_size = ssm_states.shape[0]
+        dim_size = A.shape[0]
+        dstate = A.shape[1]
+        batch_size = query_start_loc.shape[0] - 1
+        seqlen = u.shape[1]  # Total length for varlen
+
+        max_blocks = (seqlen + block_size - 1) // block_size
+
+        intermediate_states = torch.zeros(
+            (batch_size, max_blocks, dim_size, dstate),
+            dtype=ssm_states.dtype,
+            device=u.device
+        )
+
     ops.selective_scan_fwd(
         u,
         delta,
@@ -448,9 +469,17 @@ def selective_scan_fn(
         has_initial_state,
         ssm_states,
         pad_slot_id,
+        intermediate_states,
+        block_size,
     )
 
-    if z is None:
-        return delta  # output written inplace to delta
+    if return_intermediate_states:
+        if z is None:
+            return delta, intermediate_states
+        else:
+            return z, intermediate_states
     else:
-        return z  # output written inplace to z
+        if z is None:
+            return delta  # output written inplace to delta
+        else:
+            return z  # output written inplace to z

@@ -24,6 +24,8 @@ struct SSMParamsBase {
     int64_t pad_slot_id;
 
     bool delta_softplus;
+    bool cache_enabled;
+    int block_size;
 
     index_t A_d_stride;
     index_t A_dstate_stride;
@@ -65,6 +67,7 @@ struct SSMParamsBase {
     void *__restrict__ query_start_loc_ptr;
     void *__restrict__ cache_indices_ptr;
     void *__restrict__ has_initial_state_ptr;
+    void *__restrict__ intermediate_states_ptr;
 
 };
 

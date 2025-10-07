@@ -1723,6 +1723,8 @@ def selective_scan_fwd(
     has_initial_state: Optional[torch.Tensor],
     ssm_states: torch.Tensor,
     pad_slot_id: int,
+    intermediate_states: Optional[torch.Tensor] = None,
+    block_size: int = 256
 ):
     torch.ops._C.selective_scan_fwd(
         u,
@@ -1739,6 +1741,8 @@ def selective_scan_fwd(
         has_initial_state,
         ssm_states,
         pad_slot_id,
+        intermediate_states,
+        block_size,
     )
 
 
