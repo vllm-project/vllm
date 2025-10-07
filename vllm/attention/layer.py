@@ -318,6 +318,7 @@ class Attention(nn.Module, AttentionLayerBase):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        positions: Optional[torch.Tensor] = None,
         # For some alternate attention backends like MLA the attention output
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
@@ -369,11 +370,23 @@ class Attention(nn.Module, AttentionLayerBase):
                     attn_metadata = attn_metadata[self.layer_name]
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 self.impl.forward(
-                    self, query, key, value, self_kv_cache, attn_metadata, output=output
+                    self,
+                    query,
+                    key,
+                    value,
+                    self_kv_cache,
+                    attn_metadata,
+                    positions=positions,
+                    output=output,
                 )
             else:
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name,
+                    positions=positions,
                 )
             return output.view(-1, hidden_size)
         else:
@@ -682,6 +695,7 @@ def unified_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    positions: Optional[torch.Tensor] = None,
     output_scale: Optional[torch.Tensor] = None,
     output_block_scale: Optional[torch.Tensor] = None,
 ) -> None:
@@ -699,6 +713,7 @@ def unified_attention_with_output(
         value,
         kv_cache,
         attn_metadata,
+        positions=positions,
         output=output,
         output_scale=output_scale,
         output_block_scale=output_block_scale,
