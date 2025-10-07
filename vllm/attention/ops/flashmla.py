@@ -40,7 +40,12 @@ def _is_flashmla_available() -> Tuple[bool, Optional[str]]:
             "was not in the list of target arches to compile for.",
         )
     if not _flashmla_extension_C_AVAILABLE:
-        return False, "vllm._flashmla_extension_C is not available, likely "
+        return (
+            False,
+            "vllm._flashmla_extension_C is not available, likely "
+            "was not compiled due to a build error.",
+        )
+
     return True, None
 
 
