@@ -16,11 +16,15 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp8_utils import mxfp8_quantize
-from vllm.platforms import current_platform
+from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
+    quant_dequant_mxfp6,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    mxfp8_e4m3_quantize,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
-from vllm.utils.flashinfer import fp4_quantize
+from vllm.utils.flashinfer import flashinfer_fp4_quantize
 
 
 @triton.jit
@@ -106,12 +110,14 @@ def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     return x.flatten()[: prod(v)].view(*v)
 
 
-def _fp4_quantize(
+def _nvfp4_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
     is_sf_swizzled_layout: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return fp4_quantize(A, A_scale, is_sf_swizzled_layout=is_sf_swizzled_layout)
+    return flashinfer_fp4_quantize(
+        A, A_scale, is_sf_swizzled_layout=is_sf_swizzled_layout
+    )
 
 
 def _fp8_quantize(
@@ -174,15 +180,16 @@ def _mxfp4_quantize(
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, None]:
     assert block_shape is None
-    if not current_platform.supports_mx():
-        A = quant_dequant_mxfp4(A)
-    else:
-        raise NotImplementedError()
+    # TODO: native mxfp4 is currently not integrated in vllm,
+    # so simulating even on devices supporting this data type natively.
+    # Once integrated, `current_platform.supports_mx()` should be used to
+    # control quantize+dequantize, or simply quantize here down to mxfp4.
+    A = quant_dequant_mxfp4(A)
 
     return A, None
 
 
-def _mxfp8_quantize(
+def _mxfp8_e4m3_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
     per_act_token_quant: bool,
@@ -191,7 +198,41 @@ def _mxfp8_quantize(
     assert A_scale is None
     assert not per_act_token_quant
     assert block_shape is None
-    return mxfp8_quantize(A)
+    return mxfp8_e4m3_quantize(A)
+
+
+def _mxfp6_e3m2_quantize(
+    A: torch.Tensor,
+    A_scale: Optional[torch.Tensor],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]] = None,
+) -> tuple[torch.Tensor, None]:
+    assert block_shape is None
+
+    # TODO: native mxfp6 is currently not integrated in vllm,
+    # so simulating even on devices supporting this data type natively.
+    # Eventually, there should be a check based on
+    # `current_platform.supports_mx()` here.
+    A = quant_dequant_mxfp6(A, quant_dtype="fp6_e3m2")
+
+    return A, None
+
+
+def _mxfp6_e2m3_quantize(
+    A: torch.Tensor,
+    A_scale: Optional[torch.Tensor],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]] = None,
+) -> tuple[torch.Tensor, None]:
+    assert block_shape is None
+
+    # TODO: native mxfp6 is currently not integrated in vllm,
+    # so simulating even on devices supporting this data type natively.
+    # Eventually, there should be a check based on
+    # `current_platform.supports_mx()` here.
+    A = quant_dequant_mxfp6(A, quant_dtype="fp6_e2m3")
+
+    return A, None
 
 
 def moe_kernel_quantize_input(
@@ -207,11 +248,17 @@ def moe_kernel_quantize_input(
     elif quant_dtype == torch.int8:
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "nvfp4":
-        return _fp4_quantize(A, A_scale, is_sf_swizzled_layout=is_fp4_scale_swizzled)
+        return _nvfp4_quantize(A, A_scale, is_sf_swizzled_layout=is_fp4_scale_swizzled)
     elif quant_dtype == "mxfp4":
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp8":
-        return _mxfp8_quantize(A, A_scale, per_act_token_quant, block_shape)
+        # TODO: `quant_dtype == "mxfp8"` is ambiguous,
+        # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
+        return _mxfp8_e4m3_quantize(A, A_scale, per_act_token_quant, block_shape)
+    elif quant_dtype == "mxfp6_e3m2":
+        return _mxfp6_e3m2_quantize(A, A_scale, per_act_token_quant, block_shape)
+    elif quant_dtype == "mxfp6_e2m3":
+        return _mxfp6_e2m3_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
         return A, A_scale
 

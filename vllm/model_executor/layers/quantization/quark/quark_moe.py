@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
-    mxfp4_w4a4_moe_quant_config,
+    ocp_mx_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled,
@@ -25,7 +25,10 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import OCP_MX_BLOCK_SIZE
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    OCP_MX_BLOCK_SIZE,
+    OCP_MX_Scheme,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d,
@@ -38,7 +41,7 @@ from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 
-__all__ = ["QuarkMoEMethod", "QuarkW8A8Fp8MoEMethod", "QuarkW4A4MXFp4MoEMethod"]
+__all__ = ["QuarkMoEMethod", "QuarkW8A8Fp8MoEMethod", "QuarkOCP_MX_MoEMethod"]
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
@@ -64,10 +67,8 @@ class QuarkMoEMethod(FusedMoEMethodBase):
 
         if quant_config._is_fp8_w8a8(weight_config, input_config):
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
-        elif quant_config._is_mx_fp4(weight_config, input_config):
-            return QuarkW4A4MXFp4MoEMethod(
-                weight_config, input_config, module.moe_config
-            )
+        elif quant_config._is_ocp_mx(weight_config, input_config):
+            return QuarkOCP_MX_MoEMethod(weight_config, input_config, module.moe_config)
         else:
             raise RuntimeError("Unsupported FusedMoe scheme")
 
@@ -434,7 +435,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         )
 
 
-class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
+class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
     def __init__(
         self,
         weight_config: dict[str, Any],
@@ -456,16 +457,23 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
 
         self.static_input_scales = not self.input_quant.get("is_dynamic")
 
+        self.weight_dtype = self.weight_quant["dtype"].replace("fp", "mxfp")
+        self.input_dtype = self.input_quant["dtype"].replace("fp", "mxfp")
+
+        self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
+            self.input_dtype, self.weight_dtype
+        )
+
         if self.static_input_scales:
             raise NotImplementedError(
-                "QuarkW4A4MXFp4MoEMethod with static input scales is currently "
+                "QuarkOCP_MX_MoEMethod with static input scales is currently "
                 "not implemented. Please open an issue."
             )
 
         if not current_platform.supports_mx():
             self.emulate = True
             logger.warning_once(
-                "The current platform does not support native MXFP4 "
+                "The current platform does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
                 "layers computed in high precision."
@@ -473,12 +481,21 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
         else:
             self.emulate = True
             logger.warning_once(
-                "The current platform supports native MXFP4 "
+                "The current platform supports native MXFP4/MXFP6 "
                 "computation, but kernels are not yet integrated in vLLM. "
                 "Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
                 "layers computed in high precision."
             )
+
+    def get_packed_dim(self, dim: int, quant_dtype: str):
+        if quant_dtype == "mxfp4":
+            assert dim % 2 == 0
+            return dim // 2
+        else:
+            # FP6 packs 4 * 6 = 24 bits on 3 bytes.
+            assert (dim * 3) % 4 == 0
+            return (dim * 3) // 4
 
     def create_weights(
         self,
@@ -502,7 +519,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             torch.empty(
                 num_experts,
                 2 * intermediate_size_per_partition,
-                hidden_size // 2,
+                self.get_packed_dim(hidden_size, self.weight_dtype),
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -515,7 +532,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             torch.empty(
                 num_experts,
                 hidden_size,
-                intermediate_size_per_partition // 2,
+                self.get_packed_dim(intermediate_size_per_partition, self.weight_dtype),
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -552,7 +569,9 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> Optional[FusedMoEQuantConfig]:
-        return mxfp4_w4a4_moe_quant_config(
+        return ocp_mx_moe_quant_config(
+            quant_dtype=self.input_dtype,
+            weight_dtype=self.weight_dtype,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             a1_scale=None,
@@ -587,7 +606,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
 
         if enable_eplb:
             raise NotImplementedError(
-                "EPLB not supported for `QuarkW4A4MXFp4MoEMethod` yet."
+                "EPLB not supported for `QuarkOCP_MX_MoEMethod` yet."
             )
 
         from vllm.model_executor.layers.fused_moe import fused_experts

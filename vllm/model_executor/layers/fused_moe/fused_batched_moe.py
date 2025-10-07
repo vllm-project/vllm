@@ -640,7 +640,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
-        assert not self.quant_config.use_mxfp4_w4a4, "NYI"
+        assert self.quant_config.ocp_mx_scheme is None, "NYI"
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -835,7 +835,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
-        assert not self.quant_config.use_mxfp4_w4a4, "NYI"
+        assert self.quant_config.ocp_mx_scheme is None, "NYI"
         assert max_num_tokens > 0
         assert num_dispatchers > 0
         self.max_num_tokens = max_num_tokens

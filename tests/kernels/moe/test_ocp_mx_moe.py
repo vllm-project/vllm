@@ -10,13 +10,6 @@ import pytest
 import torch
 from packaging import version
 
-from vllm.model_executor.layers.quantization.quark.quark import (
-    QuarkLinearMethod,
-    QuarkW4A4MXFP4,
-)
-from vllm.model_executor.layers.quantization.quark.quark_moe import (
-    QuarkW4A4MXFp4MoEMethod,
-)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
@@ -63,9 +56,11 @@ def enable_pickle(monkeypatch):
 @pytest.mark.parametrize(
     "model_case",
     [
-        ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=1),
+        ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=2),
         ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
         ModelCase("fxmarty/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
+        ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=1),
+        ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=4),
     ],
 )
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
@@ -76,22 +71,33 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
             f"{torch.cuda.device_count()}"
         )
 
+    # `cuda_graph_sizes=[16]` to reduce load time.
     with vllm_runner(
-        model_case.model_id, tensor_parallel_size=model_case.tp, load_format="dummy"
+        model_case.model_id,
+        tensor_parallel_size=model_case.tp,
+        load_format="dummy",
+        cuda_graph_sizes=[16],
     ) as llm:
+        # Disabled as check_model is broken: https://github.com/vllm-project/vllm/pull/18465#issuecomment-3329880562
+        # def check_model(model):
+        #     from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+        #         QuarkLinearMethod)
+        #     from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import QuarkOCP_MX  # noqa: E501
+        #     from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+        #         QuarkOCP_MX_MoEMethod)
 
-        def check_model(model):
-            layer = model.model.layers[0]
+        #     layer = model.model.layers[0]
 
-            qkv_proj = layer.self_attn.qkv_proj
+        #     qkv_proj = layer.self_attn.qkv_proj
 
-            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
-            assert isinstance(qkv_proj.scheme, QuarkW4A4MXFP4)
+        #     assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+        #     assert isinstance(qkv_proj.scheme, QuarkOCP_MX)
 
-            assert isinstance(layer.mlp.experts.quant_method, QuarkW4A4MXFp4MoEMethod)
+        #     assert isinstance(layer.mlp.experts.quant_method,
+        #                       QuarkOCP_MX_MoEMethod)
 
-        if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
-            llm.apply_model(check_model)
+        # if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
+        #     llm.apply_model(check_model)
 
         output = llm.generate_greedy("Today I am in the French Alps and", max_tokens=20)
         assert output
