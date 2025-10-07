@@ -47,8 +47,10 @@ from vllm.attention.layer import (
     check_upstream_fa_availability,
     maybe_get_vit_flash_attn_backend,
 )
-from vllm.attention.ops.vit_attn_wrappers import (vit_flash_attn_wrapper,
-                                                  vit_xformers_attn_wrapper)
+from vllm.attention.ops.vit_attn_wrappers import (
+    vit_flash_attn_wrapper,
+    vit_xformers_attn_wrapper,
+)
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -416,9 +418,15 @@ class Qwen2_5_VisionAttention(nn.Module):
 
         if self.is_flash_attn_backend:
             context_layer = vit_flash_attn_wrapper(
-                q, k, v, cu_seqlens, max_seqlen, batch_size,
+                q,
+                k,
+                v,
+                cu_seqlens,
+                max_seqlen,
+                batch_size,
                 self.attn_backend == _Backend.ROCM_AITER_FA,
-                self.use_upstream_fa)
+                self.use_upstream_fa,
+            )
         elif self.attn_backend == _Backend.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
             outputs = []
@@ -428,17 +436,16 @@ class Qwen2_5_VisionAttention(nn.Module):
                 q_i = q[:, start_idx:end_idx]
                 k_i = k[:, start_idx:end_idx]
                 v_i = v[:, start_idx:end_idx]
-                q_i, k_i, v_i = (rearrange(x, "b s h d -> b h s d")
-                                 for x in [q_i, k_i, v_i])
-                output_i = F.scaled_dot_product_attention(q_i,
-                                                          k_i,
-                                                          v_i,
-                                                          dropout_p=0.0)
+                q_i, k_i, v_i = (
+                    rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
+                )
+                output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
                 output_i = rearrange(output_i, "b h s d -> b s h d ")
                 outputs.append(output_i)
             context_layer = torch.cat(outputs, dim=1)
-            context_layer = rearrange(context_layer,
-                                      "b s h d -> s b (h d)").contiguous()
+            context_layer = rearrange(
+                context_layer, "b s h d -> s b (h d)"
+            ).contiguous()
         elif self.attn_backend == _Backend.XFORMERS:
             context_layer = vit_xformers_attn_wrapper(q, k, v, seqlens)
 
@@ -447,12 +454,14 @@ class Qwen2_5_VisionAttention(nn.Module):
 
 
 @set_model_tag("Qwen2_5_VisionBlock")
-@support_torch_compile(dynamic_arg_dims={
-    "x": 0,
-    "cu_seqlens": 0,
-    "rotary_pos_emb": 0,
-    "seqlens": 0,
-})
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 0,
+        "cu_seqlens": 0,
+        "rotary_pos_emb": 0,
+        "seqlens": 0,
+    }
+)
 class Qwen2_5_VisionBlock(nn.Module):
     def __init__(
         self,
@@ -513,9 +522,11 @@ class Qwen2_5_VisionBlock(nn.Module):
 
 
 @set_model_tag("Qwen2_5_VisionPatchEmbed")
-@support_torch_compile(dynamic_arg_dims={
-    "x": 0,
-})
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 0,
+    }
+)
 class Qwen2_5_VisionPatchEmbed(nn.Module):
     def __init__(
         self,
@@ -543,9 +554,11 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
 
 
 @set_model_tag("Qwen2_5_VisionPatchMerger")
-@support_torch_compile(dynamic_arg_dims={
-    "x": 0,
-})
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 0,
+    }
+)
 class Qwen2_5_VisionPatchMerger(nn.Module):
     def __init__(
         self,
@@ -818,23 +831,24 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self,
         cu_seqlens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        max_seqlen, seqlens = torch.zeros(
-            1, device=cu_seqlens.device), torch.zeros(1,
-                                                      device=cu_seqlens.device)
-        if (self.attn_backend == _Backend.FLASH_ATTN
-                or self.attn_backend == _Backend.ROCM_AITER_FA):
+        max_seqlen, seqlens = (
+            torch.zeros(1, device=cu_seqlens.device),
+            torch.zeros(1, device=cu_seqlens.device),
+        )
+        if (
+            self.attn_backend == _Backend.FLASH_ATTN
+            or self.attn_backend == _Backend.ROCM_AITER_FA
+        ):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1])
+            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
         return max_seqlen, seqlens
 
     @staticmethod
     def invert_permutation(perm: torch.Tensor) -> torch.Tensor:
         # building the inverse permutation in O(n) time
         inv = torch.empty_like(perm, pin_memory=is_pin_memory_available())
-        inv[perm] = torch.arange(perm.numel(),
-                                 device=perm.device,
-                                 dtype=perm.dtype)
+        inv[perm] = torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype)
         return inv
 
     def forward(
@@ -867,10 +881,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
             ) = self.get_rope_by_thw(t, h, w)
 
             window_index.append(window_index_thw + window_index_id)
-            window_index_id += (t * llm_h * llm_w)
+            window_index_id += t * llm_h * llm_w
 
-            cu_seqlens_window_thw = (cu_seqlens_window_thw +
-                                     cu_window_seqlens_last)
+            cu_seqlens_window_thw = cu_seqlens_window_thw + cu_window_seqlens_last
             cu_window_seqlens_last = cu_seqlens_window_thw[-1]
             cu_window_seqlens.append(cu_seqlens_window_thw)
 
@@ -890,10 +903,10 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         # transformers
         # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
-        max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(
-            cu_seqlens)
+        max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(cu_seqlens)
         max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
-            cu_window_seqlens)
+            cu_window_seqlens
+        )
 
         cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
         cu_window_seqlens = cu_window_seqlens.to(device=self.device, non_blocking=True)
@@ -1333,13 +1346,10 @@ class Qwen2_5_VLForConditionalGeneration(
             with set_forward_context(None, self.vllm_config):
                 if self.use_data_parallel:
                     return run_dp_sharded_mrope_vision_model(
-                        self.visual,
-                        pixel_values,
-                        grid_thw_list,
-                        rope_type="rope_3d")
+                        self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
+                    )
                 else:
-                    image_embeds = self.visual(pixel_values,
-                                               grid_thw=grid_thw_list)
+                    image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
@@ -1399,10 +1409,12 @@ class Qwen2_5_VLForConditionalGeneration(
                         self.visual,
                         pixel_values_videos,
                         grid_thw_list,
-                        rope_type="rope_3d")
+                        rope_type="rope_3d",
+                    )
                 else:
-                    video_embeds = self.visual(pixel_values_videos,
-                                               grid_thw=grid_thw_list)
+                    video_embeds = self.visual(
+                        pixel_values_videos, grid_thw=grid_thw_list
+                    )
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
