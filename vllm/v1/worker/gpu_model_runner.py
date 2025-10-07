@@ -1045,24 +1045,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Optional[CommonAttentionMetadata],
         bool,
     ]:
-        """Prepare inputs for model execution.
-
-        NOTE: All padding and coordination should be done BEFORE calling this function:
-        1. Sequence parallelism padding via _get_num_input_tokens()
-        2. DP coordination via coordinate_batch_across_dp()
-        3. CUDA graph dispatch via _maybe_dispatch_cudagraph()
-
-        This function builds the attention metadata with the already-determined padding.
-
-        Args:
-            scheduler_output: Output from the scheduler.
-            num_scheduled_tokens: Array of scheduled tokens per request.
-            max_num_scheduled_tokens: Maximum number of scheduled tokens.
-            ubatch_slices: Microbatch slices from DP coordination (if using DBO).
-            padded_num_tokens: padded number of tokens (after all padding steps).
-            padded_num_reqs: padded number of requests (optional, for CUDA graphs).
-
-        Returns: tuple[
+        """
+        :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
             logits_indices, spec_decode_metadata,
             spec_decode_common_attn_metadata,
@@ -2396,21 +2380,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
         with record_function_or_nullcontext("Preprocess"):
-            self._update_states(scheduler_output)
-            if not scheduler_output.total_num_scheduled_tokens:
-                if not has_kv_transfer_group():
-                    # Return empty ModelRunnerOutput if there's no work to do.
-                    return EMPTY_MODEL_RUNNER_OUTPUT
-                return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
-            if self.cache_config.kv_sharing_fast_prefill:
-                assert not self.input_batch.num_prompt_logprobs, (
-                    "--kv-sharing-fast-prefill produces incorrect logprobs for "
-                    "prompt tokens, tokens, please disable it when the requests"
-                    " need prompt logprobs"
-                )
-
-            if self.prepare_inputs_event is not None:
-                self.prepare_inputs_event.synchronize()
+            with self.synchronize_input_prep():
+                # Update persistent batch states.
+                self._update_states(scheduler_output)
 
             # Get the number of scheduled tokens for each request.
             req_ids = self.input_batch.req_ids
@@ -3492,18 +3464,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Adjust values to reflect a single ubatch.
                 # TODO(sage,lucas): this is cruft that should be addressed in
                 #  the padding refactor.
-                num_tokens_for_forward = ubatch_slices[0].num_tokens
+                padded_num_tokens = ubatch_slices[0].num_tokens
                 if num_tokens_across_dp is not None:
-                    num_tokens_across_dp[:] = num_tokens_for_forward
-            else:
-                num_tokens_for_forward = padded_num_tokens
+                    num_tokens_across_dp[:] = padded_num_tokens
 
             with (
                 self.maybe_randomize_inputs(input_ids),
                 set_forward_context(
                     attn_metadata,
                     self.vllm_config,
-                    num_tokens=num_tokens_for_forward,
+                    num_tokens=padded_num_tokens,
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=cudagraph_batch_descriptor,
