@@ -360,7 +360,7 @@ class CoreEngineActorManager:
             if device_str in node_resources
         ]
         max_device_per_node = max(n_node_devices)
-        assert max_device_per_node >= 0, f"No {device_str} found in Ray cluster."
+        assert max_device_per_node > 0, f"No {device_str} found in Ray cluster."
 
         if max_device_per_node < world_size:
             # if we need multiple nodes per dp group, we require for now that
