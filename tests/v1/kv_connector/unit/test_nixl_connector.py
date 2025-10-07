@@ -877,6 +877,93 @@ def _run_abort_timeout_test(llm_kwargs: dict, timeout: int):
     assert "0" not in req_to_blocks
 
 
+@pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_abort_after_finish_on_prefiller(monkeypatch, distributed_executor_backend):
+    """
+    Simulate a rare scenario with AsyncLLM where a client disconnect
+    triggers an abort request after the request has finished, but before
+    AsyncLLM has processed the request output
+    """
+    model_name = "Qwen/Qwen3-0.6B"
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="NixlConnector",
+        kv_role="kv_both",
+    )
+    llm_kwargs = {
+        "model": model_name,
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.5,
+        "kv_transfer_config": kv_transfer_config,
+        "distributed_executor_backend": distributed_executor_backend,
+    }
+
+    timeout = 6
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", str(timeout))
+
+    # Build runtime_env only if we're using Ray
+    if distributed_executor_backend == "ray":
+        with _make_fake_nixl_pkg() as working_dir:
+            runtime_env = {
+                "working_dir": working_dir,  # ship fake nixl package
+                "env_vars": {
+                    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": str(timeout),
+                    # TODO: for ray to carry over, remove once we set
+                    "NIXL_TELEMETRY_ENABLE": "1",
+                },
+            }
+            ray.init(runtime_env=runtime_env)
+
+            _run_abort_after_finish_test(llm_kwargs, timeout)
+    else:
+        _run_abort_after_finish_test(llm_kwargs, timeout)
+
+
+def _run_abort_after_finish_test(llm_kwargs: dict, timeout: int):
+    """Helper function to run the abort after finish test."""
+    llm = LLM(**llm_kwargs)
+    remote_prefill_opts = {
+        "do_remote_decode": True,
+        "do_remote_prefill": False,
+        "remote_engine_id": None,
+        "remote_block_ids": None,
+        "remote_host": None,
+        "remote_port": None,
+    }
+    # Simulate sidecar request
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=1,
+        extra_args={"kv_transfer_params": remote_prefill_opts},
+    )
+    scheduler = llm.llm_engine.engine_core.engine_core.scheduler
+    req_to_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0
+    ].req_to_blocks
+
+    padding = "Just making this request a little longer so that we're sure "
+    "we're not hitting the small-request lower bound beneath which we don't "
+    "actually trigger the whole kv transfer, but rather just recompute the "
+    "blocks on D."
+    _ = llm.generate([f"What is the capital of Japan? {padding}"], sampling_params)
+
+    # Request finished but not freed
+    assert "0" in scheduler.finished_req_ids and "0" in req_to_blocks
+
+    # Request aborted and freed
+    llm.llm_engine.engine_core.abort_requests(["0"])
+    assert "0" not in req_to_blocks
+
+    # Wait for timeout and trigger another scheduler loop
+    time.sleep(timeout)
+    _ = llm.generate([f"What is the capital of France? {padding}"], sampling_params)
+    # Timeout logic hasn't crashed!
+
+
 def test_register_kv_caches(dist_init):
     """
     Test that register_kv_caches() properly calls nixl_wrapper methods with

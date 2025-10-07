@@ -1344,6 +1344,7 @@ class NixlConnectorWorker:
 
         # Remove all requests that are not to be processed (eg aborted).
         for req_id in metadata.reqs_not_processed:
+            self._reqs_to_send.pop(req_id, None)
             self._reqs_to_process.discard(req_id)
 
         # Add to requests that are waiting to be read and track expiration.
