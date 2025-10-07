@@ -16,6 +16,7 @@ class AttentionType:
     Use string to be compatible with `torch.compile`.
     """
 
+
     DECODER = "decoder"
     """Decoder attention between previous layer Q/K/V."""
     ENCODER = "encoder"

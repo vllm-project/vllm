@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
