@@ -373,19 +373,18 @@ class OpenAIServingResponses(OpenAIServing):
                 if self.reasoning_parser is not None:
                     reasoning_parser = self.reasoning_parser(tokenizer)
                     if sampling_params.structured_outputs is None:
-                        updated_structural_tag = \
-                            reasoning_parser.prepare_structured_tag( \
-                                None, self.tool_server)
-                        sampling_params.structured_outputs = \
-                            StructuredOutputsParams(structural_tag = \
-                                updated_structural_tag)
+                        sampling_params.structured_outputs = StructuredOutputsParams(
+                            structural_tag=reasoning_parser.prepare_structured_tag(
+                                None, self.tool_server
+                            )
+                        )
                     else:
-                        updated_structural_tag = \
-                            reasoning_parser.prepare_structured_tag( \
-                            sampling_params.structured_outputs.structural_tag,\
-                            self.tool_server)
-                        sampling_params.structured_outputs.structural_tag = \
-                            updated_structural_tag
+                        sampling_params.structured_outputs.structural_tag = (
+                            reasoning_parser.prepare_structured_tag(
+                                sampling_params.structured_outputs.structural_tag,
+                                self.tool_server,
+                            )
+                        )
 
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
@@ -1146,10 +1145,10 @@ class OpenAIServingResponses(OpenAIServing):
                             current_text=previous_text + output.text,
                             delta_text=output.text,
                             previous_token_ids=previous_token_ids,
-                            current_token_ids=previous_token_ids +
-                            output.token_ids,
+                            current_token_ids=previous_token_ids + output.token_ids,
                             delta_token_ids=output.token_ids,
                         )
+                    )
                 else:
                     delta_message = DeltaMessage(
                         content=output.text,
