@@ -466,6 +466,14 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
 
         return updates
 
+    @staticmethod
+    def _split_list_into_ranges(lst: torch.Tensor, interval: int) -> list[list[int]]:
+        ranges: list[list[int]] = [[] for _ in range((max(lst) // interval) + 1)]
+        for num in lst:
+            index = num // interval
+            ranges[index].append(num)
+        return ranges
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
