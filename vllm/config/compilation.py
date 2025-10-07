@@ -340,14 +340,17 @@ class CompilationConfig:
     max_cudagraph_capture_size: int = field(default=None)  # type: ignore
     """The maximum cudagraph capture size.
     
-    If cudagraph_capture_sizes is specified, this will be set to the largest size in that list (or checked for consistency if specified). If cudagraph_capture_sizes is not specified, the list sizes of sizes is generated automatically following the pattern: 
-        [1, 2, 4] + list(range(8, 256, 8)) + list(range(256, max_cudagraph_capture_size + 1, 16))
-    If not specified, max_cudagraph_capture_size is set to min(max_num_seqs * 2, 512) by default.
-
-    Note: the default value is min(max_num_seqs * 2, 512).
-    This voids OOM in tight memory scenarios with small max_num_seqs, and
-    prevents capture of many large graphs (>512) that would greatly increase
-    startup time with limited performance benefit.
+    If cudagraph_capture_sizes is specified, this will be set to the largest 
+    size in that list (or checked for consistency if specified). If 
+    cudagraph_capture_sizes is not specified, the list sizes of sizes is 
+    generated automatically following the pattern: 
+        [1, 2, 4] + list(range(8, 256, 8)) + list(
+        range(256, max_cudagraph_capture_size + 1, 16))
+    
+    If not specified, max_cudagraph_capture_size is set to min(max_num_seqs*2,
+    512) by default. This voids OOM in tight memory scenarios with small 
+    max_num_seqs, and prevents capture of many large graphs (>512) that would
+    greatly increase startup time with limited performance benefit.
     """
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
