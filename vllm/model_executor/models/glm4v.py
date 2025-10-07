@@ -19,6 +19,7 @@ from transformers.tokenization_utils_base import TextInput
 
 from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -43,7 +44,6 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .chatglm import ChatGLMBaseModel, ChatGLMModel
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .utils import flatten_bn
 
 
 class GLMVImagePixelInputs(TensorSchema):
@@ -466,6 +466,7 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
@@ -473,11 +474,14 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         target_width = target_height = vision_config["image_size"]
         num_images = mm_counts.get("image", 0)
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images)
+                                   num_images=num_images,
+                                   overrides=image_overrides)
         }
 
 
@@ -529,8 +533,9 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(GLM4VMultiModalProcessor,
                                         info=GLM4VProcessingInfo,
                                         dummy_inputs=GLM4VDummyInputsBuilder)
-class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
-                       SupportsMultiModal):
+class GLM4VForCausalLM(ChatGLMBaseModel, SupportsMultiModal, SupportsLoRA,
+                       SupportsPP):
+    merge_by_field_config = True
 
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
@@ -574,14 +579,9 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         pixel_values = kwargs.pop("pixel_values", None)
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
             expected_h = expected_w = self.config.vision_config["image_size"]
             return GLMVImagePixelInputs(type="pixel_values",
-                                        data=flatten_bn(pixel_values,
-                                                        concat=True),
+                                        data=pixel_values,
                                         resolve_bindings={
                                             "h": expected_h,
                                             "w": expected_w
@@ -597,6 +597,8 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
 
     def get_language_model(self) -> torch.nn.Module:
         return self.transformer
+
+    get_input_embeddings = SupportsMultiModal.get_input_embeddings
 
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> MultiModalEmbeddings:

@@ -1917,7 +1917,7 @@ def test_priority_scheduling_preemption_when_out_of_kv():
 def test_chunked_prefill_disabled_for_encoder_decoder(
         enable_chunked_prefill: bool, is_encoder_decoder: bool,
         expect_enabled: bool) -> None:
-    """Validate that chunked prefill is appropriately disabled for 
+    """Validate that chunked prefill is appropriately disabled for
     encoder-decoder models."""
     scheduler_config = SchedulerConfig(
         enable_chunked_prefill=enable_chunked_prefill,
@@ -1942,7 +1942,7 @@ def test_chunked_prefill_disabled_for_encoder_decoder(
 def _validate_chunked_prefill_settings_for_encoder_decoder(
         scheduler_config: SchedulerConfig, is_encoder_decoder: bool,
         expect_enabled: bool) -> None:
-    """Validate chunked prefill settings in the scheduler config for 
+    """Validate chunked prefill settings in the scheduler config for
     encoder-decoder models."""
     assert scheduler_config.chunked_prefill_enabled is expect_enabled
     assert scheduler_config.enable_chunked_prefill is expect_enabled
