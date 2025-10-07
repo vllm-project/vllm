@@ -1390,7 +1390,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             self.visual_token_mask = None
 
     @classmethod
-    def _ernie_get_input_positions_tensor(
+    def get_mrope_input_positions(
         self,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
