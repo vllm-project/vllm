@@ -40,7 +40,10 @@ def inductor_partition_rule_context(op_names: list[str]):
         yield
         return
 
-    from torch._inductor import scheduler as inductor_scheduler  # type: ignore
+    from torch._inductor.scheduler import (  # type: ignore
+        _custom_should_partition_fns,
+        register_should_partition_rule,
+    )
 
     unique_names = list(dict.fromkeys(op_names))
     overloads = [_resolve_operator_overload(name) for name in unique_names]
@@ -49,10 +52,10 @@ def inductor_partition_rule_context(op_names: list[str]):
         return True
 
     # Save current state before registering
-    saved_rules = inductor_scheduler._custom_should_partition_fns.copy()
+    saved_rules = _custom_should_partition_fns.copy()
 
     for overload in overloads:
-        inductor_scheduler.register_should_partition_rule(
+        register_should_partition_rule(
             overload,
             _always_partition,
         )
@@ -63,6 +66,6 @@ def inductor_partition_rule_context(op_names: list[str]):
         yield
     finally:
         # Clear and restore previous state
-        inductor_scheduler._custom_should_partition_fns.clear()
-        inductor_scheduler._custom_should_partition_fns.update(saved_rules)
+        _custom_should_partition_fns.clear()
+        _custom_should_partition_fns.update(saved_rules)
         logger.debug("Restored previous partition rules state.")

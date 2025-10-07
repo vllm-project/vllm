@@ -12,7 +12,6 @@ from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
-from vllm.compilation.partition_rules import inductor_partition_rule_context
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
@@ -207,8 +206,23 @@ class CompilationConfig:
     disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: Optional[list[str]] = None
-    """A list of ops to split the full graph into subgraphs, used in piecewise
-    compilation."""
+    """A list of ops to exclude from cudagraphs, used in piecewise compilation.
+    
+    The behavior depends on use_inductor_graph_partition:
+    
+    - When use_inductor_graph_partition=False (default):
+        These ops are used for Dynamo FX-level graph splitting. The graph is 
+        split at these ops before Inductor compilation, creating separate 
+        subgraphs for cudagraph capture.
+        
+    - When use_inductor_graph_partition=True:
+        These ops are used to register Inductor partition rules. The graph 
+        partitioning happens at Inductor codegen time after all passes and 
+        fusions are finished, allowing better optimization while still 
+        excluding these ops from cudagraphs.
+        
+    If None, defaults to attention ops for piecewise cudagraphs.
+    If empty list [], no ops are excluded (suitable for full cudagraphs)."""
 
     # Inductor capture
     use_inductor: bool = True
