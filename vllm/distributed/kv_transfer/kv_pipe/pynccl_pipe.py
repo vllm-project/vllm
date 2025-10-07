@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-    This module implements a PyNccl pipe for sending and receiving
-    Optional[torch.Tensor] between distributed ranks with advanced
-    communication features.
+This module implements a PyNccl pipe for sending and receiving
+Optional[torch.Tensor] between distributed ranks with advanced
+communication features.
 
-    Key Features:
-    - Supports sending and receiving tensors with metadata
-    - Handles both CUDA and CPU device communications
-    - Implements a non-blocking tensor transfer mechanism
-    - Manages buffer size and provides backpressure control
-    - Supports distributed process groups with configurable parameters
+Key Features:
+- Supports sending and receiving tensors with metadata
+- Handles both CUDA and CPU device communications
+- Implements a non-blocking tensor transfer mechanism
+- Manages buffer size and provides backpressure control
+- Supports distributed process groups with configurable parameters
 """
 
 import threading
@@ -30,7 +30,6 @@ logger = init_logger(__name__)
 
 
 class BrokenPipeException(Exception):
-
     def __init__(self, message):
         self.message = message
         super().__init__(self.message)
@@ -40,16 +39,17 @@ Metadata = dict[str, Optional[torch.Tensor]]
 
 
 class PyNcclPipe(KVPipeBase):
-
     METADATA_LENGTH = 16
     MAX_TENSOR_DIMENSIONS = 14
     METADATA_DTYPE = torch.int64
 
-    def __init__(self,
-                 local_rank: int,
-                 config: KVTransferConfig,
-                 device: Optional[str] = None,
-                 port_offset: int = 0):
+    def __init__(
+        self,
+        local_rank: int,
+        config: KVTransferConfig,
+        device: Optional[str] = None,
+        port_offset: int = 0,
+    ):
         self.config = config
         self.local_rank = local_rank
         self.kv_rank = self.config.kv_rank
@@ -84,9 +84,9 @@ class PyNcclPipe(KVPipeBase):
 
     def _get_device_send_recv_impl(
         self, group: StatelessProcessGroup
-    ) -> tuple[Callable[[torch.Tensor, int], None], Callable[
-        [torch.Tensor, int], None]]:
-
+    ) -> tuple[
+        Callable[[torch.Tensor, int], None], Callable[[torch.Tensor, int], None]
+    ]:
         send: Callable[[torch.Tensor, int], None]
         recv: Callable[[torch.Tensor, int], None]
         if self.device.type == "cuda":
@@ -144,9 +144,9 @@ class PyNcclPipe(KVPipeBase):
             buffer: A tensor of the specified type and shape,
                 allocated on `self.device`.
         """
-        return torch.empty(metadata["shape"],
-                           dtype=metadata["dtype"],
-                           device=self.device)
+        return torch.empty(
+            metadata["shape"], dtype=metadata["dtype"], device=self.device
+        )
 
     def _send_metadata(self, metadata: Metadata):
         """
@@ -179,8 +179,7 @@ class PyNcclPipe(KVPipeBase):
         metadata = self._make_metadata(tensor)
         self._send_metadata(metadata)
         if tensor is not None:
-            self.device_send_func(tensor.to(self.device),
-                                  self.target_rank_for_send)
+            self.device_send_func(tensor.to(self.device), self.target_rank_for_send)
 
     def _recv_impl(self) -> Optional[torch.Tensor]:
         """
@@ -198,8 +197,9 @@ class PyNcclPipe(KVPipeBase):
 
         return buffer
 
-    def send_tensor_wrapper(self, tensor: Optional[torch.Tensor],
-                            tensor_size: int) -> None:
+    def send_tensor_wrapper(
+        self, tensor: Optional[torch.Tensor], tensor_size: int
+    ) -> None:
         """
         Wrapper for _send_impl to handle exceptions and update buffer size.
         """
@@ -209,9 +209,14 @@ class PyNcclPipe(KVPipeBase):
             with self.buffer_size_lock:
                 self.buffer_size -= tensor_size
         except Exception as e:
-            logger.error("[rank%d]: Exception when trying to send %s, msg: %s",
-                         torch.distributed.get_rank(), str(tensor), str(e))
+            logger.error(
+                "[rank%d]: Exception when trying to send %s, msg: %s",
+                torch.distributed.get_rank(),
+                str(tensor),
+                str(e),
+            )
             import traceback
+
             traceback.print_exc()
 
     def block_if_full(self):
@@ -244,15 +249,14 @@ class PyNcclPipe(KVPipeBase):
         with self.buffer_size_lock:
             self.buffer_size += tensor_size
 
-        self.transport_thread.submit(self.send_tensor_wrapper, tensor,
-                                     tensor_size)
+        self.transport_thread.submit(self.send_tensor_wrapper, tensor, tensor_size)
 
     def recv_tensor(self) -> Optional[torch.Tensor]:
         """
         Receives a tensor and its metadata from the source rank. Blocking call.
 
-        Args:
-            tensor: The received tensor, or `None` if no tensor is received.
+        Returns:
+            The received tensor, or `None` if no tensor is received.
         """
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)
@@ -266,6 +270,7 @@ class PyNcclPipe(KVPipeBase):
             logger.error("%s", e)
             logger.error("My device: %s", self.device)
             import traceback
+
             traceback.print_exc()
             raise e
 
@@ -275,6 +280,5 @@ class PyNcclPipe(KVPipeBase):
         """
         Close the pipe and release associated resources.
         """
-        if hasattr(self,
-                   "transport_thread") and self.transport_thread is not None:
+        if hasattr(self, "transport_thread") and self.transport_thread is not None:
             self.transport_thread.shutdown()

@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from typing import Counter as CollectionsCounter
-from typing import Dict, List, Optional, Type, Union, cast
+from collections import Counter as CollectionsCounter
+from typing import Optional, Union, cast
 
 import numpy as np
 import prometheus_client
@@ -43,7 +43,7 @@ class Metrics:
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
 
-    def __init__(self, labelnames: List[str], vllm_config: VllmConfig):
+    def __init__(self, labelnames: list[str], vllm_config: VllmConfig):
         # Unregister any existing vLLM collectors (for CI/CD)
         self._unregister_vllm_metrics()
 
@@ -51,8 +51,7 @@ class Metrics:
 
         # Use this flag to hide metrics that were deprecated in
         # a previous release and which will be removed future
-        self.show_hidden_metrics = \
-            vllm_config.observability_config.show_hidden_metrics
+        self.show_hidden_metrics = vllm_config.observability_config.show_hidden_metrics
 
         # System stats
         #   Scheduler State
@@ -60,12 +59,14 @@ class Metrics:
             name="vllm:num_requests_running",
             documentation="Number of requests currently running on GPU.",
             labelnames=labelnames,
-            multiprocess_mode="sum")
+            multiprocess_mode="sum",
+        )
         self.gauge_scheduler_waiting = self._gauge_cls(
             name="vllm:num_requests_waiting",
             documentation="Number of requests waiting to be processed.",
             labelnames=labelnames,
-            multiprocess_mode="sum")
+            multiprocess_mode="sum",
+        )
         self.gauge_lora_info = self._gauge_cls(
             name="vllm:lora_requests_info",
             documentation="Running stats on lora requests.",
@@ -82,93 +83,173 @@ class Metrics:
             name="vllm:gpu_cache_usage_perc",
             documentation="GPU KV-cache usage. 1 means 100 percent usage.",
             labelnames=labelnames,
-            multiprocess_mode="sum")
+            multiprocess_mode="sum",
+        )
 
         # Iteration stats
         self.counter_num_preemption = self._counter_cls(
             name="vllm:num_preemptions_total",
             documentation="Cumulative number of preemption from the engine.",
-            labelnames=labelnames)
+            labelnames=labelnames,
+        )
         self.counter_prompt_tokens = self._counter_cls(
             name="vllm:prompt_tokens_total",
             documentation="Number of prefill tokens processed.",
-            labelnames=labelnames)
+            labelnames=labelnames,
+        )
         self.counter_generation_tokens = self._counter_cls(
             name="vllm:generation_tokens_total",
             documentation="Number of generation tokens processed.",
-            labelnames=labelnames)
+            labelnames=labelnames,
+        )
         self.histogram_iteration_tokens = self._histogram_cls(
             name="vllm:iteration_tokens_total",
             documentation="Histogram of number of tokens per engine_step.",
             labelnames=labelnames,
-            buckets=[
-                1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384
-            ])
+            buckets=[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384],
+        )
         self.histogram_time_to_first_token = self._histogram_cls(
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
             labelnames=labelnames,
             buckets=[
-                0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5,
-                0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0, 160.0, 640.0,
-                2560.0
-            ])
+                0.001,
+                0.005,
+                0.01,
+                0.02,
+                0.04,
+                0.06,
+                0.08,
+                0.1,
+                0.25,
+                0.5,
+                0.75,
+                1.0,
+                2.5,
+                5.0,
+                7.5,
+                10.0,
+                20.0,
+                40.0,
+                80.0,
+                160.0,
+                640.0,
+                2560.0,
+            ],
+        )
         # Deprecated in 0.11 - Renamed as vllm:inter_token_latency_seconds
         # TODO: in 0.12, only enable if show_hidden_metrics=True
         self.histogram_time_per_output_token = self._histogram_cls(
             name="vllm:time_per_output_token_seconds",
             documentation=(
                 "Histogram of time per output token in seconds."
-                "DEPRECATED: Use vllm:inter_token_latency_seconds instead."),
+                "DEPRECATED: Use vllm:inter_token_latency_seconds instead."
+            ),
             labelnames=labelnames,
             buckets=[
-                0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
-                1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0
-            ])
+                0.01,
+                0.025,
+                0.05,
+                0.075,
+                0.1,
+                0.15,
+                0.2,
+                0.3,
+                0.4,
+                0.5,
+                0.75,
+                1.0,
+                2.5,
+                5.0,
+                7.5,
+                10.0,
+                20.0,
+                40.0,
+                80.0,
+            ],
+        )
         self.histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
             documentation="Histogram of inter token latency in seconds.",
             labelnames=labelnames,
             buckets=[
-                0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
-                1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0
-            ])
+                0.01,
+                0.025,
+                0.05,
+                0.075,
+                0.1,
+                0.15,
+                0.2,
+                0.3,
+                0.4,
+                0.5,
+                0.75,
+                1.0,
+                2.5,
+                5.0,
+                7.5,
+                10.0,
+                20.0,
+                40.0,
+                80.0,
+            ],
+        )
 
         # Request stats
         #   Latency
         request_latency_buckets = [
-            0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
-            40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0
+            0.3,
+            0.5,
+            0.8,
+            1.0,
+            1.5,
+            2.0,
+            2.5,
+            5.0,
+            10.0,
+            15.0,
+            20.0,
+            30.0,
+            40.0,
+            50.0,
+            60.0,
+            120.0,
+            240.0,
+            480.0,
+            960.0,
+            1920.0,
+            7680.0,
         ]
         self.histogram_e2e_time_request = self._histogram_cls(
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of end to end request latency in seconds.",
             labelnames=labelnames,
-            buckets=request_latency_buckets)
+            buckets=request_latency_buckets,
+        )
         self.histogram_queue_time_request = self._histogram_cls(
             name="vllm:request_queue_time_seconds",
-            documentation=
-            "Histogram of time spent in WAITING phase for request.",
+            documentation="Histogram of time spent in WAITING phase for request.",
             labelnames=labelnames,
-            buckets=request_latency_buckets)
+            buckets=request_latency_buckets,
+        )
         self.histogram_inference_time_request = self._histogram_cls(
             name="vllm:request_inference_time_seconds",
-            documentation=
-            "Histogram of time spent in RUNNING phase for request.",
+            documentation="Histogram of time spent in RUNNING phase for request.",
             labelnames=labelnames,
-            buckets=request_latency_buckets)
+            buckets=request_latency_buckets,
+        )
         self.histogram_prefill_time_request = self._histogram_cls(
             name="vllm:request_prefill_time_seconds",
-            documentation=
-            "Histogram of time spent in PREFILL phase for request.",
+            documentation="Histogram of time spent in PREFILL phase for request.",
             labelnames=labelnames,
-            buckets=request_latency_buckets)
+            buckets=request_latency_buckets,
+        )
         self.histogram_decode_time_request = self._histogram_cls(
             name="vllm:request_decode_time_seconds",
-            documentation=
-            "Histogram of time spent in DECODE phase for request.",
+            documentation="Histogram of time spent in DECODE phase for request.",
             labelnames=labelnames,
-            buckets=request_latency_buckets)
+            buckets=request_latency_buckets,
+        )
 
         #   Metadata
         self.histogram_num_prompt_tokens_request = self._histogram_cls(
@@ -177,19 +258,18 @@ class Metrics:
             labelnames=labelnames,
             buckets=build_1_2_5_buckets(max_model_len),
         )
-        self.histogram_num_generation_tokens_request = \
-            self._histogram_cls(
-                name="vllm:request_generation_tokens",
-                documentation="Number of generation tokens processed.",
-                labelnames=labelnames,
-                buckets=build_1_2_5_buckets(max_model_len),
-            )
+        self.histogram_num_generation_tokens_request = self._histogram_cls(
+            name="vllm:request_generation_tokens",
+            documentation="Number of generation tokens processed.",
+            labelnames=labelnames,
+            buckets=build_1_2_5_buckets(max_model_len),
+        )
         self.histogram_max_num_generation_tokens_request = self._histogram_cls(
             name="vllm:request_max_num_generation_tokens",
-            documentation=
-            "Histogram of maximum number of requested generation tokens.",
+            documentation="Histogram of maximum number of requested generation tokens.",
             labelnames=labelnames,
-            buckets=build_1_2_5_buckets(max_model_len))
+            buckets=build_1_2_5_buckets(max_model_len),
+        )
         self.histogram_n_request = self._histogram_cls(
             name="vllm:request_params_n",
             documentation="Histogram of the n request parameter.",
@@ -205,10 +285,10 @@ class Metrics:
         self.counter_request_success = self._counter_cls(
             name="vllm:request_success_total",
             documentation="Count of successfully processed requests.",
-            labelnames=labelnames + [Metrics.labelname_finish_reason])
+            labelnames=labelnames + [Metrics.labelname_finish_reason],
+        )
 
-
-# --8<-- [end:metrics-definitions]
+    # --8<-- [end:metrics-definitions]
 
     def _unregister_vllm_metrics(self) -> None:
         for collector in list(prometheus_client.REGISTRY._collector_to_names):
@@ -220,16 +300,18 @@ class _RayGaugeWrapper:
     """Wraps around ray.util.metrics.Gauge to provide same API as
     prometheus_client.Gauge"""
 
-    def __init__(self,
-                 name: str,
-                 documentation: str = "",
-                 labelnames: Optional[List[str]] = None,
-                 multiprocess_mode: str = ""):
+    def __init__(
+        self,
+        name: str,
+        documentation: str = "",
+        labelnames: Optional[list[str]] = None,
+        multiprocess_mode: str = "",
+    ):
         del multiprocess_mode
         labelnames_tuple = tuple(labelnames) if labelnames else None
-        self._gauge = ray_metrics.Gauge(name=name,
-                                        description=documentation,
-                                        tag_keys=labelnames_tuple)
+        self._gauge = ray_metrics.Gauge(
+            name=name, description=documentation, tag_keys=labelnames_tuple
+        )
 
     def labels(self, **labels):
         self._gauge.set_default_tags(labels)
@@ -247,14 +329,13 @@ class _RayCounterWrapper:
     """Wraps around ray.util.metrics.Counter to provide same API as
     prometheus_client.Counter"""
 
-    def __init__(self,
-                 name: str,
-                 documentation: str = "",
-                 labelnames: Optional[List[str]] = None):
+    def __init__(
+        self, name: str, documentation: str = "", labelnames: Optional[list[str]] = None
+    ):
         labelnames_tuple = tuple(labelnames) if labelnames else None
-        self._counter = ray_metrics.Counter(name=name,
-                                            description=documentation,
-                                            tag_keys=labelnames_tuple)
+        self._counter = ray_metrics.Counter(
+            name=name, description=documentation, tag_keys=labelnames_tuple
+        )
 
     def labels(self, **labels):
         self._counter.set_default_tags(labels)
@@ -270,17 +351,21 @@ class _RayHistogramWrapper:
     """Wraps around ray.util.metrics.Histogram to provide same API as
     prometheus_client.Histogram"""
 
-    def __init__(self,
-                 name: str,
-                 documentation: str = "",
-                 labelnames: Optional[List[str]] = None,
-                 buckets: Optional[List[float]] = None):
+    def __init__(
+        self,
+        name: str,
+        documentation: str = "",
+        labelnames: Optional[list[str]] = None,
+        buckets: Optional[list[float]] = None,
+    ):
         labelnames_tuple = tuple(labelnames) if labelnames else None
         boundaries = buckets if buckets else []
-        self._histogram = ray_metrics.Histogram(name=name,
-                                                description=documentation,
-                                                tag_keys=labelnames_tuple,
-                                                boundaries=boundaries)
+        self._histogram = ray_metrics.Histogram(
+            name=name,
+            description=documentation,
+            tag_keys=labelnames_tuple,
+            boundaries=boundaries,
+        )
 
     def labels(self, **labels):
         self._histogram.set_default_tags(labels)
@@ -295,14 +380,18 @@ class RayMetrics(Metrics):
     RayMetrics is used by RayPrometheusStatLogger to log to Ray metrics.
     Provides the same metrics as Metrics but uses Ray's util.metrics library.
     """
-    _gauge_cls: Type[prometheus_client.Gauge] = cast(
-        Type[prometheus_client.Gauge], _RayGaugeWrapper)
-    _counter_cls: Type[prometheus_client.Counter] = cast(
-        Type[prometheus_client.Counter], _RayCounterWrapper)
-    _histogram_cls: Type[prometheus_client.Histogram] = cast(
-        Type[prometheus_client.Histogram], _RayHistogramWrapper)
 
-    def __init__(self, labelnames: List[str], vllm_config: VllmConfig):
+    _gauge_cls: type[prometheus_client.Gauge] = cast(
+        type[prometheus_client.Gauge], _RayGaugeWrapper
+    )
+    _counter_cls: type[prometheus_client.Counter] = cast(
+        type[prometheus_client.Counter], _RayCounterWrapper
+    )
+    _histogram_cls: type[prometheus_client.Histogram] = cast(
+        type[prometheus_client.Histogram], _RayHistogramWrapper
+    )
+
+    def __init__(self, labelnames: list[str], vllm_config: VllmConfig):
         if ray_metrics is None:
             raise ImportError("RayMetrics requires Ray to be installed.")
         super().__init__(labelnames, vllm_config)
@@ -312,14 +401,14 @@ class RayMetrics(Metrics):
         pass
 
 
-def build_buckets(mantissa_lst: List[int], max_value: int) -> List[int]:
+def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
     """
     Builds a list of buckets with increasing powers of 10 multiplied by
     mantissa values until the value exceeds the specified maximum.
 
     """
     exponent = 0
-    buckets: List[int] = []
+    buckets: list[int] = []
     while True:
         for m in mantissa_lst:
             value = m * 10**exponent
@@ -330,7 +419,7 @@ def build_buckets(mantissa_lst: List[int], max_value: int) -> List[int]:
         exponent += 1
 
 
-def build_1_2_5_buckets(max_value: int) -> List[int]:
+def build_1_2_5_buckets(max_value: int) -> list[int]:
     """
     Example:
     >>> build_1_2_5_buckets(100)
@@ -339,7 +428,7 @@ def build_1_2_5_buckets(max_value: int) -> List[int]:
     return build_buckets([1, 2, 5], max_value)
 
 
-def build_1_2_3_5_8_buckets(max_value: int) -> List[int]:
+def build_1_2_3_5_8_buckets(max_value: int) -> list[int]:
     """
     Example:
     >>> build_1_2_3_5_8_buckets(100)
@@ -348,14 +437,12 @@ def build_1_2_3_5_8_buckets(max_value: int) -> List[int]:
     return build_buckets([1, 2, 3, 5, 8], max_value)
 
 
-def local_interval_elapsed(now: float, last_log: float,
-                           local_interval: float) -> bool:
+def local_interval_elapsed(now: float, last_log: float, local_interval: float) -> bool:
     elapsed_time = now - last_log
     return elapsed_time > local_interval
 
 
-def get_throughput(tracked_stats: List[int], now: float,
-                   last_log: float) -> float:
+def get_throughput(tracked_stats: list[int], now: float, last_log: float) -> float:
     return float(np.sum(tracked_stats) / (now - last_log))
 
 
@@ -369,29 +456,32 @@ class LoggingStatLogger(StatLoggerBase):
 
     def log(self, stats: Stats) -> None:
         """Called by LLMEngine.
-           Logs to Stdout every self.local_interval seconds."""
+        Logs to Stdout every self.local_interval seconds."""
 
         # Save tracked stats for token counters.
         self.num_prompt_tokens.append(stats.num_prompt_tokens_iter)
         self.num_generation_tokens.append(stats.num_generation_tokens_iter)
 
         # Log locally every local_interval seconds.
-        if local_interval_elapsed(stats.now, self.last_local_log,
-                                  self.local_interval):
+        if local_interval_elapsed(stats.now, self.last_local_log, self.local_interval):
             # Compute summary metrics for tracked stats (and log them
-            # to promethus if applicable).
-            prompt_throughput = get_throughput(self.num_prompt_tokens,
-                                               now=stats.now,
-                                               last_log=self.last_local_log)
+            # to prometheus if applicable).
+            prompt_throughput = get_throughput(
+                self.num_prompt_tokens, now=stats.now, last_log=self.last_local_log
+            )
             generation_throughput = get_throughput(
-                self.num_generation_tokens,
-                now=stats.now,
-                last_log=self.last_local_log)
+                self.num_generation_tokens, now=stats.now, last_log=self.last_local_log
+            )
 
             log_fn = logger.info
-            if not any((prompt_throughput, generation_throughput,
-                        self.last_prompt_throughput,
-                        self.last_generation_throughput)):
+            if not any(
+                (
+                    prompt_throughput,
+                    generation_throughput,
+                    self.last_prompt_throughput,
+                    self.last_generation_throughput,
+                )
+            ):
                 # Avoid log noise on an idle production system
                 log_fn = logger.debug
 
@@ -409,8 +499,10 @@ class LoggingStatLogger(StatLoggerBase):
                 stats.gpu_cache_usage_sys * 100,
                 stats.cpu_cache_usage_sys * 100,
             )
-            if (stats.cpu_prefix_cache_hit_rate >= 0
-                    or stats.gpu_prefix_cache_hit_rate >= 0):
+            if (
+                stats.cpu_prefix_cache_hit_rate >= 0
+                or stats.gpu_prefix_cache_hit_rate >= 0
+            ):
                 log_fn(
                     "Prefix cache hit rate: GPU: %.2f%%, CPU: %.2f%%",
                     stats.gpu_prefix_cache_hit_rate * 100,
@@ -432,17 +524,20 @@ class LoggingStatLogger(StatLoggerBase):
 
 
 class PrometheusStatLogger(StatLoggerBase):
-    """PrometheusStatLogger is used LLMEngine to log to Promethus."""
+    """PrometheusStatLogger is used LLMEngine to log to Prometheus."""
+
     _metrics_cls = Metrics
     _gauge_cls = prometheus_client.Gauge
 
-    def __init__(self, local_interval: float, labels: Dict[str, str],
-                 vllm_config: VllmConfig) -> None:
+    def __init__(
+        self, local_interval: float, labels: dict[str, str], vllm_config: VllmConfig
+    ) -> None:
         super().__init__(local_interval, vllm_config)
         # Prometheus metrics
         self.labels = labels
-        self.metrics = self._metrics_cls(labelnames=list(labels.keys()),
-                                         vllm_config=vllm_config)
+        self.metrics = self._metrics_cls(
+            labelnames=list(labels.keys()), vllm_config=vllm_config
+        )
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
@@ -452,90 +547,106 @@ class PrometheusStatLogger(StatLoggerBase):
         # Convenience function for logging to counter.
         # Prevent ValueError from negative increment
         if data < 0:
-            logger.warning("Skipping negative increment of %g to %s", data,
-                           counter)
+            logger.warning("Skipping negative increment of %g to %s", data, counter)
             return
         counter.labels(**self.labels).inc(data)
 
-    def _log_counter_labels(self, counter, data: CollectionsCounter,
-                            label_key: str) -> None:
+    def _log_counter_labels(
+        self, counter, data: CollectionsCounter, label_key: str
+    ) -> None:
         # Convenience function for collection counter of labels.
         for label, count in data.items():
             counter.labels(**{**self.labels, label_key: label}).inc(count)
 
-    def _log_histogram(self, histogram, data: Union[List[int],
-                                                    List[float]]) -> None:
+    def _log_histogram(self, histogram, data: Union[list[int], list[float]]) -> None:
         # Convenience function for logging list to histogram.
         for datum in data:
             histogram.labels(**self.labels).observe(datum)
 
-    def _log_gauge_string(self, gauge, data: Dict[str, str]) -> None:
+    def _log_gauge_string(self, gauge, data: dict[str, str]) -> None:
         gauge.labels(**data).set_to_current_time()
 
     def _log_prometheus(self, stats: Stats) -> None:
         # System state data
-        self._log_gauge(self.metrics.gauge_scheduler_running,
-                        stats.num_running_sys)
-        self._log_gauge(self.metrics.gauge_scheduler_waiting,
-                        stats.num_waiting_sys)
-        self._log_gauge(self.metrics.gauge_gpu_cache_usage,
-                        stats.gpu_cache_usage_sys)
+        self._log_gauge(self.metrics.gauge_scheduler_running, stats.num_running_sys)
+        self._log_gauge(self.metrics.gauge_scheduler_waiting, stats.num_waiting_sys)
+        self._log_gauge(self.metrics.gauge_gpu_cache_usage, stats.gpu_cache_usage_sys)
         # Including max-lora in metric, in future this property of lora
         # config maybe extended to be dynamic.
         lora_info = {
-            self.metrics.labelname_running_lora_adapters:
-            ",".join(stats.running_lora_adapters),
-            self.metrics.labelname_waiting_lora_adapters:
-            ",".join(stats.waiting_lora_adapters),
-            self.metrics.labelname_max_lora:
-            stats.max_lora,
+            self.metrics.labelname_running_lora_adapters: ",".join(
+                stats.running_lora_adapters
+            ),
+            self.metrics.labelname_waiting_lora_adapters: ",".join(
+                stats.waiting_lora_adapters
+            ),
+            self.metrics.labelname_max_lora: stats.max_lora,
         }
         self._log_gauge_string(self.metrics.gauge_lora_info, lora_info)
         # Iteration level data
-        self._log_counter(self.metrics.counter_num_preemption,
-                          stats.num_preemption_iter)
-        self._log_counter(self.metrics.counter_prompt_tokens,
-                          stats.num_prompt_tokens_iter)
-        self._log_counter(self.metrics.counter_generation_tokens,
-                          stats.num_generation_tokens_iter)
-        self._log_histogram(self.metrics.histogram_iteration_tokens,
-                            [stats.num_tokens_iter])
-        self._log_histogram(self.metrics.histogram_time_to_first_token,
-                            stats.time_to_first_tokens_iter)
-        self._log_histogram(self.metrics.histogram_time_per_output_token,
-                            stats.inter_token_latencies_iter)
-        self._log_histogram(self.metrics.histogram_inter_token_latency,
-                            stats.inter_token_latencies_iter)
+        self._log_counter(
+            self.metrics.counter_num_preemption, stats.num_preemption_iter
+        )
+        self._log_counter(
+            self.metrics.counter_prompt_tokens, stats.num_prompt_tokens_iter
+        )
+        self._log_counter(
+            self.metrics.counter_generation_tokens, stats.num_generation_tokens_iter
+        )
+        self._log_histogram(
+            self.metrics.histogram_iteration_tokens, [stats.num_tokens_iter]
+        )
+        self._log_histogram(
+            self.metrics.histogram_time_to_first_token, stats.time_to_first_tokens_iter
+        )
+        self._log_histogram(
+            self.metrics.histogram_time_per_output_token,
+            stats.inter_token_latencies_iter,
+        )
+        self._log_histogram(
+            self.metrics.histogram_inter_token_latency, stats.inter_token_latencies_iter
+        )
 
         # Request level data
         # Latency
-        self._log_histogram(self.metrics.histogram_e2e_time_request,
-                            stats.time_e2e_requests)
-        self._log_histogram(self.metrics.histogram_queue_time_request,
-                            stats.time_queue_requests)
-        self._log_histogram(self.metrics.histogram_inference_time_request,
-                            stats.time_inference_requests)
-        self._log_histogram(self.metrics.histogram_prefill_time_request,
-                            stats.time_prefill_requests)
-        self._log_histogram(self.metrics.histogram_decode_time_request,
-                            stats.time_decode_requests)
+        self._log_histogram(
+            self.metrics.histogram_e2e_time_request, stats.time_e2e_requests
+        )
+        self._log_histogram(
+            self.metrics.histogram_queue_time_request, stats.time_queue_requests
+        )
+        self._log_histogram(
+            self.metrics.histogram_inference_time_request, stats.time_inference_requests
+        )
+        self._log_histogram(
+            self.metrics.histogram_prefill_time_request, stats.time_prefill_requests
+        )
+        self._log_histogram(
+            self.metrics.histogram_decode_time_request, stats.time_decode_requests
+        )
         # Metadata
-        finished_reason_counter = CollectionsCounter(
-            stats.finished_reason_requests)
-        self._log_counter_labels(self.metrics.counter_request_success,
-                                 finished_reason_counter,
-                                 Metrics.labelname_finish_reason)
-        self._log_histogram(self.metrics.histogram_num_prompt_tokens_request,
-                            stats.num_prompt_tokens_requests)
+        finished_reason_counter = CollectionsCounter(stats.finished_reason_requests)
+        self._log_counter_labels(
+            self.metrics.counter_request_success,
+            finished_reason_counter,
+            Metrics.labelname_finish_reason,
+        )
+        self._log_histogram(
+            self.metrics.histogram_num_prompt_tokens_request,
+            stats.num_prompt_tokens_requests,
+        )
         self._log_histogram(
             self.metrics.histogram_num_generation_tokens_request,
-            stats.num_generation_tokens_requests)
+            stats.num_generation_tokens_requests,
+        )
         self._log_histogram(self.metrics.histogram_n_request, stats.n_requests)
         self._log_histogram(
             self.metrics.histogram_max_num_generation_tokens_request,
-            stats.max_num_generation_tokens_requests)
-        self._log_histogram(self.metrics.histogram_max_tokens_request,
-                            stats.max_tokens_requests)
+            stats.max_num_generation_tokens_requests,
+        )
+        self._log_histogram(
+            self.metrics.histogram_max_tokens_request, stats.max_tokens_requests
+        )
 
     def log(self, stats: Stats):
         """Logs to prometheus and tracked stats every iteration."""
@@ -547,9 +658,7 @@ class PrometheusStatLogger(StatLoggerBase):
         self.num_generation_tokens.append(stats.num_generation_tokens_iter)
 
         # Log locally every local_interval seconds.
-        if local_interval_elapsed(stats.now, self.last_local_log,
-                                  self.local_interval):
-
+        if local_interval_elapsed(stats.now, self.last_local_log, self.local_interval):
             # Reset tracked stats for next interval.
             self.num_prompt_tokens = []
             self.num_generation_tokens = []
@@ -565,12 +674,14 @@ class PrometheusStatLogger(StatLoggerBase):
                 name="vllm:cache_config_info",
                 documentation="Information of the LLMEngine CacheConfig",
                 labelnames=metrics_info.keys(),
-                multiprocess_mode="mostrecent")
+                multiprocess_mode="mostrecent",
+            )
             info_gauge.labels(**metrics_info).set(1)
 
 
 class RayPrometheusStatLogger(PrometheusStatLogger):
     """RayPrometheusStatLogger uses Ray metrics instead."""
+
     _metrics_cls = RayMetrics
 
     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
