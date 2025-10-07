@@ -64,7 +64,7 @@ def test_modernbert_models(
             hf_outputs.append(softmax(output.logits[0]))
 
     # check logits difference
-    for hf_output, vllm_output in enumerate(zip(hf_outputs, vllm_outputs)):
+    for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
         hf_output = torch.tensor(hf_output).cpu().float()
         vllm_output = torch.tensor(vllm_output).cpu().float()
         assert torch.allclose(hf_output, vllm_output, 1e-2)
