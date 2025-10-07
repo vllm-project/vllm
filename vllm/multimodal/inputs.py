@@ -677,6 +677,9 @@ class MultiModalFieldConfig:
         self.field = field
         self.modality = modality
 
+    def __repr__(self) -> str:
+        return f"MultiModalFieldConfig(field={self.field}, modality={self.modality})"
+
     def build_elems(
         self,
         key: str,
