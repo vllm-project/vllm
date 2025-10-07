@@ -22,7 +22,7 @@ FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # enable spec-as-decode optimization
-    supports_spec_as_decode: ClassVar[bool] = True
+    supports_uniform_spec_as_decode: ClassVar[bool] = True
 
 
 class FlashInferMLABackend(MLACommonBackend):

@@ -68,9 +68,6 @@ class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
 class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
-    supports_spec_as_decode: ClassVar[bool] = True
-    supports_nonuniform_decode: ClassVar[bool] = True
-
     reorder_batch_threshold: int = 512
 
     def __init__(

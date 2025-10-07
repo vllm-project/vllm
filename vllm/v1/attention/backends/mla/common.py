@@ -458,20 +458,15 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     # short sequences (i.e. verification for speculative decoding) are
     # classified as decode requests.
     # If True, this will increase `reorder_batch_threshold` (below) when
-    # speculative decoding is enabled.
-    supports_spec_as_decode: ClassVar[bool] = False
-
-    # Whether the backend supports grouping decode requests with
-    # different query lengths in the same batch. If False, when
-    # `reorder_batch_threshold > 1`, any decode requests which do not
-    # have the same query length as the first decode request will
-    # fall back to the prefill kernel.
-    supports_nonuniform_decode: ClassVar[bool] = False
+    # speculative decoding is enabled, and set `require_uniform=True` when
+    # when reordering the batch. Non-uniform decode requests will
+    # fall back to prefill in this case.
+    supports_uniform_spec_as_decode: ClassVar[bool] = False
 
     # The threshold for reordering the batch into decode and prefill requests.
     # If > 1, the batch will be reordered such that requests with
     # query length <= threshold are classified as decode requests.
-    # Use `supports_spec_as_decode` (above) to set this automatically
+    # Use `supports_uniform_spec_as_decode` (above) to set this automatically
     # when speculative decoding is enabled.
     reorder_batch_threshold: int = 1
 
@@ -598,7 +593,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 device=device,
             )
 
-        supports_spec_as_decode = self.supports_spec_as_decode
+        supports_spec_as_decode = self.supports_uniform_spec_as_decode
         self._init_reorder_batch_threshold(
             self.reorder_batch_threshold, supports_spec_as_decode
         )
@@ -741,7 +736,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
-                require_uniform=not self.supports_nonuniform_decode,
+                require_uniform=self.supports_uniform_spec_as_decode,
             )
         )
 
