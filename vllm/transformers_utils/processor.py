@@ -4,11 +4,16 @@
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
-from transformers import (AutoFeatureExtractor, AutoImageProcessor,
-                          AutoProcessor)
+from transformers import (
+    AutoFeatureExtractor,
+    AutoImageProcessor,
+    AutoProcessor,
+    AutoVideoProcessor,
+)
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
 from transformers.processing_utils import ProcessorMixin
+from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
 from vllm.utils import get_allowed_kwarg_only_overrides
@@ -17,6 +22,7 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
+_V = TypeVar("_V", bound=BaseVideoProcessor, default=BaseVideoProcessor)
 
 
 class HashableDict(dict):
@@ -119,15 +125,18 @@ def get_processor(
                 "a custom processor not yet available in the HuggingFace "
                 "transformers library, consider setting "
                 "`trust_remote_code=True` in LLM or using the "
-                "`--trust-remote-code` flag in the CLI.")
+                "`--trust-remote-code` flag in the CLI."
+            )
             raise RuntimeError(err_msg) from e
         else:
             raise e
 
     if not isinstance(processor, processor_cls):
-        raise TypeError("Invalid type of HuggingFace processor. "
-                        f"Expected type: {processor_cls}, but "
-                        f"found type: {type(processor)}")
+        raise TypeError(
+            "Invalid type of HuggingFace processor. "
+            f"Expected type: {processor_cls}, but "
+            f"found type: {type(processor)}"
+        )
 
     return processor
 
@@ -156,7 +165,7 @@ def get_feature_extractor(
     trust_remote_code: bool = False,
     **kwargs: Any,
 ):
-    """Load an audio feature extractor for the given model name 
+    """Load an audio feature extractor for the given model name
     via HuggingFace."""
     try:
         feature_extractor = AutoFeatureExtractor.from_pretrained(
@@ -164,7 +173,8 @@ def get_feature_extractor(
             *args,
             revision=revision,
             trust_remote_code=trust_remote_code,
-            **kwargs)
+            **kwargs,
+        )
     except ValueError as e:
         # If the error pertains to the processor class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
@@ -175,7 +185,8 @@ def get_feature_extractor(
                 "extractor is a custom extractor not yet available in the "
                 "HuggingFace transformers library, consider setting "
                 "`trust_remote_code=True` in LLM or using the "
-                "`--trust-remote-code` flag in the CLI.")
+                "`--trust-remote-code` flag in the CLI."
+            )
             raise RuntimeError(err_msg) from e
         else:
             raise e
@@ -211,7 +222,8 @@ def get_image_processor(
             *args,
             revision=revision,
             trust_remote_code=trust_remote_code,
-            **kwargs)
+            **kwargs,
+        )
     except ValueError as e:
         # If the error pertains to the processor class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
@@ -222,7 +234,8 @@ def get_image_processor(
                 "a custom processor not yet available in the HuggingFace "
                 "transformers library, consider setting "
                 "`trust_remote_code=True` in LLM or using the "
-                "`--trust-remote-code` flag in the CLI.")
+                "`--trust-remote-code` flag in the CLI."
+            )
             raise RuntimeError(err_msg) from e
         else:
             raise e
@@ -242,4 +255,58 @@ def cached_image_processor_from_config(
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         **_merge_mm_kwargs(model_config, AutoImageProcessor, **kwargs),
+    )
+
+
+def get_video_processor(
+    processor_name: str,
+    *args: Any,
+    revision: Optional[str] = None,
+    trust_remote_code: bool = False,
+    processor_cls_overrides: Optional[type[_V]] = None,
+    **kwargs: Any,
+):
+    """Load a video processor for the given model name via HuggingFace."""
+    try:
+        processor_cls = processor_cls_overrides or AutoVideoProcessor
+        processor = processor_cls.from_pretrained(
+            processor_name,
+            *args,
+            revision=revision,
+            trust_remote_code=trust_remote_code,
+            **kwargs,
+        )
+    except ValueError as e:
+        # If the error pertains to the processor class not existing or not
+        # currently being imported, suggest using the --trust-remote-code flag.
+        # Unlike AutoTokenizer, AutoVideoProcessor does not separate such errors
+        if not trust_remote_code:
+            err_msg = (
+                "Failed to load the video processor. If the video processor is "
+                "a custom processor not yet available in the HuggingFace "
+                "transformers library, consider setting "
+                "`trust_remote_code=True` in LLM or using the "
+                "`--trust-remote-code` flag in the CLI."
+            )
+            raise RuntimeError(err_msg) from e
+        else:
+            raise e
+
+    return cast(BaseVideoProcessor, processor)
+
+
+cached_get_video_processor = lru_cache(get_video_processor)
+
+
+def cached_video_processor_from_config(
+    model_config: "ModelConfig",
+    processor_cls: Optional[type[_V]] = None,
+    **kwargs: Any,
+):
+    return cached_get_video_processor(
+        model_config.model,
+        revision=model_config.revision,
+        trust_remote_code=model_config.trust_remote_code,
+        processor_cls_overrides=processor_cls,  # type: ignore[arg-type]
+        **_merge_mm_kwargs(model_config, AutoVideoProcessor, **kwargs),
     )

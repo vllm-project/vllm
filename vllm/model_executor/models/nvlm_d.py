@@ -14,25 +14,34 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargsItems
-from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
-                                   MultiModalDataItems)
-from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
+from vllm.multimodal.parse import (
+    ImageEmbeddingItems,
+    ImageProcessorItems,
+    MultiModalDataItems,
+)
+from vllm.multimodal.processing import (
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+)
 
 from .intern_vit import InternVisionModel
-from .internvl import (BaseInternVLDummyInputsBuilder,
-                       BaseInternVLMultiModalProcessor,
-                       BaseInternVLProcessingInfo, BaseInternVLProcessor,
-                       InternVLChatModel)
+from .internvl import (
+    BaseInternVLDummyInputsBuilder,
+    BaseInternVLMultiModalProcessor,
+    BaseInternVLProcessingInfo,
+    BaseInternVLProcessor,
+    InternVLChatModel,
+)
 
 IMG_PAD = "<|vision_pad|>"
 
 
 class NVLMProcessor(BaseInternVLProcessor):
-
     @property
     def image_token_id(self) -> int:
         return self.tokenizer.get_vocab()[IMG_PAD]
@@ -50,8 +59,9 @@ class NVLMProcessor(BaseInternVLProcessor):
             tile_pos_identifiers += ["<tile_global_thumbnail>"]
 
         context_size = feature_size // num_patches
-        features = "".join(identifier + IMG_PAD * context_size
-                           for identifier in tile_pos_identifiers)
+        features = "".join(
+            identifier + IMG_PAD * context_size for identifier in tile_pos_identifiers
+        )
 
         # We include the start and end as well because "<Image><tile" is
         # tokenized as ["<Image", "><", "tile"], resulting in assertion error
@@ -62,7 +72,6 @@ class NVLMProcessor(BaseInternVLProcessor):
 
 
 class NVLMProcessingInfo(BaseInternVLProcessingInfo):
-
     def get_hf_processor(self, **kwargs: object) -> NVLMProcessor:
         return self.ctx.init_processor(
             NVLMProcessor,
@@ -72,9 +81,7 @@ class NVLMProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-class NVLMDummyInputsBuilder(BaseInternVLDummyInputsBuilder[NVLMProcessingInfo]
-                             ):
-
+class NVLMDummyInputsBuilder(BaseInternVLDummyInputsBuilder[NVLMProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
@@ -86,22 +93,24 @@ class NVLMDummyInputsBuilder(BaseInternVLDummyInputsBuilder[NVLMProcessingInfo]
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
-        target_width, target_height = \
-            self.info.get_image_size_with_most_features()
+        target_width, target_height = self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images)
+            "image": self._get_dummy_images(
+                width=target_width,
+                height=target_height,
+                num_images=num_images,
+                overrides=image_overrides,
+            )
         }
 
 
-class NVLMMultiModalProcessor(
-        BaseInternVLMultiModalProcessor[NVLMProcessingInfo]):
-
+class NVLMMultiModalProcessor(BaseInternVLMultiModalProcessor[NVLMProcessingInfo]):
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -124,7 +133,8 @@ class NVLMMultiModalProcessor(
 
         def get_replacement_nvlm(item_idx: int):
             images = mm_items.get_items(
-                "image", (ImageEmbeddingItems, ImageProcessorItems))
+                "image", (ImageEmbeddingItems, ImageProcessorItems)
+            )
 
             if isinstance(images, ImageEmbeddingItems):
                 feature_size = images.get_feature_size(item_idx)
@@ -154,21 +164,24 @@ class NVLMMultiModalProcessor(
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(NVLMMultiModalProcessor,
-                                        info=NVLMProcessingInfo,
-                                        dummy_inputs=NVLMDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(
+    NVLMMultiModalProcessor,
+    info=NVLMProcessingInfo,
+    dummy_inputs=NVLMDummyInputsBuilder,
+)
 class NVLM_D_Model(InternVLChatModel):
-
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:
+    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
         vit_hidden_size = config.vision_config.hidden_size
         llm_intermediate_size = config.text_config.intermediate_size
         llm_hidden_size = config.text_config.hidden_size
 
         return nn.Sequential(
-            nn.LayerNorm(vit_hidden_size * int(1 / self.downsample_ratio)**2),
-            nn.Linear(vit_hidden_size * int(1 / self.downsample_ratio)**2,
-                      llm_intermediate_size,
-                      bias=False),
+            nn.LayerNorm(vit_hidden_size * int(1 / self.downsample_ratio) ** 2),
+            nn.Linear(
+                vit_hidden_size * int(1 / self.downsample_ratio) ** 2,
+                llm_intermediate_size,
+                bias=False,
+            ),
             nn.GELU(),
             nn.Linear(llm_intermediate_size, llm_hidden_size, bias=False),
         )
@@ -184,8 +197,9 @@ class NVLM_D_Model(InternVLChatModel):
         if not is_mono:
             vision_feature_layer = config.select_layer
             if vision_feature_layer < 0:
-                num_hidden_layers = config.vision_config.num_hidden_layers \
-                    + vision_feature_layer + 1
+                num_hidden_layers = (
+                    config.vision_config.num_hidden_layers + vision_feature_layer + 1
+                )
             else:
                 num_hidden_layers = vision_feature_layer + 1
 

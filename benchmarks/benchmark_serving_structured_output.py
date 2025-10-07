@@ -37,14 +37,13 @@ from typing import Optional
 import datasets
 import numpy as np
 import pandas as pd
-from tqdm.asyncio import tqdm
-from transformers import PreTrainedTokenizerBase
-
 from backend_request_func import (
     ASYNC_REQUEST_FUNCS,
     RequestFuncInput,
     RequestFuncOutput,
 )
+from tqdm.asyncio import tqdm
+from transformers import PreTrainedTokenizerBase
 
 try:
     from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -449,7 +448,8 @@ async def benchmark(
     def prepare_extra_body(request) -> dict:
         extra_body = {}
         # Add the schema to the extra_body
-        extra_body[request.structure_type] = request.schema
+        extra_body["structured_outputs"] = {}
+        extra_body["structured_outputs"][request.structure_type] = request.schema
         return extra_body
 
     print("Starting initial single prompt test run...")
@@ -909,13 +909,13 @@ def create_argument_parser():
     parser.add_argument(
         "--tokenizer",
         type=str,
-        help="Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+        help="Name or path of the tokenizer, if not using the default tokenizer.",
     )
     parser.add_argument(
         "--tokenizer-mode",
         type=str,
         default="auto",
-        help="Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+        help="Name or path of the tokenizer, if not using the default tokenizer.",
     )
     parser.add_argument(
         "--num-prompts",
