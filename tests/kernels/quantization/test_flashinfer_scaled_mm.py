@@ -9,8 +9,7 @@ from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm
 
 if not current_platform.has_device_capability(100):
     pytest.skip(
-        reason=
-        "Flashinfer FP8 gemms requires compute capability of 10.0 or above.",
+        reason="Flashinfer FP8 gemms requires compute capability of 10.0 or above.",
         allow_module_level=True,
     )
 
@@ -53,7 +52,7 @@ def test_flashinfer_fp8_gemm(
     ).to(dtype=dtype)
 
     if use_bias:
-        bias = torch.randn((n, ), dtype=dtype, device=device)
+        bias = torch.randn((n,), dtype=dtype, device=device)
         expected_out = expected_out + bias
     else:
         bias = None

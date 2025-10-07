@@ -254,7 +254,7 @@ void cutlass_moe_mm(
     bool per_act_token, bool per_out_ch) {
   int32_t version_num = get_sm_version_num();
 #if defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100
-  if (version_num >= 100) {
+  if (version_num >= 100 && version_num < 110) {
     cutlass_moe_mm_sm100(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
                          expert_offsets, problem_sizes, a_strides, b_strides,
                          c_strides, per_act_token, per_out_ch);
@@ -262,7 +262,7 @@ void cutlass_moe_mm(
   }
 #endif
 #if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90
-  if (version_num >= 90) {
+  if (version_num >= 90 && version_num < 100) {
     cutlass_moe_mm_sm90(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
                         expert_offsets, problem_sizes, a_strides, b_strides,
                         c_strides, per_act_token, per_out_ch);

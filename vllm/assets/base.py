@@ -20,8 +20,7 @@ def get_cache_dir() -> Path:
 
 
 @lru_cache
-def get_vllm_public_assets(filename: str,
-                           s3_prefix: Optional[str] = None) -> Path:
+def get_vllm_public_assets(filename: str, s3_prefix: Optional[str] = None) -> Path:
     """
     Download an asset file from ``s3://vllm-public-assets``
     and return the path to the downloaded file.
@@ -36,6 +35,7 @@ def get_vllm_public_assets(filename: str,
         global_http_connection.download_file(
             f"{VLLM_S3_BUCKET_URL}/{filename}",
             asset_path,
-            timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT)
+            timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        )
 
     return asset_path

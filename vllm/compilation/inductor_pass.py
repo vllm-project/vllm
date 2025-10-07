@@ -11,8 +11,7 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 from torch import fx
-from torch._subclasses.fake_tensor import (FakeTensorMode,
-                                           unset_fake_temporarily)
+from torch._subclasses.fake_tensor import FakeTensorMode, unset_fake_temporarily
 
 from vllm.utils import is_torch_equal_or_newer
 
@@ -20,14 +19,14 @@ if is_torch_equal_or_newer("2.6"):
     from torch._inductor.custom_graph_pass import CustomGraphPass
 else:
     # CustomGraphPass is not present in 2.5 or lower, import our version
-    from .torch25_custom_graph_pass import (  # noqa: E501
-        Torch25CustomGraphPass as CustomGraphPass)
+    from .torch25_custom_graph_pass import (
+        Torch25CustomGraphPass as CustomGraphPass,
+    )
 
 _pass_context = None
 
 
 class PassContext:
-
     def __init__(self, runtime_shape: Optional[int]):
         self.runtime_shape = runtime_shape
 
@@ -106,9 +105,9 @@ class CallableInductorPass(InductorPass):
     implementation of the UUID.
     """
 
-    def __init__(self,
-                 callable: Callable[[fx.Graph], None],
-                 uuid: Optional[Any] = None):
+    def __init__(
+        self, callable: Callable[[fx.Graph], None], uuid: Optional[Any] = None
+    ):
         self.callable = callable
         self._uuid = self.hash_source(callable) if uuid is None else uuid
 
@@ -127,8 +126,7 @@ def enable_fake_mode(fn: Callable[..., Any]) -> Callable[..., Any]:
 
     @functools.wraps(fn)
     def fn_new(*args, **kwargs) -> Any:
-        with torch._guards.tracing(
-                None), unset_fake_temporarily(), FakeTensorMode():
+        with torch._guards.tracing(None), unset_fake_temporarily(), FakeTensorMode():
             result = fn(*args, **kwargs)
 
         return result

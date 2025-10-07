@@ -22,8 +22,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from ...utils import create_new_process_for_each_test, multi_gpu_test
 
 if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.",
-                allow_module_level=True)
+    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -48,7 +47,6 @@ def make_request() -> EngineCoreRequest:
 
 @create_new_process_for_each_test()
 def test_engine_core(monkeypatch: pytest.MonkeyPatch):
-
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
         """Setup the EngineCore."""
@@ -57,14 +55,13 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         executor_class = Executor.get_class(vllm_config)
 
         with set_default_torch_num_threads(1):
-            engine_core = EngineCore(vllm_config=vllm_config,
-                                     executor_class=executor_class,
-                                     log_stats=True)
+            engine_core = EngineCore(
+                vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+            )
         """Test basic request lifecycle."""
 
         # First request.
-        engine_core.add_request(
-            *engine_core.preprocess_add_request(make_request()))
+        engine_core.add_request(*engine_core.preprocess_add_request(make_request()))
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 0
 
@@ -73,8 +70,7 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         assert len(engine_core.scheduler.running) == 1
 
         # Second request.
-        engine_core.add_request(
-            *engine_core.preprocess_add_request(make_request()))
+        engine_core.add_request(*engine_core.preprocess_add_request(make_request()))
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 1
 
@@ -83,10 +79,8 @@ def test_engine_core(monkeypatch: pytest.MonkeyPatch):
         assert len(engine_core.scheduler.running) == 2
 
         # Add two requests in a row.
-        engine_core.add_request(
-            *engine_core.preprocess_add_request(make_request()))
-        engine_core.add_request(
-            *engine_core.preprocess_add_request(make_request()))
+        engine_core.add_request(*engine_core.preprocess_add_request(make_request()))
+        engine_core.add_request(*engine_core.preprocess_add_request(make_request()))
         assert len(engine_core.scheduler.waiting) == 2
         assert len(engine_core.scheduler.running) == 2
 
@@ -196,9 +190,9 @@ def test_engine_core_advanced_sampling(monkeypatch: pytest.MonkeyPatch):
         executor_class = Executor.get_class(vllm_config)
 
         with set_default_torch_num_threads(1):
-            engine_core = EngineCore(vllm_config=vllm_config,
-                                     executor_class=executor_class,
-                                     log_stats=True)
+            engine_core = EngineCore(
+                vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+            )
         """Test basic request lifecycle."""
         # First request.
         request: EngineCoreRequest = make_request()
@@ -238,17 +232,14 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
     Test that the engine can handle multiple concurrent batches.
     """
 
-    def make_request_with_max_tokens(req_id: str,
-                                     max_tokens: int) -> EngineCoreRequest:
+    def make_request_with_max_tokens(req_id: str, max_tokens: int) -> EngineCoreRequest:
         request = make_request()
         request.request_id = req_id
         request.sampling_params.max_tokens = max_tokens
         return request
 
     class DummyExecutor(UniProcExecutor):
-
-        def initialize_from_config(
-                self, kv_cache_configs: list[KVCacheConfig]) -> None:
+        def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
             super().initialize_from_config(kv_cache_configs)
 
             # Create a thread pool with a single worker
@@ -265,8 +256,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
             assert non_block
 
             def _execute():
-                output = self.collective_rpc("execute_model",
-                                             args=(scheduler_output, ))
+                output = self.collective_rpc("execute_model", args=(scheduler_output,))
                 # Make a copy because output[0] may be reused
                 # by the next batch.
                 return copy.deepcopy(output[0])
@@ -279,7 +269,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
             return 2
 
         def shutdown(self):
-            if hasattr(self, 'thread_pool'):
+            if hasattr(self, "thread_pool"):
                 self.thread_pool.shutdown(wait=False)
 
     with monkeypatch.context() as m:
@@ -297,9 +287,9 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         )
         vllm_config = engine_args.create_engine_config()
         with set_default_torch_num_threads(1):
-            engine_core = EngineCore(vllm_config=vllm_config,
-                                     log_stats=False,
-                                     executor_class=DummyExecutor)
+            engine_core = EngineCore(
+                vllm_config=vllm_config, log_stats=False, executor_class=DummyExecutor
+            )
         assert engine_core.batch_queue is not None
 
         # Add two requests in a row. Each request have 12 prompt tokens.
@@ -314,8 +304,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         scheduler_output = engine_core.batch_queue[-1][1]
         assert scheduler_output.num_scheduled_tokens["0"] == 10
         # num_computed_tokens should have been updated immediately.
-        assert engine_core.scheduler.requests[
-            req0.request_id].num_computed_tokens == 10
+        assert engine_core.scheduler.requests[req0.request_id].num_computed_tokens == 10
 
         # Schedule Batch 2: (2, req0), (8, req1)
         assert engine_core.step_with_batch_queue()[0] == {}
@@ -366,8 +355,10 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
             assert output is not None
             assert len(output[0].outputs) == 1
             if req_id in engine_core.scheduler.requests:
-                assert engine_core.scheduler.requests[
-                    req_id].num_tokens == expected_num_tokens[req_id]
+                assert (
+                    engine_core.scheduler.requests[req_id].num_tokens
+                    == expected_num_tokens[req_id]
+                )
             expected_num_tokens[req_id] += 1
             req_id = (req_id + 1) % 2
 
@@ -391,17 +382,19 @@ def test_engine_core_tp(monkeypatch: pytest.MonkeyPatch):
         executor_class = Executor.get_class(vllm_config)
 
         with set_default_torch_num_threads(1):
-            engine_core = EngineCore(vllm_config=vllm_config,
-                                     executor_class=executor_class,
-                                     log_stats=True)
+            engine_core = EngineCore(
+                vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+            )
 
         def get_worker_cache_config_field(worker, key: str):
             return getattr(worker.cache_config, key)
 
         num_gpu_blocks = engine_core.collective_rpc(
-            get_worker_cache_config_field, args=("num_gpu_blocks", ))
+            get_worker_cache_config_field, args=("num_gpu_blocks",)
+        )
         num_cpu_blocks = engine_core.collective_rpc(
-            get_worker_cache_config_field, args=("num_cpu_blocks", ))
+            get_worker_cache_config_field, args=("num_cpu_blocks",)
+        )
         assert all(x is not None for x in num_gpu_blocks)
         assert all(x is not None for x in num_cpu_blocks)
 
@@ -417,40 +410,35 @@ def test_engine_core_invalid_request_id_type(monkeypatch: pytest.MonkeyPatch):
         executor_class = Executor.get_class(vllm_config)
 
         with set_default_torch_num_threads(1):
-            engine_core = EngineCore(vllm_config=vllm_config,
-                                     executor_class=executor_class,
-                                     log_stats=True)
+            engine_core = EngineCore(
+                vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+            )
 
         # Test with UUID object (common mistake)
         uuid_request = make_request()
         uuid_request.request_id = uuid.uuid4()  # UUID object instead of string
 
-        with pytest.raises(TypeError,
-                           match="request_id must be a string, got.*UUID"):
-            engine_core.add_request(
-                *engine_core.preprocess_add_request(uuid_request))
+        with pytest.raises(TypeError, match="request_id must be a string, got.*UUID"):
+            engine_core.add_request(*engine_core.preprocess_add_request(uuid_request))
 
         # Test with integer
         int_request = make_request()
         int_request.request_id = 12345
 
-        with pytest.raises(TypeError,
-                           match="request_id must be a string, got.*int"):
-            engine_core.add_request(
-                *engine_core.preprocess_add_request(int_request))
+        with pytest.raises(TypeError, match="request_id must be a string, got.*int"):
+            engine_core.add_request(*engine_core.preprocess_add_request(int_request))
 
         # Test with None
         none_request = make_request()
         none_request.request_id = None
 
-        with pytest.raises(TypeError,
-                           match="request_id must be a string, got.*NoneType"):
-            engine_core.add_request(
-                *engine_core.preprocess_add_request(none_request))
+        with pytest.raises(
+            TypeError, match="request_id must be a string, got.*NoneType"
+        ):
+            engine_core.add_request(*engine_core.preprocess_add_request(none_request))
 
         # Verify engine is still functional after errors
         valid_request = make_request()
-        engine_core.add_request(
-            *engine_core.preprocess_add_request(valid_request))
+        engine_core.add_request(*engine_core.preprocess_add_request(valid_request))
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 0

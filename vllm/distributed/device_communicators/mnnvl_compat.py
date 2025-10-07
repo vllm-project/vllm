@@ -9,7 +9,6 @@ assert has_flashinfer_all2all(), "Flashinfer alltoallv module cannot be found"
 
 
 class CustomCommunicator(CommBackend):
-
     def __init__(self, group):
         self._group = group
 
@@ -24,5 +23,5 @@ class CustomCommunicator(CommBackend):
         dist.all_gather_object(gathered, data, group=self._group)
         return gathered
 
-    def Split(self, color: int, key: int) -> 'CustomCommunicator':
+    def Split(self, color: int, key: int) -> "CustomCommunicator":
         return self
