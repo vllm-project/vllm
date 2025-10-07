@@ -594,10 +594,6 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
   const int64_t head_idx = (blockIdx.y * blockDim.y * blockDim.x +
                             threadIdx.y * blockDim.x + threadIdx.x) *
                            VEC_SIZE;
-  if (head_idx >= head_dim) {
-    return;
-  }
-
   // Find batch index within a block
   __shared__ int batch_idx;
   for (int iter = 0;
@@ -614,6 +610,10 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
     }
   }
   __syncthreads();
+
+  if (head_idx >= head_dim) {
+    return;
+  }
   const int64_t inbatch_seq_idx = token_idx - cu_seq_lens[batch_idx];
   const int64_t block_idx =
       block_table[batch_idx * num_blocks + inbatch_seq_idx / cache_block_size];
