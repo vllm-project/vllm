@@ -23,14 +23,16 @@ In this document we will discuss the:
 
 Initial piecewise compilation was built to allow piecewise cudagraph capture, excluding cudagraph-unsupported operations (mainly attention). This allowed some speedup from cudagraphs while maintaining compatibility with all attention backends. We later added support for "full cudagraphs" by not compiling piecewise, so that we could further reduce the latency in cases where attention supported cudagraphs. However, this tight coupling between compilation and cudagraph capture led to an all-or-nothing experience with little flexibility. Many attention backends also weren’t ready for unified "full" CUDA Graphs capture (e.g., only FlashAttention 3 supports it currently) or only support CUDA Graphs for pure decode batches (e.g., Flashinfer, FlashMLA, and Mamba, etc.). That led to confusing performance/compatibility tradeoffs, inconsistent CUDA Graphs support, and increasingly complex code structure.
 
-This led us to seek a more fine-grained CUDA Graphs solution with the following features:```
+This led us to seek a more fine-grained CUDA Graphs solution with the following features:
 
-* Be explicitly aware of whether a batch is prefill/uniform decode/mixed and should capture/replay the CUDA Graphs accordingly. It should do this because a unified full CUDA Graph for different cases of the same batchsize is usually infeasible (e.g., for many attention backends).
-* Capture full CUDA Graphs while maintaining the ability to use piecewise CUDA Graphs. i.e, can dispatch CUDA Graph-incompatible routines (e.g., cascade attention or mixed prefill/decode batches for some attention backends) into piecewise CUDA Graphs.
-* Achieve centralized control of the CUDA Graphs behavior via a dispatcher, which makes CUDA Graphs dispatching easier to understand and more extensible.
-* Add CUDA Graphs support to models that do not fit vllm's torch.compile integration system design in v1.
+* Explicitly aware of CUDA Graphs for prefill/mixed or (uniform-)decode batch and capture them separately.
+* Separate CUDAGraph capture logic from compilation (as much as feasible) for feature orthogonality, which suggest:
+    * Capturing piecewise and full cudagraphs using the same compiled graph, and
+    * Full cudagraph capture without compilation.
+* Dispatch between full and piecewise cudagraph at runtime depending on batch composition.
+* Centralized control of CUDAGraph behavior for reduced code complexity and allowed more extendibility.
 
-We also found that when a batch cannot hit a full CUDA Graph, the host-side eager execution of the flattened compiled FX graph (previous behavior) can be slower than the piecewise compiled FX graph in Python (see <gh-pr:20059>). So, we prefer maintaining the piecewise compilation when enabling full CUDA Graphs to reduce host-side overhead. We can safely do this as full CUDA Graphs and compilation are actually orthogonal to each other.
+These features allow the most flexibility for cudagraph capture and compilation for all kinds of startup/performance tradeoffs and feature support.
 
 ## `CudagraphModes`
 
@@ -47,7 +49,7 @@ Defaults: If you’re on v1 with piecewise compilation, we default to `FULL_AND_
 While `NONE` , `PIECEWISE`, and `FULL` are single-mode configurations and simply equivalent to past implementations of eager execution, piecewise CUDA Graphs, and full CUDA Graphs respectively, `FULL_DECODE_ONLY` and `FULL_AND_PIECEWISE` are newly appended dual-mode configurations, which require dispatching to switch between concrete runtime modes according to runtime batches dynamically.
 
 !!! note
-    We also fuse the subset `NONE`, `PIECEWISE`, and `FULL` modes as the concrete runtime modes for CUDA Graphs dispatching, which means they are treated as one of the modes for prefill/mixed or uniform-decode phase at runtime.
+    Here, the single-modes `NONE`, `PIECEWISE`, and `FULL` are treated as the runtime modes for CUDA Graphs dispatching. If using a dual-mode, the dispatcher will always dispatch to one of its member modes (plus a potantial `NONE` if no suitable CUDA Graph available), depending on the batch composition.
 
 While cascade attention is not cudagraph compatible, it is now compatible with all possible cudagraph mode configurations. If a batch uses cascade attention, it always gets dispatched to `PIECEWISE` mode if available (otherwise `NONE`).
 
@@ -59,6 +61,7 @@ While cascade attention is not cudagraph compatible, it is now compatible with a
 ### Overview
 
 The new CUDA Graphs logic is built on top of piecewise compilation and supports dual CUDA Graphs runtime mode switching. The system contains the following core components:
+
 * [CUDAGraphWrapper][vllm.compilation.cuda_graph.CUDAGraphWrapper]: wrapper that handles CUDAGraph capture & replay on the wrapped callable
 * [CudagraphDispatcher][vllm.v1.cudagraph_dispatcher.CudagraphDispatcher]: the central controller that contains the single source of truth about CUDA Graphs and handles dispatching between them.
 * [CUDAGraphMode][vllm.config.compilation.CUDAGraphMode]: enum describing the supported and runtime modes (introduced above).
