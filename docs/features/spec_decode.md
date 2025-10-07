@@ -48,10 +48,9 @@ The following code configures vLLM in an offline mode to use speculative decodin
 To perform the same with an online mode launch the server:
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
+vllm serve facebook/opt-6.7b \
     --host 0.0.0.0 \
     --port 8000 \
-    --model facebook/opt-6.7b \
     --seed 42 \
     -tp 1 \
     --gpu_memory_utilization 0.8 \
