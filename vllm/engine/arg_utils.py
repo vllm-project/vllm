@@ -347,9 +347,7 @@ class EngineArgs:
     )
     """ Note: This field is removed from SchedulerConfig. We keep it in CLI
     and only mapped to CompilationConfig.cudagraph_capture_sizes."""
-    cuda_graph_max_size: Optional[int] = get_field(
-        CompilationConfig, "max_cudagraph_capture_size"
-    )
+    cuda_graph_max_size: Optional[int] = CompilationConfig.max_cudagraph_capture_size
     """ Alias for CompilationConfig.max_cudagraph_capture_size."""
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
