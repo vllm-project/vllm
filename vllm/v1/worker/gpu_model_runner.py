@@ -1170,12 +1170,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             max_num_scheduled_tokens == self.uniform_decode_query_len
         ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
-            num_scheduled_tokens,
-            num_tokens_unpadded,
-            num_tokens_padded,
-            self.parallel_config,
-            True,
-            uniform_decode,
+            num_tokens_unpadded=num_tokens_unpadded,
+            parallel_config=self.parallel_config,
+            allow_microbatching=True,
+            allow_dp_padding=True,
+            num_tokens_padded=num_tokens_padded,
+            uniform_decode=uniform_decode,
+            num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
 
         self.seq_lens.np[:num_reqs] = (
@@ -3284,12 +3285,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
-            num_scheduled_tokens,
-            total_num_scheduled_tokens,
-            total_num_scheduled_tokens,
-            self.vllm_config.parallel_config,
-            allow_microbatching,
-            uniform_decode,
+            num_tokens_unpadded=total_num_scheduled_tokens,
+            parallel_config=self.vllm_config.parallel_config,
+            allow_microbatching=allow_microbatching,
+            allow_dp_padding=True,
+            num_tokens_padded=total_num_scheduled_tokens,
+            uniform_decode=uniform_decode,
+            num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
         num_tokens_after_padding = num_tokens
         if num_tokens_across_dp is not None:
