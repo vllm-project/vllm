@@ -46,7 +46,6 @@ from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
-from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.multimodal.utils import fetch_image
@@ -732,7 +731,7 @@ class VllmRunner:
                     set_default_torch_num_threads(default_torch_num_threads))
 
         if not kwargs.get("compilation_config", None):
-            kwargs["compilation_config"] = {"cudagraph_capture_sizes": [8]}
+            kwargs["compilation_config"] = {"cudagraph_capture_sizes": [4]}
 
         with init_ctx:
             self.llm = LLM(
@@ -756,21 +755,28 @@ class VllmRunner:
 
     def get_inputs(
         self,
-        prompts: Union[list[str], list[torch.Tensor], list[int]],
+        prompts: Union[list[str], list[torch.Tensor], list[list[int]]],
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
-    ) -> list[TextPrompt]:
-
+    ) -> list[dict[str, Any]]:
         if any(x is not None and len(x) != len(prompts)
                for x in [images, videos, audios]):
             raise ValueError(
                 "All non-None multimodal inputs must have the same length as "
                 "prompts")
 
-        inputs = []
+        inputs = list[dict[str, Any]]()
         for i, prompt in enumerate(prompts):
-            multi_modal_data = {}
+            prompt_dict = dict[str, Any]()
+            if isinstance(prompt, str):
+                prompt_dict["prompt"] = prompt
+            elif isinstance(prompt, list):
+                prompt_dict["prompt_token_ids"] = prompt
+            else:
+                prompt_dict["prompt_embeds"] = prompt
+
+            multi_modal_data = dict[str, Any]()
             if images is not None and (image := images[i]) is not None:
                 multi_modal_data["image"] = image
             if videos is not None and (video := videos[i]) is not None:
@@ -778,17 +784,10 @@ class VllmRunner:
             if audios is not None and (audio := audios[i]) is not None:
                 multi_modal_data["audio"] = audio
 
-            text_prompt_kwargs: dict[str, Any] = {
-                "multi_modal_data": multi_modal_data or None
-            }
-            if isinstance(prompt, str):
-                text_prompt_kwargs["prompt"] = prompt
-            elif isinstance(prompt, list):
-                text_prompt_kwargs["prompt_token_ids"] = prompt
-            else:
-                text_prompt_kwargs["prompt_embeds"] = prompt
+            if multi_modal_data:
+                prompt_dict["multi_modal_data"] = multi_modal_data
 
-            inputs.append(TextPrompt(**text_prompt_kwargs))
+            inputs.append(prompt_dict)
 
         return inputs
 

@@ -15,13 +15,15 @@ import torch
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
-from .interface import CpuArchEnum, Platform, PlatformEnum, _Backend
+from .interface import CpuArchEnum, Platform, PlatformEnum
 
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.attention.backends.registry import _Backend
     from vllm.config import VllmConfig
 else:
+    _Backend = None
     VllmConfig = None
 
 
@@ -82,6 +84,31 @@ class CpuPlatform(Platform):
                     shell=True).strip() == b"1"):
                 return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
+        elif self.get_cpu_architecture() == CpuArchEnum.RISCV:
+            # Workaround for Issue #25655: RISC-V scheduler bug with float16
+            #
+            # Background:
+            # - RISC-V currently uses scalar code path
+            # - There is a latent bug in the vLLM scheduler that provides
+            # invalid
+            #   physical_block_idx values under certain conditions
+            # - This bug causes segmentation faults when using float16
+            # dtype on RISC-V
+            # - Testing shows that forcing float32 successfully bypasses
+            # this issue
+            #
+            # Technical details:
+            # - The bug manifests as out-of-bounds physical_block_idx in
+            # block_tables
+            # - Only occurs on RISC-V hardware
+            # tested on Sophgo SG2044
+            # - Does not reproduce on x86 or other architectures
+            # - Root cause is in Python-level scheduling logic,
+            # not C++ kernels
+            #
+            # This is a temporary workaround until the scheduler bug is fixed.
+            # See: https://github.com/vllm-project/vllm/issues/25655
+            return [torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
 
@@ -90,10 +117,11 @@ class CpuPlatform(Platform):
         return "cpu"
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
+    def get_attn_backend_cls(cls, selected_backend: "_Backend", head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool, use_sparse: bool) -> str:
+        from vllm.attention.backends.registry import _Backend
         if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:

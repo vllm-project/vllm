@@ -396,10 +396,17 @@ class VllmConfig:
                         "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
                         "to 'spawn'.")
 
-        # Disable prefix caching only if chunked prefill is explicitly disabled
-        # (and not merely unset)
-        if (self.scheduler_config.chunked_prefill_enabled is False
-                or disable_chunked_prefill_reasons):
+        # Final off-switch for CP/APC:
+        # Disable for (a) collected blockers, (b) encoder–decoder, or
+        # (c) explicit CP=False when APC wasn't requested.
+        # Do NOT disable merely because the resolved CP flag is False.
+        apc_requested = (self.cache_config is not None
+                         and self.cache_config.enable_prefix_caching)
+        if (disable_chunked_prefill_reasons
+                or (self.model_config is not None
+                    and self.model_config.is_encoder_decoder)
+                or (self.scheduler_config.enable_chunked_prefill is False
+                    and not apc_requested)):
             for reason in disable_chunked_prefill_reasons:
                 logger.info(reason)
             self.scheduler_config.chunked_prefill_enabled = False
@@ -515,6 +522,23 @@ class VllmConfig:
                     "Config-specified debug dump path is overridden"
                     " by VLLM_DEBUG_DUMP_PATH to %s", env_path)
             self.compilation_config.debug_dump_path = env_path
+
+        def has_blocked_weights():
+            if self.quant_config is not None:
+                if hasattr(self.quant_config, "weight_block_size"):
+                    return self.quant_config.weight_block_size is not None
+                elif hasattr(self.quant_config, "has_blocked_weights"):
+                    return self.quant_config.has_blocked_weights()
+            return False
+
+        # Enable quant_fp8 CUDA ops (TODO disable in follow up)
+        # On H100 the CUDA kernel is faster than
+        # native implementation
+        # https://github.com/vllm-project/vllm/issues/25094
+        if has_blocked_weights():
+            custom_ops = self.compilation_config.custom_ops
+            if "none" not in custom_ops and "-quant_fp8" not in custom_ops:
+                custom_ops.append("+quant_fp8")
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
@@ -651,7 +675,7 @@ class VllmConfig:
                                  f"Model: {self.model_config.model}")
 
     def compile_debug_dump_path(self) -> Optional[Path]:
-        """Returns a rank-aware path for dumping 
+        """Returns a rank-aware path for dumping
         torch.compile debug information.
         """
         if self.compilation_config.debug_dump_path is None:
