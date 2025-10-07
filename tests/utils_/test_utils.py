@@ -388,7 +388,6 @@ def test_duplicate_dict_args(caplog_vllm, parser):
     assert "-O.level" in caplog_vllm.text
 
 
-# yapf: enable
 @pytest.mark.parametrize(
     "callable,kw_name,requires_kw_only,allow_var_kwargs,is_supported",
     [
@@ -408,7 +407,6 @@ def test_duplicate_dict_args(caplog_vllm, parser):
         (lambda foo, **kwargs: None, "foo", True, True, False),
     ],
 )
-# yapf: disable
 def test_supports_kw(
     callable, kw_name, requires_kw_only, allow_var_kwargs, is_supported
 ):
@@ -681,7 +679,6 @@ def test_lru_cache():
     assert 6 in cache
 
 
-# yapf: disable
 @pytest.mark.parametrize(
     ("src_dtype", "tgt_dtype", "expected_result"),
     [
@@ -715,12 +712,10 @@ def test_lru_cache():
         (torch.complex64, torch.complex32, False),
     ],
 )
-# yapf: enable
 def test_is_lossless_cast(src_dtype, tgt_dtype, expected_result):
     assert is_lossless_cast(src_dtype, tgt_dtype) == expected_result
 
 
-# yapf: disable
 @pytest.mark.parametrize(
     ("dtypes", "expected_result"),
     [
@@ -730,7 +725,6 @@ def test_is_lossless_cast(src_dtype, tgt_dtype, expected_result):
         ([torch.bool, torch.int8, torch.float16, torch.complex32], torch.complex32),  # noqa: E501
     ],
 )
-# yapf: enable
 def test_common_broadcastable_dtype(dtypes, expected_result):
     assert common_broadcastable_dtype(dtypes) == expected_result
 
@@ -775,7 +769,6 @@ def test_placeholder_module_error_handling():
         _ = placeholder_attr.module
 
 
-# yapf: disable
 @pytest.mark.parametrize(
     "obj,key1,key2",
     [
@@ -785,8 +778,8 @@ def test_placeholder_module_error_handling():
         ({1: "a", 2: "b"}, 1, 3),
         # Tests for both keys do not exist
         ({1: "a", 2: "b"}, 3, 4),
-    ])
-# yapf: enable
+    ],
+)
 def test_swap_dict_values(obj, key1, key2):
     original_obj = obj.copy()
     swap_dict_values(obj, key1, key2)
@@ -800,26 +793,30 @@ def test_swap_dict_values(obj, key1, key2):
         assert key1 not in obj
 
 
-def test_model_specification(parser_with_config, cli_config_file,
-                             cli_config_file_with_model):
+def test_model_specification(
+    parser_with_config, cli_config_file, cli_config_file_with_model
+):
     # Test model in CLI takes precedence over config
     args = parser_with_config.parse_args(
-        ['serve', 'cli-model', '--config', cli_config_file_with_model])
-    assert args.model_tag == 'cli-model'
-    assert args.served_model_name == 'mymodel'
+        ["serve", "cli-model", "--config", cli_config_file_with_model]
+    )
+    assert args.model_tag == "cli-model"
+    assert args.served_model_name == "mymodel"
 
     # Test model from config file works
-    args = parser_with_config.parse_args([
-        'serve',
-        '--config',
-        cli_config_file_with_model,
-    ])
-    assert args.model == 'config-model'
-    assert args.served_model_name == 'mymodel'
+    args = parser_with_config.parse_args(
+        [
+            "serve",
+            "--config",
+            cli_config_file_with_model,
+        ]
+    )
+    assert args.model == "config-model"
+    assert args.served_model_name == "mymodel"
 
     # Test no model specified anywhere raises error
     with pytest.raises(ValueError, match="No model specified!"):
-        parser_with_config.parse_args(['serve', '--config', cli_config_file])
+        parser_with_config.parse_args(["serve", "--config", cli_config_file])
 
     # Test using --model option raises error
     # with pytest.raises(
@@ -833,47 +830,52 @@ def test_model_specification(parser_with_config, cli_config_file,
     # Test using --model option back-compatibility
     # (when back-compatibility ends, the above test should be uncommented
     # and the below test should be removed)
-    args = parser_with_config.parse_args([
-        'serve',
-        '--tensor-parallel-size',
-        '2',
-        '--model',
-        'my-model',
-        '--trust-remote-code',
-        '--port',
-        '8001',
-    ])
+    args = parser_with_config.parse_args(
+        [
+            "serve",
+            "--tensor-parallel-size",
+            "2",
+            "--model",
+            "my-model",
+            "--trust-remote-code",
+            "--port",
+            "8001",
+        ]
+    )
     assert args.model is None
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code is True
     assert args.port == 8001
 
-    args = parser_with_config.parse_args([
-        'serve',
-        '--tensor-parallel-size=2',
-        '--model=my-model',
-        '--trust-remote-code',
-        '--port=8001',
-    ])
+    args = parser_with_config.parse_args(
+        [
+            "serve",
+            "--tensor-parallel-size=2",
+            "--model=my-model",
+            "--trust-remote-code",
+            "--port=8001",
+        ]
+    )
     assert args.model is None
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code is True
     assert args.port == 8001
 
     # Test other config values are preserved
-    args = parser_with_config.parse_args([
-        'serve',
-        'cli-model',
-        '--config',
-        cli_config_file_with_model,
-    ])
+    args = parser_with_config.parse_args(
+        [
+            "serve",
+            "cli-model",
+            "--config",
+            cli_config_file_with_model,
+        ]
+    )
     assert args.tensor_parallel_size == 2
     assert args.trust_remote_code is True
     assert args.port == 12312
 
 
-@pytest.mark.parametrize("input", [(), ("abc", ), (None, ),
-                                   (None, bool, [1, 2, 3])])
+@pytest.mark.parametrize("input", [(), ("abc",), (None,), (None, bool, [1, 2, 3])])
 def test_sha256(input: tuple):
     digest = sha256(input)
     assert digest is not None
@@ -887,7 +889,7 @@ def test_sha256(input: tuple):
     assert digest == sha256(input)
 
     # hashing different input, returns different value
-    assert digest != sha256(input + (1, ))
+    assert digest != sha256(input + (1,))
 
 
 @pytest.mark.parametrize(
@@ -897,7 +899,8 @@ def test_sha256(input: tuple):
         ("tcp://127.0.0.1:5555", ("tcp", "127.0.0.1", "5555")),
         ("tcp://[::1]:5555", ("tcp", "::1", "5555")),  # IPv6 address
         ("inproc://some_identifier", ("inproc", "some_identifier", "")),
-    ])
+    ],
+)
 def test_split_zmq_path(path, expected):
     assert split_zmq_path(path) == expected
 
@@ -909,7 +912,8 @@ def test_split_zmq_path(path, expected):
         "tcp://127.0.0.1",  # Missing port
         "tcp://[::1]",  # Missing port for IPv6
         "tcp://:5555",  # Missing host
-    ])
+    ],
+)
 def test_split_zmq_path_invalid(invalid_path):
     with pytest.raises(ValueError):
         split_zmq_path(invalid_path)
@@ -931,8 +935,9 @@ def test_make_zmq_socket_ipv6():
     zsock: zmq.Socket = make_zmq_socket(ctx, ipv6_path, socket_type)
 
     # Verify that the IPV6 option is set
-    assert zsock.getsockopt(
-        zmq.IPV6) == 1, "IPV6 option should be enabled for IPv6 addresses"
+    assert zsock.getsockopt(zmq.IPV6) == 1, (
+        "IPV6 option should be enabled for IPv6 addresses"
+    )
 
     # Clean up
     zsock.close()
@@ -1019,15 +1024,14 @@ def test_convert_ids_list_to_tokens():
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
     token_ids = tokenizer.encode("Hello, world!")
     # token_ids = [9707, 11, 1879, 0]
-    assert tokenizer.convert_ids_to_tokens(token_ids) == [
-        'Hello', ',', 'Ġworld', '!'
-    ]
+    assert tokenizer.convert_ids_to_tokens(token_ids) == ["Hello", ",", "Ġworld", "!"]
     tokens = convert_ids_list_to_tokens(tokenizer, token_ids)
-    assert tokens == ['Hello', ',', ' world', '!']
+    assert tokens == ["Hello", ",", " world", "!"]
 
 
 def test_current_stream_multithread():
     import threading
+
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
@@ -1046,13 +1050,18 @@ def test_current_stream_multithread():
     child_thread.start()
 
     try:
-        assert thread_stream_ready.wait(
-            timeout=5), "Child thread failed to enter stream context in time"
+        assert thread_stream_ready.wait(timeout=5), (
+            "Child thread failed to enter stream context in time"
+        )
 
         main_current_stream = current_stream()
 
-        assert main_current_stream != child_stream, "Main thread's current_stream was contaminated by child thread"
-        assert main_current_stream == main_default_stream, "Main thread's current_stream is not the default stream"
+        assert main_current_stream != child_stream, (
+            "Main thread's current_stream was contaminated by child thread"
+        )
+        assert main_current_stream == main_default_stream, (
+            "Main thread's current_stream is not the default stream"
+        )
 
         # Notify child thread it can exit
         thread_can_exit.set()
@@ -1070,7 +1079,7 @@ def test_load_config_file(tmp_path):
         "enable-logging": True,
         "list-arg": ["item1", "item2"],
         "port": 12323,
-        "tensor-parallel-size": 4
+        "tensor-parallel-size": 4,
     }
 
     # Write the configuration data to a temporary YAML file

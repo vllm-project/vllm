@@ -289,7 +289,7 @@ class MultiModalFieldElem:
         return (
             (self.modality, self.key) == (other.modality, other.key)
             and data_equal
-            and type(self.field) == type(other.field)
+            and type(self.field) is type(other.field)
         )  # noqa: E721
 
 
@@ -676,6 +676,9 @@ class MultiModalFieldConfig:
 
         self.field = field
         self.modality = modality
+
+    def __repr__(self) -> str:
+        return f"MultiModalFieldConfig(field={self.field}, modality={self.modality})"
 
     def build_elems(
         self,
