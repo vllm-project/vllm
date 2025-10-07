@@ -219,7 +219,8 @@ class ApertusToolParser(ToolParser):
         Extract JSON string from the current text between tool call delimiters.
 
         Extracts the content between <|tools_prefix|> and <|tools_suffix|> tokens.
-        If the suffix is not present (incomplete streaming), returns everything after the prefix.
+        If the suffix is not present (incomplete streaming),
+        returns everything after the prefix.
 
         Args:
             current_text: The accumulated model output text.
@@ -228,7 +229,8 @@ class ApertusToolParser(ToolParser):
             The extracted JSON string without the delimiter tokens.
 
         Example:
-            >>> current_text = 'Some text <|tools_prefix|>[{"func": {"arg": "val"}}]<|tools_suffix|>'
+            >>> current_text = 'Some text <|tools_prefix|>
+                [{"func": {"arg": "val"}}]<|tools_suffix|>'
             >>> self._extract_json_str(current_text)
             '[{"func": {"arg": "val"}}]'
 
@@ -282,10 +284,13 @@ class ApertusToolParser(ToolParser):
 
     def _finalize_previous_tool(self) -> DeltaMessage | None:
         """
-        Finalize any remaining arguments from the previous tool before moving to the next one.
+        Finalize any remaining arguments
+        from the previous tool before moving to the next one.
 
-        When transitioning to a new tool in the array, this ensures all arguments
-        from the current tool that haven't been streamed yet are sent in one final delta.
+        When transitioning to a new tool in the array,
+        this ensures all arguments
+        from the current tool that haven't been
+        streamed yet are sent in one final delta.
 
         This is necessary because when a new tool appears, we may have parsed additional
         arguments for the previous tool that weren't yet sent to the client.
@@ -385,7 +390,8 @@ class ApertusToolParser(ToolParser):
         as they become available. Tracks what has already been sent and only streams
         the difference.
 
-        The tool call format is expected to be: {"function_name": {"arg1": "val1", ...}}
+        The tool call format is expected to be:
+            {"function_name": {"arg1": "val1", ...}}
 
         Args:
             current_tool_call: A dictionary with a single key (function name) and
@@ -470,8 +476,10 @@ class ApertusToolParser(ToolParser):
             - Arguments haven't changed since last iteration
 
         Example:
-            Iteration 1: args_json = '{"x": 5'  -> sent = 0  -> returns '{"x": 5'
-            Iteration 2: args_json = '{"x": 5, "y": 10}' -> sent = 7 -> returns ', "y": 10}'
+            Iteration 1: args_json =
+                '{"x": 5'  -> sent = 0  -> returns '{"x": 5'
+            Iteration 2: args_json =
+                '{"x": 5, "y": 10}' -> sent = 7 -> returns ', "y": 10}'
         """
         is_complete_call = is_complete_json(json_str)
 
