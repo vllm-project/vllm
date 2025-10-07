@@ -323,6 +323,8 @@ class CoreEngineActorManager:
         for actor in self.local_engine_actors + self.remote_engine_actors:
             self.run_refs.append(actor.run.remote())
 
+        logger.info("Core engine actors are ready")
+
     @staticmethod
     def create_dp_placement_groups(
         vllm_config: VllmConfig,
@@ -343,6 +345,7 @@ class CoreEngineActorManager:
         world_size = vllm_config.parallel_config.world_size
         placement_groups: list[PlacementGroup] = []
         local_dp_ranks: list[int] = []
+
         dp_master_ip_key = f"node:{dp_master_ip}"
         nodes = sorted(
             available_resources.values(), key=lambda x: dp_master_ip_key not in x
@@ -356,10 +359,8 @@ class CoreEngineActorManager:
         for node_resources in nodes:
             if device_str not in node_resources:
                 continue
-            # For now, each DP rank can only be assigned to one node
-            # TODO(rui): support allocating a single DP rank
-            # to multiple nodes
-            available_engine_count = int(node_resources[device_str]) // world_size
+
+            available_engine_count = max(int(node_resources[device_str]) // world_size, 1)
             if dp_master_ip_key in node_resources:
                 assert available_engine_count >= local_engine_count, (
                     "Not enough resources to allocate DP ranks "
@@ -368,10 +369,10 @@ class CoreEngineActorManager:
                 for i in range(local_engine_count):
                     bundles = [
                         {device_str: 1.0, "node:" + dp_master_ip: 0.001}
-                    ] * world_size + [{"CPU": 1.0}]
+                    ] * 8 + [{device_str: 1.0}] * 8 + [{"CPU": 1.0}] * 2
                     pg = ray.util.placement_group(
                         name=f"dp_rank_{len(placement_groups)}",
-                        strategy="STRICT_PACK",
+                        strategy="PACK",
                         bundles=bundles,
                     )
                     placement_groups.append(pg)
@@ -380,10 +381,10 @@ class CoreEngineActorManager:
                 for i in range(available_engine_count):
                     if len(placement_groups) == num_pg_to_create:
                         break
-                    bundles = [{device_str: 1.0}] * world_size + [{"CPU": 1.0}]
+                    bundles = [{device_str: 1.0}] * world_size + [{"CPU": 1.0}] * 2
                     pg = ray.util.placement_group(
                         name=f"dp_rank_{len(placement_groups)}",
-                        strategy="STRICT_PACK",
+                        strategy="PACK",
                         bundles=bundles,
                     )
                     placement_groups.append(pg)
@@ -396,6 +397,8 @@ class CoreEngineActorManager:
                 "Available resources: "
                 f"{available_resources}"
             )
+        logger.info(f"Created placement groups, {placement_groups}.")
+        logger.info(f"Created ocal dp ranks, {local_dp_ranks}.")
         return placement_groups, local_dp_ranks
 
     @staticmethod
