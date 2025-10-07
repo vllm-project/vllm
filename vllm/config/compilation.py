@@ -172,7 +172,8 @@ class CompilationConfig:
     # Top-level Compilation control
     level: int | None = None
     """
-    Level is deprecated and will be removed in the next release.
+    Level is deprecated and will be removed in the next release,
+    either 0.12.0 or 0.11.2 whichever is soonest.
     Please use mode. Currently all levels are mapped to mode.
     """
 
@@ -486,7 +487,8 @@ class CompilationConfig:
     def __post_init__(self) -> None:
         if self.level is not None:
             logger.warning(
-                "Level is deprecated and will be removed in the next release."
+                "Level is deprecated and will be removed in the next release,"
+                "either 0.12.0 or 0.11.2 whichever is soonest."
                 "Use mode instead."
                 "If both level and mode are given,"
                 "only mode will be used."
