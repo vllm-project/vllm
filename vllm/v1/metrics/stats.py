@@ -232,7 +232,9 @@ class IterationStats:
         req_stats: RequestStateStats,
         lora_stats: LoRAStats | None,
     ):
-        num_new_generation_tokens = len(output.new_token_ids)
+        num_new_generation_tokens = (
+            1 if isinstance(output.new_token_ids, int) else len(output.new_token_ids)
+        )
 
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:

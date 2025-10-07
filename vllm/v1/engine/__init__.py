@@ -106,7 +106,7 @@ class EngineCoreOutput(
     gc=False,
 ):  # type: ignore[call-arg]
     request_id: str
-    new_token_ids: list[int]
+    new_token_ids: int | list[int]
 
     new_logprobs: LogprobsLists | None = None
     new_prompt_logprobs_tensors: LogprobsTensors | None = None

@@ -2248,7 +2248,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> tuple[
         dict[str, int],
         LogprobsLists | None,
-        list[list[int]],
+        list[int | list[int]],
         dict[str, LogprobsTensors | None],
         list[str],
         dict[str, int],
@@ -2301,7 +2301,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
             # Mask out the sampled tokens that should not be sampled.
             for i in discard_sampled_tokens_req_indices:
-                valid_sampled_token_ids[int(i)].clear()
+                valid_sampled_token_ids[int(i)] = []
         else:
             valid_sampled_token_ids = []
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
@@ -2329,6 +2329,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
             else:
                 sampled_ids = valid_sampled_token_ids[req_idx]
+                sampled_ids = (
+                    [sampled_ids] if isinstance(sampled_ids, int) else sampled_ids
+                )
             if not sampled_ids:
                 continue
 
@@ -2691,7 +2694,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def propose_draft_token_ids(
         self,
         scheduler_output: "SchedulerOutput",
-        sampled_token_ids: torch.Tensor | list[list[int]],
+        sampled_token_ids: torch.Tensor | list[int | list[int]],
         sampling_metadata: SamplingMetadata,
         hidden_states: torch.Tensor,
         sample_hidden_states: torch.Tensor,
@@ -2724,7 +2727,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 for num_draft, tokens in zip(
                     spec_decode_metadata.num_draft_tokens, sampled_token_ids
                 ):
-                    indices.append(offset + len(tokens) - 1)
+                    index = offset - 1 + (1 if isinstance(tokens, int) else len(tokens))
+                    indices.append(index)
                     offset += num_draft + 1
                 indices = torch.tensor(indices, device=self.device)
                 hidden_states = sample_hidden_states[indices]
@@ -4688,7 +4692,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return kv_cache_spec
 
-    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
+    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[int]:
         # This is a short term mitigation for issue mentioned in
         # https://github.com/vllm-project/vllm/issues/22754.
         # `tolist` would trigger a cuda wise stream sync, which
@@ -4701,4 +4705,4 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         pinned.copy_(sampled_token_ids, non_blocking=True)
         self.transfer_event.record()
         self.transfer_event.synchronize()
-        return pinned.tolist()
+        return pinned.squeeze(dim=-1).tolist()

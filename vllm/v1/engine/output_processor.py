@@ -422,6 +422,8 @@ class OutputProcessor:
             )
 
             new_token_ids = engine_core_output.new_token_ids
+            if isinstance(new_token_ids, int):
+                new_token_ids = [new_token_ids]
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
