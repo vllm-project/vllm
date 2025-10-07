@@ -83,9 +83,9 @@ from vllm.utils import is_list_of
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
+    SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
-    SupportsMRoPE,
 )
 from .qwen2_5_vl import (
     Qwen2_5_VisionAttention,
@@ -1173,8 +1173,7 @@ class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class Qwen3VLForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, 
-    SupportsMRoPE
+    nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
     packed_modules_mapping = {
         "qkv_proj": [
