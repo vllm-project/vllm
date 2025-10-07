@@ -406,7 +406,7 @@ class CoreEngineActorManager:
                 if len(placement_groups) == num_pg_to_create:
                     assert not is_master_ip, (
                         f"The DP master node (ip: {dp_master_ip_key}) cannot "
-                        f"place more than {len(num_pg_to_create)} groups"
+                        f"place more than {num_pg_to_create} groups"
                     )
                     break
 
