@@ -262,6 +262,12 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
                 list_type = str
             kwargs[name]["type"] = list_type
             kwargs[name]["nargs"] = "+"
+        elif contains_type(type_hints, set):
+            type_hint = get_type(type_hints, set)
+            types = get_args(type_hint)
+            set_type = types[0]
+            kwargs[name]["type"] = set_type
+            kwargs[name]["nargs"] = "+"
         elif contains_type(type_hints, int):
             kwargs[name]["type"] = int
             # Special case for large integers
