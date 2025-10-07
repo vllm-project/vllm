@@ -178,6 +178,9 @@ class NixlConnector(KVConnectorBase_V1):
             # as the layout should not matter in that case,
             # which fallback to the default behavior.
             return None
+        if envs.VLLM_KV_CACHE_LAYOUT is not None:
+            # honor user specified layout
+            return envs.VLLM_KV_CACHE_LAYOUT
         logger.info_once(
             "NixlConnector setting KV cache layout to HND for better xfer performance."
         )
