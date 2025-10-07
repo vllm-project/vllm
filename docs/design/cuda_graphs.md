@@ -58,7 +58,11 @@ With the new feature, cascade attention is supported by all Cudagraph modes now 
 
 ### Overview
 
-The new CUDA Graphs logic is built on top of piecewise compilation and supports dual CUDA Graphs runtime mode switching. To make the system work, there are two core classes, i.e., [CUDAGraphWrapper][vllm.compilation.cuda_graph.CUDAGraphWrapper] and [CudagraphDispatcher][vllm.v1.cudagraph_dispatcher.CudagraphDispatcher] and an auxiliary component, i.e., [CUDAGraphMode][vllm.config.compilation.CUDAGraphMode] (introduced above) used for runtime mode, [BatchDescriptor][vllm.forward_context.BatchDescriptor] serving as the dispatch key.
+The new CUDA Graphs logic is built on top of piecewise compilation and supports dual CUDA Graphs runtime mode switching. The system contains the following core components:
+* [CUDAGraphWrapper][vllm.compilation.cuda_graph.CUDAGraphWrapper]: wrapper that handles CUDAGraph capture & replay on the wrapped callable
+* [CudagraphDispatcher][vllm.v1.cudagraph_dispatcher.CudagraphDispatcher]: the central controller that contains the single source of truth about CUDA Graphs and handles dispatching between them.
+* [CUDAGraphMode][vllm.config.compilation.CUDAGraphMode]: enum describing the supported and runtime modes (introduced above).
+* [BatchDescriptor][vllm.forward_context.BatchDescriptor], serving as a unique representation of the runtime batch used for dispatching.
 
 See the following figures for a quick comparison between the previous and current design patterns of CUDA Graphs with inductor compilation. We can see that previously the CUDA Graphs logic and compilation logic were tightly coupled into the vllm `PiecewiseBackend`, and CUDA Graphs was implicitly dispatched by `batch_size` idly. Now the CUDA Graphs logic is separated into the `CUDAGraphWrapper` class, responsible for both full and piecewise CUDA Graphs abilities, and dispatching is **explicitly** done via **runtime mode** plus the `BatchDescriptor` as the **dispatch key** via `CudagraphDispatcher`.
 
