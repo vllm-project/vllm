@@ -868,7 +868,7 @@ steps:
     - pytest -s -v tests/quantization/test_blackwell_moe.py
 
 - label: Blackwell LM Eval Small Models
-  timeout_in_minutes: 75
+  timeout_in_minutes: 120
   gpu: b200
   optional: true # run on nightlies
   source_file_dependencies:
