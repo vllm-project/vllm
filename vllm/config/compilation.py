@@ -172,16 +172,9 @@ class CompilationConfig:
     # Top-level Compilation control
     level: int | None = None
     """
-    This level field is deprecated. Please use mode. Currently all levels are
-    mapped to mode.
-    The compilation modes:
-
-    - None: If None, we will select the default compilation level.
-      For V1 engine this is 3, for V0 engine this is 0.
-    - 0: NONE, no compilation.
-    - 1: STOCK_TORCH_COMPILE, dynamo as is with inductor on by default.
-    - 2: DYNAMO_TRACE_ONCE.
-    - 3: VLLM_COMPILE, piecewise compilation."""
+    Level is deprecated and will be removed in the next release.
+    Please use mode. Currently all levels are mapped to mode.
+    """
 
     # Top-level Compilation control
     mode: Optional[int] = None
@@ -493,7 +486,8 @@ class CompilationConfig:
     def __post_init__(self) -> None:
         if self.level is not None:
             logger.warning(
-                "level is deprecated, use mode instead."
+                "Level is deprecated and will be removed in the next release."
+                "Use mode instead."
                 "If both level and mode are given,"
                 "only mode will be used."
             )
