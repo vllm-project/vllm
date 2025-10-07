@@ -14,6 +14,7 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 @pytest.fixture(scope="module")
 def monkeypatch_module():
     from _pytest.monkeypatch import MonkeyPatch
+
     mpatch = MonkeyPatch()
     yield mpatch
     mpatch.undo()
@@ -22,7 +23,7 @@ def monkeypatch_module():
 @pytest.fixture(scope="module", params=[True])
 def server(request, monkeypatch_module):
     use_v1 = request.param
-    monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
+    monkeypatch_module.setenv("VLLM_USE_V1", "1" if use_v1 else "0")
 
     args = [
         "--dtype",
@@ -44,13 +45,10 @@ async def client(server):
 
 @pytest.mark.asyncio
 async def test_chat_completion_with_orca_header(server: RemoteOpenAIServer):
-    messages = [{
-        "role": "system",
-        "content": "you are a helpful assistant"
-    }, {
-        "role": "user",
-        "content": "what is 1+1?"
-    }]
+    messages = [
+        {"role": "system", "content": "you are a helpful assistant"},
+        {"role": "user", "content": "what is 1+1?"},
+    ]
 
     client = openai.OpenAI(
         api_key="EMPTY",
@@ -106,7 +104,8 @@ async def test_single_completion(client: openai.AsyncOpenAI):
         prompt="Hello, my name is",
         max_tokens=5,
         extra_headers={"endpoint-load-metrics-format": "JSON"},
-        temperature=0.0)
+        temperature=0.0,
+    )
 
     assert completion.id is not None
     assert completion.choices is not None and len(completion.choices) == 1
@@ -115,7 +114,8 @@ async def test_single_completion(client: openai.AsyncOpenAI):
     assert len(choice.text) >= 5
     assert choice.finish_reason == "length"
     assert completion.usage == openai.types.CompletionUsage(
-        completion_tokens=5, prompt_tokens=6, total_tokens=11)
+        completion_tokens=5, prompt_tokens=6, total_tokens=11
+    )
 
     # test using token IDs
     completion = await client.completions.create(
