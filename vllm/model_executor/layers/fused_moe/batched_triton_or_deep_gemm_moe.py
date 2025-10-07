@@ -104,8 +104,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        M_chunk: int,
-        M_full: int,
+        M: int,
         N: int,
         K: int,
         topk: int,
@@ -119,8 +118,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if self.allow_deep_gemm:
             assert self.batched_deep_gemm_experts is not None
             return self.batched_deep_gemm_experts.workspace_shapes(
-                M_chunk,
-                M_full,
+                M,
                 N,
                 K,
                 topk,
@@ -131,8 +129,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         else:
             assert self.batched_triton_experts is not None
             return self.batched_triton_experts.workspace_shapes(
-                M_chunk,
-                M_full,
+                M,
                 N,
                 K,
                 topk,

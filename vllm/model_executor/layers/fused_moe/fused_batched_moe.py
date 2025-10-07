@@ -668,8 +668,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        M_chunk: int,
-        M_full: int,
+        M: int,
         N: int,
         K: int,
         topk: int,
@@ -863,8 +862,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        M_chunk: int,
-        M_full: int,
+        M: int,
         N: int,
         K: int,
         topk: int,

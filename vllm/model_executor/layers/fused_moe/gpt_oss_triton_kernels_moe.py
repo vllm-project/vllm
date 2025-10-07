@@ -255,8 +255,7 @@ class OAITritonExperts(BaseOAITritonExperts):
 
     def workspace_shapes(
         self,
-        M_chunk: int,
-        M_full: int,
+        M: int,
         N: int,
         K: int,
         topk: int,
@@ -265,9 +264,9 @@ class OAITritonExperts(BaseOAITritonExperts):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
-        workspace1 = (M_chunk, K)
+        workspace1 = (M, K)
         workspace2 = (0, 0)
-        output = (M_full, K)
+        output = (M, K)
         return (workspace1, workspace2, output)
 
     def apply(

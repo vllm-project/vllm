@@ -331,8 +331,7 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        M_chunk: int,
-        M_full: int,
+        M: int,
         N: int,
         K: int,
         topk: int,
@@ -355,9 +354,9 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         # Workspace/IntermediateCache allocation accounting for output buffer
         # provisioning
-        workspace1 = (M_chunk * topk, max(N, K))
-        workspace2 = (M_chunk * topk * max(2 * N, K),)
-        output = (M_full, K)
+        workspace1 = (M * topk, max(N, K))
+        workspace2 = (M * topk * max(2 * N, K),)
+        output = (M, K)
 
         return (workspace1, workspace2, output)
 

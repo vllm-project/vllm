@@ -510,8 +510,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     @abstractmethod
     def workspace_shapes(
         self,
-        M_chunk: int,
-        M_full: int,
+        M: int,
         N: int,
         K: int,
         topk: int,
@@ -526,9 +525,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         workspace for the last gemm.
 
         Inputs:
-        - M_chunk: current number of tokens due to chunking, otherwise same as
-          M_full, generally used for intermediate workspace shapes.
-        - M_full: full number of tokens, generally used to compute output shape.
+        - M: number of tokens.
         - N: Row (or column) dimension of expert weights.
         - K: hidden dimension
         - topk: The number of top-k experts to select.
@@ -759,17 +756,26 @@ class FusedMoEModularKernel(torch.nn.Module):
         buffers = self.shared_buffers[ubatch_idx]
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
-        workspace13_shape, workspace2_shape, fused_out_shape = (
-            self.fused_experts.workspace_shapes(
-                M_chunk,
-                M_full,
-                N,
-                K,
-                top_k,
-                global_num_experts,
-                local_num_experts,
-                expert_tokens_meta,
-            )
+        # Get intermediate workspace shapes based off the chunked M size.
+        workspace13_shape, workspace2_shape, _ = self.fused_experts.workspace_shapes(
+            M_chunk,
+            N,
+            K,
+            top_k,
+            global_num_experts,
+            local_num_experts,
+            expert_tokens_meta,
+        )
+
+        # Get final output shape based on the full M size.
+        _, _, fused_out_shape = self.fused_experts.workspace_shapes(
+            M_full,
+            N,
+            K,
+            top_k,
+            global_num_experts,
+            local_num_experts,
+            expert_tokens_meta,
         )
 
         # We can reuse the memory between cache1 and cache3 because by the
