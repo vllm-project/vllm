@@ -918,7 +918,6 @@ steps:
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
-  - tests/compile/test_async_tp.py
   - tests/compile/test_basic_correctness.py
   - tests/compile/test_sequence_parallelism.py
   - tests/compile/test_wrapper.py
@@ -933,7 +932,6 @@ steps:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s ./compile/test_async_tp.py
   - pytest -v -s ./compile/test_basic_correctness.py
   - pytest -v -s ./compile/test_sequence_parallelism.py
   - pytest -v -s ./compile/test_wrapper.py
@@ -1084,6 +1082,7 @@ steps:
   num_gpus: 2
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
+    - pytest -v -s tests/compile/test_async_tp.py
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
 
 ##### B200 test #####
