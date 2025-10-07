@@ -336,11 +336,9 @@ class CoreEngineActorManager:
         from ray._private.state import available_resources_per_node
 
         logger.info("Creating placement groups for data parallel")
-        dp_master_ip = \
-            vllm_config.parallel_config.data_parallel_master_ip
+        dp_master_ip = vllm_config.parallel_config.data_parallel_master_ip
         dp_size = vllm_config.parallel_config.data_parallel_size
-        dp_size_local = \
-            vllm_config.parallel_config.data_parallel_size_local
+        dp_size_local = vllm_config.parallel_config.data_parallel_size_local
 
         available_resources = available_resources_per_node()
         world_size = vllm_config.parallel_config.world_size
@@ -352,33 +350,39 @@ class CoreEngineActorManager:
         )
         assert len(nodes) > 0, "No nodes with resources found in Ray cluster."
         assert dp_master_ip_key in nodes[0], (
-            "The DP master node (ip: %s) is missing or dead", dp_master_ip)
+            "The DP master node (ip: %s) is missing or dead",
+            dp_master_ip,
+        )
 
         if envs.VLLM_RAY_DP_PACK_STRATEGY == "strict":
             logger.info(
                 "Using strict local size packing strategy based "
                 "on VLLM_RAY_DP_PACK_STRATEGY (%s)",
-                envs.VLLM_RAY_DP_PACK_STRATEGY)
+                envs.VLLM_RAY_DP_PACK_STRATEGY,
+            )
             strict_local_size = True
-        elif (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
-              or envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency"):
+        elif (
+            envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
+            or envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency"
+        ):
             logger.info(
                 "Using strict local size packing strategy based "
-                "on VLLM_ALL2ALL_BACKEND (%s)", envs.VLLM_ALL2ALL_BACKEND)
+                "on VLLM_ALL2ALL_BACKEND (%s)",
+                envs.VLLM_ALL2ALL_BACKEND,
+            )
             strict_local_size = True
         else:
             logger.info(
-                "Using fill packing strategy based "
-                "on VLLM_RAY_DP_PACK_STRATEGY (%s)",
-                envs.VLLM_RAY_DP_PACK_STRATEGY)
+                "Using fill packing strategy based on VLLM_RAY_DP_PACK_STRATEGY (%s)",
+                envs.VLLM_RAY_DP_PACK_STRATEGY,
+            )
             strict_local_size = False
         for node_resources in nodes:
-            node_ip_keys = [
-                key for key in node_resources if key.startswith('node:')
-            ]
+            node_ip_keys = [key for key in node_resources if key.startswith("node:")]
             assert len(node_ip_keys) == 1, (
                 "Zero or multiple node IP keys found in node resources: %s",
-                node_ip_keys)
+                node_ip_keys,
+            )
             node_ip_key = node_ip_keys[0]
             node_ip = node_ip_key.split(":")[1]
             dp_size_available = int(node_resources["GPU"]) // world_size
@@ -388,12 +392,18 @@ class CoreEngineActorManager:
                         raise ValueError(
                             "Not enough resources to allocate %s DP ranks "
                             "on DP master node %s, possible to fit %s DP ranks",
-                            dp_size_local, dp_master_ip, dp_size_available)
+                            dp_size_local,
+                            dp_master_ip,
+                            dp_size_available,
+                        )
                     else:
                         logger.info(
                             "Skipping node %s as %s DP ranks could not fit, "
-                            "possible to fit %s DP ranks", node_ip,
-                            dp_size_local, dp_size_available)
+                            "possible to fit %s DP ranks",
+                            node_ip,
+                            dp_size_local,
+                            dp_size_available,
+                        )
                         continue
                 dp_size_to_allocate = dp_size_local
             elif node_ip == dp_master_ip:
@@ -402,12 +412,9 @@ class CoreEngineActorManager:
                 dp_size_to_allocate = dp_size_available
 
             for i in range(dp_size_to_allocate):
-                bundles = [{
-                    "GPU": 1.0,
-                    "node:" + node_ip: 0.001
-                }] * world_size + [{
-                    "CPU": 1.0
-                }]
+                bundles = [{"GPU": 1.0, "node:" + node_ip: 0.001}] * world_size + [
+                    {"CPU": 1.0}
+                ]
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{len(placement_groups)}",
                     strategy="STRICT_PACK",
@@ -417,11 +424,13 @@ class CoreEngineActorManager:
                 local_dp_ranks.append(i)
 
         if len(placement_groups) < dp_size:
-            raise ValueError(f"Not enough resources to allocate {dp_size} "
-                             "placement groups, only created "
-                             f"{len(placement_groups)} placement groups. "
-                             "Available resources: "
-                             f"{available_resources}")
+            raise ValueError(
+                f"Not enough resources to allocate {dp_size} "
+                "placement groups, only created "
+                f"{len(placement_groups)} placement groups. "
+                "Available resources: "
+                f"{available_resources}"
+            )
         return placement_groups, local_dp_ranks
 
     @staticmethod

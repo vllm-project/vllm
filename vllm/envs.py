@@ -998,9 +998,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # units.
     "VLLM_MOE_DP_CHUNK_SIZE": lambda: int(os.getenv("VLLM_MOE_DP_CHUNK_SIZE", "256")),
     # Randomize inputs during dummy runs when using Data Parallel
-    "VLLM_RANDOMIZE_DP_DUMMY_INPUTS":
-    lambda: os.environ.get("VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0") == "1",
-
+    "VLLM_RANDOMIZE_DP_DUMMY_INPUTS": lambda: os.environ.get(
+        "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0"
+    )
+    == "1",
     # Strategy to pack the data parallel ranks for Ray.
     # Available options:
     # - "fill":
@@ -1009,8 +1010,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "strict":
     #   allocate exactly data-parallel-size-local DP ranks to each picked node;
     # This environment variable is ignored if data-parallel-backend is not Ray.
-    "VLLM_RAY_DP_PACK_STRATEGY":
-    lambda: os.getenv("VLLM_RAY_DP_PACK_STRATEGY", "fill"),
+    "VLLM_RAY_DP_PACK_STRATEGY": lambda: os.getenv("VLLM_RAY_DP_PACK_STRATEGY", "fill"),
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3": lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
     # Use model_redirect to redirect the model name to a local folder.
