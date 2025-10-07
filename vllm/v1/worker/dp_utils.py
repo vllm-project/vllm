@@ -112,7 +112,7 @@ def _synchronize_dp_ranks(
     num_tokens_across_dp = tensor[1, :]
     should_dp_pad = bool(torch.all(tensor[3] == 1).item())
 
-    # DP ranks should all have the same value for allow_padding
+    # DP ranks should all have the same value for allow_dp_padding
     assert allow_dp_padding == should_dp_pad
 
     if should_dp_pad:
