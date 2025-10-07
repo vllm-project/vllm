@@ -147,7 +147,10 @@ class AgRsAll2AllManager(All2AllManagerBase):
         return hidden_states
 
     def destroy(self):
-        pass
+        print("DESTROY")
+        with self.handle_cache._lock:
+            for _, handle in self.handle_cache._cache.items():
+                handle.destroy()
 
 
 class PPLXAll2AllManager(All2AllManagerBase):
@@ -345,6 +348,9 @@ class DeepEPHybridAll2AllManager(DeepEPAll2AllManagerBase):
             buffer_kwargs, deep_ep.HybridEpBuffer)
         logger.debug("DeepEP Hybrid constructed.")
         return handle
+
+    def destroy(self):
+        pass
 
 
 class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
