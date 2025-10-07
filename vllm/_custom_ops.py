@@ -12,8 +12,7 @@ from vllm.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
-current_platform.import_core_kernels()
-current_platform.import_moe_kernels()
+current_platform.import_kernels()
 
 if TYPE_CHECKING:
 

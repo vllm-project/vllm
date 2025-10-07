@@ -167,16 +167,12 @@ class Platform:
             return device_id
 
     @classmethod
-    def import_core_kernels(cls) -> None:
+    def import_kernels(cls) -> None:
         """Import any platform-specific C kernels."""
         try:
             import vllm._C  # noqa: F401
         except ImportError as e:
             logger.warning("Failed to import from vllm._C: %r", e)
-
-    @classmethod
-    def import_moe_kernels(cls) -> None:
-        """Import any platform-specific MoE kernels."""
         with contextlib.suppress(ImportError):
             import vllm._moe_C  # noqa: F401
 
