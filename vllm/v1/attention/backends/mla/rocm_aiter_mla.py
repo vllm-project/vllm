@@ -8,7 +8,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionLayer
-from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
 from vllm.config import VllmConfig
 from vllm.utils import cdiv
@@ -27,7 +26,6 @@ def is_aiter_mla_enabled() -> bool:
     return envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MLA
 
 
-@register_attn_backend(_Backend.ROCM_AITER_MLA)
 class AiterMLABackend(MLACommonBackend):
     @staticmethod
     def get_name() -> str:

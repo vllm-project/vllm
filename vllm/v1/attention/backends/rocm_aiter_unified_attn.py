@@ -8,7 +8,6 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import AttentionMetadata, AttentionType
-from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -25,7 +24,6 @@ from vllm.v1.attention.backends.rocm_attn import (
 logger = init_logger(__name__)
 
 
-@register_attn_backend(_Backend.ROCM_AITER_UNIFIED_ATTN)
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     accept_output_buffer: bool = True
 

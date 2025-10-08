@@ -16,7 +16,6 @@ from vllm.attention.backends.abstract import (
     AttentionType,
     is_quantized_kv_cache,
 )
-from vllm.attention.backends.registry import _Backend, register_attn_backend
 from vllm.attention.layer import Attention
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import (
@@ -46,7 +45,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 logger = init_logger(__name__)
 
 
-@register_attn_backend(_Backend.FLASH_ATTN)
 class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supports_quant_query_input: bool = True
