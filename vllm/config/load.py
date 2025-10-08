@@ -116,9 +116,9 @@ class LoadConfig:
 
     @field_validator("ignore_patterns", mode="after")
     def _validate_ignore_patterns(
-        cls, ignore_patterns: Optional[Union[list[str], str]]
-    ) -> Optional[Union[list[str], str]]:
-        if ignore_patterns is not None and len(ignore_patterns) > 0:
+        cls, ignore_patterns: Union[list[str], str]
+    ) -> Union[list[str], str]:
+        if ignore_patterns != ["original/**/*"] and len(ignore_patterns) > 0:
             logger.info(
                 "Ignoring the following patterns when downloading weights: %s",
                 ignore_patterns,
