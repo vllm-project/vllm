@@ -11,14 +11,10 @@ from pydantic import BaseModel
 async def test_structured_output(client: openai.AsyncOpenAI):
     response = await client.responses.create(
         input=[
-            {
-                "role": "system",
-                "content": "Extract the event information."
-            },
+            {"role": "system", "content": "Extract the event information."},
             {
                 "role": "user",
-                "content":
-                "Alice and Bob are going to a science fair on Friday.",
+                "content": "Alice and Bob are going to a science fair on Friday.",
             },
         ],
         text={
@@ -28,18 +24,9 @@ async def test_structured_output(client: openai.AsyncOpenAI):
                 "schema": {
                     "type": "object",
                     "properties": {
-                        "event_name": {
-                            "type": "string"
-                        },
-                        "date": {
-                            "type": "string"
-                        },
-                        "participants": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            }
-                        },
+                        "event_name": {"type": "string"},
+                        "date": {"type": "string"},
+                        "participants": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["event_name", "date", "participants"],
                     "additionalProperties": False,
@@ -65,7 +52,6 @@ async def test_structured_output(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_structured_output_with_parse(client: openai.AsyncOpenAI):
-
     class CalendarEvent(BaseModel):
         event_name: str
         date: str
