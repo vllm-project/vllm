@@ -108,7 +108,7 @@ If you have PRs touching the area, please ping the area owner for review.
 - FusedMoE: FusedMoE kernel, Modular kernel framework, EPLB
     - @tlrmchlsmth
 - Quantization: Various quantization config, weight loading, and kernel.
-    - @mgoin, @Isotr0py
+    - @mgoin, @Isotr0py, @yewentao256 
 - Multi-modal Input Processing: Components that load and process image/video/audio data into feature tensors
     - @DarkLight1337, @ywang96, @Isotr0py
 - torch compile: The torch compile integration for vLLM
