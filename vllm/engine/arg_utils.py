@@ -379,8 +379,8 @@ class EngineArgs:
     expert_placement_strategy: ExpertPlacementStrategy = (
         ParallelConfig.expert_placement_strategy
     )
-    _api_process_count: int = ParallelConfig._api_process_count
-    _api_process_rank: int = ParallelConfig._api_process_rank
+    _api_process_count: int = ParallelConfig._api_process_count.default
+    _api_process_rank: int = ParallelConfig._api_process_rank.default
     num_redundant_experts: int = EPLBConfig.num_redundant_experts
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
