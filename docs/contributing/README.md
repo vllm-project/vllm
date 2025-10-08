@@ -54,7 +54,7 @@ For more details about installing from source and installing for other hardware,
 For an optimized workflow when iterating on C++/CUDA kernels, see the [Incremental Compilation Workflow](./incremental_build.md) for recommendations.
 
 !!! tip
-    vLLM is compatible with Python versions 3.9 to 3.12. However, vLLM's default [Dockerfile](gh-file:docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
+    vLLM is compatible with Python versions 3.10 to 3.13. However, vLLM's default [Dockerfile](gh-file:docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
 
     Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
 
@@ -83,7 +83,7 @@ vLLM's `pre-commit` hooks will now run automatically every time you commit.
 
     ```bash
     pre-commit run --hook-stage manual markdownlint
-    pre-commit run --hook-stage manual mypy-3.9
+    pre-commit run --hook-stage manual mypy-3.10
     ```
 
 ### Documentation

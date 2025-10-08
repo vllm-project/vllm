@@ -20,7 +20,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ## Requirements
 
-- Python: 3.9 -- 3.12
+- Python: 3.10 -- 3.13
 
 === "Intel/AMD x86"
 
