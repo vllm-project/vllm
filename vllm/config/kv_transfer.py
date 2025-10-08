@@ -4,8 +4,9 @@
 import hashlib
 import uuid
 from dataclasses import field
-from typing import Any, Literal, Optional, get_args
+from typing import Any, Literal, Optional, Self, get_args
 
+from pydantic import field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -79,21 +80,32 @@ class KVTransferConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __post_init__(self) -> None:
-        if self.engine_id is None:
-            self.engine_id = str(uuid.uuid4())
+    @field_validator("engine_id", mode="before")
+    @classmethod
+    def _generate_engine_id(cls, engine_id: Optional[str]) -> str:
+        if engine_id is None:
+            return str(uuid.uuid4())
+        return engine_id
 
-        if self.kv_role is not None and self.kv_role not in get_args(KVRole):
+    @field_validator("kv_role", mode="after")
+    @classmethod
+    def _validate_kv_role(cls, kv_role: Optional[KVRole]) -> Optional[KVRole]:
+        if kv_role is not None and kv_role not in get_args(KVRole):
             raise ValueError(
-                f"Unsupported kv_role: {self.kv_role}. "
+                f"Unsupported kv_role: {kv_role}. "
                 f"Supported roles are {get_args(KVRole)}"
             )
 
+        return kv_role
+
+    @model_validator(mode="after")
+    def _validate_kv_role_is_set_if_kv_connector_is_set(self: Self) -> Self:
         if self.kv_connector is not None and self.kv_role is None:
             raise ValueError(
-                "Please specify kv_disagg_role when kv_connector "
+                "Please specify kv_role when kv_connector "
                 f"is set, supported roles are {get_args(KVRole)}"
             )
+        return self
 
     @property
     def is_kv_transfer_instance(self) -> bool:
