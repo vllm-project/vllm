@@ -2,14 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    ClassVar,
-    Literal,
-    Optional,
-    Union,
-)
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional, Union
 
 import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
