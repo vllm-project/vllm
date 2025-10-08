@@ -122,7 +122,7 @@ def test_env(
                     backend = get_attn_backend(
                         16, torch.float16, None, block_size, use_mla=use_mla
                     )
-                    expected = "TRITON_ATTN"
+                    expected = "ROCM_ATTN"
                     assert backend.get_name() == expected
 
         elif device == "cuda":
