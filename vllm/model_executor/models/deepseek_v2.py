@@ -205,6 +205,8 @@ class DeepseekV2MoE(nn.Module):
         )
 
         if config.n_shared_experts is None:
+            self.use_shared_fused_moe = False
+
             self.experts = FusedMoE(
                 num_experts=config.n_routed_experts,
                 top_k=config.num_experts_per_tok,
@@ -227,6 +229,8 @@ class DeepseekV2MoE(nn.Module):
             )
             self.shared_experts = None
         else:
+            self.use_shared_fused_moe = True
+
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
 
             self.shared_experts = DeepseekV2MLP(
@@ -241,6 +245,7 @@ class DeepseekV2MoE(nn.Module):
 
             self.experts = SharedFusedMoE(
                 shared_experts=self.shared_experts,
+                gate=self.gate,
                 num_experts=config.n_routed_experts,
                 top_k=config.num_experts_per_tok,
                 hidden_size=config.hidden_size,
@@ -272,12 +277,16 @@ class DeepseekV2MoE(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
-
-        fused_moe_out = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        if self.use_shared_fused_moe:
+            fused_moe_out = self.experts(
+                hidden_states=hidden_states, router_logits=hidden_states
+            )
+        else:
+            # router_logits: (num_tokens, n_experts)
+            router_logits, _ = self.gate(hidden_states)
+            fused_moe_out = self.experts(
+                hidden_states=hidden_states, router_logits=router_logits
+            )
 
         if self.shared_experts is not None:
             shared_output, final_hidden_states = fused_moe_out

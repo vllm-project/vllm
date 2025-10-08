@@ -19,16 +19,22 @@ class SharedFusedMoE(FusedMoE):
     def __init__(
         self,
         shared_experts: torch.nn.Module,
+        gate: torch.nn.Module,
         use_overlapped: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._shared_experts = shared_experts
+        self._gate = gate
         self.use_overlapped = use_overlapped
 
     @property
     def shared_experts(self) -> Optional[torch.nn.Module]:
         return self._shared_experts if self.use_overlapped else None
+
+    @property
+    def gate(self) -> Optional[torch.nn.Module]:
+        return self._gate if self.use_overlapped else None
 
     def forward(
         self,
