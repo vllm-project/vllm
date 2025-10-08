@@ -51,7 +51,6 @@ def wikitext_ppl_test(
         gpu_memory_utilization=0.7,
         max_model_len=max_length,
         max_num_seqs=1,
-        enforce_eager=True,
         **vllm_extra_kwargs,
     ) as vllm_model:
         # Use max_num_seqs=1 to avoid OOM,
