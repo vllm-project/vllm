@@ -473,9 +473,11 @@ def use_cudnn_prefill() -> bool:
 
 def use_trtllm_ragged_deepseek_prefill() -> bool:
     """Check if TRT-LLM ragged DeepSeek prefill should be used."""
-    return (flashinfer_available
-            and envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
-            and current_platform.is_device_capability(100))
+    return (
+        flashinfer_available
+        and envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
+        and current_platform.is_device_capability(100)
+    )
 
 
 # Currently 394MB, this can be tuned based on GEMM sizes used.
@@ -944,8 +946,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 prefill_metadata.cudnn_workspace = self.cudnn_workspace
 
             if self._use_trtllm_ragged_prefill:
-                prefill_metadata.query_seq_lens = prefill_query_start_loc[1:] \
-                    - prefill_query_start_loc[:-1]
+                prefill_metadata.query_seq_lens = (
+                    prefill_query_start_loc[1:] - prefill_query_start_loc[:-1]
+                )
 
         decode_metadata = None
         if num_decodes > 0:
@@ -1245,10 +1248,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             self._pad_v = False
         elif use_trtllm_ragged_deepseek_prefill():
             logger.debug_once("Using TRT-LLM ragged DeepSeek prefill for MLA")
-            self._run_prefill_context_chunk = \
+            self._run_prefill_context_chunk = (
                 self._run_prefill_context_chunk_trtllm_ragged
-            self._run_prefill_new_tokens = \
-                self._run_prefill_new_tokens_trtllm_ragged
+            )
+            self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
         elif use_cudnn_prefill():
             logger.debug_once("Using CUDNN prefill for MLA")
@@ -1439,10 +1442,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
     def _run_prefill_new_tokens_trtllm_ragged(
-            self, prefill: MLACommonPrefillMetadata, q, k, v,
-            return_softmax_lse):
+        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+    ):
         """TRT-LLM ragged attention for new tokens (causal)."""
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
+
         assert prefill.query_seq_lens is not None
 
         return trtllm_ragged_attention_deepseek(
@@ -1467,9 +1471,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
     def _run_prefill_context_chunk_trtllm_ragged(
-            self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v):
-        """TRT-LLM ragged attention for context chunks (non-causal).
-        """
+        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
+    ):
+        """TRT-LLM ragged attention for context chunks (non-causal)."""
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
         assert prefill.chunked_context is not None
