@@ -633,7 +633,7 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
         reinterpret_cast<const float*>(kv_cache)[src_scale_offset / 4];
   }
 #else
-  assert false;  // TODO: this kernel has compilation errors with ROCm.
+  assert(false);  // TODO: This kernel has compilation errors with ROCm.
 #endif
 }
 
