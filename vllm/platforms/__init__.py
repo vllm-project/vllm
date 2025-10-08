@@ -37,7 +37,7 @@ def tpu_platform_plugin() -> Optional[str]:
     # Check for Pathways TPU proxy
     if envs.VLLM_TPU_USING_PATHWAYS:
         logger.debug("Confirmed TPU platform is available via Pathways proxy.")
-        return "tpu_commons.platforms.tpu_jax.TpuPlatform"
+        return "tpu_inference.platforms.tpu_jax.TpuPlatform"
 
     # Check for libtpu installation
     try:
