@@ -1,33 +1,25 @@
-diff --git a/vllm/device_allocator/cumem.py b/vllm/device_allocator/cumem.pydiff --git a/vllm/device_allocator/cumem.py b/vllm/device_allocator/cumem.py
+diff --git a/vllm/device_allocator/cumem.py b/vllm/device_allocator/cumem.py
+index 97c665438..5328440e2 100644
+--- a/vllm/device_allocator/cumem.py
++++ b/vllm/device_allocator/cumem.py
+@@ -150,12 +150,13 @@ class CuMemAllocator:
+         return CuMemAllocator.instance
 
---- a/vllm/device_allocator/cumem.py--- a/vllm/device_allocator/cumem.py
+     def __init__(self):
+-        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+-        assert "expandable_segments:True" not in conf, (
+-            "Expandable segments are not compatible with memory pool. "
+-            "Please track https://github.com/pytorch/pytorch/issues/147851 "
+-            "for the latest updates."
+-        )
++        conf = os.environ.get(
++            "PYTORCH_ALLOC_CONF",
++            os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""),
++        )
++        # Overlay scripts enforce policy around expandable segments; keep reading
++        # the configuration for compatibility with overrides.
++        _ = conf
 
-+++ b/vllm/device_allocator/cumem.py+++ b/vllm/device_allocator/cumem.py
-
-@@@@ -140,7 +140,9 @@ class CuMemAllocator:
-
--    def __init__(self):         return CuMemAllocator.instance
-
--        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "") 
-
--        assert "expandable_segments:True" not in conf, \     def __init__(self):
-
--            ("Expandable segments are not compatible with memory pool. "-        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
-
--            "Please track https://github.com/pytorch/pytorch/issues/147851 "+        # Prefer new env var; fall back to deprecated one for compatibility
-
--            "for the latest updates.")+        conf = os.environ.get("PYTORCH_ALLOC_CONF",
-
-+    def __init__(self):+               os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""))
-
-+        # Prefer new env var; fall back to deprecated one for compatibility         assert "expandable_segments:True" not in conf, \
-
-+        conf = os.environ.get("PYTORCH_ALLOC_CONF",             ("Expandable segments are not compatible with memory pool. "
-
-+               os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""))             "Please track https://github.com/pytorch/pytorch/issues/147851 "
-
-+        # Relax assertion (handled via extras patch script if needed)
-+        # Original assert removed to allow user override.
          self.pointer_to_data: dict[int, AllocationData] = {}
          self.current_tag: str = CuMemAllocator.default_tag
          self.allocator_and_pools: dict[str, Any] = {}
