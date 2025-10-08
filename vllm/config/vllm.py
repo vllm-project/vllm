@@ -324,7 +324,7 @@ class VllmConfig:
                 self.compilation_config.level = CompilationMode.NO_COMPILATION
         else:
             assert self.compilation_config.level >= CompilationMode.NO_COMPILATION
-            assert self.compilation_config.level <= CompilationMode.PIECEWISE
+            assert self.compilation_config.level <= CompilationMode.VLLM_COMPILE
 
         # If user does not set custom ops via none or all set it here based on
         # compilation level and backend.
