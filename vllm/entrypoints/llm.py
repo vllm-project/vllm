@@ -335,9 +335,8 @@ class LLM:
         self.request_counter = Counter()
         self.default_sampling_params: Union[dict[str, Any], None] = None
 
-        supported_tasks = self.llm_engine.get_supported_tasks()  # type: ignore
-
-        logger.info("Supported_tasks: %s", supported_tasks)
+        supported_tasks = self.llm_engine.get_supported_tasks()
+        logger.info("Supported tasks: %s", supported_tasks)
 
         self.supported_tasks = supported_tasks
 

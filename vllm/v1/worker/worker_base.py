@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Callable, TypeVar, Union
 
 import torch
 import torch.nn as nn
@@ -12,6 +12,8 @@ import torch.nn as nn
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (
     enable_trace_function_call_for_thread,
@@ -22,6 +24,10 @@ from vllm.utils import (
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.outputs import SamplerOutput
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.outputs import ModelRunnerOutput
 
 logger = init_logger(__name__)
 
@@ -289,6 +295,28 @@ class WorkerWrapperBase:
                     worker_class,
                     extended_calls,
                 )
+
+        shared_worker_lock = kwargs.pop("shared_worker_lock", None)
+        if shared_worker_lock is None:
+            msg = (
+                "Missing `shared_worker_lock` argument from executor. "
+                "This argument is needed for mm_processor_cache_type='shm'."
+            )
+
+            mm_config = self.vllm_config.model_config.multimodal_config
+            if mm_config and mm_config.mm_processor_cache_type == "shm":
+                raise ValueError(msg)
+            else:
+                logger.warning_once(msg)
+
+            self.mm_receiver_cache = None
+        else:
+            self.mm_receiver_cache = worker_receiver_cache_from_config(
+                self.vllm_config,
+                MULTIMODAL_REGISTRY,
+                shared_worker_lock,
+            )
+
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
@@ -323,5 +351,30 @@ class WorkerWrapperBase:
             logger.exception(msg)
             raise e
 
-    def __getattr__(self, attr):
+    def __getattr__(self, attr: str):
         return getattr(self.worker, attr)
+
+    def _apply_mm_cache(self, scheduler_output: SchedulerOutput) -> None:
+        mm_cache = self.mm_receiver_cache
+        if mm_cache is None:
+            return
+
+        for req_data in scheduler_output.scheduled_new_reqs:
+            req_data.mm_features = mm_cache.get_and_update_features(
+                req_data.mm_features
+            )
+
+    def execute_model(
+        self,
+        scheduler_output: SchedulerOutput,
+        *args,
+        **kwargs,
+    ) -> ModelRunnerOutput:
+        self._apply_mm_cache(scheduler_output)
+
+        return self.worker.execute_model(scheduler_output, *args, **kwargs)  # type: ignore
+
+    def reset_mm_cache(self) -> None:
+        mm_receiver_cache = self.mm_receiver_cache
+        if mm_receiver_cache is not None:
+            mm_receiver_cache.clear_cache()

@@ -1625,8 +1625,7 @@ async def init_app_state(
     model_config = vllm_config.model_config
 
     supported_tasks = await engine_client.get_supported_tasks()
-
-    logger.info("Supported_tasks: %s", supported_tasks)
+    logger.info("Supported tasks: %s", supported_tasks)
 
     resolved_chat_template = load_chat_template(args.chat_template)
     if resolved_chat_template is not None:
