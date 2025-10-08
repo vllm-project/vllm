@@ -591,6 +591,7 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
     const int num_tokens,            // number of tokens
     const int quant_block_size       // quantization block size
 ) {
+#ifndef USE_ROCM
   constexpr int VEC_SIZE = sizeof(float4) / sizeof(char);
   const int token_idx = blockIdx.x * blockDim.y + threadIdx.y;
   const int head_idx = (blockIdx.y * blockDim.x + threadIdx.x) * VEC_SIZE;
@@ -607,9 +608,7 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
       }
     }
   }
-#ifndef USE_ROCM
   __syncwarp();
-#endif
 
   if (head_idx >= head_dim || token_idx >= num_tokens) {
     return;
@@ -633,6 +632,9 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
     reinterpret_cast<float*>(dst_scale)[dst_inblock_offset / quant_block_size] =
         reinterpret_cast<const float*>(kv_cache)[src_scale_offset / 4];
   }
+#else
+  assert false;  // TODO: this kernel has compilation errors with ROCm.
+#endif
 }
 
 }  // namespace vllm
