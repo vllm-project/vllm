@@ -73,7 +73,7 @@ class LoadConfig:
     device: Optional[str] = None
     """Device to which model weights will be loaded, default to
     device_config.device"""
-    ignore_patterns: Optional[Union[list[str], str]] = Field(
+    ignore_patterns: Union[list[str], str] = Field(
         default_factory=lambda: ["original/**/*"]
     )
     """The list of patterns to ignore when loading the model. Default to
