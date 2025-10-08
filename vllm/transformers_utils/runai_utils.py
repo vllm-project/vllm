@@ -14,7 +14,7 @@ from vllm.utils import PlaceholderModule
 
 logger = init_logger(__name__)
 
-SUPPORTED_SCHEMES = ['s3://', 'gs://']
+SUPPORTED_SCHEMES = ["s3://", "gs://"]
 
 try:
     from runai_model_streamer import list_safetensors as runai_list_safetensors
@@ -22,11 +22,9 @@ try:
 except (ImportError, OSError):
     # see https://github.com/run-ai/runai-model-streamer/issues/26
     # OSError will be raised on arm64 platform
-    runai_model_streamer = PlaceholderModule(
-        "runai_model_streamer")  # type: ignore[assignment]
+    runai_model_streamer = PlaceholderModule("runai_model_streamer")  # type: ignore[assignment]
     runai_pull_files = runai_model_streamer.placeholder_attr("pull_files")
-    runai_list_safetensors = runai_model_streamer.placeholder_attr(
-        "list_safetensors")
+    runai_list_safetensors = runai_model_streamer.placeholder_attr("list_safetensors")
 
 
 def list_safetensors(path: str = "") -> list[str]:
@@ -65,8 +63,10 @@ class ObjectStorageModel:
                 signal.signal(sig, self._close_by_signal(existing_handler))
 
         dir_name = os.path.join(
-            get_cache_dir(), "model_streamer",
-            hashlib.sha256(str(url).encode()).hexdigest()[:8])
+            get_cache_dir(),
+            "model_streamer",
+            hashlib.sha256(str(url).encode()).hexdigest()[:8],
+        )
         if os.path.exists(dir_name):
             shutil.rmtree(dir_name)
         os.makedirs(dir_name)
@@ -78,7 +78,6 @@ class ObjectStorageModel:
             shutil.rmtree(self.dir)
 
     def _close_by_signal(self, existing_handler=None):
-
         def new_handler(signum, frame):
             self._close()
             if existing_handler:
@@ -86,10 +85,12 @@ class ObjectStorageModel:
 
         return new_handler
 
-    def pull_files(self,
-                   model_path: str = "",
-                   allow_pattern: Optional[list[str]] = None,
-                   ignore_pattern: Optional[list[str]] = None) -> None:
+    def pull_files(
+        self,
+        model_path: str = "",
+        allow_pattern: Optional[list[str]] = None,
+        ignore_pattern: Optional[list[str]] = None,
+    ) -> None:
         """
         Pull files from object storage into the temporary directory.
 
