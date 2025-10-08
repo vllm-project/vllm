@@ -252,7 +252,12 @@ def test_modular_kernel_combinations_multigpu(
     world_size: int,
     pytestconfig,
 ):
-    assert cuda_device_count_stateless() >= world_size
+    if cuda_device_count_stateless() < world_size:
+        pytest.skip(
+            f"Not enough GPUs available to run, got "
+            f"{cuda_device_count_stateless()} exepected "
+            f"{world_size}."
+        )
 
     config = Config(
         Ms=Ms,
