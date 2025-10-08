@@ -480,7 +480,9 @@ class LLM:
         ):
             return lora_request
 
-        intersection = set(mm_data.keys()).intersection(default_mm_loras.keys())
+        intersection = set(
+            mm_data.keys()  # type: ignore
+        ).intersection(default_mm_loras.keys())
         if not intersection:
             return lora_request
         if len(intersection) > 1:
