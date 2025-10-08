@@ -108,12 +108,9 @@ class LoadConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @field_validator("load_format", mode="before")
-    def _lowercase_load_format(cls, load_format: Any) -> Any:
-        if isinstance(load_format, str):
-            return load_format.lower()
-
-        return load_format
+    @field_validator("load_format", mode="after")
+    def _lowercase_load_format(cls, load_format: str) -> str:
+        return load_format.lower()
 
     @field_validator("ignore_patterns", mode="after")
     def _validate_ignore_patterns(
