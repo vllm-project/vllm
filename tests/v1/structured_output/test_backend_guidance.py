@@ -15,7 +15,10 @@ def test_backend_guidance_rollback_terminated():
     # it should be reverted in case EOS is not accepted by the target
     # model.
     vllm_config = VllmConfig(
-        decoding_config=DecodingConfig(backend="guidance", ))
+        decoding_config=DecodingConfig(
+            backend="guidance",
+        )
+    )
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
 
     backend = GuidanceBackend(
@@ -24,8 +27,9 @@ def test_backend_guidance_rollback_terminated():
         vocab_size=50257,
     )
 
-    grammar = backend.compile_grammar(StructuredOutputOptions.JSON,
-                                      '{"type": "object"}')
+    grammar = backend.compile_grammar(
+        StructuredOutputOptions.JSON, '{"type": "object"}'
+    )
 
     prompt = tokenizer.encode('{"a": "b"}')
     grammar.accept_tokens("test", prompt + [tokenizer.eos_token_id])
