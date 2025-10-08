@@ -21,7 +21,7 @@ from ..utils import multi_gpu_test
 
 MODELS = [
     "hmellor/tiny-random-Gemma2ForCausalLM",
-    "hmellor/tiny-random-LlamaForCausalLM",
+    "meta-llama/Llama-3.2-1B-Instruct",
 ]
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
