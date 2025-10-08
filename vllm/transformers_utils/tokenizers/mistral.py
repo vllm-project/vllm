@@ -351,15 +351,15 @@ class MistralTokenizer(TokenizerBase):
         if is_list_of(text, str):
             input_ids_: list[list[int]] = []
             for p in text:
-                each_input_ids = self.encode_one(p, truncation, max_length)
+                each_input_ids = self.encode_one(p, truncation, max_length)  # type: ignore[arg-type]
                 input_ids_.append(each_input_ids)
             input_ids = input_ids_
         # For list[int], apply chat template output, already tokens.
         elif is_list_of(text, int):
-            input_ids = text
+            input_ids = text  # type: ignore[assignment]
         # For str, single prompt text
         else:
-            input_ids = self.encode_one(text, truncation, max_length)
+            input_ids = self.encode_one(text, truncation, max_length)  # type: ignore[arg-type]
         return BatchEncoding({"input_ids": input_ids})
 
     def get_vocab(self) -> dict[str, int]:
