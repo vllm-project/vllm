@@ -439,14 +439,14 @@ class EngineArgs:
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
-    enable_lora_bias: bool = LoRAConfig.bias_enabled
-    max_loras: int = LoRAConfig.max_loras
+    enable_lora_bias: bool = LoRAConfig.bias_enabled.default
+    max_loras: int = LoRAConfig.max_loras.default
     max_lora_rank: int = LoRAConfig.max_lora_rank
     default_mm_loras: Optional[dict[str, str]] = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
-    lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
+    lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size.default
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[int] = CacheConfig.num_gpu_blocks_override
