@@ -236,7 +236,7 @@ def test_multi_graph_vllmcompile_compile_outputs_equal():
     # no compile or cudagraph
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            mode=CompilationMode.NO_COMPILATION,
+            mode=CompilationMode.NONE,
         )
     )
     cudagraph_runtime_mode = CUDAGraphMode.NONE

@@ -123,7 +123,7 @@ def test_compile_correctness(
         all_envs: list[dict[str, str] | None] = []
 
         for mode in [
-            CompilationMode.NO_COMPILATION,
+            CompilationMode.NONE,
             CompilationMode.VLLM_COMPILE,
         ]:
             all_args.append(final_args + [f"-O{mode}"])
@@ -141,7 +141,7 @@ def test_compile_correctness(
         all_args.clear()
 
         for mode in [
-            CompilationMode.NO_COMPILATION,
+            CompilationMode.NONE,
             CompilationMode.STOCK_TORCH_COMPILE,
             CompilationMode.DYNAMO_TRACE_ONCE,
         ]:

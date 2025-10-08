@@ -53,13 +53,13 @@ class TestCudagraphDispatcher:
         "case_id,cudagraph_mode_str,compilation_mode",
         [
             # Test case 0: Full CG for mixed batches, no separate routine
-            (0, "FULL", CompilationMode.NO_COMPILATION),
+            (0, "FULL", CompilationMode.NONE),
             # Test case 1: Full CG for uniform batches, piecewise for mixed
-            (1, "FULL_AND_PIECEWISE", CompilationMode.NO_COMPILATION),
+            (1, "FULL_AND_PIECEWISE", CompilationMode.NONE),
             # Test case 2: Full CG for uniform batches, no CG for mixed
-            (2, "FULL_DECODE_ONLY", CompilationMode.NO_COMPILATION),
-            # Test case 3: Piecewise for all
-            (3, "PIECEWISE", CompilationMode.VLLM_COMPILE),
+            (2, "FULL_DECODE_ONLY", CompilationMode.NONE),
+            # Test case 3: VLLM_COMPILE for all
+            (3, "VLLM_COMPILE", CompilationMode.VLLM_COMPILE),
         ],
     )
     def test_dispatcher(self, cudagraph_mode_str, compilation_mode):

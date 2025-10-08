@@ -276,7 +276,7 @@ class CpuPlatform(Platform):
             )
 
         if vllm_config.lora_config is not None:
-            compilation_config.mode = CompilationMode.NO_COMPILATION
+            compilation_config.mode = CompilationMode.NONE
 
         assert vllm_config.device_config.device_type == "cpu"
 
