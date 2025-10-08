@@ -3,11 +3,10 @@
 
 import hashlib
 import os
-from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import torch
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, model_validator
 from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
@@ -32,6 +31,7 @@ logger = init_logger(__name__)
 
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
+DataParallelBackend = Literal["ray", "mp"]
 
 
 @config
@@ -49,7 +49,7 @@ class EPLBConfig:
     of the last `lb_window_size` steps will be used for rearranging experts.
     """
 
-    num_redundant_experts: int = 0
+    num_redundant_experts: int = Field(default=0, ge=0)
     """Number of redundant experts to use for expert parallelism."""
 
     log_balancedness: bool = False
@@ -84,7 +84,7 @@ class ParallelConfig:
     """Port for data parallel messaging."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
-    data_parallel_backend: str = "mp"
+    data_parallel_backend: DataParallelBackend = "mp"
     """Backend to use for data parallel, either "mp" or "ray"."""
     data_parallel_external_lb: bool = False
     """Whether to use "external" DP LB mode. Applies only to online serving
@@ -102,7 +102,7 @@ class ParallelConfig:
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
-    eplb_config: EPLBConfig = field(default_factory=EPLBConfig)
+    eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
     expert_placement_strategy: ExpertPlacementStrategy = "linear"
     """The expert placement strategy for MoE layers:\n
@@ -188,13 +188,13 @@ class ParallelConfig:
     new attributes and methods to the worker class for use in collective_rpc
     calls."""
 
-    world_size: int = field(init=False)
+    world_size: int = Field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
 
     rank: int = 0
     """Global rank in distributed setup."""
 
-    _data_parallel_master_port_list: list[int] = field(default_factory=list)
+    _data_parallel_master_port_list: list[int] = Field(default_factory=list)
     """List of open port auto-queried for data parallel messaging.
     Set to be private as it's not intended to be configured by users.
     """
@@ -223,16 +223,6 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
-    @field_validator("data_parallel_backend")
-    @classmethod
-    def _validate_data_parallel_backend(cls, data_parallel_backend: str) -> str:
-        if data_parallel_backend not in {"mp", "ray"}:
-            raise ValueError(
-                "data_parallel_backend must be either 'mp' or 'ray', "
-                f"but got {data_parallel_backend}."
-            )
-        return data_parallel_backend
-
     @model_validator(mode="after")
     def _validate_parallel_config(self) -> Self:
         if self._api_process_rank >= self._api_process_count:
@@ -258,11 +248,6 @@ class ParallelConfig:
                 raise ValueError(
                     "Expert parallelism load balancing is only supported on "
                     "CUDA devices now."
-                )
-            if self.eplb_config.num_redundant_experts < 0:
-                raise ValueError(
-                    "num_redundant_experts must be non-negative, but got "
-                    f"{self.eplb_config.num_redundant_experts}."
                 )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")
