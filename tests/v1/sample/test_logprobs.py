@@ -16,7 +16,7 @@ from tests.v1.sample.utils import (
     get_test_batch,
 )
 from vllm import SamplingParams
-from vllm.config import LogprobsMode
+from vllm.config.model import LogprobsMode
 
 from ...conftest import HfRunner, VllmRunner
 
