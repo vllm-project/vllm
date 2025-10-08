@@ -335,6 +335,9 @@ class ParallelConfig:
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
+
+        This hash is also used for DP worker configuration validation
+        to prevent hangs from mismatched collective communication patterns.
         """
         ignored_factors = {
             # Derived/runtime topology, networking, or launch details
