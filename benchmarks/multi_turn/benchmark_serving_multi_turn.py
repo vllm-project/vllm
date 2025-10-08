@@ -1166,7 +1166,7 @@ def process_statistics(
                 )
                 startrow += len(gen_params_df) + 3
 
-            for params, df_stats in zip(params_list, df_list, strict=True):
+            for params, df_stats in zip(params_list, df_list):
                 df_params = pd.DataFrame([params])
                 df_params.to_excel(
                     writer, sheet_name="Summary", index=False, startrow=startrow
