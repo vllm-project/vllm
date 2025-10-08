@@ -661,7 +661,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                     )
                 elif child_module.__class__.__name__.endswith("RMSNorm"):
                     new_module = replace_rms_norm_class(
-                        child_module, self.config.hidden_size
+                        child_module, self.config.text_config.hidden_size
                     )
                 else:
                     _recursive_replace(child_module, prefix=qual_name)
