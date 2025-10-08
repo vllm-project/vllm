@@ -13,15 +13,15 @@ from vllm.model_executor.layers.quantization.utils import fp8_utils, int8_utils
 @pytest.mark.parametrize("scale_ue8m0", [False, True])
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_per_token_group_quant_fp8(shape, column_major: bool,
-                                   scale_ue8m0: bool, group_size: int):
+def test_per_token_group_quant_fp8(
+    shape, column_major: bool, scale_ue8m0: bool, group_size: int
+):
     device = "cuda"
 
     torch.manual_seed(42)
     num_tokens, hidden_dim = shape
 
-    x = (torch.randn(
-        (num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8)
+    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
 
     # cuda path
     out_q, scale = fp8_utils.per_token_group_quant_fp8(
@@ -53,8 +53,7 @@ def test_per_token_group_quant_int8(shape, group_size: int):
     torch.manual_seed(42)
     num_tokens, hidden_dim = shape
 
-    x = (torch.randn(
-        (num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8)
+    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
 
     # cuda path
     out_q, scale = int8_utils.per_token_group_quant_int8(
