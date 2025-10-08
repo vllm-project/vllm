@@ -59,9 +59,14 @@ class LoadConfig:
       This is recommended for models on network filesystems (e.g., Lustre, NFS)
       as it avoids inefficient random reads, significantly speeding up model
       initialization. However, it uses more CPU RAM.
+    - "torchao": Weights are loaded in upfront and then reconstructed
+      into torchao tensor subclasses. This is used when the checkpoint
+      was quantized using torchao and saved using safetensors.
+      Needs torchao >= 0.14.0
     """
     model_loader_extra_config: Union[dict, TensorizerConfig] = field(
-        default_factory=dict)
+        default_factory=dict
+    )
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""
     device: Optional[str] = None
@@ -99,8 +104,7 @@ class LoadConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     def __post_init__(self):
@@ -108,6 +112,7 @@ class LoadConfig:
         if self.ignore_patterns is not None and len(self.ignore_patterns) > 0:
             logger.info(
                 "Ignoring the following patterns when downloading weights: %s",
-                self.ignore_patterns)
+                self.ignore_patterns,
+            )
         else:
             self.ignore_patterns = ["original/**/*"]
