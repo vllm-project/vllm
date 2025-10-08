@@ -223,7 +223,7 @@ class Scheduler(SchedulerInterface):
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
             num_new_tokens = min(
-                num_new_tokens, self.max_model_len - request.num_computed_tokens
+                num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens
             )
 
             # Schedule encoder inputs.
@@ -597,7 +597,7 @@ class Scheduler(SchedulerInterface):
             any_request = self.running[0]
             num_common_prefix_blocks = (
                 self.kv_cache_manager.get_num_common_prefix_blocks(
-                    any_request, len(self.running)
+                    any_request.request_id
                 )
             )
 
@@ -712,7 +712,6 @@ class Scheduler(SchedulerInterface):
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
 
-        use_connector = self.connector is not None
         for req in itertools.chain(running_reqs, resumed_reqs):
             req_id = req.request_id
             req_ids.append(req_id)
@@ -729,16 +728,11 @@ class Scheduler(SchedulerInterface):
                     req.num_computed_tokens : req.num_computed_tokens + num_tokens
                 ]
                 new_token_ids.append(token_ids)
-            elif use_connector:
-                # When using a KVConnector, we add a placeholder to avoid index
-                # out of bounds errors. TODO: Remove this once the KVConnector
-                # is updated to handle token IDs properly.
-                new_token_ids.append([])
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
             num_computed_tokens.append(req.num_computed_tokens)
-            num_output_tokens.append(len(req.output_token_ids))
+            num_output_tokens.append(req.num_output_tokens)
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
         resumed_from_preemption = [False] * len(running_reqs)
