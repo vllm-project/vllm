@@ -560,7 +560,7 @@ class CompilationConfig:
         # Currently only eager and inductor backend are supported.
         # for piecewise compilation. Custom backends are not suppported for
         # piecewise compilation. Update when more backends are supported.
-        if self.level == CompilationLevel.PIECEWISE and self.backend not in [
+        if self.level == CompilationMode.VLLM_COMPILE and self.backend not in [
             "",
             "eager",
             "inductor",
@@ -600,7 +600,10 @@ class CompilationConfig:
         from torch._dynamo.backends.registry import list_backends
 
         torch_backends = list_backends(exclude_tags=tuple())
-        if self.level in [CompilationMode.STOCK_TORCH_COMPILE, CompilationMode.DYNAMO_TRACE_ONCE]:
+        if self.level in [
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CompilationMode.DYNAMO_TRACE_ONCE,
+        ]:
             if self.backend in torch_backends:
                 return self.backend
             return resolve_obj_by_qualname(self.backend)
@@ -764,7 +767,8 @@ class CompilationConfig:
         inductor_used = (
             self.level == CompilationMode.VLLM_COMPILE and self.backend == "inductor"
         ) or (
-            self.level >= CompilationMode.STOCK_TORCH_COMPILE and self.backend == "inductor"
+            self.level >= CompilationMode.STOCK_TORCH_COMPILE
+            and self.backend == "inductor"
         )
         use_inductor_piecewise_compilation = (
             inductor_used
