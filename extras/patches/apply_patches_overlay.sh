@@ -18,6 +18,13 @@ PATCHES=("$PATCH_DIR"/*.diff)
 shopt -u nullglob
 
 OVERLAY_MODE=${PYTHON_PATCH_OVERLAY:-0}
+TRACK_FILE_DEFAULT="/opt/work/tmp/vllm_patched_files.txt"
+PATCH_TRACK_FILE=${PATCH_TRACK_FILE:-$TRACK_FILE_DEFAULT}
+
+if [[ "$OVERLAY_MODE" == "1" ]]; then
+  mkdir -p "$(dirname "$PATCH_TRACK_FILE")" 2>/dev/null || true
+  : > "$PATCH_TRACK_FILE"
+fi
 
 echo "[patches] ROOT_DIR=$ROOT_DIR"
 echo "[patches] ${#PATCHES[@]} patch(es)"
@@ -39,8 +46,21 @@ apply_one() {
   tmp=$(mktemp /tmp/patch.overlay.XXXXXX.diff)
   tr -d '\r' < "$patch_path" > "$tmp" 2>/dev/null || cp "$patch_path" "$tmp"
 
+  local patch_targets=()
+  while IFS= read -r line; do
+    if [[ "$line" == "+++ b/"* ]]; then
+      local file=${line#+++ b/}
+      if [[ "$file" != "/dev/null" && -n "$file" ]]; then
+        patch_targets+=("$file")
+      fi
+    fi
+  done < "$tmp"
+
   if git apply --check "$tmp" 2>/dev/null; then
     git apply "$tmp" || true
+    if [[ "$OVERLAY_MODE" == "1" && ${#patch_targets[@]} -gt 0 ]]; then
+      printf '%s\n' "${patch_targets[@]}" >> "$PATCH_TRACK_FILE"
+    fi
     rm -f "$tmp"
     return 0
   fi
@@ -101,6 +121,10 @@ if os.path.exists(path):
     io.open(path, 'w', encoding='utf-8', newline='\n').write(new_src)
     print('[patches] Removed expandable_segments assert')
 PY
+fi
+
+if [[ "$OVERLAY_MODE" == "1" && -f "$PATCH_TRACK_FILE" ]]; then
+  sort -u "$PATCH_TRACK_FILE" -o "$PATCH_TRACK_FILE" 2>/dev/null || true
 fi
 
 if command -v git >/dev/null 2>&1; then

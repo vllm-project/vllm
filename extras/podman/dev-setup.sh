@@ -322,6 +322,11 @@ echo "✅ vLLM installed in editable mode."
 
 publish_python_overlays
 
+if [[ -f ./extras/patches/reset_patched_files.sh ]]; then
+	PATCH_TRACK_FILE=${PATCH_TRACK_FILE:-/opt/work/tmp/vllm_patched_files.txt} \
+		bash ./extras/patches/reset_patched_files.sh || true
+fi
+
 if command -v git >/dev/null 2>&1; then
 	if git status --porcelain --untracked-files=no | grep -q '.'; then
 		echo "[dev-setup] ERROR: repository left dirty after setup" >&2
