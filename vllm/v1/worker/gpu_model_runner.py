@@ -89,7 +89,6 @@ from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
-    AttentionMetadataBuilder,
     CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
     reorder_batch_to_split_decodes_and_prefills,
@@ -1015,7 +1014,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _get_encoder_seq_lens(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduled_encoder_inputs: dict[str, list[int]],
         kv_cache_spec: KVCacheSpec,
         num_reqs: int,
     ) -> Optional[np.ndarray]:
@@ -1025,7 +1024,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Build encoder_seq_lens array mapping request indices to
         # encoder lengths for inputs scheduled in this batch
         encoder_seq_lens = np.zeros(num_reqs, dtype=np.int32)
-        for req_id in scheduler_output.scheduled_encoder_inputs:
+        for req_id in scheduled_encoder_inputs:
             req_index = self.input_batch.req_id_to_index[req_id]
             encoder_seq_lens[req_index] = self.max_encoder_len
 
@@ -1035,24 +1034,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         num_scheduled_tokens: np.ndarray,
-        max_num_scheduled_tokens: int,
-        ubatch_slices: Optional[UBatchSlices],
-        padded_num_tokens: int,
         padded_num_reqs: Optional[int] = None,
-    ) -> tuple[
-        PerLayerAttnMetadata,
-        torch.Tensor,
-        Optional[SpecDecodeMetadata],
-        Optional[CommonAttentionMetadata],
-        bool,
-    ]:
+    ) -> tuple[torch.Tensor, Optional[SpecDecodeMetadata]]:
         """
-        :return: tuple[
-            attn_metadata: layer-to-attention_metadata mapping,
-            logits_indices, spec_decode_metadata,
-            spec_decode_common_attn_metadata,
-            use_cascade_attn
-        ]
+        Prepare inputs for model forward pass (tokens, positions, etc.)
+
+        :return: tuple[logits_indices, spec_decode_metadata]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -1172,8 +1159,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Fill unused with 0 for full cuda graph mode.
         self.seq_lens.np[num_reqs:].fill(0)
         self.seq_lens.copy_to_gpu()
-        max_seq_len = self.seq_lens.np[:num_reqs].max().item()
-
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
@@ -1243,24 +1228,87 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
             self.num_decode_draft_tokens.copy_to_gpu()
 
+        # Hot-Swap lora model
+        if self.lora_config:
+            self.set_active_loras(self.input_batch, num_scheduled_tokens)
+
+        return logits_indices, spec_decode_metadata
+
+    def _build_attention_metadata(
+        self,
+        total_num_scheduled_tokens: int,
+        max_num_scheduled_tokens: int,
+        ubatch_slices: Optional[UBatchSlices],
+        padded_num_tokens: int,
+        padded_num_reqs: int,
+        scheduled_encoder_inputs: dict[str, list[int]],
+        logits_indices: torch.Tensor,
+        spec_decode_metadata: Optional[SpecDecodeMetadata],
+        use_spec_decode: bool,
+        common_prefix_lens: list[int],
+    ) -> tuple[
+        PerLayerAttnMetadata,
+        Optional[SpecDecodeMetadata],
+        Optional[CommonAttentionMetadata],
+    ]:
+        """
+        Build attention metadata using pre-computed cascade attention prefix lengths.
+
+        Args:
+            total_num_scheduled_tokens: Total number of scheduled tokens
+            max_num_scheduled_tokens: Maximum number of scheduled tokens per request
+            ubatch_slices: Microbatch slices for DP coordination
+            padded_num_tokens: Padded number of tokens (includes all padding)
+            padded_num_reqs: Padded number of requests
+            scheduled_encoder_inputs: Encoder inputs scheduled in this batch
+            logits_indices: Indices of tokens to compute logits for
+            spec_decode_metadata: Speculative decoding metadata
+            use_spec_decode: Whether speculative decoding is enabled
+            common_prefix_lens: Pre-computed common prefix lengths per KV cache group
+
+        Returns:
+            tuple[attn_metadata, spec_decode_metadata, spec_decode_common_attn_metadata]
+        """
+        num_reqs = self.input_batch.num_reqs
+
+        # Use provided padding values (already determined from coordination
+        # and cudagraph dispatch)
+        if padded_num_reqs is None:
+            padded_num_reqs = num_reqs
+
+        max_seq_len = self.seq_lens.np[:num_reqs].max().item()
+
+        # Get logits_indices_padded for KV sharing fast prefill if enabled
         logits_indices_padded = None
         if self.cache_config.kv_sharing_fast_prefill:
             logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
                 logits_indices
             )
 
+        # Lift tensor slicing operations out of the loop
+        query_start_loc_gpu = self.query_start_loc.gpu[: padded_num_reqs + 1]
+        query_start_loc_cpu = self.query_start_loc.cpu[: padded_num_reqs + 1]
+        seq_lens_gpu = self.seq_lens.gpu[:padded_num_reqs]
+        seq_lens_cpu = self.seq_lens.cpu[:padded_num_reqs]
+        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+            :padded_num_reqs
+        ]
+
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
-        use_cascade_attn = False
 
         spec_decode_common_attn_metadata = None
+        num_accepted_tokens_gpu = None
+        num_decode_draft_tokens_cpu = None
         if use_spec_decode:
             self.num_accepted_tokens.np[:num_reqs] = (
                 self.input_batch.num_accepted_tokens_cpu[:num_reqs]
             )
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
+            num_accepted_tokens_gpu = self.num_accepted_tokens.gpu[:num_reqs]
+            num_decode_draft_tokens_cpu = self.num_decode_draft_tokens.cpu[:num_reqs]
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
@@ -1268,7 +1316,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.kv_cache_config.kv_cache_groups
         ):
             encoder_seq_lens = self._get_encoder_seq_lens(
-                scheduler_output, kv_cache_group_spec.kv_cache_spec, padded_num_reqs
+                scheduled_encoder_inputs,
+                kv_cache_group_spec.kv_cache_spec,
+                padded_num_reqs,
             )
 
             if isinstance(kv_cache_group_spec.kv_cache_spec, EncoderOnlyAttentionSpec):
@@ -1284,7 +1334,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     dtype=torch.int64,
                     device=self.device,
                 )
-                num_common_prefix_blocks = 0
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
                 blk_table_tensor = blk_table.get_device_tensor(padded_num_reqs)
@@ -1293,18 +1342,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode.
                 blk_table.slot_mapping.gpu[total_num_scheduled_tokens:].fill_(-1)
-                num_common_prefix_blocks = scheduler_output.num_common_prefix_blocks[
-                    kv_cache_group_id
-                ]
 
             common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=self.query_start_loc.gpu[: padded_num_reqs + 1],
-                query_start_loc_cpu=self.query_start_loc.cpu[: padded_num_reqs + 1],
-                seq_lens=self.seq_lens.gpu[:padded_num_reqs],
-                seq_lens_cpu=self.seq_lens.cpu[:padded_num_reqs],
-                num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[
-                    :padded_num_reqs
-                ],
+                query_start_loc=query_start_loc_gpu,
+                query_start_loc_cpu=query_start_loc_cpu,
+                seq_lens=seq_lens_gpu,
+                seq_lens_cpu=seq_lens_cpu,
+                num_computed_tokens_cpu=num_computed_tokens_cpu,
                 num_reqs=padded_num_reqs,
                 num_actual_tokens=padded_num_tokens,
                 max_query_len=max_num_scheduled_tokens,
@@ -1328,38 +1372,29 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_common_attn_metadata = common_attn_metadata
 
             for attn_group in self.attn_groups[kv_cache_group_id]:
-                # Prepare for cascade attention if enabled & beneficial.
-                common_prefix_len = 0
+                # Use pre-computed cascade attention prefix length
+                common_prefix_len = common_prefix_lens[kv_cache_group_id]
                 builder = attn_group.get_metadata_builder()
-                if self.cascade_attn_enabled:
-                    common_prefix_len = self._compute_cascade_attn_prefix_len(
-                        num_scheduled_tokens,
-                        num_common_prefix_blocks,
-                        attn_group.kv_cache_spec,
-                        builder,
-                    )
 
                 extra_attn_metadata_args = {}
                 if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
                     extra_attn_metadata_args = dict(
-                        num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs],
-                        num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[
-                            :num_reqs
-                        ],
+                        num_accepted_tokens=num_accepted_tokens_gpu,
+                        num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
                     )
 
                 if ubatch_slices is not None:
                     common_attn_metadata_list = split_attn_metadata(
                         ubatch_slices, common_attn_metadata
                     )
-                    for ubid, common_attn_metadata in enumerate(
+                    for ubid, common_attn_metadata_item in enumerate(
                         common_attn_metadata_list
                     ):
                         attn_metadata_i = attn_group.get_metadata_builder(
                             ubatch_id=ubid
                         ).build(
                             common_prefix_len=common_prefix_len,
-                            common_attn_metadata=common_attn_metadata,
+                            common_attn_metadata=common_attn_metadata_item,
                         )
                         for layer_name in kv_cache_group_spec.layer_names:
                             assert type(attn_metadata) is list
@@ -1371,49 +1406,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         common_attn_metadata=common_attn_metadata,
                         **extra_attn_metadata_args,
                     )
-                    use_cascade_attn |= getattr(attn_metadata_i, "use_cascade", False)
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
-        # disable cascade attention when DBO
-        if ubatch_slices is not None:
-            use_cascade_attn = False
-
-        # Hot-Swap lora model
-        if self.lora_config:
-            self.set_active_loras(self.input_batch, num_scheduled_tokens)
-
-        return (
-            attn_metadata,
-            logits_indices,
-            spec_decode_metadata,
-            spec_decode_common_attn_metadata,
-            use_cascade_attn,
-        )
+        return attn_metadata, spec_decode_metadata, spec_decode_common_attn_metadata
 
     def _compute_cascade_attn_prefix_len(
         self,
         num_scheduled_tokens: np.ndarray,
         num_common_prefix_blocks: int,
         kv_cache_spec: KVCacheSpec,
-        attn_metadata_builder: AttentionMetadataBuilder,
     ) -> int:
         """Compute the length of the common prefix for cascade attention.
 
         NOTE(woosuk): The common prefix length returned by this function
         represents the length used specifically for cascade attention, not the
-        actual number of tokens shared between requests. When cascade attention
-        is disabled (use_cascade=False), this function returns 0 even if
-        requests share common tokens. Additionally, the common prefix length is
-        truncated to a multiple of the block size and may be further truncated
-        due to implementation details explained below.
+        actual number of tokens shared between requests. Additionally, the
+        common prefix length is truncated to a multiple of the block size and
+        may be further truncated due to implementation details explained below.
 
         Args:
             num_scheduled_tokens: Number of tokens scheduled per request.
             num_common_prefix_blocks: Number of shared KV cache blocks.
+            kv_cache_spec: KV cache specification for this attention group.
 
         Returns:
-            int: Length of common prefix in tokens.
+            int: Length of common prefix in tokens (in blocks).
         """
         common_prefix_len = num_common_prefix_blocks * kv_cache_spec.block_size
         if common_prefix_len == 0:
@@ -1467,26 +1485,74 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         common_prefix_len = (
             common_prefix_len // kv_cache_spec.block_size * kv_cache_spec.block_size
         )
-        use_sliding_window = isinstance(kv_cache_spec, SlidingWindowSpec) or (
-            isinstance(kv_cache_spec, FullAttentionSpec)
-            and kv_cache_spec.sliding_window is not None
-        )
-        use_local_attention = isinstance(kv_cache_spec, ChunkedLocalAttentionSpec) or (
-            isinstance(kv_cache_spec, FullAttentionSpec)
-            and kv_cache_spec.attention_chunk_size is not None
-        )
-        assert isinstance(kv_cache_spec, AttentionSpec)
-        use_cascade = attn_metadata_builder.use_cascade_attention(
-            common_prefix_len=common_prefix_len,
-            query_lens=num_scheduled_tokens,
-            num_query_heads=self.num_query_heads,
-            num_kv_heads=kv_cache_spec.num_kv_heads,
-            use_alibi=self.use_alibi,
-            use_sliding_window=use_sliding_window,
-            use_local_attention=use_local_attention,
-            num_sms=self.num_sms,
-        )
-        return common_prefix_len if use_cascade else 0
+        return common_prefix_len
+
+    def _compute_cascade_attn_prefix_lens(
+        self,
+        num_scheduled_tokens_np: np.ndarray,
+        num_common_prefix_blocks: list[int],
+    ) -> tuple[list[int], bool]:
+        """
+        Compute cascade attention prefix lengths for all KV cache groups.
+
+        Args:
+            num_scheduled_tokens_np: Number of tokens scheduled per request.
+            num_common_prefix_blocks: Number of common prefix blocks per KV cache group.
+
+        Returns:
+            common_prefix_lens: list[int]
+                # per kv cache group common prefix lens in tokens
+            use_cascade_attn: bool
+                # whether to use cascade attention (i.e. at least one
+                # kv cache group has non-zero common prefix len)
+        """
+        use_cascade_attn = False
+        common_prefix_lens = [0] * len(self.kv_cache_config.kv_cache_groups)
+
+        for kv_cache_group_id, kv_cache_group_spec in enumerate(
+            self.kv_cache_config.kv_cache_groups
+        ):
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+            common_prefix_lens[kv_cache_group_id] = (
+                self._compute_cascade_attn_prefix_len(
+                    num_scheduled_tokens_np,
+                    num_common_prefix_blocks[kv_cache_group_id],
+                    kv_cache_spec,
+                )
+            )
+
+            use_sliding_window = isinstance(kv_cache_spec, SlidingWindowSpec) or (
+                isinstance(kv_cache_spec, FullAttentionSpec)
+                and kv_cache_spec.sliding_window is not None
+            )
+            use_local_attention = isinstance(
+                kv_cache_spec, ChunkedLocalAttentionSpec
+            ) or (
+                isinstance(kv_cache_spec, FullAttentionSpec)
+                and kv_cache_spec.attention_chunk_size is not None
+            )
+            assert isinstance(kv_cache_spec, AttentionSpec)
+
+            group_use_cascade_attn = False
+            for attn_group in self.attn_groups[kv_cache_group_id]:
+                builder = attn_group.get_metadata_builder()
+
+                group_use_cascade_attn |= builder.use_cascade_attention(
+                    common_prefix_len=common_prefix_lens[kv_cache_group_id],
+                    query_lens=num_scheduled_tokens_np,
+                    num_query_heads=self.num_query_heads,
+                    num_kv_heads=kv_cache_spec.num_kv_heads,
+                    use_alibi=self.use_alibi,
+                    use_sliding_window=use_sliding_window,
+                    use_local_attention=use_local_attention,
+                    num_sms=self.num_sms,
+                )
+
+            if not group_use_cascade_attn:
+                common_prefix_lens[kv_cache_group_id] = 0
+            use_cascade_attn |= group_use_cascade_attn
+
+        return common_prefix_lens, use_cascade_attn
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         mrope_pos_ptr = 0
@@ -2024,7 +2090,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=pooler_output,
         )
 
-    def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
+    def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         """
         Apply sequence parallelism padding only.
         CUDA graph padding is handled separately via _maybe_dispatch_cudagraph.
@@ -2377,10 +2443,27 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             max_num_scheduled_tokens = max(num_scheduled_tokens_np)
             total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
-            # Step 1: Pad for sequence parallelism (TP-related padding)
-            padded_num_tokens = self._get_num_input_tokens(total_num_scheduled_tokens)
+            # Compute cascade attention decision before cudagraph dispatch
+            common_prefix_lens = [0] * len(self.kv_cache_config.kv_cache_groups)
+            use_cascade_attn = False
+            if self.cascade_attn_enabled:
+                common_prefix_lens, use_cascade_attn = (
+                    self._compute_cascade_attn_prefix_lens(
+                        num_scheduled_tokens_np,
+                        scheduler_output.num_common_prefix_blocks,
+                    )
+                )
 
-            # Step 2: Coordinate across DP ranks (can add padding)
+            # Padding order:
+            # 1. Pad for sequence parallelism (TP-related padding)
+            # 2. Pad for DP (done by `coordinate_batch_across_dp`)
+            # 3. Maybe pad for cudagraphs
+            #    (pad to `cudagraph_batch_descriptor` if not None)
+
+            padded_num_tokens = self._pad_for_sequence_parallelism(
+                total_num_scheduled_tokens
+            )
+
             ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
                 num_scheduled_tokens_np,
                 total_num_scheduled_tokens,
@@ -2396,19 +2479,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if num_tokens_across_dp is not None:
                 padded_num_tokens = int(num_tokens_across_dp[0].item())
 
-            # Step 3: Dispatch CUDA graph (can add padding)
             cudagraph_runtime_mode, cudagraph_batch_descriptor = (
                 self._maybe_dispatch_cudagraph(
                     unpadded_num_tokens=total_num_scheduled_tokens,
                     padded_num_tokens=padded_num_tokens,
                     num_reqs=self.input_batch.num_reqs,
                     max_num_scheduled_tokens=max_num_scheduled_tokens,
+                    use_cascade_attn=use_cascade_attn,
                 )
             )
             padded_num_reqs = None
             if cudagraph_batch_descriptor is not None:
                 padded_num_tokens = cudagraph_batch_descriptor.num_tokens
                 padded_num_reqs = cudagraph_batch_descriptor.num_reqs
+
+            # Default padded_num_reqs to num_reqs if not set by cudagraph
+            if padded_num_reqs is None:
+                padded_num_reqs = self.input_batch.num_reqs
 
             try:
                 if not scheduler_output.total_num_scheduled_tokens:
@@ -2426,19 +2513,34 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     )
 
                 # Prepare the decoder inputs (all padding and coordination done above)
-                (
-                    attn_metadata,
-                    logits_indices,
-                    spec_decode_metadata,
-                    spec_decode_common_attn_metadata,
-                    use_cascade_attn,
-                ) = self._prepare_inputs(
+                logits_indices, spec_decode_metadata = self._prepare_inputs(
                     scheduler_output,
                     num_scheduled_tokens_np,
+                    padded_num_reqs,
+                )
+
+                use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+
+                # Disable cascade attention when DBO (microbatching)
+                if ubatch_slices is not None:
+                    common_prefix_lens = [0] * len(self.kv_cache_config.kv_cache_groups)
+
+                # Build attention metadata using pre-computed cascade attention decision
+                (
+                    attn_metadata,
+                    spec_decode_metadata,
+                    spec_decode_common_attn_metadata,
+                ) = self._build_attention_metadata(
+                    total_num_scheduled_tokens,
                     max_num_scheduled_tokens,
                     ubatch_slices,
                     padded_num_tokens,
                     padded_num_reqs,
+                    scheduler_output.scheduled_encoder_inputs,
+                    logits_indices,
+                    spec_decode_metadata,
+                    use_spec_decode,
+                    common_prefix_lens,
                 )
 
             finally:
@@ -2452,7 +2554,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             elif num_tokens_across_dp is not None:
                 num_input_tokens = int(num_tokens_across_dp[0].item())
             else:
-                num_input_tokens = self._get_num_input_tokens(
+                num_input_tokens = self._pad_for_sequence_parallelism(
                     scheduler_output.total_num_scheduled_tokens
                 )
 
@@ -3187,6 +3289,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         padded_num_tokens: int,
         num_reqs: int,
         max_num_scheduled_tokens: int,
+        use_cascade_attn: bool = False,
         # allow overriding for uniform decode for piecewise cudagraph capture
         uniform_decode: Optional[bool] = None,
     ) -> tuple[CUDAGraphMode, Optional[BatchDescriptor]]:
@@ -3203,7 +3306,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ),
         )
 
-        return self.cudagraph_dispatcher.dispatch(batch_descriptor)
+        return self.cudagraph_dispatcher.dispatch(
+            batch_descriptor, use_cascade_attn=use_cascade_attn
+        )
 
     @torch.inference_mode()
     def _dummy_run(
@@ -3287,7 +3392,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         max_num_scheduled_tokens = int(num_scheduled_tokens.max())
 
         # Step 1: Pad for sequence parallelism (TP-related padding)
-        padded_num_tokens = self._get_num_input_tokens(total_num_scheduled_tokens)
+        padded_num_tokens = self._pad_for_sequence_parallelism(
+            total_num_scheduled_tokens
+        )
 
         # Step 2: Coordinate microbatching across DP ranks (can add padding)
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(

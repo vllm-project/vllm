@@ -19,6 +19,12 @@ class CUDAGraphKey(NamedTuple):
             batch_descriptor.num_tokens, batch_descriptor.uniform_decode
         )
 
+    def non_uniform(self) -> "CUDAGraphKey":
+        """
+        Return a non-uniform version of current CUDAGraphKey.
+        """
+        return CUDAGraphKey(self.num_tokens, uniform_decode=False)
+
 
 class CudagraphDispatcher:
     """
@@ -171,19 +177,32 @@ class CudagraphDispatcher:
             return CUDAGraphMode.NONE, None
 
         key = CUDAGraphKey.from_batch_descriptor(batch_descriptor)
-        cudagraph_mode = CUDAGraphMode.NONE
-        cudagraph_batch_desc = None
 
-        if key in self.cudagraph_keys[CUDAGraphMode.FULL]:
-            cudagraph_batch_desc = self.cudagraph_keys[CUDAGraphMode.FULL][key]
-            cudagraph_mode = CUDAGraphMode.FULL
-        elif key in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
-            cudagraph_batch_desc = self.cudagraph_keys[CUDAGraphMode.PIECEWISE][key]
-            cudagraph_mode = CUDAGraphMode.PIECEWISE
+        def check_batch_desc(mode: CUDAGraphMode, key: CUDAGraphKey):
+            if key in self.cudagraph_keys[mode]:
+                cg_batch_desc = self.cudagraph_keys[mode][key]
+                assert self._is_compatible(batch_descriptor, cg_batch_desc), (
+                    f"Batch descriptor {batch_descriptor} is not compatible with "
+                    f"cudagraph batch descriptor: {cg_batch_desc} (key {key})"
+                )
+                return cg_batch_desc
+            return None
 
-        if cudagraph_batch_desc is not None:
-            assert self._is_compatible(batch_descriptor, cudagraph_batch_desc), (
-                f"Batch descriptor {batch_descriptor} is not compatible with "
-                f"cudagraph batch descriptor: {cudagraph_batch_desc} (key {key})"
-            )
-        return cudagraph_mode, cudagraph_batch_desc
+        if not use_cascade_attn:
+            # check if key exists for full cudagraph
+            if cg_batch_desc := check_batch_desc(CUDAGraphMode.FULL, key):
+                return CUDAGraphMode.FULL, cg_batch_desc
+
+            # otherwise, check if non-uniform key exists
+            if cg_batch_desc := check_batch_desc(CUDAGraphMode.FULL, key.non_uniform()):
+                return CUDAGraphMode.FULL, cg_batch_desc
+
+        # also check if non-uniform key exists for more "general"
+        # piecewise cudagraph
+        if cg_batch_desc := check_batch_desc(
+            CUDAGraphMode.PIECEWISE, key.non_uniform()
+        ):
+            return CUDAGraphMode.PIECEWISE, cg_batch_desc
+
+        # finally, just return no cudagraphs
+        return CUDAGraphMode.NONE, None

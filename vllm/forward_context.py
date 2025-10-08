@@ -45,15 +45,6 @@ class BatchDescriptor(NamedTuple):
     we don't need to know the number of requests.
     """
 
-    @property
-    def non_uniform(self) -> "BatchDescriptor":
-        """
-        Return a non-uniform version of current batch descriptor.
-        """
-        return BatchDescriptor(
-            self.num_tokens, uniform_decode=False, num_reqs=self.num_reqs
-        )
-
 
 def _compute_sp_num_tokens(
     num_tokens_across_dp_cpu: torch.Tensor, sequence_parallel_size: int
