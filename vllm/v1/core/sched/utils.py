@@ -58,6 +58,11 @@ def check_stop(
 
     sampling_params = request.sampling_params
     assert sampling_params is not None
+
+    min_tokens = sampling_params.min_tokens
+    if request.num_output_tokens < min_tokens:
+        return False
+
     last_token_id = request.output_token_ids[-1]
     if not sampling_params.ignore_eos and last_token_id == request.eos_token_id:
         request.status = RequestStatus.FINISHED_STOPPED
