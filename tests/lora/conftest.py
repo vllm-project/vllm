@@ -229,39 +229,9 @@ def qwen25vl_lora_files():
 def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
-
-@pytest.fixture(scope="session")
-def phi2_lora_files():
-    return snapshot_download(repo_id="isotr0py/phi-2-test-sql-lora")
-
-
 @pytest.fixture(scope="session")
 def deepseekv2_lora_files():
     return snapshot_download(repo_id="wuchen01/DeepSeek-V2-Lite-Chat-All-LoRA")
-
-
-@pytest.fixture
-def llama_2_7b_engine_extra_embeddings():
-    cleanup_dist_env_and_memory(shutdown_ray=True)
-    get_model_old = get_model
-
-    def get_model_patched(**kwargs):
-        kwargs["vllm_config"].lora_config = LoRAConfig(max_loras=4, max_lora_rank=8)
-        return get_model_old(**kwargs)
-
-    with patch("vllm.worker.model_runner.get_model", get_model_patched):
-        engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)
-    yield engine.llm_engine
-    del engine
-    cleanup_dist_env_and_memory(shutdown_ray=True)
-
-
-@pytest.fixture
-def llama_2_7b_model_extra_embeddings(llama_2_7b_engine_extra_embeddings):
-    yield (
-        llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.model_runner.model
-    )
-
 
 @pytest.fixture
 def reset_default_device():
