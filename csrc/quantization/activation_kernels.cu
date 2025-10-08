@@ -393,7 +393,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   const __int128_t* input_128_ptr =
       reinterpret_cast<const __int128_t*>(_input) + gate_warp_offset +
-      ((lane_id < 16) ? 0 : (H / 8));
+      ((lane_id < 16) ? 0 : ((H * stride_i_h) / 8));
   __int128_t* load_ptr = const_cast<__int128_t*>(input_128_ptr + base_i);
 
   auto token_offset = token_id - expert_offset;
@@ -431,13 +431,13 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
           next_expert_offset = s_expert_offsets[expert_id + 1];
         } while (next_expert_offset == expert_offset);
 
-        base_i = expert_id * (T * (H / 4));
+        base_i = expert_id * (stride_i_e / 8);
         token_offset = 0;
         load_ptr = const_cast<__int128_t*>(input_128_ptr + base_i);
       } else {
         // We remain within the same expert, so just
         // move by H/4 __int128_t (2 * H/8).
-        base_i += H / 4;
+        base_i += stride_yq_t / 4;
         token_offset++;
       }
 
@@ -472,8 +472,9 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const Idx_t base_ys = expert_id * stride_ys_e;
     auto y_s_ptr = y_scale_base_ptr + base_ys + token_offset * stride_ys_t;
     __nv_fp8x4_e4m3* y_q_ptr =
-        y_q_base_ptr +
-        ((expert_id * (T * H) + token_offset * H) + warp_position_yq) / 4;
+        y_q_base_ptr + (expert_id * stride_yq_e + token_offset * stride_yq_t +
+                        warp_position_yq * stride_yq_h) /
+                           4;
     const int COMPUTE_LIMIT = H / (GROUP_SIZE * NUM_WARPS);
 
     for (int i = 0; i < COMPUTE_LIMIT; i++) {
@@ -523,7 +524,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       }
 
       *y_q_ptr = __nv_fp8x4_e4m3(res[0], res[1]);
-      y_q_ptr += WARP_SIZE;
+      y_q_ptr += WARP_SIZE * stride_yq_h;
 
       if (!lane_id) {
         *y_s_ptr = y_s;
