@@ -727,6 +727,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "int quant_block_size, str kv_cache_dtype) -> ()");
   cache_ops.impl("indexer_k_quant_and_cache", torch::kCUDA,
                  &indexer_k_quant_and_cache);
+
+  cache_ops.def(
+      "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, Tensor! "
+      "dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
+  cache_ops.impl("cp_gather_indexer_k_quant_cache", torch::kCUDA,
+                 &cp_gather_indexer_k_quant_cache);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
