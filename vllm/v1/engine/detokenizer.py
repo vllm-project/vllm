@@ -230,7 +230,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         except (OverflowError, TypeError):
             # Handle rare observed overflow, still to be diagnosed.
             # See https://github.com/vllm-project/vllm/issues/21951.
-            logger.exception("Encountered invalid token id: %d", next_token_id)
+            logger.exception("Encountered invalid token id: %r", next_token_id)
             token = None
         except Exception as e:
             if not str(e).startswith(INVALID_PREFIX_ERR_MSG):
