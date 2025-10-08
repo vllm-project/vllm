@@ -4,10 +4,11 @@
 import hashlib
 import uuid
 from dataclasses import field
-from typing import Any, Literal, Optional, Self, get_args
+from typing import Any, Literal, Optional, get_args
 
 from pydantic import field_validator, model_validator
 from pydantic.dataclasses import dataclass
+from typing_extensions import Self
 
 from vllm.config.utils import config
 

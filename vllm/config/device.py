@@ -3,11 +3,12 @@
 
 import hashlib
 from dataclasses import field
-from typing import Any, Literal, Optional, Self, Union
+from typing import Any, Literal, Optional, Union
 
 import torch
 from pydantic import ConfigDict, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
+from typing_extensions import Self
 
 from vllm.config.utils import config
 
