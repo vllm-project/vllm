@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import os
 from typing import TYPE_CHECKING, Optional
 
@@ -35,8 +36,10 @@ class XPUPlatform(Platform):
     device_control_env_var: str = "ZE_AFFINITY_MASK"
 
     @classmethod
-    def import_core_kernels(cls) -> None:
-        pass
+    def import_kernels(cls) -> None:
+        # Do not import vllm._C
+        with contextlib.suppress(ImportError):
+            import vllm._moe_C  # noqa: F401
 
     @classmethod
     def get_attn_backend_cls(
