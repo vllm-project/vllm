@@ -40,7 +40,7 @@ NUM_BITS = os.getenv("RTN_NUM_BITS", "8")
 """By default, use group size of 128 parameters, but it can be 
 overridden by setting the RTN_GROUP_SIZE envvar
 """
-GROUP_SIZE = os.getenv('RTN_GROUP_SIZE', "128")
+GROUP_SIZE = os.getenv("RTN_GROUP_SIZE", "128")
 """Global Marlin workspace shared by all modules
 """
 workspace = None
@@ -63,8 +63,9 @@ class RTNConfig(QuantizationConfig):
                 f"supported for RTN, but got {self.weight_bits} bits."
             )
 
-        self.quant_type = (scalar_types.uint8b128
-                           if self.weight_bits == 8 else scalar_types.uint4b8)
+        self.quant_type = (
+            scalar_types.uint8b128 if self.weight_bits == 8 else scalar_types.uint4b8
+        )
 
     def __repr__(self) -> str:
         return (
@@ -227,8 +228,7 @@ class RTNLinearMethod(LinearMethodBase):
         layer.output_size_per_partition = output_size_per_partition
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """ Repack weights and scales for Marlin kernels.
-        """
+        """ Repack weights and scales for Marlin kernels."""
         weight_bits = self.quant_config.weight_bits
 
         weight, scale = repack_weights(layer.weight, layer.scale, weight_bits)
@@ -238,10 +238,12 @@ class RTNLinearMethod(LinearMethodBase):
 
         init_workspace(layer.weight.device)
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         return apply_rtn_marlin_linear(
             input=x,
             weight=layer.weight,
@@ -250,7 +252,8 @@ class RTNLinearMethod(LinearMethodBase):
             quant_type=self.quant_config.quant_type,
             output_size_per_partition=layer.output_size_per_partition,
             input_size_per_partition=layer.input_size_per_partition,
-            bias=bias)
+            bias=bias,
+        )
 
 
 class RTNMoEMethod(FusedMoEMethodBase):
@@ -327,24 +330,26 @@ class RTNMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """ Repack weights and scales for Marlin kernels.
-        """
+        """ Repack weights and scales for Marlin kernels."""
         weight_bits = self.quant_config.weight_bits
 
-        w13_weight, w13_scale = repack_weights(layer.w13_weight,
-                                               layer.w13_scale, weight_bits)
+        w13_weight, w13_scale = repack_weights(
+            layer.w13_weight, layer.w13_scale, weight_bits
+        )
         replace_parameter(layer, "w13_weight", w13_weight)
         replace_parameter(layer, "w13_scale", w13_scale)
 
-        w2_weight, w2_scale = repack_weights(layer.w2_weight, layer.w2_scale,
-                                             weight_bits)
+        w2_weight, w2_scale = repack_weights(
+            layer.w2_weight, layer.w2_scale, weight_bits
+        )
         replace_parameter(layer, "w2_weight", w2_weight)
         replace_parameter(layer, "w2_scale", w2_scale)
 
         init_workspace(layer.w13_weight.device)
 
     def get_fused_moe_quant_config(
-            self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
+        self, layer: torch.nn.Module
+    ) -> Optional[FusedMoEQuantConfig]:
         return None
 
     def apply(
@@ -405,7 +410,8 @@ class RTNMoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            workspace=workspace)
+            workspace=workspace,
+        )
 
 
 def rtn_quantize(
@@ -521,8 +527,10 @@ def _get_perms():
         col = i // 4
         for block in [0, 1]:
             for row in [
-                    2 * (i % 4), 2 * (i % 4) + 1, 2 * (i % 4 + 4),
-                    2 * (i % 4 + 4) + 1
+                2 * (i % 4),
+                2 * (i % 4) + 1,
+                2 * (i % 4 + 4),
+                2 * (i % 4 + 4) + 1
             ]:
                 perm1.append(16 * row + col + 8 * block)
         for j in range(4):
@@ -537,8 +545,7 @@ def _get_perms():
         scale_perm.extend([i + 8 * j for j in range(8)])
     scale_perm_single = []
     for i in range(4):
-        scale_perm_single.extend(
-            [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
+        scale_perm_single.extend([2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
     return perm_tensor, scale_perm, scale_perm_single
 
 
@@ -567,19 +574,17 @@ def pack_for_marlin(weight, scale, qbits):
         w = w.reshape((batch, k, n)).contiguous()
         s = s.reshape((batch, -1, len(_scale_perm)))[:, :, _scale_perm]
     else:
-        s = s.reshape((batch, -1, len(_scale_perm_single)))[:, :,
-                                                            _scale_perm_single]
+        s = s.reshape((batch, -1, len(_scale_perm_single)))[:, :, _scale_perm_single]
     s = s.reshape((batch, -1, n)).contiguous()
     w = w.reshape((batch, k // tile, tile, n // tile, tile))
     w = w.permute((0, 1, 3, 2, 4))
     w = w.reshape((batch, k // tile, n * tile))
     res = w
-    res = res.reshape((batch, -1, _perm.numel()))[:, :,
-                                                  _perm].reshape(res.shape)
+    res = res.reshape((batch, -1, _perm.numel()))[:, :, _perm].reshape(res.shape)
     if qbits == 4:
-        q = torch.zeros((batch, res.shape[1], res.shape[2] // 2),
-                        dtype=torch.int8,
-                        device=w.device)
+        q = torch.zeros(
+            (batch, res.shape[1], res.shape[2] // 2), dtype=torch.int8, device=w.device
+        )
         for i in range(2):
             q |= res[:, :, i::2] << 4 * i
         q = q.reshape(batch, -1, n).contiguous()
@@ -595,11 +600,13 @@ def pack_for_marlin(weight, scale, qbits):
 
 
 def repack_8bit_into_32bit(input):
-    output = torch.zeros((input.shape[0], input.shape[1], input.shape[2] // 4),
-                         dtype=torch.int32,
-                         device=input.device)
+    output = torch.zeros(
+        (input.shape[0], input.shape[1], input.shape[2] // 4),
+        dtype=torch.int32,
+        device=input.device,
+    )
     for i in range(4):
-        output |= (input[:, :, i::4] & 0xff).to(torch.int32) << 8 * i
+        output |= (input[:, :, i::4] & 0xFF).to(torch.int32) << 8 * i
 
     return output
 
@@ -616,23 +623,22 @@ def repack_weights(qweight, scale, weight_bits):
         qweight_unpacked = torch.empty(
             (qweight.shape[0], qweight.shape[1] * 2, qweight.shape[2]),
             dtype=torch.uint8,
-            device=qweight.device)
+            device=qweight.device,
+        )
         for i in range(2):
-            qweight_unpacked[:, :, i::2] = \
-                ((qweight << 4 * (1 - i)) >> 4).reshape(
-                    qweight.shape[0],
-                    qweight.shape[1] * 2,
-                    qweight.shape[2] // 2)
+            qweight_unpacked[:, :, i::2] = ((qweight << 4 * (1 - i)) >> 4).reshape(
+                    qweight.shape[0], qweight.shape[1] * 2, qweight.shape[2] // 2
+            )
     else:
         qweight_unpacked = qweight
 
-    qweight_packed, scale_packed = pack_for_marlin(qweight_unpacked, scale,
-                                                   weight_bits)
+    qweight_packed, scale_packed = pack_for_marlin(qweight_unpacked, scale, weight_bits)
     """Marlin kernels expect tensors in int32 format in a certain shape
     """
     qweight_repacked = repack_8bit_into_32bit(qweight_packed.to(torch.uint8))
-    qweight_reshaped = qweight_repacked.reshape(qweight.shape[0],
-                                                qweight.shape[2] // 16, -1)
+    qweight_reshaped = qweight_repacked.reshape(
+        qweight.shape[0], qweight.shape[2] // 16, -1
+    )
     if not batch_present:
         qweight_reshaped = qweight_reshaped.squeeze(0)
         scale_packed = scale_packed.squeeze(0)
