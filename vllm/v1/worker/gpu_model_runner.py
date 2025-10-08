@@ -19,8 +19,8 @@ from typing_extensions import TypeAlias
 
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
-from vllm.attention.layer import MLAAttention
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.layer import MLAAttention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
@@ -4407,8 +4407,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         for layer_name, attn_module in attn_layers.items():
-            if isinstance(attn_module, Attention) or isinstance(attn_module, MLAAttention):
-                if (kv_tgt_layer := attn_module.kv_sharing_target_layer_name) is not None:
+            if isinstance(attn_module, Attention):
+                if (
+                    kv_tgt_layer := attn_module.kv_sharing_target_layer_name
+                ) is not None:
                     # The layer doesn't need its own KV cache and will use that of
                     # the target layer. We skip creating a KVCacheSpec for it, so
                     # that KV cache management logic will act as this layer does
@@ -4431,15 +4433,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             dtype=self.kv_cache_dtype,
                             sliding_window=attn_module.sliding_window,
                         )
-                    elif use_mla:
-                        kv_cache_spec[layer_name] = MLAAttentionSpec(
-                            block_size=block_size,
-                            num_kv_heads=attn_module.num_kv_heads,
-                            head_size=attn_module.head_size,
-                            dtype=self.kv_cache_dtype,
-                            cache_dtype_str=cache_dtype_str,
-                        )
-                    elif self.attention_chunk_size is not None and isinstance(attn_module, ChunkedLocalAttention):
+                    elif self.attention_chunk_size is not None and isinstance(
+                        attn_module, ChunkedLocalAttention
+                    ):
                         kv_cache_spec[layer_name] = ChunkedLocalAttentionSpec(
                             block_size=block_size,
                             num_kv_heads=attn_module.num_kv_heads,
@@ -4461,38 +4457,48 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                     )
-                elif attn_module.attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_ONLY):
+                elif attn_module.attn_type in (
+                    AttentionType.ENCODER,
+                    AttentionType.ENCODER_ONLY,
+                ):
                     # encoder-only attention does not need KV cache.
                     continue
                 else:
                     raise ValueError(f"Unknown attention type: {attn_module.attn_type}")
 
-        mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
-        if len(mamba_layers) > 0:
-            if (
-                self.vllm_config.speculative_config is not None
-                and self.vllm_config.model_config.hf_config.model_type
-                not in ["qwen3_next"]
-            ):
-                raise NotImplementedError(
-                    "Mamba with speculative decoding is not supported yet."
+            elif isinstance(attn_module, MLAAttention):
+                kv_cache_spec[layer_name] = MLAAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=attn_module.head_size,
+                    dtype=self.kv_cache_dtype,
+                    cache_dtype_str=cache_dtype_str,
                 )
-            mamba_block_size = self.vllm_config.cache_config.mamba_block_size
-            page_size_padded = self.vllm_config.cache_config.mamba_page_size_padded
 
-            for layer_name, mamba_module in mamba_layers.items():
+            elif isinstance(attn_module, MambaBase):
+                if (
+                    self.vllm_config.speculative_config is not None
+                    and self.vllm_config.model_config.hf_config.model_type
+                    not in ["qwen3_next"]
+                ):
+                    raise NotImplementedError(
+                        "Mamba with speculative decoding is not supported yet."
+                    )
+                mamba_block_size = self.vllm_config.cache_config.mamba_block_size
+                page_size_padded = self.vllm_config.cache_config.mamba_page_size_padded
                 kv_cache_spec[layer_name] = MambaSpec(
-                    shapes=mamba_module.get_state_shape(),
-                    dtypes=mamba_module.get_state_dtype(),
+                    shapes=attn_module.get_state_shape(),
+                    dtypes=attn_module.get_state_dtype(),
                     block_size=mamba_block_size,
                     page_size_padded=page_size_padded,
-                    mamba_type=mamba_module.mamba_type,
+                    mamba_type=attn_module.mamba_type,
                     num_speculative_blocks=(
                         self.speculative_config.num_speculative_tokens
                         if self.speculative_config
                         else 0
                     ),
                 )
+
         ds_indexer_layers = get_layers_from_vllm_config(
             self.vllm_config, DeepseekV32IndexerCache
         )

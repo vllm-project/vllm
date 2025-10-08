@@ -19,6 +19,7 @@ import torch_xla.runtime as xr
 import vllm.envs as envs
 from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import MLAAttention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import (
@@ -33,7 +34,6 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.attention.layer import MLAAttention
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.tpu import TPUModelLoader
 from vllm.model_executor.models.interfaces import (
@@ -65,6 +65,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    MLAAttentionSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.outputs import (
@@ -566,13 +567,14 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         block_size = self.vllm_config.cache_config.block_size
         cache_dtype_str = self.vllm_config.cache_config.cache_dtype
-        
+
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         for layer_name, attn_module in layers.items():
             # Classic Attention path
             if isinstance(attn_module, Attention):
-                kv_tgt_layer = getattr(attn_module, "kv_sharing_target_layer_name", None)
-                if kv_tgt_layer is not None:
+                if (
+                    kv_tgt_layer := attn_module.kv_sharing_target_layer_name
+                ) is not None:
                     # The layer doesn't need its own KV cache and will use that of
                     # the target layer. We skip creating a KVCacheSpec for it, so
                     # that KV cache management logic will act as this layer does
@@ -604,7 +606,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             head_size=attn_module.head_size,
                             dtype=self.kv_cache_dtype,
                         )
-                elif attn_module.attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_ONLY):
+                elif attn_module.attn_type in (
+                    AttentionType.ENCODER,
+                    AttentionType.ENCODER_ONLY,
+                ):
                     # encoder-only attention does not need KV cache.
                     continue
                 elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
@@ -622,7 +627,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     dtype=self.kv_cache_dtype,
                     cache_dtype_str=cache_dtype_str,
                 )
-            # Skip non-attention subclasses (e.g., Mamba)
             else:
                 continue
 
