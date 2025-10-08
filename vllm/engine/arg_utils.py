@@ -389,9 +389,9 @@ class EngineArgs:
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
-    swap_space: float = CacheConfig.swap_space
-    cpu_offload_gb: float = CacheConfig.cpu_offload_gb
-    gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
+    swap_space: float = CacheConfig.swap_space.default
+    cpu_offload_gb: float = CacheConfig.cpu_offload_gb.default
+    gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization.default
     kv_cache_memory_bytes: Optional[int] = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: Optional[int] = SchedulerConfig.max_num_batched_tokens
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
