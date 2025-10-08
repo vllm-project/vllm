@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_dp_group
+from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.worker.ubatch_utils import (
@@ -74,11 +74,27 @@ def _post_process_ubatch(tensor: torch.Tensor) -> bool:
     return should_ubatch
 
 
+def _post_process_dp_padding(tensor: torch.Tensor, should_dp_pad: bool) -> torch.Tensor:
+    num_tokens_across_dp = tensor[1, :]
+    # DP padding is always enabled when running microbatched
+    if should_dp_pad:
+        # If DP padding is enabled, ensure that each rank is processing the same number
+        # of tokens
+        max_num_tokens = int(num_tokens_across_dp.max().item())
+        return torch.tensor(
+            [max_num_tokens] * len(num_tokens_across_dp),
+            device="cpu",
+            dtype=torch.int32,
+        )
+    else:
+        return num_tokens_across_dp
+
+
 def _synchronize_dp_ranks(
     num_tokens_unpadded: int,
     num_tokens_padded: int,
     should_attempt_ubatching: bool,
-    allow_dp_padding: bool,
+    should_attempt_dp_padding: bool,
     parallel_config: ParallelConfig,
 ) -> tuple[bool, Optional[torch.Tensor]]:
     """
@@ -103,31 +119,34 @@ def _synchronize_dp_ranks(
     # will run and if we are using ubatching or not.
     tensor = _run_ar(
         should_ubatch=should_attempt_ubatching,
-        should_dp_pad=allow_dp_padding,
+        should_dp_pad=should_attempt_dp_padding,
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
         padded_num_tokens_per_ubatch=num_tokens_padded,
         parallel_config=parallel_config,
     )
 
-    num_tokens_across_dp = tensor[1, :]
     should_dp_pad = bool(torch.all(tensor[3] == 1).item())
 
-    # DP ranks should all have the same value for allow_dp_padding
-    assert allow_dp_padding == should_dp_pad
-
-    if should_dp_pad:
-        # If DP padding is enabled, ensure that each rank is processing the same number
-        # of tokens
-        max_num_tokens = int(num_tokens_across_dp.max().item())
-        num_tokens_after_padding = torch.tensor(
-            [max_num_tokens] * len(num_tokens_across_dp),
-            device="cpu",
-            dtype=torch.int32,
-        )
-    else:
-        num_tokens_after_padding = num_tokens_across_dp
+    # DP ranks should all have the same value for allow_dp_padding.
+    # This constraint can be easily relaxed but is usually indicative
+    # of a bug elsewhere
+    assert should_attempt_dp_padding == should_dp_pad
 
     should_ubatch = _post_process_ubatch(tensor)
+
+    if should_ubatch and not should_dp_pad:
+        if is_global_first_rank():
+            logger.debug(
+                "Microbatching has been triggered and requires DP padding. "
+                "Enabling DP padding even though it has been explicitly "
+                "disabled."
+            )
+        should_dp_pad = True
+
+    num_tokens_after_padding = _post_process_dp_padding(
+        tensor,
+        should_dp_pad,
+    )
 
     return should_ubatch, num_tokens_after_padding
 
