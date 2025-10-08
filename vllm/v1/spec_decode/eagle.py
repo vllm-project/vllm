@@ -892,9 +892,18 @@ class EagleProposer:
         from vllm.compilation.backends import set_model_tag
 
         with set_model_tag("eagle_head"):
+            if self.vllm_config.quant_config is not None:
+                target_model_quant_config = self.vllm_config.quant_config
+                self.vllm_config.quant_config = None
+                logger.warning(
+                    "Quantization is not supported for draft model, "
+                    "disabling quantization for draft model"
+                )
             self.model = get_model(
                 vllm_config=self.vllm_config, model_config=draft_model_config
             )
+            # restore the quant config
+            self.vllm_config.quant_config = target_model_quant_config
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys()
