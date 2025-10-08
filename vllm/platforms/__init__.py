@@ -37,7 +37,7 @@ def tpu_platform_plugin() -> Optional[str]:
     # Check for Pathways TPU proxy
     if envs.VLLM_TPU_USING_PATHWAYS:
         logger.debug("Confirmed TPU platform is available via Pathways proxy.")
-        return "tpu_commons.platforms.tpu_jax.TpuPlatform"
+        return "tpu_inference.platforms.tpu_jax.TpuPlatform"
 
     # Check for libtpu installation
     try:
@@ -257,6 +257,16 @@ def __getattr__(name: str):
         return _current_platform
     elif name in globals():
         return globals()[name]
+    else:
+        raise AttributeError(f"No attribute named '{name}' exists in {__name__}.")
+
+
+def __setattr__(name: str, value):
+    if name == "current_platform":
+        global _current_platform
+        _current_platform = value
+    elif name in globals():
+        globals()[name] = value
     else:
         raise AttributeError(f"No attribute named '{name}' exists in {__name__}.")
 
