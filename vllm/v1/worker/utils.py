@@ -294,10 +294,7 @@ def bind_kv_cache(
 
     for layer_index in sorted(index2name.keys()):
         layer_names = index2name[layer_index]
-        non_draft_layers = [
-            name for name in layer_names if not name.startswith("draft_model.")
-        ]
-        if len(non_draft_layers) > 1:
+        if len(layer_names) > 1:
             # One typical case is encoder-decoder model, e.g., bart.
             # The cross attention and self attention in the same decoder layer
             # has different layer_name but the same layer_index.
@@ -312,7 +309,6 @@ def bind_kv_cache(
                 pass
             else:
                 raise NotImplementedError
-
         for layer_name in layer_names:
             runner_kv_caches.append(kv_caches[layer_name])
 

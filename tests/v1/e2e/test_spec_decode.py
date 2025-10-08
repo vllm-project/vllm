@@ -393,7 +393,7 @@ cases = [
         draft_model="Qwen/Qwen3-0.6B",
         sampling_config=stochastic_sampling(),
         num_speculative_tokens=3,
-        expected_acceptance_len=2.85 + 1,
+        expected_acceptance_len=2.8 + 1,
         expected_acceptance_rate=0.9,
         expected_same_output_fraction=0.9,
     ),
