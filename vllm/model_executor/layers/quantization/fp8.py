@@ -51,7 +51,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
-    check_aiter_fp8_linear_support,
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
@@ -60,6 +59,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_block_strategy,
     process_fp8_weight_tensor_strategy,
     requant_weight_ue8m0_inplace,
+    use_aiter_fp8_linear,
     validate_fp8_block_shape,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
@@ -353,7 +353,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if current_platform.is_rocm():
             self.use_marlin = False
 
-        self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
+        self.use_aiter_and_is_supported = use_aiter_fp8_linear()
 
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None
