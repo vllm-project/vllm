@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 from typing import TYPE_CHECKING, Optional, Union, cast
 
 import torch
@@ -45,8 +46,10 @@ class TpuPlatform(Platform):
     additional_env_vars: list[str] = ["TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"]
 
     @classmethod
-    def import_core_kernels(cls) -> None:
-        pass
+    def import_kernels(cls) -> None:
+        # Do not import vllm._C
+        with contextlib.suppress(ImportError):
+            import vllm._moe_C  # noqa: F401
 
     @classmethod
     def get_attn_backend_cls(
