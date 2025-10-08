@@ -5,7 +5,7 @@ import hashlib
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional, Union
 
 import torch
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -24,6 +24,8 @@ else:
 logger = init_logger(__name__)
 
 LoRADType = Literal["auto", "float16", "bfloat16"]
+MaxLoRARanks = Literal[8, 16, 32, 64, 128, 256, 320, 512]
+LoRAExtraVocabSize = Literal[256, 512]
 
 
 @config
@@ -31,7 +33,7 @@ LoRADType = Literal["auto", "float16", "bfloat16"]
 class LoRAConfig:
     """Configuration for LoRA."""
 
-    max_lora_rank: int = 16
+    max_lora_rank: MaxLoRARanks = 16
     """Max LoRA rank."""
     max_loras: int = Field(default=1, ge=1)
     """Max number of LoRAs in a single batch."""
@@ -45,7 +47,7 @@ class LoRAConfig:
     `max_loras`."""
     lora_dtype: Union[torch.dtype, LoRADType] = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
-    lora_extra_vocab_size: int = Field(
+    lora_extra_vocab_size: LoRAExtraVocabSize = Field(
         default=256,
         deprecated=(
             "`lora_extra_vocab_size` is deprecated and will be removed "
@@ -97,31 +99,6 @@ class LoRAConfig:
         factors.append(self.bias_enabled)
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
-
-    @field_validator("max_lora_rank", mode="after")
-    @classmethod
-    def _validate_max_lora_rank(cls, max_lora_rank: int) -> int:
-        # Setting the maximum rank to 512 should be able to satisfy the vast
-        # majority of applications.
-        possible_max_ranks = (1, 8, 16, 32, 64, 128, 256, 320, 512)
-        possible_lora_extra_vocab_size = (256, 512)
-        if self.max_lora_rank not in possible_max_ranks:
-            raise ValueError(
-                f"max_lora_rank ({max_lora_rank}) must be one of {possible_max_ranks}."
-            )
-        return max_lora_rank
-
-    @field_validator("lora_extra_vocab_size", mode="after")
-    @classmethod
-    def _validate_lora_extra_vocab_size(cls, lora_extra_vocab_size: int) -> int:
-        possible_lora_extra_vocab_size = {256, 512}
-        if lora_extra_vocab_size not in possible_lora_extra_vocab_size:
-            raise ValueError(
-                f"lora_extra_vocab_size ({lora_extra_vocab_size}) "
-                f"must be one of {possible_lora_extra_vocab_size}."
-            )
-
-        return lora_extra_vocab_size
 
     @model_validator(mode="after")
     def _validate_max_loras_and_max_cpu_loras(self) -> Self:

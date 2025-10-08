@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Optional, Union
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -73,7 +73,9 @@ class LoadConfig:
     device: Optional[str] = None
     """Device to which model weights will be loaded, default to
     device_config.device"""
-    ignore_patterns: Optional[Union[list[str], str]] = None
+    ignore_patterns: Optional[Union[list[str], str]] = Field(
+        default_factory=lambda: ["original/**/*"]
+    )
     """The list of patterns to ignore when loading the model. Default to
     "original/**/*" to avoid repeated loading of llama's checkpoints."""
     use_tqdm_on_load: bool = True
@@ -121,6 +123,5 @@ class LoadConfig:
                 "Ignoring the following patterns when downloading weights: %s",
                 ignore_patterns,
             )
-            return ignore_patterns
 
-        return ["original/**/*"]
+        return ignore_patterns
