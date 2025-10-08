@@ -101,16 +101,11 @@ async def test_online_serving(client, audio_assets: AudioTestAssets):
         return audio_dict
 
     audio_chunks = [asset_to_chunk(asset) for asset in audio_assets]
+    text = f"What's happening in these {len(audio_assets)} audio clips?"
     messages = [
         {
             "role": "user",
-            "content": [
-                *audio_chunks,
-                {
-                    "type": "text",
-                    "text": f"What's happening in these {len(audio_assets)} audio clips?",
-                },
-            ],
+            "content": [*audio_chunks, {"type": "text", "text": text}],
         }
     ]
 
