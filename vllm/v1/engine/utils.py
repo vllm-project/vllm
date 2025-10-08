@@ -73,6 +73,7 @@ class EngineHandshakeMetadata:
 
     addresses: EngineZmqAddresses
     parallel_config: dict[str, Union[int, str, list[int]]]
+    parallel_config_hash: Optional[str] = None
 
 
 class CoreEngineProcManager:
@@ -867,7 +868,8 @@ def wait_for_engine_startup(
                 )
 
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
-            # Send init message with DP config info.
+            # Send init message with DP config info and config hash.
+            # The config hash ensures all DP workers have compatible configs.
             init_message = msgspec.msgpack.encode(
                 EngineHandshakeMetadata(
                     addresses=addresses,
@@ -880,6 +882,9 @@ def wait_for_engine_startup(
                             "data_parallel_size",
                         )
                     },
+                    parallel_config_hash=parallel_config.compute_hash()
+                    if parallel_config.data_parallel_size > 1
+                    else None,
                 )
             )
             handshake_socket.send_multipart((eng_identity, init_message), copy=False)
@@ -899,6 +904,23 @@ def wait_for_engine_startup(
             # front-end process in the response from the other.
             if addresses.frontend_stats_publish_address is None:
                 addresses.frontend_stats_publish_address = msg.get("dp_stats_address")
+
+            # Validate config hash consistency across DP workers
+            if parallel_config.data_parallel_size > 1:
+                worker_config_hash = msg.get("parallel_config_hash")
+                expected_hash = parallel_config.compute_hash()
+                if worker_config_hash != expected_hash:
+                    raise RuntimeError(
+                        f"Configuration mismatch detected for engine "
+                        f"{eng_index}. All DP workers must have identical "
+                        f"configurations for parameters that affect collective "
+                        f"communication (e.g., enable_eplb, "
+                        f"eplb_config.log_balancedness). "
+                        f"Worker hash: {worker_config_hash}, "
+                        f"Expected hash: {expected_hash}. "
+                        f"Please ensure all workers are started with the same "
+                        f"command-line arguments."
+                    )
 
             start_pending[0 if local else 1] -= 1
             engine.state = CoreEngineState.READY
