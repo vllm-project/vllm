@@ -297,7 +297,9 @@ class OpenAIServing:
         if is_explicit_encoder_decoder_prompt(prompt):
             raise NotImplementedError
         else:
-            processed_inputs = processor._prompt_to_llm_inputs(prompt)
+            processed_inputs = processor.input_preprocessor._prompt_to_llm_inputs(
+                prompt
+            )
 
         if processed_inputs["type"] == "embeds":
             raise NotImplementedError
