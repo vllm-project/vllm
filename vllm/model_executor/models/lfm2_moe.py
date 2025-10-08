@@ -1,22 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from itertools import islice
 from typing import Any, Optional
 
 import torch
 import torch.nn as nn
-from transformers import Lfm2Config
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed import (
+    get_ep_group,
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -34,8 +38,16 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs import Lfm2MoeConfig
 
-from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP, SupportsQuant
+from .interfaces import (
+    HasInnerState,
+    IsHybrid,
+    MixtureOfExperts,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsQuant,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -47,25 +59,15 @@ from .utils import (
 )
 
 
-class Lfm2MLP(nn.Module):
+class Lfm2MoeMlp(nn.Module):
     def __init__(
         self,
         dim: int,
         ff_dim: int,
-        multiple_of: int,
-        auto_adjust_ff_dim: bool,
-        ffn_dim_multiplier: Optional[float],
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
         super().__init__()
-        if auto_adjust_ff_dim:
-            ff_dim = int(2 * ff_dim / 3)
-            # custom dim factor multiplier
-            if ffn_dim_multiplier is not None:
-                ff_dim = int(ffn_dim_multiplier * ff_dim)
-            ff_dim = multiple_of * ((ff_dim + multiple_of - 1) // multiple_of)
-
         self.w1 = MergedColumnParallelLinear(
             input_size=dim,
             output_sizes=[ff_dim] * 2,
@@ -89,10 +91,100 @@ class Lfm2MLP(nn.Module):
         return x
 
 
-class Lfm2Attention(nn.Module):
+class Lfm2MoeSparseMoeBlock(nn.Module):
     def __init__(
         self,
-        config: Lfm2Config,
+        config: Lfm2MoeConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        enable_eplb: bool = False,
+    ):
+        super().__init__()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.routed_scaling_factor = config.routed_scaling_factor
+
+        self.ep_group = get_ep_group().device_group
+        self.ep_rank = self.ep_group.rank()
+        self.ep_size = self.ep_group.size()
+        self.n_routed_experts = config.num_experts
+
+        if self.tp_size > self.n_routed_experts:
+            raise ValueError(
+                f"Tensor parallel size {self.tp_size} is greater than "
+                f"the number of experts {self.n_routed_experts}."
+            )
+
+        # Load balancing settings.
+        vllm_config = get_current_vllm_config()
+        eplb_config = vllm_config.parallel_config.eplb_config
+        self.enable_eplb = enable_eplb
+
+        self.n_logical_experts = self.n_routed_experts
+        self.n_redundant_experts = eplb_config.num_redundant_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = (
+            self.physical_expert_start + self.n_local_physical_experts
+        )
+
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            config.num_experts,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate",
+        )
+        if config.use_expert_bias:
+            self.gate.e_score_correction_bias = nn.Parameter(
+                torch.empty(self.n_routed_experts, dtype=torch.float32)
+            )
+        else:
+            self.gate.e_score_correction_bias = None
+
+        self.experts = FusedMoE(
+            num_experts=self.n_routed_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            reduce_results=False,
+            renormalize=config.norm_topk_prob,
+            quant_config=quant_config,
+            use_grouped_topk=True,  # needed for softmax score func
+            num_expert_group=1,
+            topk_group=1,
+            prefix=f"{prefix}.experts",
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
+            scoring_func="sigmoid",
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        orig_shape = hidden_states.shape
+        hidden_dim = hidden_states.shape[-1]
+        hidden_states = hidden_states.view(-1, hidden_dim)
+
+        # router_logits: (num_tokens, n_experts)
+        router_logits, _ = self.gate(hidden_states)
+        final_hidden_states = (
+            self.experts(hidden_states=hidden_states, router_logits=router_logits)
+            * self.routed_scaling_factor
+        )
+
+        if self.tp_size > 1:
+            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
+                final_hidden_states
+            )
+
+        return final_hidden_states.view(orig_shape)
+
+
+class Lfm2MoeAttention(nn.Module):
+    def __init__(
+        self,
+        config: Lfm2MoeConfig,
         layer_idx: int,
         hidden_size: int,
         num_heads: int,
@@ -185,15 +277,16 @@ class Lfm2Attention(nn.Module):
         return output
 
 
-class Lfm2AttentionDecoderLayer(nn.Module):
+class Lfm2MoeAttentionDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: Lfm2Config,
+        config: Lfm2MoeConfig,
         layer_idx: int,
         model_config: Optional[ModelConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        enable_eplb: bool = False,
     ) -> None:
         super().__init__()
         self.prefix = prefix
@@ -210,7 +303,7 @@ class Lfm2AttentionDecoderLayer(nn.Module):
             )
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
 
-        self.self_attn = Lfm2Attention(
+        self.self_attn = Lfm2MoeAttention(
             config=config,
             layer_idx=layer_idx,
             hidden_size=config.hidden_size,
@@ -224,15 +317,21 @@ class Lfm2AttentionDecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
 
-        self.feed_forward = Lfm2MLP(
-            dim=config.block_dim,
-            ff_dim=config.block_ff_dim,
-            multiple_of=config.block_multiple_of,
-            auto_adjust_ff_dim=config.block_auto_adjust_ff_dim,
-            ffn_dim_multiplier=config.block_ffn_dim_multiplier,
-            quant_config=quant_config,
-            prefix=f"{prefix}.feed_forward",
-        )
+        if layer_idx < config.num_dense_layers:
+            self.feed_forward = Lfm2MoeMlp(
+                dim=config.hidden_size,
+                ff_dim=config.intermediate_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.feed_forward",
+            )
+        else:
+            self.feed_forward = Lfm2MoeSparseMoeBlock(
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.feed_forward",
+                enable_eplb=enable_eplb,
+            )
+
         self.operator_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
 
@@ -253,36 +352,43 @@ class Lfm2AttentionDecoderLayer(nn.Module):
         return self.feed_forward(hidden_states), residual
 
 
-class Lfm2ShortConvDecoderLayer(nn.Module):
+class Lfm2MoeShortConvDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: Lfm2Config,
+        config: Lfm2MoeConfig,
         layer_idx: int,
         model_config: Optional[ModelConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        enable_eplb: bool = False,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.conv = ShortConv(
             config=config,
-            dim=config.conv_dim,
+            dim=config.hidden_size,
             layer_idx=layer_idx,
             model_config=model_config,
             cache_config=cache_config,
             prefix=f"{prefix}.conv",
         )
 
-        self.feed_forward = Lfm2MLP(
-            dim=config.block_dim,
-            ff_dim=config.block_ff_dim,
-            multiple_of=config.block_multiple_of,
-            auto_adjust_ff_dim=config.block_auto_adjust_ff_dim,
-            ffn_dim_multiplier=config.block_ffn_dim_multiplier,
-            quant_config=quant_config,
-            prefix=f"{prefix}.feed_forward",
-        )
+        if layer_idx < config.num_dense_layers:
+            self.feed_forward = Lfm2MoeMlp(
+                dim=config.hidden_size,
+                ff_dim=config.intermediate_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.feed_forward",
+            )
+        else:
+            self.feed_forward = Lfm2MoeSparseMoeBlock(
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.feed_forward",
+                enable_eplb=enable_eplb,
+            )
+
         self.operator_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
 
@@ -308,7 +414,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class Lfm2Model(nn.Module):
+class Lfm2MoeModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -317,6 +423,10 @@ class Lfm2Model(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
+        parallel_config = vllm_config.parallel_config
+        enable_eplb = parallel_config.enable_eplb
+        eplb_config = parallel_config.eplb_config
+        self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
         lora_vocab = (
@@ -335,7 +445,9 @@ class Lfm2Model(nn.Module):
             layer_idx = extract_layer_index(prefix)
             is_attn = self.config.layer_types[layer_idx] == "full_attention"
             layer_class = (
-                Lfm2AttentionDecoderLayer if is_attn else Lfm2ShortConvDecoderLayer
+                Lfm2MoeAttentionDecoderLayer
+                if is_attn
+                else Lfm2MoeShortConvDecoderLayer
             )
             return layer_class(
                 config,
@@ -344,6 +456,7 @@ class Lfm2Model(nn.Module):
                 cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
+                enable_eplb=enable_eplb,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -379,7 +492,7 @@ class Lfm2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        for layer in self.layers[self.start_layer : self.end_layer]:
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
@@ -392,6 +505,15 @@ class Lfm2Model(nn.Module):
         hidden_states, _ = self.embedding_norm(hidden_states, residual)
         return hidden_states
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            num_experts=self.config.num_experts,
+            num_redundant_experts=self.num_redundant_experts,
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             (".qkv_proj", ".q_proj", "q"),
@@ -402,30 +524,86 @@ class Lfm2Model(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
+            if "expert_bias" in name:
+                name = name.replace("expert_bias", "gate.e_score_correction_bias")
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
+                # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
 
+                if ("feed_forward.experts." in name) and name not in params_dict:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if (
+                    name.endswith(".bias") or name.endswith("_bias")
+                ) and name not in params_dict:
+                    continue
+                # Skip layers on other devices.
                 if is_pp_missing_parameter(name, self):
                     continue
+
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+
+                    if weight_name not in name:
+                        continue
+
+                    name = name.replace(weight_name, param_name)
+                    # Skip layers on other devices.
+                    if is_pp_missing_parameter(name, self):
+                        continue
+
+                    # Skip loading extra bias for GPTQ models.
+                    if (
+                        name.endswith(".bias") or name.endswith("_bias")
+                    ) and name not in params_dict:
+                        continue
+                    param = params_dict[name]
+
+                    weight_loader = param.weight_loader
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                    )
+                    break
+                else:
+                    # Skip loading extra bias for GPTQ models.
+                    if (
+                        name.endswith(".bias") or name.endswith("_bias")
+                    ) and name not in params_dict:
+                        continue
+                    # Skip layers on other devices.
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    param = params_dict[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
 
-class Lfm2ForCausalLM(
-    nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid, SupportsQuant
+class Lfm2MoeForCausalLM(
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsPP,
+    IsHybrid,
+    SupportsQuant,
+    MixtureOfExperts,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -475,7 +653,7 @@ class Lfm2ForCausalLM(
 
         return MambaStateShapeCalculator.short_conv_state_shape(
             tp_world_size=parallel_config.tensor_parallel_size,
-            intermediate_size=hf_config.conv_dim,
+            intermediate_size=hf_config.hidden_size,
             conv_kernel=hf_config.conv_L_cache,
         )
 
@@ -485,12 +663,12 @@ class Lfm2ForCausalLM(
         cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
         assert not cache_config.enable_prefix_caching, (
-            "Lfm2 currently does not support prefix caching"
+            "Lfm2Moe currently does not support prefix caching"
         )
 
         super().__init__()
         self.config = config
-        self.model = Lfm2Model(
+        self.model = Lfm2MoeModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
@@ -525,8 +703,71 @@ class Lfm2ForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
+        # Set MoE hyperparameters
+        self.expert_weights = []
+
+        self.moe_layers: list[FusedMoE] = []
+        example_layer = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
+            assert isinstance(
+                layer, (Lfm2MoeAttentionDecoderLayer, Lfm2MoeShortConvDecoderLayer)
+            )
+            if isinstance(layer.feed_forward, Lfm2MoeSparseMoeBlock):
+                example_layer = layer.feed_forward
+                self.moe_layers.append(layer.feed_forward.experts)
+
+        if example_layer is None:
+            raise RuntimeError(
+                "No Lfm2MoeSparseMoeBlock layer found in the model.layers."
+            )
+
+        self.num_moe_layers = len(self.moe_layers)
+        self.num_expert_groups = 1
+        self.num_shared_experts = 0
+        self.num_logical_experts = example_layer.n_logical_experts
+        self.num_physical_experts = example_layer.n_physical_experts
+        self.num_local_physical_experts = example_layer.n_local_physical_experts
+        self.num_routed_experts = example_layer.n_routed_experts
+        self.num_redundant_experts = example_layer.n_redundant_experts
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        for layer_idx, layer in enumerate(self.moe_layers):
+            # Register the expert weights.
+            self.expert_weights.append(layer.get_expert_weights())
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for layer in self.model.layers:
+            if isinstance(layer.feed_forward, Lfm2MoeSparseMoeBlock):
+                moe = layer.feed_forward
+                moe.n_local_physical_experts = num_local_physical_experts
+                moe.n_physical_experts = num_physical_experts
+                moe.n_redundant_experts = self.num_redundant_experts
+                moe.experts.update_expert_map()
 
     def forward(
         self,
@@ -551,3 +792,6 @@ class Lfm2ForCausalLM(
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.model.get_expert_mapping()
