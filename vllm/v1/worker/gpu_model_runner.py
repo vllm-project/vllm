@@ -1241,11 +1241,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ubatch_slices: Optional[UBatchSlices],
         padded_num_tokens: int,
         padded_num_reqs: int,
-        scheduled_encoder_inputs: dict[str, list[int]],
-        logits_indices: torch.Tensor,
-        spec_decode_metadata: Optional[SpecDecodeMetadata],
-        use_spec_decode: bool,
-        common_prefix_lens: list[int],
+        scheduled_encoder_inputs: Optional[dict[str, list[int]]] = None,
+        logits_indices: Optional[torch.Tensor] = None,
+        spec_decode_metadata: Optional[SpecDecodeMetadata] = None,
+        use_spec_decode: bool = False,
+        common_prefix_lens: Optional[list[int]] = None,
+        num_computed_tokens_cpu: Optional[torch.Tensor] = None,
+        for_cudagraph_capture: bool = False,
     ) -> tuple[
         PerLayerAttnMetadata,
         Optional[SpecDecodeMetadata],
@@ -1256,19 +1258,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         Args:
             total_num_scheduled_tokens: Total number of scheduled tokens
-            max_num_scheduled_tokens: Maximum number of scheduled tokens per request
+            max_num_scheduled_tokens: Maximum number of scheduled tokens
+                per request
             ubatch_slices: Microbatch slices for DP coordination
             padded_num_tokens: Padded number of tokens (includes all padding)
             padded_num_reqs: Padded number of requests
-            scheduled_encoder_inputs: Encoder inputs scheduled in this batch
+            scheduled_encoder_inputs: Encoder inputs scheduled in this
+                batch (optional, defaults to {})
             logits_indices: Indices of tokens to compute logits for
+                (optional, None for dummy runs)
             spec_decode_metadata: Speculative decoding metadata
+                (optional, defaults to None)
             use_spec_decode: Whether speculative decoding is enabled
-            common_prefix_lens: Pre-computed common prefix lengths per KV cache group
+                (optional, defaults to False)
+            common_prefix_lens: Pre-computed common prefix lengths per
+                KV cache group (optional, None for dummy runs)
+            num_computed_tokens_cpu: Number of computed tokens per
+                request (optional, for dummy runs)
+            for_cudagraph_capture: Whether this is for cudagraph capture
+                (uses build_for_cudagraph_capture instead of build)
 
         Returns:
             tuple[attn_metadata, spec_decode_metadata, spec_decode_common_attn_metadata]
         """
+        if scheduled_encoder_inputs is None:
+            scheduled_encoder_inputs = {}
+
         num_reqs = self.input_batch.num_reqs
 
         # Use provided padding values (already determined from coordination
@@ -1280,7 +1295,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Get logits_indices_padded for KV sharing fast prefill if enabled
         logits_indices_padded = None
-        if self.cache_config.kv_sharing_fast_prefill:
+        if self.cache_config.kv_sharing_fast_prefill and logits_indices is not None:
             logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
                 logits_indices
             )
@@ -1290,9 +1305,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         query_start_loc_cpu = self.query_start_loc.cpu[: padded_num_reqs + 1]
         seq_lens_gpu = self.seq_lens.gpu[:padded_num_reqs]
         seq_lens_cpu = self.seq_lens.cpu[:padded_num_reqs]
-        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
-            :padded_num_reqs
-        ]
+        if num_computed_tokens_cpu is None:
+            num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+                :padded_num_reqs
+            ]
 
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
@@ -1312,102 +1328,198 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
-        for kv_cache_group_id, kv_cache_group_spec in enumerate(
-            self.kv_cache_config.kv_cache_groups
-        ):
-            encoder_seq_lens = self._get_encoder_seq_lens(
-                scheduled_encoder_inputs,
-                kv_cache_group_spec.kv_cache_spec,
-                padded_num_reqs,
-            )
-
-            if isinstance(kv_cache_group_spec.kv_cache_spec, EncoderOnlyAttentionSpec):
-                # Encoder-only layers do not have KV cache, so we need to
-                # create a dummy block table and slot mapping for them.
-                blk_table_tensor = torch.zeros(
-                    (padded_num_reqs, 1),
-                    dtype=torch.int32,
-                    device=self.device,
+        if for_cudagraph_capture:
+            # CUDA graph capture path: use build_for_cudagraph_capture
+            for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                self.kv_cache_config.kv_cache_groups
+            ):
+                encoder_seq_lens = self._get_encoder_seq_lens(
+                    scheduled_encoder_inputs,
+                    kv_cache_group_spec.kv_cache_spec,
+                    padded_num_reqs,
                 )
-                slot_mapping = torch.zeros(
-                    (padded_num_tokens,),
-                    dtype=torch.int64,
-                    device=self.device,
+
+                if isinstance(
+                    kv_cache_group_spec.kv_cache_spec, EncoderOnlyAttentionSpec
+                ):
+                    blk_table_tensor = torch.zeros(
+                        (padded_num_reqs, 1),
+                        dtype=torch.int32,
+                        device=self.device,
+                    )
+                    slot_mapping = torch.zeros(
+                        (padded_num_tokens,),
+                        dtype=torch.int64,
+                        device=self.device,
+                    )
+                else:
+                    blk_table = self.input_batch.block_table[kv_cache_group_id]
+                    blk_table_tensor = blk_table.get_device_tensor(padded_num_reqs)
+                    slot_mapping = blk_table.slot_mapping.gpu[:padded_num_tokens]
+                    blk_table.slot_mapping.gpu[total_num_scheduled_tokens:].fill_(-1)
+
+                common_attn_metadata = CommonAttentionMetadata(
+                    query_start_loc=query_start_loc_gpu,
+                    query_start_loc_cpu=query_start_loc_cpu,
+                    seq_lens=seq_lens_gpu,
+                    seq_lens_cpu=seq_lens_cpu,
+                    num_computed_tokens_cpu=num_computed_tokens_cpu,
+                    num_reqs=padded_num_reqs,
+                    num_actual_tokens=padded_num_tokens,
+                    max_query_len=max_num_scheduled_tokens,
+                    max_seq_len=max_seq_len,
+                    block_table_tensor=blk_table_tensor,
+                    slot_mapping=slot_mapping,
+                    logits_indices_padded=logits_indices_padded,
+                    num_logits_indices=(
+                        logits_indices.size(0) if logits_indices is not None else 0
+                    ),
+                    causal=True,
+                    encoder_seq_lens=encoder_seq_lens,
                 )
-            else:
-                blk_table = self.input_batch.block_table[kv_cache_group_id]
-                blk_table_tensor = blk_table.get_device_tensor(padded_num_reqs)
-                slot_mapping = blk_table.slot_mapping.gpu[:padded_num_tokens]
 
-                # Fill unused with -1. Needed for reshape_and_cache in full cuda
-                # graph mode.
-                blk_table.slot_mapping.gpu[total_num_scheduled_tokens:].fill_(-1)
-
-            common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=query_start_loc_gpu,
-                query_start_loc_cpu=query_start_loc_cpu,
-                seq_lens=seq_lens_gpu,
-                seq_lens_cpu=seq_lens_cpu,
-                num_computed_tokens_cpu=num_computed_tokens_cpu,
-                num_reqs=padded_num_reqs,
-                num_actual_tokens=padded_num_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                max_seq_len=max_seq_len,
-                block_table_tensor=blk_table_tensor,
-                slot_mapping=slot_mapping,
-                logits_indices_padded=logits_indices_padded,
-                num_logits_indices=logits_indices.size(0),
-                causal=True,
-                encoder_seq_lens=encoder_seq_lens,
-            )
-
-            if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, EagleProposer):
-                    if (
-                        self.drafter.attn_layer_names[0]
-                        in kv_cache_group_spec.layer_names
-                    ):
+                if self.speculative_config and spec_decode_common_attn_metadata is None:
+                    if isinstance(self.drafter, EagleProposer):
+                        if (
+                            self.drafter.attn_layer_names[0]
+                            in kv_cache_group_spec.layer_names
+                        ):
+                            spec_decode_common_attn_metadata = common_attn_metadata
+                    else:
                         spec_decode_common_attn_metadata = common_attn_metadata
-                else:
-                    spec_decode_common_attn_metadata = common_attn_metadata
 
-            for attn_group in self.attn_groups[kv_cache_group_id]:
-                # Use pre-computed cascade attention prefix length
-                common_prefix_len = common_prefix_lens[kv_cache_group_id]
-                builder = attn_group.get_metadata_builder()
+                for attn_group in self.attn_groups[kv_cache_group_id]:
+                    builder = attn_group.get_metadata_builder()
 
-                extra_attn_metadata_args = {}
-                if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
-                    extra_attn_metadata_args = dict(
-                        num_accepted_tokens=num_accepted_tokens_gpu,
-                        num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
-                    )
-
-                if ubatch_slices is not None:
-                    common_attn_metadata_list = split_attn_metadata(
-                        ubatch_slices, common_attn_metadata
-                    )
-                    for ubid, common_attn_metadata_item in enumerate(
-                        common_attn_metadata_list
-                    ):
-                        attn_metadata_i = attn_group.get_metadata_builder(
-                            ubatch_id=ubid
-                        ).build(
-                            common_prefix_len=common_prefix_len,
-                            common_attn_metadata=common_attn_metadata_item,
+                    if ubatch_slices is not None:
+                        common_attn_metadata_list = split_attn_metadata(
+                            ubatch_slices, common_attn_metadata
                         )
-                        for layer_name in kv_cache_group_spec.layer_names:
-                            assert type(attn_metadata) is list
-                            attn_metadata[ubid][layer_name] = attn_metadata_i
-                else:
-                    assert isinstance(attn_metadata, dict)
-                    attn_metadata_i = builder.build(
-                        common_prefix_len=common_prefix_len,
-                        common_attn_metadata=common_attn_metadata,
-                        **extra_attn_metadata_args,
+                        for ubid, common_attn_metadata_item in enumerate(
+                            common_attn_metadata_list
+                        ):
+                            ubatch_builder = attn_group.get_metadata_builder(
+                                ubatch_id=ubid
+                            )
+                            attn_metadata_i = (
+                                ubatch_builder.build_for_cudagraph_capture(
+                                    common_attn_metadata=common_attn_metadata_item,
+                                )
+                            )
+                            for layer_name in kv_cache_group_spec.layer_names:
+                                assert type(attn_metadata) is list
+                                attn_metadata[ubid][layer_name] = attn_metadata_i
+                    else:
+                        assert isinstance(attn_metadata, dict)
+                        attn_metadata_i = builder.build_for_cudagraph_capture(
+                            common_attn_metadata=common_attn_metadata,
+                        )
+                        for layer_name in attn_group.layer_names:
+                            attn_metadata[layer_name] = attn_metadata_i
+        else:
+            # Regular path: use build with cascade attention support
+            for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                self.kv_cache_config.kv_cache_groups
+            ):
+                encoder_seq_lens = self._get_encoder_seq_lens(
+                    scheduled_encoder_inputs,
+                    kv_cache_group_spec.kv_cache_spec,
+                    padded_num_reqs,
+                )
+
+                if isinstance(
+                    kv_cache_group_spec.kv_cache_spec, EncoderOnlyAttentionSpec
+                ):
+                    blk_table_tensor = torch.zeros(
+                        (padded_num_reqs, 1),
+                        dtype=torch.int32,
+                        device=self.device,
                     )
-                    for layer_name in attn_group.layer_names:
-                        attn_metadata[layer_name] = attn_metadata_i
+                    slot_mapping = torch.zeros(
+                        (padded_num_tokens,),
+                        dtype=torch.int64,
+                        device=self.device,
+                    )
+                else:
+                    blk_table = self.input_batch.block_table[kv_cache_group_id]
+                    blk_table_tensor = blk_table.get_device_tensor(padded_num_reqs)
+                    slot_mapping = blk_table.slot_mapping.gpu[:padded_num_tokens]
+                    blk_table.slot_mapping.gpu[total_num_scheduled_tokens:].fill_(-1)
+
+                common_attn_metadata = CommonAttentionMetadata(
+                    query_start_loc=query_start_loc_gpu,
+                    query_start_loc_cpu=query_start_loc_cpu,
+                    seq_lens=seq_lens_gpu,
+                    seq_lens_cpu=seq_lens_cpu,
+                    num_computed_tokens_cpu=num_computed_tokens_cpu,
+                    num_reqs=padded_num_reqs,
+                    num_actual_tokens=padded_num_tokens,
+                    max_query_len=max_num_scheduled_tokens,
+                    max_seq_len=max_seq_len,
+                    block_table_tensor=blk_table_tensor,
+                    slot_mapping=slot_mapping,
+                    logits_indices_padded=logits_indices_padded,
+                    num_logits_indices=(
+                        logits_indices.size(0) if logits_indices is not None else 0
+                    ),
+                    causal=True,
+                    encoder_seq_lens=encoder_seq_lens,
+                )
+
+                if self.speculative_config and spec_decode_common_attn_metadata is None:
+                    if isinstance(self.drafter, EagleProposer):
+                        if (
+                            self.drafter.attn_layer_names[0]
+                            in kv_cache_group_spec.layer_names
+                        ):
+                            spec_decode_common_attn_metadata = common_attn_metadata
+                    else:
+                        spec_decode_common_attn_metadata = common_attn_metadata
+
+                for attn_group in self.attn_groups[kv_cache_group_id]:
+                    # Use pre-computed cascade attention prefix length
+                    common_prefix_len = (
+                        common_prefix_lens[kv_cache_group_id]
+                        if common_prefix_lens is not None
+                        else 0
+                    )
+                    builder = attn_group.get_metadata_builder()
+
+                    extra_attn_metadata_args = {}
+                    if use_spec_decode and isinstance(
+                        builder, GDNAttentionMetadataBuilder
+                    ):
+                        extra_attn_metadata_args = dict(
+                            num_accepted_tokens=num_accepted_tokens_gpu,
+                            num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+                        )
+
+                    if ubatch_slices is not None:
+                        common_attn_metadata_list = split_attn_metadata(
+                            ubatch_slices, common_attn_metadata
+                        )
+                        for ubid, common_attn_metadata_item in enumerate(
+                            common_attn_metadata_list
+                        ):
+                            ubatch_builder = attn_group.get_metadata_builder(
+                                ubatch_id=ubid
+                            )
+                            attn_metadata_i = ubatch_builder.build(
+                                common_prefix_len=common_prefix_len,
+                                common_attn_metadata=common_attn_metadata_item,
+                            )
+                            for layer_name in kv_cache_group_spec.layer_names:
+                                assert type(attn_metadata) is list
+                                attn_metadata[ubid][layer_name] = attn_metadata_i
+                    else:
+                        assert isinstance(attn_metadata, dict)
+                        attn_metadata_i = builder.build(
+                            common_prefix_len=common_prefix_len,
+                            common_attn_metadata=common_attn_metadata,
+                            **extra_attn_metadata_args,
+                        )
+                        for layer_name in attn_group.layer_names:
+                            attn_metadata[layer_name] = attn_metadata_i
 
         return attn_metadata, spec_decode_metadata, spec_decode_common_attn_metadata
 
@@ -3452,10 +3564,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # If force_attention is True, we always capture attention. Otherwise,
         # it only happens for cudagraph_runtime_mode=FULL.
         if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            attn_metadata = {}
-            if ubatch_slices is not None:
-                attn_metadata = [dict() for _ in range(len(ubatch_slices))]
-
             seq_lens: Union[list[int], int] = max_num_scheduled_tokens
             if create_mixed_batch:
                 # In the mixed batch mode (used for FI warmup), we use
@@ -3470,52 +3578,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
 
-            for kv_cache_group_id, kv_cache_group_spec in enumerate(
-                self.kv_cache_config.kv_cache_groups
-            ):
-                common_attn_metadata = CommonAttentionMetadata(
-                    query_start_loc=self.query_start_loc.gpu[: padded_num_reqs + 1],
-                    query_start_loc_cpu=self.query_start_loc.cpu[: padded_num_reqs + 1],
-                    seq_lens=self.seq_lens.gpu[:padded_num_reqs],
-                    seq_lens_cpu=self.seq_lens.cpu[:padded_num_reqs],
-                    num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[
-                        :padded_num_reqs
-                    ],
-                    num_reqs=padded_num_reqs,
-                    num_actual_tokens=padded_num_tokens,
-                    max_query_len=max_num_scheduled_tokens,
-                    max_seq_len=self.max_model_len,
-                    block_table_tensor=self.input_batch.block_table[
-                        kv_cache_group_id
-                    ].get_device_tensor(padded_num_reqs),
-                    slot_mapping=self.input_batch.block_table[
-                        kv_cache_group_id
-                    ].slot_mapping.gpu[:padded_num_tokens],
-                    causal=True,
-                )
-                for attn_group in self.attn_groups[kv_cache_group_id]:
-                    if ubatch_slices is not None:
-                        common_attn_metadata_list = split_attn_metadata(
-                            ubatch_slices, common_attn_metadata
-                        )
-                        for ubid, common_attn_metadata in enumerate(
-                            common_attn_metadata_list
-                        ):
-                            assert common_attn_metadata.max_query_len == 1
-                            attn_metadata_i = attn_group.get_metadata_builder(
-                                ubatch_id=ubid
-                            ).build_for_cudagraph_capture(common_attn_metadata)
-                            for layer_name in attn_group.layer_names:
-                                assert type(attn_metadata) is list
-                                attn_metadata[ubid][layer_name] = attn_metadata_i
-                    else:
-                        assert type(attn_metadata) is dict
-                        metadata_builder = attn_group.get_metadata_builder()
-                        attn_metadata_i = metadata_builder.build_for_cudagraph_capture(
-                            common_attn_metadata
-                        )
-                        for layer_name in attn_group.layer_names:
-                            attn_metadata[layer_name] = attn_metadata_i
+            # Create dummy num_computed_tokens_cpu for attention metadata
+            # For dummy runs, all tokens are new (nothing computed yet)
+            dummy_num_computed_tokens_cpu = torch.zeros(
+                (padded_num_reqs,),
+                device="cpu",
+                dtype=torch.int32,
+            )
+
+            attn_metadata, _, _ = self._build_attention_metadata(
+                total_num_scheduled_tokens=total_num_scheduled_tokens,
+                max_num_scheduled_tokens=max_num_scheduled_tokens,
+                ubatch_slices=ubatch_slices,
+                padded_num_tokens=padded_num_tokens,
+                padded_num_reqs=padded_num_reqs,
+                num_computed_tokens_cpu=dummy_num_computed_tokens_cpu,
+                for_cudagraph_capture=True,
+            )
 
         with self.maybe_dummy_run_with_lora(
             self.lora_config, num_scheduled_tokens, remove_lora
