@@ -6,7 +6,7 @@
  */
 
 #include "type_convert.cuh"
-#include "quantization/fp8/common.cuh"
+#include "quantization/w8a8/fp8/common.cuh"
 #include "dispatch_utils.h"
 #include "cub_helpers.h"
 #include "core/batch_invariant.hpp"
