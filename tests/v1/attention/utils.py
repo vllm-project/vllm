@@ -181,6 +181,7 @@ def create_vllm_config(
     max_num_batched_tokens: int = 8192,
     enable_chunked_prefill: bool = True,
     add_mock_model_methods: bool = True,
+    hf_config_override: Optional[dict] = None,
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
 
@@ -234,6 +235,9 @@ def create_vllm_config(
         model_config.get_sm_scale_for_layer = types.MethodType(
             lambda self, i: 1.0 / model_config.get_head_size() ** 0.5, model_config
         )
+
+    if hf_config_override:
+        model_config.hf_config.update(hf_config_override)
 
     return VllmConfig(
         model_config=model_config,
