@@ -5,6 +5,7 @@ import hashlib
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Optional, Union
 
+from pydantic import field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -107,12 +108,22 @@ class LoadConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __post_init__(self):
-        self.load_format = self.load_format.lower()
-        if self.ignore_patterns is not None and len(self.ignore_patterns) > 0:
+    @field_validator("load_format", mode="before")
+    def _lowercase_load_format(cls, load_format: Any) -> Any:
+        if isinstance(load_format, str):
+            return load_format.lower()
+
+        return load_format
+
+    @field_validator("ignore_patterns", mode="after")
+    def _validate_ignore_patterns(
+        cls, ignore_patterns: Optional[Union[list[str], str]]
+    ) -> Optional[Union[list[str], str]]:
+        if ignore_patterns is not None and len(ignore_patterns) > 0:
             logger.info(
                 "Ignoring the following patterns when downloading weights: %s",
-                self.ignore_patterns,
+                ignore_patterns,
             )
-        else:
-            self.ignore_patterns = ["original/**/*"]
+            return ignore_patterns
+
+        return ["original/**/*"]
