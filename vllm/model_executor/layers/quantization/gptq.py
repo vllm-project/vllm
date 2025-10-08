@@ -223,7 +223,7 @@ class GPTQLinearMethod(LinearMethodBase):
         self.quant_config = quant_config
 
         # GPTQ v1 and v2 format deals with zero points differently
-        self.use_gptq_gemm_v2 = quant_config.checkpoint_format == "gptq_v2"
+        self.use_v2_format = quant_config.checkpoint_format == "gptq_v2"
 
     def create_weights(
         self,
@@ -368,26 +368,16 @@ class GPTQLinearMethod(LinearMethodBase):
 
         # GPTQ v1 and v2 format checkpoints deals with zero points differently,
         # and require different gemm kernels.
-        if self.use_gptq_gemm_v2:
-            output = ops.gptq_gemm_v2(
-                reshaped_x,
-                layer.qweight,
-                layer.qzeros,
-                layer.scales,
-                layer.g_idx,
-                layer.exllama_state == ExllamaState.READY,
-                self.quant_config.weight_bits,
-            )
-        else:
-            output = ops.gptq_gemm(
-                reshaped_x,
-                layer.qweight,
-                layer.qzeros,
-                layer.scales,
-                layer.g_idx,
-                layer.exllama_state == ExllamaState.READY,
-                self.quant_config.weight_bits,
-            )
+        output = ops.gptq_gemm(
+            reshaped_x,
+            layer.qweight,
+            layer.qzeros,
+            layer.scales,
+            layer.g_idx,
+            layer.exllama_state == ExllamaState.READY,
+            self.use_v2_format,
+            self.quant_config.weight_bits,
+        )
         if bias is not None:
             output.add_(bias)
         return output.reshape(out_shape)
