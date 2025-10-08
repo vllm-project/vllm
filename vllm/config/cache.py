@@ -152,7 +152,7 @@ class CacheConfig:
 
     @field_validator("cache_dtype", mode="after")
     @classmethod
-    def _verify_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
+    def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
         if cache_dtype.startswith("fp8"):
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
