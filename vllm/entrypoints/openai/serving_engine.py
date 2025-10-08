@@ -269,9 +269,8 @@ class OpenAIServing:
         self._async_tokenizer_pool: dict[AnyTokenizer, AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
 
-        self.vllm_config = self.models.vllm_config
-        self.tokenizer = self.models.tokenizer
         self.processor = self.models.processor
+        self.io_processor = self.models.io_processor
         self.model_config = self.models.model_config
         self.max_model_len = self.model_config.max_model_len
 

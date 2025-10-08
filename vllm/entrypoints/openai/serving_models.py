@@ -21,7 +21,6 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.utils import AtomicCounter
-from vllm.v1.engine.processor import Processor
 
 logger = init_logger(__name__)
 
@@ -71,10 +70,9 @@ class OpenAIServingModels:
             )
         self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
 
-        self.vllm_config = self.engine_client.vllm_config
-        self.tokenizer = self.engine_client.tokenizer
-        self.processor = Processor(self.vllm_config, self.tokenizer)
-        self.model_config = self.vllm_config.model_config
+        self.processor = self.engine_client.processor
+        self.io_processor = self.engine_client.io_processor
+        self.model_config = self.engine_client.vllm_config.model_config
         self.max_model_len = self.model_config.max_model_len
 
     async def init_static_loras(self):

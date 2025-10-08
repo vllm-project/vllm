@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
@@ -100,6 +101,12 @@ class LLMEngine:
         else:
             self.tokenizer = init_tokenizer_from_configs(self.model_config)
 
+        self.processor = Processor(self.vllm_config, self.tokenizer)
+        self.io_processor = get_io_processor(
+            self.vllm_config,
+            self.model_config.io_processor_plugin,
+        )
+
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(
             self.tokenizer, log_stats=self.log_stats
@@ -139,14 +146,6 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
-
-    # Lazy init to avoid conflicting with the one in LLM class
-    # We can remove this after deprecating Processor in LLMEngine
-    def _get_processor(self) -> Processor:
-        if not hasattr(self, "_processor"):
-            self._processor = Processor(self.vllm_config, self.tokenizer)
-
-        return self._processor
 
     @classmethod
     def from_vllm_config(
@@ -248,7 +247,7 @@ class LLMEngine:
                 "Processor has been moved under LLM and will "
                 "be removed from LLMEngine in v0.13."
             )
-            request = self._get_processor().process_inputs(
+            request = self.processor.process_inputs(
                 request_id,
                 prompt,
                 params,
@@ -322,7 +321,7 @@ class LLMEngine:
         self.engine_core.profile(False)
 
     def reset_mm_cache(self):
-        self._get_processor().clear_cache()
+        self.processor.clear_cache()
         self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(self, device: Optional[Device] = None):

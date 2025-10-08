@@ -5,17 +5,19 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any, Optional, Union
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Device
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.processor import Processor
 
 logger = init_logger(__name__)
 
@@ -24,7 +26,10 @@ class EngineClient(ABC):
     """Protocol class for Clients to Engine"""
 
     vllm_config: VllmConfig
+    model_config: ModelConfig
     tokenizer: Optional[AnyTokenizer]
+    processor: Processor
+    io_processor: Optional[IOProcessor]
 
     @property
     @abstractmethod

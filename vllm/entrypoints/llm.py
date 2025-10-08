@@ -66,7 +66,6 @@ from vllm.outputs import (
     RequestOutput,
     ScoringRequestOutput,
 )
-from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
@@ -79,7 +78,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, Device, as_iter, is_list_of
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.llm_engine import LLMEngine
-from vllm.v1.engine.processor import Processor
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
@@ -337,18 +335,11 @@ class LLM:
 
         supported_tasks = self.llm_engine.get_supported_tasks()
         logger.info("Supported tasks: %s", supported_tasks)
-
-        self.vllm_config = self.llm_engine.vllm_config
-        self.tokenizer = self.llm_engine.tokenizer
-        self.model_config = self.llm_engine.model_config
         self.supported_tasks = supported_tasks
-        self.processor = Processor(self.vllm_config, self.tokenizer)
 
-        # Load the Input/Output processor plugin if any
-        io_processor_plugin = self.model_config.io_processor_plugin
-        self.io_processor = get_io_processor(
-            self.llm_engine.vllm_config, io_processor_plugin
-        )
+        self.model_config = self.llm_engine.model_config
+        self.processor = self.llm_engine.processor
+        self.io_processor = self.llm_engine.io_processor
 
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer()
