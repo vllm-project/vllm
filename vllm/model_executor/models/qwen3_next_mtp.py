@@ -63,7 +63,6 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
 
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "num_nextn_predict_layers", 1)
-        enable_eplb = vllm_config.parallel_config.enable_eplb
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
@@ -86,7 +85,6 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
                 vllm_config,
                 layer_type="full_attention",
                 prefix=f"{prefix}.layers.{idx}",
-                enable_eplb=enable_eplb,
             )
             for idx in range(self.num_mtp_layers)
         )
