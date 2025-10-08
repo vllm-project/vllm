@@ -36,15 +36,19 @@ def main():
 
     # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default
     if len(sys.argv) > 1 and sys.argv[1] == "bench":
-        logger.debug("Bench command detected, "
-                     "must ensure current platform is not UnspecifiedPlatform "
-                     "to avoid device type inference error")
+        logger.debug(
+            "Bench command detected, must ensure current platform is not "
+            "UnspecifiedPlatform to avoid device type inference error"
+        )
         from vllm import platforms
+
         if platforms.current_platform.is_unspecified():
             from vllm.platforms.cpu import CpuPlatform
+
             platforms.current_platform = CpuPlatform()
-            logger.info("Unspecified platform detected, "
-                        "switching to CPU Platform instead.")
+            logger.info(
+                "Unspecified platform detected, switching to CPU Platform instead."
+            )
 
     parser = FlexibleArgumentParser(
         description="vLLM CLI",

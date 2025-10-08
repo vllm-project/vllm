@@ -262,14 +262,13 @@ def __getattr__(name: str):
 
 
 def __setattr__(name: str, value):
-    if name == 'current_platform':
+    if name == "current_platform":
         global _current_platform
         _current_platform = value
     elif name in globals():
         globals()[name] = value
     else:
-        raise AttributeError(
-            f"No attribute named '{name}' exists in {__name__}.")
+        raise AttributeError(f"No attribute named '{name}' exists in {__name__}.")
 
 
 __all__ = ["Platform", "PlatformEnum", "current_platform", "CpuArchEnum", "_init_trace"]
