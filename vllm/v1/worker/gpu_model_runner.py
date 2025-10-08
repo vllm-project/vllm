@@ -3335,6 +3335,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     f"Cudagraph runtime mode mismatch at dummy_run. "
                     f"Expected {cudagraph_runtime_mode}, but got {cg_mode}."
                 )
+                # If we are forcing the cudagraph runtime mode, we are
+                # capturing a cudagraph so this should match exactly what
+                # the dispatcher expects.
+                assert cudagraph_batch_descriptor is not None
+                assert (
+                    cudagraph_batch_descriptor.num_reqs is None
+                    or cudagraph_batch_descriptor.num_reqs == num_reqs
+                )
+                assert cudagraph_batch_descriptor.num_tokens == padded_num_tokens
             else:
                 cudagraph_runtime_mode = cg_mode
 

@@ -1,16 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from math import ceil
-from typing import Optional
-
-from typing_extensions import TypeAlias
+from typing import NamedTuple, Optional
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-CUDAGraphKey: TypeAlias = tuple[int, bool]
+
+
+class CUDAGraphKey(NamedTuple):
+    num_tokens: int
+    uniform_decode: bool
+
+    @staticmethod
+    def from_batch_descriptor(batch_descriptor: BatchDescriptor):
+        return CUDAGraphKey(
+            batch_descriptor.num_tokens, batch_descriptor.uniform_decode
+        )
 
 
 class CudagraphDispatcher:
@@ -70,7 +77,7 @@ class CudagraphDispatcher:
         assert runtime_mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL], (
             f"Invalid cudagraph runtime mode for keys: {runtime_mode}"
         )
-        key = (batch_descriptor.num_tokens, batch_descriptor.uniform_decode)
+        key = CUDAGraphKey.from_batch_descriptor(batch_descriptor)
         self.cudagraph_keys[runtime_mode][key] = batch_descriptor
 
     def initialize_cudagraph_keys(
@@ -135,10 +142,11 @@ class CudagraphDispatcher:
         max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
 
         if uniform_decode:
-            num_reqs = ceil(num_tokens / uniform_decode_query_len)
-            return min(num_reqs, max_num_seqs)
-        else:
-            return min(num_tokens, max_num_seqs)
+            num_reqs = num_tokens // uniform_decode_query_len
+            assert num_tokens % uniform_decode_query_len == 0
+            assert num_reqs <= max_num_seqs
+            return num_reqs
+        return min(num_tokens, max_num_seqs)
 
     def _is_compatible(
         self, batch_descriptor: BatchDescriptor, candidate: BatchDescriptor
@@ -162,19 +170,20 @@ class CudagraphDispatcher:
         if not self.keys_initialized:
             return CUDAGraphMode.NONE, None
 
-        num_tokens, uniform_decode = (
-            batch_descriptor.num_tokens,
-            batch_descriptor.uniform_decode,
-        )
+        key = CUDAGraphKey.from_batch_descriptor(batch_descriptor)
+        cudagraph_mode = CUDAGraphMode.NONE
+        cudagraph_batch_desc = None
 
-        candidates = [(CUDAGraphMode.FULL, (num_tokens, uniform_decode))]
-        if uniform_decode:
-            candidates.append((CUDAGraphMode.FULL, (num_tokens, False)))
-        candidates.append((CUDAGraphMode.PIECEWISE, (num_tokens, False)))
+        if key in self.cudagraph_keys[CUDAGraphMode.FULL]:
+            cudagraph_batch_desc = self.cudagraph_keys[CUDAGraphMode.FULL][key]
+            cudagraph_mode = CUDAGraphMode.FULL
+        elif key in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
+            cudagraph_batch_desc = self.cudagraph_keys[CUDAGraphMode.PIECEWISE][key]
+            cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        for mode, key in candidates:
-            candidate = self.cudagraph_keys[mode].get(key)
-            if candidate and self._is_compatible(batch_descriptor, candidate):
-                return mode, candidate
-
-        return CUDAGraphMode.NONE, None
+        if cudagraph_batch_desc is not None:
+            assert self._is_compatible(batch_descriptor, cudagraph_batch_desc), (
+                f"Batch descriptor {batch_descriptor} is not compatible with "
+                f"cudagraph batch descriptor: {cudagraph_batch_desc} (key {key})"
+            )
+        return cudagraph_mode, cudagraph_batch_desc
