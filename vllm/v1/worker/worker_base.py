@@ -361,7 +361,6 @@ class WorkerWrapperBase:
 
         if self.mm_cache_stats is not None:
             delta = mm_cache.make_stats(delta=True)
-            self.mm_cache_stats.requests += 1
             self.mm_cache_stats.queries += delta.total
             self.mm_cache_stats.hits += delta.hits
 

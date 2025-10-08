@@ -1080,7 +1080,12 @@ class Scheduler(SchedulerInterface):
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
 
             eco.scheduler_stats = scheduler_stats
-            eco.mm_cache_stats = model_runner_output.mm_cache_stats
+
+            mm_cache_stats = model_runner_output.mm_cache_stats
+            if mm_cache_stats is not None:
+                mm_cache_stats.requests = scheduler_stats.prefix_cache_stats.requests
+
+            eco.mm_cache_stats = mm_cache_stats
 
         return engine_core_outputs
 
