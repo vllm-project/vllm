@@ -23,7 +23,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-from .aiter_rmsnorm_fused_quant import is_rocm_aiter_rmsnorm_enabled
 from .inductor_pass import enable_fake_mode
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
@@ -55,10 +54,6 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default
 
-if is_rocm_aiter_rmsnorm_enabled():
-    ROCM_AITER_RMS_OP = torch.ops.vllm.rocm_aiter_rms_norm.default
-    ROCM_AITER_RMS_ADD_OP = torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default  # noqa: E501
-
 
 class FusedRMSQuantKey(NamedTuple):
     """
@@ -69,35 +64,27 @@ class FusedRMSQuantKey(NamedTuple):
 
     quant: QuantKey
     fused_add: bool
-    use_rocm_aiter: bool = False
 
     def __str__(self):
         return (
             f"FusedQuantKey({self.quant}, with"
-            f"{'' if self.fused_add else 'out'} residual)",
-            f"{'using rocm aiter' if self.use_rocm_aiter else '.'}",
+            f"{'' if self.fused_add else 'out'} residual)"
         )
 
 
 FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     FusedRMSQuantKey(
-        kFp8StaticTensorSym, False, False
+        kFp8StaticTensorSym, False
     ): torch.ops._C.rms_norm_static_fp8_quant.default,  # noqa: E501
     FusedRMSQuantKey(
-        kFp8StaticTensorSym, True, False
+        kFp8StaticTensorSym, True
     ): torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,  # noqa: E501
     FusedRMSQuantKey(
-        kFp8DynamicTokenSym, False, False
+        kFp8DynamicTokenSym, False
     ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
     FusedRMSQuantKey(
-        kFp8DynamicTokenSym, True, False
+        kFp8DynamicTokenSym, True
     ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8DynamicTokenSym, False, True
-    ): torch.ops.vllm.rocm_aiter_rmsnorm_fused_dynamic_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8DynamicTokenSym, True, True
-    ): torch.ops.vllm.rocm_aiter_rmsnorm_fused_add_dynamic_quant.default,  # noqa: E501
 }
 
 
@@ -257,7 +244,6 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
         key = FusedRMSQuantKey(
             fused_add=False,
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
-            use_rocm_aiter=is_rocm_aiter_rmsnorm_enabled(),
         )
         super().__init__(epsilon, key)
 
@@ -269,24 +255,17 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
             weight: torch.Tensor,
             scale: torch.Tensor,
         ):
-            if is_rocm_aiter_rmsnorm_enabled():
-                at1 = auto_functionalized(
-                    ROCM_AITER_RMS_OP,
-                    input=input,
-                    weight=weight,
-                    variance_epsilon=self.epsilon,
-                )
-            else:
-                at1 = auto_functionalized(
-                    RMS_OP,
-                    result=result_rms,
-                    input=input,
-                    weight=weight,
-                    epsilon=self.epsilon,
-                )
+            at1 = auto_functionalized(
+                RMS_OP,
+                result=result_rms,
+                input=input,
+                weight=weight,
+                epsilon=self.epsilon,
+            )
             at2 = auto_functionalized(
                 self.QUANT_OP, result=result, input=at1[1], scale=scale, scale_ub=None
             )
+
             # result, scale
             return at2[1], at2[2]
 
@@ -297,26 +276,17 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
             weight: torch.Tensor,
             scale: torch.Tensor,
         ):
-            if is_rocm_aiter_rmsnorm_enabled():
-                at = auto_functionalized(
-                    self.FUSED_OP,
-                    out=result,
-                    input=input,
-                    weight=weight,
-                    yscale=scale,
-                    variance_epsilon=self.epsilon,
-                )
-            else:
-                at = auto_functionalized(
-                    self.FUSED_OP,
-                    result=result,
-                    input=input,
-                    weight=weight,
-                    scale=scale,
-                    epsilon=self.epsilon,
-                    scale_ub=None,
-                    residual=None,
-                )
+            at = auto_functionalized(
+                self.FUSED_OP,
+                result=result,
+                input=input,
+                weight=weight,
+                scale=scale,
+                epsilon=self.epsilon,
+                scale_ub=None,
+                residual=None,
+            )
+
             # result, scale
             return at[1], at[2]
 
@@ -349,81 +319,54 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
         key = FusedRMSQuantKey(
             fused_add=True,
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
-            use_rocm_aiter=is_rocm_aiter_rmsnorm_enabled(),
         )
         super().__init__(epsilon, key)
 
     def register(self, pm_pass: PatternMatcherPass):
         def pattern(
             result: torch.Tensor,
-            result_rms: torch.Tensor,
             input: torch.Tensor,
             residual: torch.Tensor,
             weight: torch.Tensor,
             scale: torch.Tensor,
         ):
-            if is_rocm_aiter_rmsnorm_enabled():
-                at = auto_functionalized(
-                    ROCM_AITER_RMS_ADD_OP,
-                    out=result_rms,
-                    input=input,
-                    residual=residual,
-                    residual_out=torch.empty_like(residual),
-                    weight=weight,
-                    variance_epsilon=self.epsilon,
-                )
-            else:
-                at = auto_functionalized(
-                    RMS_ADD_OP,
-                    input=input,
-                    residual=residual,
-                    weight=weight,
-                    epsilon=self.epsilon,
-                )
-
+            at = auto_functionalized(
+                RMS_ADD_OP,
+                input=input,
+                residual=residual,
+                weight=weight,
+                epsilon=self.epsilon,
+            )
             at1 = auto_functionalized(
                 self.QUANT_OP, result=result, input=at[1], scale=scale, scale_ub=None
             )
+
             # result, residual, scale
             return at1[1], at[2], at1[2]
 
         def replacement(
             result: torch.Tensor,
-            result_rms: torch.Tensor,
             input: torch.Tensor,
             residual: torch.Tensor,
             weight: torch.Tensor,
             scale: torch.Tensor,
         ):
-            if is_rocm_aiter_rmsnorm_enabled():
-                at = auto_functionalized(
-                    self.FUSED_OP,
-                    out=result,
-                    input=input,
-                    residual_in=residual,
-                    residual_out=torch.empyt_like(residual),
-                    weight=weight,
-                    yscale=scale,
-                    variance_epsilon=self.epsilon,
-                )
-            else:
-                at = auto_functionalized(
-                    self.FUSED_OP,
-                    result=result,
-                    input=input,
-                    weight=weight,
-                    scale=scale,
-                    epsilon=self.epsilon,
-                    scale_ub=None,
-                    residual=residual,
-                )
+            at = auto_functionalized(
+                self.FUSED_OP,
+                result=result,
+                input=input,
+                weight=weight,
+                scale=scale,
+                epsilon=self.epsilon,
+                scale_ub=None,
+                residual=residual,
+            )
 
             # result, residual, scale
             return at[1], at[3], at[2]
 
         inputs = [
             torch.empty(5, 4, device="cuda", dtype=self.quant_dtype),  # result
-            empty_bf16(5, 4),  # result_rms
             empty_bf16(5, 4),  # input
             empty_bf16(5, 4),  # residual
             empty_bf16(1, 5),  # weight
@@ -475,8 +418,6 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
         self.matched_count = self.patterns.apply(graph)
-        print("found pattern count:")
-        print(self.matched_count)
         logger.debug("Replaced %s patterns", self.matched_count)
 
     def uuid(self) -> Any:
