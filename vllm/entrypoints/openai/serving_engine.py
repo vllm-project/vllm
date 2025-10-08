@@ -290,6 +290,11 @@ class OpenAIServing:
 
         processor = self.processor
         tokenizer = processor.tokenizer
+        if tokenizer is None:
+            raise ValueError(
+                "You cannot use beam search when `skip_tokenizer_init` is True"
+            )
+
         eos_token_id: int = tokenizer.eos_token_id  # type: ignore
 
         if is_explicit_encoder_decoder_prompt(prompt):
