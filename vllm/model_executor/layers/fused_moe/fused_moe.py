@@ -32,6 +32,7 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
+    TopKWeightAndReduceContiguous,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -1902,7 +1903,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        return TopKWeightAndReduceNoOP()
+        # return TopKWeightAndReduceOnlyReduce()
+        return TopKWeightAndReduceContiguous()
 
     def workspace_shapes(
         self,
@@ -1918,7 +1920,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         workspace1 = (M, topk, max(N // 2, K))
         workspace2 = (M, topk, max(N, K))
-        output = (M, K)
+        output = (M,topk, K)
         return (workspace1, workspace2, output, a.dtype)
 
     def apply(
@@ -1990,7 +1992,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         intermediate_cache2 = _resize_cache(
             workspace13, (num_tokens * top_k_num, N // 2)
         )
-        intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
+        intermediate_cache3 = _resize_cache(output, (num_tokens, top_k_num, K))
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
@@ -2051,7 +2053,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             sorted_token_ids,
             expert_ids,
             num_tokens_post_padded,
-            not apply_router_weight_on_input,
+            False,
             1,
             config,
             compute_type=compute_type,
@@ -2063,12 +2065,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             block_shape=self.block_shape,
             B_bias=self.w2_bias,
         )
-
-        # ops.moe_sum(intermediate_cache3, output)
-        self.moe_sum(intermediate_cache3, output)
-
-    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
-        ops.moe_sum(input, output)
 
 
 def modular_triton_fused_moe(

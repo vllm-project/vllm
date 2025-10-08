@@ -133,63 +133,74 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
             return wrapper
 
-        def moe_sum_decorator(layer, func):
-
+        def finalize_weight_and_reduce_impl_decorator(layer, func):
             def wrapper(*args, **kwargs):
+                topk_weight_and_reduce = func(*args, **kwargs)
 
-                hidden_states = layer._lora["hidden_states"]
-                topk_weights = layer._lora["topk_weights"]
-                curr_topk_ids = layer._lora["topk_ids"]
+                def apply_decorator(func):
+                    def wrapper(*args, **kwargs):
+                        # _,fused_expert_output,_,_,_=args
+                        fused_expert_output = kwargs["fused_expert_output"]
 
-                config_dtype = _get_config_dtype_str(use_fp8_w8a8=False,
+                        hidden_states = layer._lora["hidden_states"]
+                        topk_weights = layer._lora["topk_weights"]
+                        curr_topk_ids = layer._lora["topk_ids"]
+
+                        config_dtype = _get_config_dtype_str(use_fp8_w8a8=False,
                                                      use_int8_w8a16=False,
                                                      use_int4_w4a16=False,
                                                      use_mxfp4_w4a4=False,
                                                      dtype=hidden_states.dtype)
-                CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
-                num_tokens = hidden_states.size(0)
-                M = min(num_tokens, CHUNK_SIZE)
+                        
+                        CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
+                        num_tokens = hidden_states.size(0)
+                        M = min(num_tokens, CHUNK_SIZE)
 
-                get_config_func = functools.partial(
-                    try_get_optimal_moe_config,
-                    layer.w13_weight.size(),
-                    layer.w2_weight.size(),
-                    top_k,
-                    config_dtype,
-                    block_shape=layer.quant_method.moe_quant_config.
-                    block_shape,
-                )
+                        get_config_func = functools.partial(
+                            try_get_optimal_moe_config,
+                            layer.w13_weight.size(),
+                            layer.w2_weight.size(),
+                            top_k,
+                            config_dtype,
+                            block_shape=layer.quant_method.moe_quant_config.
+                            block_shape,
+                        )
 
-                config = get_config_func(M)
-                w1_lora_a_stacked = layer.w1_lora_a_stacked
-                w2_lora_a_stacked = layer.w2_lora_a_stacked
-                w2_lora_b_stacked = layer.w2_lora_b_stacked
+                        config = get_config_func(M)
+                        w1_lora_a_stacked = layer.w1_lora_a_stacked
+                        w2_lora_a_stacked = layer.w2_lora_a_stacked
+                        w2_lora_b_stacked = layer.w2_lora_b_stacked
 
-                max_lora_rank = w1_lora_a_stacked.shape[-2]
+                        max_lora_rank = w1_lora_a_stacked.shape[-2]
 
-                sorted_token_ids_lora = layer._lora["sorted_token_ids_lora"]
-                expert_ids_lora = layer._lora["expert_ids_lora"]
-                num_tokens_post_padded_lora = layer._lora[
-                    "num_tokens_post_padded_lora"]
+                        sorted_token_ids_lora = layer._lora["sorted_token_ids_lora"]
+                        expert_ids_lora = layer._lora["expert_ids_lora"]
+                        num_tokens_post_padded_lora = layer._lora[
+                            "num_tokens_post_padded_lora"]
 
-                expert_ids_lora = expert_ids_lora.view(curr_topk_ids.shape[-1],
-                                                       -1)
-                sorted_token_ids_lora = sorted_token_ids_lora.view(
-                    curr_topk_ids.shape[-1], -1)
-                intermediate_cache2 = layer._lora["intermediate_cache2"]
-                intermediate_cache3 = args[0]
+                        expert_ids_lora = expert_ids_lora.view(curr_topk_ids.shape[-1],
+                                                            -1)
+                        sorted_token_ids_lora = sorted_token_ids_lora.view(
+                            curr_topk_ids.shape[-1], -1)
+                        intermediate_cache2 = layer._lora["intermediate_cache2"]
 
-                layer.punica_wrapper.add_lora_fused_moe(
-                    intermediate_cache3, intermediate_cache2,
-                    [w2_lora_a_stacked], [w2_lora_b_stacked], topk_weights,
-                    sorted_token_ids_lora, expert_ids_lora,
-                    num_tokens_post_padded_lora, max_lora_rank, top_k, config,
-                    True)
+                        layer.punica_wrapper.add_lora_fused_moe(
+                            fused_expert_output, intermediate_cache2,
+                            [w2_lora_a_stacked], [w2_lora_b_stacked], topk_weights,
+                            sorted_token_ids_lora, expert_ids_lora,
+                            num_tokens_post_padded_lora, max_lora_rank, top_k, config,
+                            True)
 
-                result = func(*args, **kwargs)
-                return result
+                        result = func(*args, **kwargs)
+                        return result
 
+                    return wrapper
+
+                topk_weight_and_reduce.apply = apply_decorator(topk_weight_and_reduce.apply)
+
+                return topk_weight_and_reduce
             return wrapper
+
 
         m_fused_moe_fn = modular_triton_fused_moe(
             quant_config
@@ -202,8 +213,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                                                m_fused_moe_fn.forward)
         fused_experts.activation = act_decorator(base_layer,
                                                  fused_experts.activation)
-        fused_experts.moe_sum = moe_sum_decorator(base_layer,
-                                                  fused_experts.moe_sum)
+
+        fused_experts.finalize_weight_and_reduce_impl = \
+            finalize_weight_and_reduce_impl_decorator(base_layer,fused_experts.finalize_weight_and_reduce_impl)
 
         base_layer.quant_method.old_fused_experts = \
             base_layer.quant_method.fused_experts

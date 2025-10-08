@@ -302,7 +302,7 @@ def _fused_moe_lora(
         slice_a_size=a_intermediate_cache1.numel() // num_slices,
         slice_c_size=b_intermediate_cache1.numel() // num_slices,
         top_k=1,
-        MUL_ROUTED_WEIGHT=mul_routed_weight,
+        MUL_ROUTED_WEIGHT=False,
         **config)
     for i in range(num_slices):
         intermediate_cache1[:, :,
