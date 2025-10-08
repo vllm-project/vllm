@@ -5,7 +5,6 @@ import logging
 import sys
 from argparse import SUPPRESS, HelpFormatter
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import MagicMock, patch
 
@@ -125,10 +124,7 @@ def create_parser(add_cli_args, **kwargs) -> FlexibleArgumentParser:
     """
     parser = FlexibleArgumentParser(add_json_tip=False)
     parser.formatter_class = MarkdownFormatter
-
-    # DeviceConfig checks the current platform's device, we mock it here
-    with patch("vllm.platforms.current_platform", SimpleNamespace(device_type="cpu")):
-        _parser = add_cli_args(parser, **kwargs)
+    _parser = add_cli_args(parser, **kwargs)
     # add_cli_args might be in-place so return parser if _parser is None
     return _parser or parser
 
