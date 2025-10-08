@@ -1,7 +1,7 @@
 #include "common.cuh"
 #include "dispatch_utils.h"
-#include "../../cub_helpers.h"
-#include "../vectorization_utils.cuh"
+#include "cub_helpers.h"
+#include "quantization/vectorization_utils.cuh"
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/Exceptions.h>
 
