@@ -190,13 +190,7 @@ class MistralTokenizer(TokenizerBase):
         }
 
         # Vocab sorted by token id.
-        self._vocab = [
-            token
-            for token, _ in sorted(
-                self._vocab_dict.items(),
-                key=lambda x: x[1],
-            )
-        ]
+        self._vocab = self.tokenizer._vocab
         self._max_token_id = self.vocab_size - 1
 
     @classmethod
