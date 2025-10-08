@@ -209,18 +209,18 @@ class Config:
         info = prepare_finalize_info(self.prepare_finalize_type)
         return info.backend
 
-    def is_valid(self):
+    def is_valid(self) -> tuple[bool, Optional[str]]:
         # Check prepare-finalize and fused-experts compatibility
         if self.is_batched_prepare_finalize():
             if not self.is_batched_fused_experts():
-                return False
+                return False, "Mismatched format."
         else:
             if not self.is_standard_fused_experts():
-                return False
+                return False, "Mismatched format."
 
         use_chunking = self.fused_moe_chunk_size is not None
         if use_chunking and not self.is_fe_supports_chunking():
-            return False
+            return False, "Chunking not supported."
 
         # Check quantization sanity
         if (
@@ -229,7 +229,7 @@ class Config:
             + int(self.quant_block_shape is not None)
         ) > 1:
             # invalid quant config
-            return False
+            return False, f"Bad quant_config {self.quant_config}."
 
         # check type support
         if self.quant_dtype is None:
@@ -237,34 +237,43 @@ class Config:
                 self.dtype not in self.pf_supported_types()
                 or self.dtype not in self.fe_supported_types()
             ):
-                return False
+                return False, (
+                    f"Unsupported type {self.dtype} not in "
+                    f"{self.pf_supported_types()} and "
+                    f"{self.fe_supported_types()}."
+                )
         else:
             if (
                 self.quant_dtype not in self.pf_supported_types()
                 or self.quant_dtype not in self.fe_supported_types()
             ):
-                return False
+                return False, (
+                    f"Unsupported quant type {self.quant_dtype} "
+                    f"not in {self.pf_supported_types()} and "
+                    f"{self.fe_supported_types()}."
+                )
 
         # Check block quanization support
         is_block_quatized = self.quant_block_shape is not None
         if is_block_quatized and self.quant_dtype is None:
-            return False
+            return False, "No block quantization support."
+
         if is_block_quatized and not self.is_block_quant_supported():
-            return False
+            return False, "Mismatched block quantization support."
 
         # deep_gemm only works with block-quantized
         if self.needs_deep_gemm() and not is_block_quatized:
-            return False
+            return False, "Needs DeepGEMM but not block quantized."
 
         # Check dependencies (turn into asserts?)
         if self.needs_deep_ep() and not has_deep_ep():
-            return False
+            return False, "Needs DeepEP, but DeepEP not available."
         if self.needs_deep_gemm() and not has_deep_gemm():
-            return False
+            return False, "Needs DeepGEMM, but DeepGEMM not available."
         if self.needs_pplx() and not has_pplx():  # noqa: SIM103
-            return False
+            return False, "Needs PPLX, but PPLX not available."
 
-        return True
+        return True, None
 
 
 @dataclass

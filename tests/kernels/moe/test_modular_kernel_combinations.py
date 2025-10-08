@@ -5,7 +5,7 @@ import copy
 import textwrap
 import traceback
 from itertools import product
-from typing import Optional
+from typing import Any, Optional
 
 import pytest
 import torch
@@ -13,10 +13,9 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.platforms import current_platform
-from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils import cuda_device_count_stateless, has_deep_ep, has_deep_gemm, has_pplx
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
-from ...utils import multi_gpu_test
 from .modular_kernel_tools.common import (
     Config,
     RankTensors,
@@ -132,7 +131,8 @@ def rank_worker(
 
 
 def run(config: Config, verbose: bool):
-    assert config.is_valid()
+    assert config.is_valid()[0]
+    assert not is_nyi_config(config)
 
     weights: WeightTensors = WeightTensors.make(config)
 
@@ -168,17 +168,77 @@ def is_nyi_config(config: Config) -> bool:
     return not info.supports_expert_map
 
 
-@pytest.mark.parametrize("k", Ks)
-@pytest.mark.parametrize("n", Ns)
-@pytest.mark.parametrize("e", Es)
-@pytest.mark.parametrize("dtype", DTYPEs)
-@pytest.mark.parametrize("quant_config", MK_QUANT_CONFIGS)
+def generate_valid_test_cases(
+    world_size: int, prepare_finalize_types
+) -> list[tuple[Any, ...]]:
+    cases = []
+    total = 0
+
+    for k, n, e, dtype, quant_config, combination, chunk_size in product(
+        Ks,
+        Ns,
+        Es,
+        DTYPEs,
+        MK_QUANT_CONFIGS,
+        product(prepare_finalize_types, MK_FUSED_EXPERT_TYPES),
+        FUSED_MOE_CHUNK_SIZEs,
+    ):
+        total = total + 1
+
+        config = Config(
+            Ms=Ms,
+            K=k,
+            N=n,
+            E=e,
+            topks=TOPKs,
+            dtype=dtype,
+            quant_config=quant_config,
+            prepare_finalize_type=combination[0],
+            fused_experts_type=combination[1],
+            fused_moe_chunk_size=chunk_size,
+            world_size=world_size,
+        )
+
+        # TODO(bnell): figure out how to get verbose flag here.
+        verbose = False  # pytestconfig.getoption('verbose') > 0
+
+        valid, reason = config.is_valid()
+
+        if not valid:
+            if verbose:
+                print(f"Test config {config} is not valid: {reason}")
+            continue
+
+        if is_nyi_config(config):
+            if verbose:
+                print(f"Test config {config} is nyi.")
+            continue
+
+        cases.append(
+            (
+                k,
+                n,
+                e,
+                dtype,
+                quant_config,
+                combination[0],
+                combination[1],
+                chunk_size,
+                world_size,
+            )
+        )
+
+    print(f"{len(cases)} of {total} valid configs generated.")
+
+    return cases
+
+
 @pytest.mark.parametrize(
-    "combination", product(MK_MULTI_GPU_PREPARE_FINALIZE_TYPES, MK_FUSED_EXPERT_TYPES)
+    "k,n,e,dtype,quant_config,prepare_finalize_type,fused_experts_type,chunk_size,world_size",
+    generate_valid_test_cases(
+        world_size=2, prepare_finalize_types=MK_MULTI_GPU_PREPARE_FINALIZE_TYPES
+    ),
 )
-@pytest.mark.parametrize("fused_moe_chunk_size", FUSED_MOE_CHUNK_SIZEs)
-@pytest.mark.parametrize("world_size", [2])
-@multi_gpu_test(num_gpus=2)
 @meets_multi_gpu_requirements
 def test_modular_kernel_combinations_multigpu(
     k: int,
@@ -186,13 +246,19 @@ def test_modular_kernel_combinations_multigpu(
     e: int,
     dtype: torch.dtype,
     quant_config: Optional[TestMoEQuantConfig],
-    combination: tuple[
-        mk.FusedMoEPrepareAndFinalize, mk.FusedMoEPermuteExpertsUnpermute
-    ],
-    fused_moe_chunk_size: Optional[int],
+    prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
+    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
+    chunk_size: Optional[int],
     world_size: int,
     pytestconfig,
 ):
+    if cuda_device_count_stateless() < world_size:
+        pytest.skip(
+            f"Not enough GPUs available to run, got "
+            f"{cuda_device_count_stateless()} exepected "
+            f"{world_size}."
+        )
+
     config = Config(
         Ms=Ms,
         K=k,
@@ -201,42 +267,30 @@ def test_modular_kernel_combinations_multigpu(
         topks=TOPKs,
         dtype=dtype,
         quant_config=quant_config,
-        prepare_finalize_type=combination[0],
-        fused_experts_type=combination[1],
-        fused_moe_chunk_size=fused_moe_chunk_size,
+        prepare_finalize_type=prepare_finalize_type,
+        fused_experts_type=fused_experts_type,
+        fused_moe_chunk_size=chunk_size,
         world_size=world_size,
     )
-
-    if not config.is_valid():
-        pytest.skip(f"Tests config {config} is not valid. Skipping ...")
-
-    if is_nyi_config(config):
-        pytest.skip(f"Tests config {config} is nyi. Skipping ...")
-
     verbosity = pytestconfig.getoption("verbose")
     run(config, verbosity > 0)
 
 
-@pytest.mark.parametrize("k", Ks)
-@pytest.mark.parametrize("n", Ns)
-@pytest.mark.parametrize("e", Es)
-@pytest.mark.parametrize("dtype", DTYPEs)
-@pytest.mark.parametrize("quant_config", MK_QUANT_CONFIGS)
 @pytest.mark.parametrize(
-    "combination", product(MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES, MK_FUSED_EXPERT_TYPES)
+    "k,n,e,dtype,quant_config,prepare_finalize_type,fused_experts_type,chunk_size,world_size",
+    generate_valid_test_cases(
+        world_size=1, prepare_finalize_types=MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES
+    ),
 )
-@pytest.mark.parametrize("fused_moe_chunk_size", FUSED_MOE_CHUNK_SIZEs)
-@pytest.mark.parametrize("world_size", [1])
 def test_modular_kernel_combinations_singlegpu(
     k: int,
     n: int,
     e: int,
     dtype: torch.dtype,
     quant_config: Optional[TestMoEQuantConfig],
-    combination: tuple[
-        mk.FusedMoEPrepareAndFinalize, mk.FusedMoEPermuteExpertsUnpermute
-    ],
-    fused_moe_chunk_size: Optional[int],
+    prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
+    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
+    chunk_size: Optional[int],
     world_size: int,
     pytestconfig,
 ):
@@ -248,17 +302,11 @@ def test_modular_kernel_combinations_singlegpu(
         topks=TOPKs,
         dtype=dtype,
         quant_config=quant_config,
-        prepare_finalize_type=combination[0],
-        fused_experts_type=combination[1],
-        fused_moe_chunk_size=fused_moe_chunk_size,
+        prepare_finalize_type=prepare_finalize_type,
+        fused_experts_type=fused_experts_type,
+        fused_moe_chunk_size=chunk_size,
         world_size=world_size,
     )
-
-    if not config.is_valid():
-        pytest.skip(f"Tests config {config} is not valid. Skipping ...")
-
-    if is_nyi_config(config):
-        pytest.skip(f"Tests config {config} is nyi. Skipping ...")
 
     verbosity = pytestconfig.getoption("verbose")
     run(config, verbosity > 0)
