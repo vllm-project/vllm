@@ -114,7 +114,7 @@ class LoRAConfig:
     @field_validator("lora_extra_vocab_size", mode="after")
     @classmethod
     def _validate_lora_extra_vocab_size(cls, lora_extra_vocab_size: int) -> int:
-        possible_lora_extra_vocab_size = (256, 512)
+        possible_lora_extra_vocab_size = {256, 512}
         if lora_extra_vocab_size not in possible_lora_extra_vocab_size:
             raise ValueError(
                 f"lora_extra_vocab_size ({lora_extra_vocab_size}) "
