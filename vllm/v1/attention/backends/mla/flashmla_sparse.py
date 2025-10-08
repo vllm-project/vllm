@@ -79,7 +79,7 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def get_supported_block_sizes(cls) -> list[int]:
-        return [32, 64]
+        return [64]
 
     @classmethod
     def is_sparse(cls) -> bool:
