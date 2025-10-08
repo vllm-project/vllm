@@ -39,7 +39,8 @@ def register_attn_backend(backend: _Backend, class_path: Optional[str] = None):
     - If class_path is provided, use it.
     - Otherwise, auto-generate from the class object.
     Validation: only checks if 'backend' is a valid _Backend enum member.
-    Overwriting existing mappings is allowed.
+    Overwriting existing mappings is allowed. This enables other hardware
+    platforms to plug in custom out-of-tree backends.
     """
     if not isinstance(backend, _Backend):
         raise ValueError(f"{backend} is not a valid _Backend enum value.")
