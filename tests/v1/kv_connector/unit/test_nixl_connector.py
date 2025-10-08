@@ -1273,6 +1273,11 @@ def test_transfer_setup_failure_returns_finished(dist_init):
     )
     connector.start_load_kv(dummy_ctx)
 
+    # Wait for handshake to complete and process ready_requests
+    connector.bind_connector_metadata(NixlConnectorMetadata())
+    time.sleep(0.1)
+    connector.start_load_kv(dummy_ctx)
+
     # check that blocks were marked invalid
     invalid_blocks = connector.get_block_ids_with_load_errors()
     assert invalid_blocks == {7, 8, 9}
@@ -1317,6 +1322,11 @@ def test_prefix_cache_hit_returns_finished(dist_init):
         attn_metadata={},
         virtual_engine=0,
     )
+    connector.start_load_kv(dummy_ctx)
+
+    # Wait for handshake to complete and process ready_requests
+    connector.bind_connector_metadata(NixlConnectorMetadata())
+    time.sleep(0.1)
     connector.start_load_kv(dummy_ctx)
 
     # ensure request appears in get_finished even if send_notif failed
