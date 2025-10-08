@@ -458,10 +458,6 @@ class OpenAIServing:
             prompt_logprobs=None,
         )
 
-    async def reset_mm_cache(self) -> None:
-        self.processor.clear_cache()
-        await self.engine_client.reset_mm_cache()
-
     def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:
         """
         Get a Renderer instance with the provided tokenizer.

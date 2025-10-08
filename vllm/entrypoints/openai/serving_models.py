@@ -72,7 +72,7 @@ class OpenAIServingModels:
 
         self.processor = self.engine_client.processor
         self.io_processor = self.engine_client.io_processor
-        self.model_config = self.engine_client.vllm_config.model_config
+        self.model_config = self.engine_client.model_config
         self.max_model_len = self.model_config.max_model_len
 
     async def init_static_loras(self):

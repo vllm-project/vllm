@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any, Optional, Union
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -26,6 +26,7 @@ class EngineClient(ABC):
     """Protocol class for Clients to Engine"""
 
     vllm_config: VllmConfig
+    model_config: ModelConfig
     processor: Processor
     io_processor: Optional[IOProcessor]
 

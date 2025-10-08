@@ -343,7 +343,7 @@ async def run_batch(
         BaseModelPath(name=name, model_path=args.model) for name in served_model_names
     ]
 
-    model_config = engine_client.vllm_config.model_config
+    model_config = engine_client.model_config
     supported_tasks = await engine_client.get_supported_tasks()
     logger.info("Supported tasks: %s", supported_tasks)
 
