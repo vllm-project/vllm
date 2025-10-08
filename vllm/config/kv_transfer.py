@@ -3,10 +3,9 @@
 
 import hashlib
 import uuid
-from dataclasses import field
 from typing import Any, Literal, Optional, get_args
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -29,11 +28,11 @@ class KVTransferConfig:
     engine_id: Optional[str] = None
     """The engine id for KV transfers."""
 
-    kv_buffer_device: Optional[str] = "cuda"
+    kv_buffer_device: Optional[str] = Field(default="cuda")
     """The device used by kv connector to buffer the KV cache. Choices are 
     'cuda' and 'cpu'."""
 
-    kv_buffer_size: float = 1e9
+    kv_buffer_size: float = Field(default=1e9, gt=0)
     """The buffer size for TorchDistributedConnector. Measured in number of
     bytes. Recommended value: 1e9 (about 1GB)."""
 
@@ -46,7 +45,7 @@ class KVTransferConfig:
     0 for prefill instance, 1 for decode instance.
     Currently only 1P1D is supported."""
 
-    kv_parallel_size: int = 1
+    kv_parallel_size: int = Field(default=1, ge=1)
     """The number of parallel instances for KV cache transfer. For
     P2pNcclConnector, this should be 2."""
 
@@ -56,7 +55,7 @@ class KVTransferConfig:
     kv_port: int = 14579
     """The KV connector port, used to build distributed connection."""
 
-    kv_connector_extra_config: dict[str, Any] = field(default_factory=dict)
+    kv_connector_extra_config: dict[str, Any] = Field(default_factory=dict)
     """any extra config that the connector may need."""
 
     kv_connector_module_path: Optional[str] = None
@@ -98,6 +97,20 @@ class KVTransferConfig:
             )
 
         return kv_role
+
+    @field_validator("kv_buffer_device")
+    @classmethod
+    def _validate_buffer_device(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+
+        allowed_devices = {"cuda", "cpu"}
+        if value not in allowed_devices:
+            raise ValueError(
+                "Unsupported kv_buffer_device: "
+                f"{value}. Supported devices are {allowed_devices}"
+            )
+        return value
 
     @model_validator(mode="after")
     def _validate_kv_role_is_set_if_kv_connector_is_set(self: Self) -> Self:
