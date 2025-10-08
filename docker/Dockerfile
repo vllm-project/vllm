@@ -396,7 +396,7 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
             # NOTE: To make new precompiled wheels, see tools/flashinfer-build.sh
             echo "🏗️  Installing FlashInfer from pre-compiled wheel"
             uv pip install --system https://wheels.vllm.ai/flashinfer-python/flashinfer_python-0.3.1-cp39-abi3-manylinux1_x86_64.whl \
-                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+                --reinstall --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
             if [ "${FLASHINFER_AOT_COMPILE}" = "true" ]; then
                 # Download pre-compiled cubins
                 TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
@@ -413,14 +413,14 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
             # Install with no-build-isolation since we already built AOT kernels
             TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
                 uv pip install --system --no-build-isolation . \
-                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+                --reinstall --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
             # Download pre-compiled cubins
             TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
                 python3 -m flashinfer --download-cubin || echo "WARNING: Failed to download flashinfer cubins."
         else
             echo "🏗️  Installing FlashInfer without AOT compilation in JIT mode"
             uv pip install --system . \
-                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+                --reinstall --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
         fi
     popd
     rm -rf flashinfer
