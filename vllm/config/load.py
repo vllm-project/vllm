@@ -59,6 +59,10 @@ class LoadConfig:
       This is recommended for models on network filesystems (e.g., Lustre, NFS)
       as it avoids inefficient random reads, significantly speeding up model
       initialization. However, it uses more CPU RAM.
+    - "torchao": Weights are loaded in upfront and then reconstructed
+      into torchao tensor subclasses. This is used when the checkpoint
+      was quantized using torchao and saved using safetensors.
+      Needs torchao >= 0.14.0
     """
     model_loader_extra_config: Union[dict, TensorizerConfig] = field(
         default_factory=dict
