@@ -327,7 +327,9 @@ class OpenAIServing:
             prompt_token_ids = prompt.get("prompt_token_ids", [])  # type: ignore
             multi_modal_data = prompt.get("multi_modal_data")  # type: ignore
 
-        mm_processor_kwargs = processed_inputs.get("mm_processor_kwargs")
+        mm_processor_kwargs: Optional[dict[str, Any]] = processed_inputs.get(
+            "mm_processor_kwargs"
+        )  # type: ignore
 
         tokenized_length = len(prompt_token_ids)
 
@@ -441,7 +443,7 @@ class OpenAIServing:
             prompt=prompt_text,
             outputs=[
                 CompletionOutput(
-                    text=beam.text,
+                    text=beam.text,  # type: ignore
                     cumulative_logprob=beam.cum_logprob,
                     token_ids=beam.tokens[tokenized_length:],
                     index=i,

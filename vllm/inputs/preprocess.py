@@ -348,8 +348,8 @@ class InputPreprocessor:
         if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_token_ids,
-                parsed_content.get("multi_modal_data", {}),
-                parsed_content.get("mm_processor_kwargs"),
+                parsed_content.get("multi_modal_data") or {},
+                parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
@@ -377,8 +377,8 @@ class InputPreprocessor:
         if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_text,
-                parsed_content.get("multi_modal_data", {}),
-                parsed_content.get("mm_processor_kwargs"),
+                parsed_content.get("multi_modal_data") or {},
+                parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
