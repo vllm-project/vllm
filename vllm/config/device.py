@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from dataclasses import field
 from typing import Any, Literal, Optional, Union
 
 import torch
-from pydantic import ConfigDict, SkipValidation, model_validator
+from pydantic import ConfigDict, Field, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -26,7 +25,7 @@ class DeviceConfig:
     removed in a future release.
     It will now be set automatically based
     on the current platform."""
-    device_type: str = field(init=False)
+    device_type: str = Field(init=False)
     """Device type from the current platform. Set during validation."""
 
     def compute_hash(self) -> str:
