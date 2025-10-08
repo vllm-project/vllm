@@ -634,91 +634,57 @@ class SPLADESparsePooler(Pooler):
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> Union[torch.Tensor, list[torch.Tensor]]:
-        if isinstance(hidden_states, torch.Tensor):
-            hs_list = [hidden_states]
-        else:
-            hs_list = list(hidden_states)
+        lens_tensor: torch.Tensor = pooling_metadata.prompt_lens
+        lens: list[int] = lens_tensor.tolist()
+        B: int = len(lens)
+        max_len: int = int(lens_tensor.max().item())
 
-        for i, hs in enumerate(hs_list):
-            if hs.dim() == 3 and hs.size(0) == 1:
-                hs_list[i] = hs.squeeze(0)  # [L, H]
-            elif hs.dim() != 2:
-                raise ValueError(f"Expected [L,H] or [1,L,H], got {tuple(hs.shape)}")
+        if isinstance(hidden_states, list):
+            hidden_states = torch.cat(hidden_states, dim=0)
+        assert isinstance(hidden_states, torch.Tensor) and hidden_states.dim() == 2
 
-        B = len(hs_list)
-        H = hs_list[0].size(-1)
+        device = hidden_states.device
+        H: int = int(self.mlm_head.dense.in_features)
 
-        raw_lens = pooling_metadata.prompt_lens
+        hs_list = list(torch.split(hidden_states, lens, dim=0))
 
-        def _fallback_lens_from_hs():
-            return [int(h.size(0)) for h in hs_list]
-
-        if raw_lens is None:
-            lens = _fallback_lens_from_hs()
-        elif isinstance(raw_lens, int):
-            lens = [int(raw_lens)] * B
-        else:
-            try:
-                tmp = list(raw_lens)
-                if len(tmp) == B:
-                    lens = [int(x) for x in tmp]
-                elif len(tmp) == 1:
-                    lens = [int(tmp[0])] * B
-                else:
-                    lens = _fallback_lens_from_hs()
-            except TypeError:
-                lens = _fallback_lens_from_hs()
-
-        max_len = max(int(h.size(0)) for h in hs_list)
-        device = hs_list[0].device
-
-        # pad to [B, T, H]
-        padded = hs_list[0].new_zeros((B, max_len, H))  # zeros
-        attn_mask = torch.zeros((B, max_len), dtype=torch.bool, device=device)
-
+        padded = hidden_states.new_zeros((B, max_len, H))
+        valid_mask = torch.zeros((B, max_len), dtype=torch.bool, device=device)
         for i, (hs, L) in enumerate(zip(hs_list, lens)):
             L = int(L)
-            L = min(L, max_len)
-            padded[i, :L] = hs[:L]
-            attn_mask[i, :L] = True
+            padded[i, :L] = hs
+            valid_mask[i, :L] = True
 
-        # [CLS]/[SEP] remove(Optional)
-        token_ids = getattr(pooling_metadata, "prompt_token_ids", None)  # [B,T] or None
+        token_ids = pooling_metadata.prompt_token_ids
         if self.remove_cls_sep and token_ids is not None:
             for i, L in enumerate(lens):
-                L = int(min(L, max_len))
-                if L <= 0:
-                    continue
                 if (
                     self.cls_token_id is not None
                     and int(token_ids[i, 0].item()) == self.cls_token_id
                 ):
-                    attn_mask[i, 0] = False
+                    valid_mask[i, 0] = False
                 if (
                     self.sep_token_id is not None
                     and int(token_ids[i, L - 1].item()) == self.sep_token_id
                 ):
-                    attn_mask[i, L - 1] = False
+                    valid_mask[i, L - 1] = False
 
-        # MLM logits: [B, T, V]
-        B, T, _ = padded.shape
-        flat = padded.reshape(B * T, H)  # [B*T, H]
-        logits = self.mlm_head(flat)  # [B*T, V]
+        flat = padded.reshape(B * max_len, H)
+        logits = self.mlm_head(flat)
         V = int(logits.size(-1))
-        logits = logits.view(B, T, V)  # [B, T, V]
+        logits = logits.view(B, max_len, V)
 
         # SPLADE activation
         scores = torch.log1p(torch.relu(logits))  # [B, T, V]
 
-        # pooling after masking
         if self.pooling == "sum":
-            pooled = (scores * attn_mask.float().unsqueeze(-1)).sum(dim=1)  # [B, V]
+            pooled = (scores * valid_mask.to(scores.dtype).unsqueeze(-1)).sum(dim=1)
         else:
             neg_inf = torch.tensor(
                 float("-inf"), device=scores.device, dtype=scores.dtype
             )
-            masked = scores.masked_fill(~attn_mask.unsqueeze(-1), neg_inf)  # [B, T, V]
-            pooled = masked.max(dim=1).values  # [B, V]
+            masked = scores.masked_fill(~valid_mask.unsqueeze(-1), neg_inf)
+            pooled = masked.max(dim=1).values
             pooled = torch.where(
                 torch.isneginf(pooled), torch.zeros_like(pooled), pooled
             )
