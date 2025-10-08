@@ -10,8 +10,7 @@
 
 #include "../cuda_compat.h"
 #include "../dispatch_utils.h"
-
-#define CEILDIV(x, y) (((x) + (y) - 1) / (y))
+#include "core/math.hpp"
 
 namespace {
 
@@ -22,11 +21,6 @@ __device__ __forceinline__ int32_t index(int32_t total_col, int32_t row,
 
 }  // namespace
 
-int round_up(int value, int multiple) {
-  if (multiple == 0) return value;
-  return ((value + multiple - 1) / multiple) * multiple;
-}
-
 template <typename scalar_t, typename token_cnts_t>
 __global__ void moe_lora_align_sum_kernel(
     scalar_t* __restrict__ topk_ids, scalar_t* __restrict__ token_lora_mapping,
@@ -34,7 +28,7 @@ __global__ void moe_lora_align_sum_kernel(
     int max_num_tokens_padded, int max_num_m_blocks,
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
     int topk_num, int32_t* total_tokens_post_pad) {
-  const size_t tokens_per_thread = CEILDIV(numel, blockDim.x);
+  const size_t tokens_per_thread = div_ceil(numel, blockDim.x);
   const size_t start_idx = threadIdx.x * tokens_per_thread;
 
   int lora_id = blockIdx.x;
@@ -71,8 +65,8 @@ __global__ void moe_lora_align_sum_kernel(
     cumsum[0] = 0;
     for (int i = 1; i <= num_experts; ++i) {
       cumsum[i] = cumsum[i - 1] +
-                  CEILDIV(tokens_cnts[index(num_experts, blockDim.x, i - 1)],
-                          block_size) *
+                  div_ceil(tokens_cnts[index(num_experts, blockDim.x, i - 1)],
+                           block_size) *
                       block_size;
     }
     total_tokens_post_pad[lora_id] = static_cast<int32_t>(cumsum[num_experts]);
@@ -104,12 +98,6 @@ __global__ void moe_lora_align_sum_kernel(
         tokens_cnts[index(num_experts, threadIdx.x, expert_id)] +
         cumsum[expert_id];
 
-    // if (token_lora_mapping[i / topk_num] == lora_id) {
-    //   sorted_token_ids[index(max_num_tokens_padded, lora_id, rank_post_pad)]
-    //   =
-    //       i;
-    //   tokens_cnts[index(num_experts, threadIdx.x, expert_id)] += 1;
-    // }
     int mask = (int)token_lora_mapping[i / topk_num] == lora_id;
     atomicAdd(
         &sorted_token_ids[index(max_num_tokens_padded, lora_id, rank_post_pad)],
@@ -128,8 +116,11 @@ void moe_lora_align_block_size(torch::Tensor topk_ids,
   const int topk_num = topk_ids.size(1);
 
   int max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1);
-  max_num_tokens_padded = round_up(max_num_tokens_padded, block_size);
-  int max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size);
+  max_num_tokens_padded = (block_size == 0) ? max_num_tokens_padded
+                                            : round_to_next_multiple_of(
+                                                  max_num_tokens_padded,
+                                                  static_cast<int>(block_size));
+  int max_num_m_blocks = div_ceil(max_num_tokens_padded, block_size);
 
   int device_max_shared_mem;
   auto dev = topk_ids.get_device();
@@ -138,7 +129,9 @@ void moe_lora_align_block_size(torch::Tensor topk_ids,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   const int32_t num_thread = max((int32_t)num_experts, 128);  // WARP_SIZE,
-
+  TORCH_CHECK(num_thread <= 1024,
+              "num_thread must be less than 1024, "
+              "and fallback is not implemented yet.");
   const int32_t shared_mem = (num_thread + 1) * num_experts * sizeof(int32_t) +
                              (num_experts + 1) * sizeof(int32_t);
 
