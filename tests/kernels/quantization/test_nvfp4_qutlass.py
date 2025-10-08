@@ -23,8 +23,8 @@ from compressed_tensors.transform.utils.hadamard import deterministic_hadamard_m
 
 from vllm import _custom_ops as ops  # use existing nvfp4 gemm in vllm
 from vllm._custom_ops import fusedQuantizeNv
+from vllm.model_executor.layers.quantization.qutlass_utils import to_blocked
 from vllm.platforms import current_platform
-from vllm.qutlass_utils.utils import to_blocked
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA required for these tests.", allow_module_level=True)
@@ -226,8 +226,8 @@ def test_fused_quantization(rot_size: int, global_scale_value: float):
     b_dq, *_ = _dq_fp4(b_e2m1, b_e4m3[:n, :k], alpha=1.0)
     out_ref = a_dq @ b_dq.transpose(-2, -1)
 
-    a_scale_block = to_blocked(a_e4m3).view(-1, k // 16)
-    b_scale_block = to_blocked(b_e4m3).view(-1, k // 16)
+    a_scale_block = to_blocked(a_e4m3, backend="triton").view(-1, k // 16)
+    b_scale_block = to_blocked(b_e4m3, backend="triton").view(-1, k // 16)
     alpha = torch.tensor([1.0], device=device)
     out = ops.cutlass_scaled_fp4_mm(
         a_e2m1, b_e2m1, a_scale_block, b_scale_block, alpha, torch.bfloat16
@@ -259,8 +259,8 @@ def test_llama_shapes(model: str, layer_idx: int, batch: int, rot_size: int):
     b_dq, *_ = _dq_fp4(b_e2m1, b_e4m3[:n, :k], alpha=1.0)
     out_ref = a_dq @ b_dq.transpose(-2, -1)
 
-    a_scale_block = to_blocked(a_e4m3).view(-1, k // 16)
-    b_scale_block = to_blocked(b_e4m3).view(-1, k // 16)
+    a_scale_block = to_blocked(a_e4m3, backend="triton").view(-1, k // 16)
+    b_scale_block = to_blocked(b_e4m3, backend="triton").view(-1, k // 16)
     alpha = torch.tensor([1.0], device=device)
     out = ops.cutlass_scaled_fp4_mm(
         a_e2m1, b_e2m1, a_scale_block, b_scale_block, alpha, torch.bfloat16

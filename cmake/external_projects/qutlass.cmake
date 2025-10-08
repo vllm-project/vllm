@@ -81,6 +81,10 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND QUTLASS_ARCHS)
     TARGET_CUDA_ARCH=${QUTLASS_TARGET_CC}
   )
 
+  target_compile_options(_C PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --use_fast_math -O3>
+  )
+
 else()
   if("${CMAKE_CUDA_COMPILER_VERSION}" VERSION_LESS "12.8")
     message(STATUS

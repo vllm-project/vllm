@@ -26,7 +26,7 @@ from compressed_tensors.transform.utils.hadamard import deterministic_hadamard_m
 from weight_shapes import WEIGHT_SHAPES
 
 from vllm._custom_ops import fusedQuantizeMx, matmul_mxf4_bf16_tn
-from vllm.qutlass_utils.utils import to_blocked
+from vllm.model_executor.layers.quantization.qutlass_utils import to_blocked
 from vllm.triton_utils import triton
 
 PROVIDER_CFGS = {
@@ -51,7 +51,7 @@ def _quant_weight_mxfp4(
     weight_hf_e2m1, weight_hf_e8m0 = fusedQuantizeMx(
         b, forward_hadamard_matrix, method="abs_max"
     )
-    weight_hf_scale_block = to_blocked(weight_hf_e8m0, False)
+    weight_hf_scale_block = to_blocked(weight_hf_e8m0, backend="triton")
     return weight_hf_e2m1, weight_hf_scale_block
 
 
@@ -66,7 +66,7 @@ def build_mxfp4_runner(cfg, a, b, forward_hadamard_matrix, dtype, device):
         input_hf_e2m1, input_hf_e8m0 = fusedQuantizeMx(
             a, forward_hadamard_matrix, method="abs_max"
         )
-        input_hf_scale_block = to_blocked(input_hf_e8m0, False)
+        input_hf_scale_block = to_blocked(input_hf_e8m0, backend="triton")
 
         def run():
             return matmul_mxf4_bf16_tn(
@@ -84,7 +84,7 @@ def build_mxfp4_runner(cfg, a, b, forward_hadamard_matrix, dtype, device):
         input_hf_e2m1, input_hf_e8m0 = fusedQuantizeMx(
             a, forward_hadamard_matrix, method="abs_max"
         )
-        input_hf_scale_block = to_blocked(input_hf_e8m0, False)
+        input_hf_scale_block = to_blocked(input_hf_e8m0, backend="triton")
         return matmul_mxf4_bf16_tn(
             input_hf_e2m1,
             weight_hf_e2m1,
@@ -170,7 +170,7 @@ if __name__ == "__main__":
         "--models",
         nargs="+",
         type=str,
-        default=["meta-llama/Llama-3.1-8B-Instruct"],
+        default=["meta-llama/Llama-3.3-70B-Instruct"],
         choices=list(WEIGHT_SHAPES.keys()),
     )
     parser.add_argument("--tp-sizes", nargs="+", type=int, default=[1])

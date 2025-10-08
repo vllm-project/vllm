@@ -11,13 +11,12 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Literal
+
 import torch
 import triton
 import triton.language as tl
 from torch.library import wrap_triton
-
-Tensor = torch.Tensor
-
 
 @triton.jit
 def triton_scale_swizzle(
@@ -145,7 +144,7 @@ def ceil_div(a, b):
     return (a + b - 1) // b
 
 
-def to_blocked(input_matrix, use_triton_kernel: bool = False) -> Tensor:
+def to_blocked(input_matrix, backend: Literal["torch", "triton"] = "triton") -> torch.Tensor:
     """
     Rearrange a large matrix by breaking it into blocks and applying
     the rearrangement pattern.
@@ -155,14 +154,15 @@ def to_blocked(input_matrix, use_triton_kernel: bool = False) -> Tensor:
 
     Args:
         input_matrix: Input tensor of shape (H, W)
-        use_triton_kernel: Whether to use a triton implementation instead of
-            relying on torch.compile
+        backend: "torch" (PyTorch path) or "triton" (Triton kernel)
 
     Returns:
         Rearranged tensor of shape (32*ceil_div(H,128), 16*ceil_div(W,4))
     """
-    if use_triton_kernel:
+    if backend == "triton":
         return triton_mx_block_rearrange(input_matrix).flatten()
+    elif backend != "torch":
+        raise ValueError(f'backend must be "torch" or "triton", got {backend!r}')
 
     rows, cols = input_matrix.shape
     n_row_blocks = ceil_div(rows, 128)

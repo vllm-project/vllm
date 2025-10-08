@@ -21,9 +21,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.qutlass_utils import to_blocked
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.qutlass_utils.utils import to_blocked
 from vllm.utils import direct_register_custom_op
 
 
@@ -292,8 +292,8 @@ def matmul_mxf4_bf16(
     return matmul_mxf4_bf16_tn(
         x,
         w,
-        to_blocked(xs, True).view(torch.float8_e8m0fnu),
-        to_blocked(ws, True).view(torch.float8_e8m0fnu),
+        to_blocked(xs, backend="triton").view(torch.float8_e8m0fnu),
+        to_blocked(ws, backend="triton").view(torch.float8_e8m0fnu),
         alpha,
     )
 
@@ -351,10 +351,12 @@ def matmul_nvf4_bf16(
     return cutlass_scaled_fp4_mm(
         x,
         w,
-        to_blocked(xs, True)
+        to_blocked(xs, backend="triton")
         .view(torch.float8_e4m3fn)
         .view(-1, x.shape[1] // 8),  # *2//16
-        to_blocked(ws, True).view(torch.float8_e4m3fn).view(-1, x.shape[1] // 8),
+        to_blocked(ws, backend="triton")
+        .view(torch.float8_e4m3fn)
+        .view(-1, x.shape[1] // 8),
         alpha,
         torch.bfloat16,
     )

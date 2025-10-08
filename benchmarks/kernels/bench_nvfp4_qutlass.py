@@ -27,7 +27,7 @@ from weight_shapes import WEIGHT_SHAPES
 
 from vllm import _custom_ops as ops  # use existing nvfp4 gemm in vllm
 from vllm._custom_ops import fusedQuantizeNv
-from vllm.qutlass_utils.utils import to_blocked
+from vllm.model_executor.layers.quantization.qutlass_utils import to_blocked
 from vllm.triton_utils import triton
 
 PROVIDER_CFGS = {
@@ -58,7 +58,9 @@ def _quant_weight_nvfp4(
     weight_hf_e2m1, weight_hf_e8m0 = fusedQuantizeNv(
         b, forward_hadamard_matrix, global_scale
     )
-    weight_hf_scale_block = to_blocked(weight_hf_e8m0, True).view(-1, K // 16)
+    weight_hf_scale_block = to_blocked(weight_hf_e8m0, backend="triton").view(
+        -1, K // 16
+    )
     return weight_hf_e2m1, weight_hf_scale_block
 
 
@@ -74,7 +76,9 @@ def build_nvfp4_runner(cfg, a, b, forward_hadamard_matrix, dtype, device, M, N, 
         input_hf_e2m1, input_hf_e8m0 = fusedQuantizeNv(
             a, forward_hadamard_matrix, global_scale
         )
-        input_hf_scale_block = to_blocked(input_hf_e8m0, True).view(-1, K // 16)
+        input_hf_scale_block = to_blocked(input_hf_e8m0, backend="triton").view(
+            -1, K // 16
+        )
 
         def run():
             return ops.cutlass_scaled_fp4_mm(
@@ -93,7 +97,9 @@ def build_nvfp4_runner(cfg, a, b, forward_hadamard_matrix, dtype, device, M, N, 
         input_hf_e2m1, input_hf_e8m0 = fusedQuantizeNv(
             a, forward_hadamard_matrix, global_scale
         )
-        input_hf_scale_block = to_blocked(input_hf_e8m0, True).view(-1, K // 16)
+        input_hf_scale_block = to_blocked(input_hf_e8m0, backend="triton").view(
+            -1, K // 16
+        )
         return ops.cutlass_scaled_fp4_mm(
             input_hf_e2m1,
             weight_hf_e2m1,
@@ -180,7 +186,7 @@ if __name__ == "__main__":
         "--models",
         nargs="+",
         type=str,
-        default=["meta-llama/Llama-3.1-8B-Instruct"],
+        default=["meta-llama/Llama-3.3-70B-Instruct"],
         choices=list(WEIGHT_SHAPES.keys()),
     )
     parser.add_argument("--tp-sizes", nargs="+", type=int, default=[1])
