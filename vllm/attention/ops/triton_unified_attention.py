@@ -37,14 +37,14 @@ def select_2d_config(
         if head_size > 128:
             max_num_stages_2d = 2
         if all_decode == False:
-            num_stages_2d = 4
-            num_warps = 4
+            num_stages_2d = 1
+            num_warps = 2
         else:
             num_stages_2d = 3
             num_warps = 2
             TILE_SIZE = block_size
 
-        if max_seqlen_q >= 512:
+        if max_seqlen_q >= 256:
             BLOCK_M = 128
             num_stages_2d = 1
             num_warps = 4
