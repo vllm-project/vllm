@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from dataclasses import field
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 from pydantic import Field, field_validator
@@ -65,7 +64,7 @@ class LoadConfig:
       was quantized using torchao and saved using safetensors.
       Needs torchao >= 0.14.0
     """
-    model_loader_extra_config: Union[dict, TensorizerConfig] = field(
+    model_loader_extra_config: Union[dict, TensorizerConfig] = Field(
         default_factory=dict
     )
     """Extra config for model loader. This will be passed to the model loader
