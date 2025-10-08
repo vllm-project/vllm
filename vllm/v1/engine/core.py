@@ -681,17 +681,21 @@ class EngineCoreProc(EngineCore):
             # external LB case for our colocated front-end to use (coordinator
             # only runs with rank 0).
             dp_stats_address = self.frontend_stats_publish_address
-            handshake_socket.send(
-                msgspec.msgpack.encode(
-                    {
-                        "status": "READY",
-                        "local": local_client,
-                        "headless": headless,
-                        "num_gpu_blocks": num_gpu_blocks,
-                        "dp_stats_address": dp_stats_address,
-                    }
+
+            # Include config hash for DP configuration validation
+            ready_msg = {
+                "status": "READY",
+                "local": local_client,
+                "headless": headless,
+                "num_gpu_blocks": num_gpu_blocks,
+                "dp_stats_address": dp_stats_address,
+            }
+            if vllm_config.parallel_config.data_parallel_size > 1:
+                ready_msg["parallel_config_hash"] = (
+                    vllm_config.parallel_config.compute_hash()
                 )
-            )
+
+            handshake_socket.send(msgspec.msgpack.encode(ready_msg))
 
     @staticmethod
     def startup_handshake(

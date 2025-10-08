@@ -100,6 +100,11 @@ void apply_repetition_penalties_(torch::Tensor& logits,
                                  const torch::Tensor& output_mask,
                                  const torch::Tensor& repetition_penalties);
 
+void top_k_per_row(const torch::Tensor& logits, const torch::Tensor& rowStarts,
+                   const torch::Tensor& rowEnds, torch::Tensor& indices,
+                   torch::Tensor& values, int64_t numRows, int64_t stride0,
+                   int64_t stride1);
+
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,
                                double epsilon);

@@ -10,7 +10,6 @@ AsyncLLMEngine are working correctly.
 """
 
 import lm_eval
-import pytest
 
 from vllm.platforms import current_platform
 
@@ -67,21 +66,13 @@ def run_test(more_args):
         ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda()
-    and not current_platform.is_tpu()
-    and not current_platform.is_xpu(),
-    reason="V1 currently only supported on CUDA, XPU and TPU",
-)
-def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch):
+def test_lm_eval_accuracy_v1_engine():
     """Run with the V1 Engine."""
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        more_args = []
+    more_args = []
 
-        # Limit compilation time for V1
-        if current_platform.is_tpu():
-            more_args = ["--max-num-seqs", "64"]
+    # Limit compilation time for V1
+    if current_platform.is_tpu():
+        more_args = ["--max-num-seqs", "64"]
 
-        run_test(more_args)
+    run_test(more_args)

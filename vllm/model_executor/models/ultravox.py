@@ -69,18 +69,16 @@ class UltravoxAudioFeatureInputs(TensorSchema):
     type: Literal["audio_features"]
     data: Annotated[
         Union[torch.Tensor, list[torch.Tensor], list[list[torch.Tensor]]],
-        TensorShape("b", "n", "nmb", "t", dynamic_dims={"n"}),
+        TensorShape("bn", "nmb", "t"),
     ]
-    lens: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
-        TensorShape("b", "n", dynamic_dims={"n"}),
-    ]
-    """Length of the audio frames. Used for attention mask in WhisperEncoder."""
-    token_len: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
-        TensorShape("b", "n", dynamic_dims={"n"}),
-    ]
-    """Length of the audio tokens. Used for flattening the audio features."""
+    lens: Annotated[torch.Tensor, TensorShape("bn")]
+    """
+    Length of the audio frames per chunk. Used for attention mask in WhisperEncoder.
+    """
+    token_len: Annotated[torch.Tensor, TensorShape("bn")]
+    """Length of the audio tokens per chunk. Used for flattening the audio features."""
+    num_chunks: Annotated[torch.Tensor, TensorShape("n")]
+    """Number of chunks per audio. Used for flattening the audio features."""
 
 
 class UltravoxAudioEmbeddingInputs(TensorSchema):
@@ -421,6 +419,8 @@ class ModifiedWhisperEncoder(WhisperEncoder):
     dummy_inputs=UltravoxDummyInputsBuilder,
 )
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -519,6 +519,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         audio_embeds = kwargs.pop("audio_embeds", None)
         audio_lens = kwargs.pop("audio_lens", None)
         audio_token_len = kwargs.pop("audio_token_len", None)
+        audio_num_chunks = kwargs.pop("audio_num_chunks", None)
 
         if audio_features is None and audio_embeds is None:
             return None
@@ -529,6 +530,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
                 data=audio_features,
                 lens=audio_lens,
                 token_len=audio_token_len,
+                num_chunks=audio_num_chunks,
             )
 
         if audio_embeds is not None:
@@ -547,9 +549,8 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         # [[B1, 80, M1], [B2, 80, M2]] -> [B1+B2, 80, max(M1, M2)]
         audio_features = pad_and_concat_to_dim3(audio_input["data"])
 
-        # [B1, B2] -> [B1+B2]
-        audio_lens = flatten_bn(audio_input["lens"], concat=True)
-        audio_token_len = flatten_bn(audio_input["token_len"], concat=True)
+        audio_lens = audio_input["lens"]
+        audio_token_len = audio_input["token_len"]
 
         embeddings = self._audio_features_to_embeddings(audio_features, audio_lens)
 
@@ -568,7 +569,8 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
         # Return one tensor per input audio
         embed_lens = [
-            token_len_item.sum().item() for token_len_item in audio_input["token_len"]
+            chunk_lens.sum().item()
+            for chunk_lens in audio_token_len.split(audio_input["num_chunks"].tolist())
         ]
         return flattened_embeddings.split(embed_lens)
 
@@ -663,6 +665,7 @@ def pad_and_concat_to_dim3(
         if features.ndim > 3:
             # Flatten [B, N, 80, M] -> [B * N, 80, M]
             features = flatten_bn(features)
+
         return features
 
     features = [pad_and_concat_to_dim3(f) for f in features]

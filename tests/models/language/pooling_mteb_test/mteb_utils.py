@@ -192,7 +192,6 @@ def mteb_test_embed_models(
         model_info.name,
         runner="pooling",
         max_model_len=None,
-        enforce_eager=True,
         **vllm_extra_kwargs,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
@@ -349,7 +348,6 @@ def mteb_test_rerank_models(
         runner="pooling",
         max_model_len=None,
         max_num_seqs=8,
-        enforce_eager=True,
         **vllm_extra_kwargs,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config

@@ -465,6 +465,7 @@ def calculate_metrics(
 
 
 async def benchmark(
+    task_type: TaskType,
     endpoint_type: str,
     api_url: str,
     base_url: str,
@@ -490,18 +491,10 @@ async def benchmark(
     ramp_up_end_rps: Optional[int] = None,
     ready_check_timeout_sec: int = 600,
 ):
-    task_type = (
-        TaskType.EMBEDDING
-        if api_url.endswith("/v1/embeddings")
-        else TaskType.GENERATION
-    )
-    if endpoint_type in ASYNC_REQUEST_FUNCS:
-        if task_type == TaskType.EMBEDDING:
-            request_func = ASYNC_REQUEST_FUNCS["openai-embeddings"]
-        else:
-            request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
-    else:
-        raise ValueError(f"Unknown backend: {endpoint_type}")
+    try:
+        request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
+    except KeyError:
+        raise ValueError(f"Unknown backend: {endpoint_type}") from None
 
     # Reuses connections across requests to reduce TLS handshake overhead.
     connector = aiohttp.TCPConnector(
@@ -1310,36 +1303,43 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     input_requests = get_samples(args, tokenizer)
     goodput_config_dict = check_goodput_args(args)
 
+    backend = args.backend
+    task_type = TaskType.EMBEDDING if "embeddings" in backend else TaskType.GENERATION
+
     # Collect the sampling parameters.
-    sampling_params = {
-        k: v
-        for k, v in {
-            "top_p": args.top_p,
-            "top_k": args.top_k,
-            "min_p": args.min_p,
-            "temperature": args.temperature,
-            "frequency_penalty": args.frequency_penalty,
-            "presence_penalty": args.presence_penalty,
-            "repetition_penalty": args.repetition_penalty,
-        }.items()
-        if v is not None
-    }
+    if task_type == TaskType.GENERATION:
+        sampling_params = {
+            k: v
+            for k, v in {
+                "top_p": args.top_p,
+                "top_k": args.top_k,
+                "min_p": args.min_p,
+                "temperature": args.temperature,
+                "frequency_penalty": args.frequency_penalty,
+                "presence_penalty": args.presence_penalty,
+                "repetition_penalty": args.repetition_penalty,
+            }.items()
+            if v is not None
+        }
 
-    # Sampling parameters are only supported by openai-compatible backend.
-    if sampling_params and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
-        raise ValueError(
-            "Sampling parameters are only supported by openai-compatible backends."
-        )
+        # Sampling parameters are only supported by openai-compatible backend.
+        if sampling_params and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
+            raise ValueError(
+                "Sampling parameters are only supported by openai-compatible backends."
+            )
 
-    if "temperature" not in sampling_params:
-        sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+        if "temperature" not in sampling_params:
+            sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+    else:
+        sampling_params = {}
 
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
     gc.freeze()
 
     benchmark_result = await benchmark(
-        endpoint_type=args.backend,
+        task_type=task_type,
+        endpoint_type=backend,
         api_url=api_url,
         base_url=base_url,
         model_id=model_id,

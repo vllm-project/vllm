@@ -23,7 +23,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
-from vllm.platforms.tpu import USE_TPU_COMMONS
+from vllm.platforms.tpu import USE_TPU_INFERENCE
 from vllm.tasks import SupportedTask
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -36,8 +36,8 @@ logger = init_logger(__name__)
 
 _R = TypeVar("_R")
 
-if not USE_TPU_COMMONS:
-    logger.info("tpu_commons not found, using vLLM's TPUWorker.")
+if not USE_TPU_INFERENCE:
+    logger.info("tpu_inference not found, using vLLM's TPUWorker.")
     import torch_xla.core.xla_model as xm
     import torch_xla.debug.profiler as xp
     import torch_xla.runtime as xr
@@ -346,7 +346,7 @@ class TPUWorker:
         return fn(self.get_model())
 
 
-if USE_TPU_COMMONS:
-    from tpu_commons.worker import TPUWorker as TPUCommonsWorker
+if USE_TPU_INFERENCE:
+    from tpu_inference.worker import TPUWorker as TpuInferenceWorker
 
-    TPUWorker = TPUCommonsWorker  # type: ignore
+    TPUWorker = TpuInferenceWorker  # type: ignore

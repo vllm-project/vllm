@@ -15,7 +15,8 @@ from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
-    from vllm.config import BlockSize, ModelConfig, VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config.cache import BlockSize
     from vllm.pooling_params import PoolingParams
 else:
     BlockSize = None
@@ -26,7 +27,7 @@ else:
 
 logger = init_logger(__name__)
 
-USE_TPU_COMMONS = False
+USE_TPU_INFERENCE = False
 
 
 class TpuPlatform(Platform):
@@ -254,10 +255,10 @@ class TpuPlatform(Platform):
 
 
 try:
-    from tpu_commons.platforms import TpuPlatform as TpuCommonsPlatform
+    from tpu_inference.platforms import TpuPlatform as TpuInferencePlatform
 
-    TpuPlatform = TpuCommonsPlatform  # type: ignore
-    USE_TPU_COMMONS = True
+    TpuPlatform = TpuInferencePlatform  # type: ignore
+    USE_TPU_INFERENCE = True
 except ImportError:
-    logger.info("tpu_commons not found, using vLLM's TpuPlatform")
+    logger.info("tpu_inference not found, using vLLM's TpuPlatform")
     pass

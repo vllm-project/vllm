@@ -24,12 +24,7 @@ from vllm import _custom_ops as ops
 from vllm.attention.ops import flashmla
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.utils import cdiv
-from vllm.v1.attention.backends.mla.flashmla_sparse import (
-    FlashMLASparseBackend,
-    FlashMLASparseDecodeAndContextMetadata,
-    FlashMLASparseImpl,
-    FlashMLASparseMetadata,
-)
+from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
 from vllm.v1.attention.backends.mla.indexer import split_prefill_chunks
 
 SPARSE_BACKEND_BATCH_SPECS = {
@@ -116,59 +111,6 @@ def _quantize_dequantize_fp8_ds_mla(
     return dequant_kv_c, dequant_k_pe
 
 
-def test_sparse_backend_metadata_registration():
-    backend = FlashMLASparseBackend
-
-    assert backend.get_name() == "FLASHMLA_SPARSE_VLLM_V1"
-    assert backend.get_metadata_cls() is FlashMLASparseMetadata
-    assert backend.get_impl_cls() is FlashMLASparseImpl
-
-    dtype_list = backend.get_supported_dtypes()
-    assert torch.bfloat16 in dtype_list
-
-    shape = backend.get_kv_cache_shape(
-        num_blocks=2, block_size=64, num_kv_heads=1, head_size=576
-    )
-    assert shape == (2, 64, 576)
-
-
-def test_sparse_decode_metadata_filters_prefill_indices():
-    prefill_context_lengths = torch.tensor([4, 2], dtype=torch.int32)
-    metadata = FlashMLASparseDecodeAndContextMetadata(
-        scheduler_metadata=torch.tensor([[0]], dtype=torch.int32),
-        num_splits=torch.tensor([1, 1], dtype=torch.int32),
-        cache_lens=torch.tensor([10, 12], dtype=torch.int32),
-        prefill_context_lengths=prefill_context_lengths,
-    )
-
-    indices = torch.tensor([[0, 3, 5], [1, 2, 4]], dtype=torch.int32)
-
-    context_indices, new_token_indices = metadata.filter_prefill_indices(indices)
-
-    expected_context = torch.tensor([[-1, -1, 5], [-1, -1, 4]], dtype=torch.int32)
-    expected_new_tokens = torch.tensor([[-1, -1, 1], [-1, 0, 2]], dtype=torch.int32)
-
-    assert torch.equal(context_indices, expected_context)
-    assert torch.equal(new_token_indices, expected_new_tokens)
-
-
-def test_sparse_impl_zero_fills_when_metadata_missing():
-    impl = FlashMLASparseImpl.__new__(FlashMLASparseImpl)
-    dummy_layer = object()
-    q = torch.zeros((2, 1, 3))
-    k_c = torch.zeros((2, 3))
-    k_pe = torch.zeros((2, 1, 1))
-    kv_cache = torch.zeros((1, 1, 1))
-    output = torch.ones((2, 4))
-
-    result = FlashMLASparseImpl.forward(
-        impl, dummy_layer, q, k_c, k_pe, kv_cache, attn_metadata=None, output=output
-    )
-
-    assert result is output
-    assert torch.all(result == 0)
-
-
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", ["fp8_ds_mla", "auto"])
 def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype):
@@ -198,11 +140,12 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype
         max_model_len=max_seqlen,
         num_gpu_blocks=max(2048, cdiv(total_cache_tokens, block_size) + 1),
         block_size=block_size,
+        hf_config_override={
+            "index_topk": topk_tokens,
+            "attn_module_list_cfg": [{"topk_tokens": topk_tokens}],
+        },
     )
     model_config = vllm_config.model_config
-    model_config.hf_config = SimpleNamespace(
-        attn_module_list_cfg=[{"topk_tokens": topk_tokens}]
-    )
     model_config.hf_text_config = SimpleNamespace(
         q_lora_rank=None,
         kv_lora_rank=kv_lora_rank,
@@ -301,6 +244,7 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype
     sdpa_reference = torch.cat(reference_outputs, dim=0)
 
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
+    vllm_config.model_config.hf_config.index_topk = topk_tokens
 
     common_attn_metadata = create_common_attn_metadata(
         batch_spec,
@@ -352,7 +296,7 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype
     debug_indices = debug_indices.expand(metadata.num_actual_tokens, -1).clone()
     mock_indexer = SimpleNamespace(topk_indices_buffer=debug_indices)
 
-    ok, reason = flashmla.is_flashmla_supported()
+    ok, reason = flashmla.is_flashmla_sparse_supported()
     if not ok:
         pytest.skip(reason)
 
@@ -397,9 +341,16 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype
         metadata.num_actual_tokens, num_heads * v_head_dim, dtype=dtype, device=device
     )
 
-    backend_output = impl.forward(
-        layer, query_vllm, kv_c_vllm, k_pe_vllm, kv_cache, metadata, output=out_buffer
-    )
+    with torch.inference_mode():
+        backend_output = impl.forward(
+            layer,
+            query_vllm,
+            kv_c_vllm,
+            k_pe_vllm,
+            kv_cache,
+            metadata,
+            output=out_buffer,
+        )
 
     assert backend_output.shape == sdpa_reference.shape
     assert backend_output.dtype == sdpa_reference.dtype
