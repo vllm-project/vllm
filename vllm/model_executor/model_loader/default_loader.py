@@ -223,9 +223,9 @@ class DefaultModelLoader(BaseModelLoader):
                 )
 
         if current_platform.is_tpu():
-            from vllm.platforms.tpu import USE_TPU_COMMONS
+            from vllm.platforms.tpu import USE_TPU_INFERENCE
 
-            if not USE_TPU_COMMONS:
+            if not USE_TPU_INFERENCE:
                 # In PyTorch XLA, we should call `torch_xla.sync`
                 # frequently so that not too many ops are accumulated
                 # in the XLA program.
