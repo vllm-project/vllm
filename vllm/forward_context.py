@@ -268,6 +268,9 @@ def set_forward_context(
     if vllm_config.parallel_config.data_parallel_size > 1 and (
         attn_metadata is not None or num_tokens is not None
     ):
+        # If num_tokens_across_dp hasn't already been initialized, then
+        # initialize it here. Both DP padding and Microbatching will be
+        # disabled.
         if num_tokens_across_dp is None:
             assert ubatch_slices is None
             assert num_tokens is not None

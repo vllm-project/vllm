@@ -76,7 +76,6 @@ def _post_process_ubatch(tensor: torch.Tensor) -> bool:
 
 def _post_process_dp_padding(tensor: torch.Tensor, should_dp_pad: bool) -> torch.Tensor:
     num_tokens_across_dp = tensor[1, :]
-    # DP padding is always enabled when running microbatched
     if should_dp_pad:
         # If DP padding is enabled, ensure that each rank is processing the same number
         # of tokens
@@ -102,19 +101,19 @@ def _synchronize_dp_ranks(
     run with microbatching or none of them do.
 
     2. Determines the total number of tokens that each rank will run.
-    All ranks will be padded out so that the run with the same number
-    of tokens
+    When running microbatched or if should_attempt_dp_padding is True, all
+    ranks will be padded out so that the run with the same number of tokens
 
     Returns: tuple[
         should_ubatch: Are all DP ranks going to microbatch
         num_tokens_after_padding: A tensor containing the total number of
-        tokens per-microbatch for each DP rank including padding.
+        tokens per-microbatch for each DP rank including any DP padding.
     ]
 
     """
     assert num_tokens_padded >= num_tokens_unpadded
 
-    # First we coordinate between the DP ranks via an All Reduce
+    # Coordinate between the DP ranks via an All Reduce
     # to determine the total number of tokens that each rank
     # will run and if we are using ubatching or not.
     tensor = _run_ar(
@@ -127,11 +126,10 @@ def _synchronize_dp_ranks(
 
     should_dp_pad = bool(torch.all(tensor[3] == 1).item())
 
-    # DP ranks should all have the same value for allow_dp_padding.
-    # This constraint can be easily relaxed but is usually indicative
-    # of a bug elsewhere
+    # DP ranks should all have the same value for should_attempt_dp_padding.
     assert should_attempt_dp_padding == should_dp_pad
 
+    # Check conditions for microbatching
     should_ubatch = _post_process_ubatch(tensor)
 
     if should_ubatch and not should_dp_pad:
@@ -143,6 +141,8 @@ def _synchronize_dp_ranks(
             )
         should_dp_pad = True
 
+    # Pad all DP ranks up to the maximum token count across ranks if
+    # should_dp_pad is True
     num_tokens_after_padding = _post_process_dp_padding(
         tensor,
         should_dp_pad,
