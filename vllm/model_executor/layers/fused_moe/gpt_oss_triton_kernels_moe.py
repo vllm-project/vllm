@@ -85,6 +85,7 @@ def triton_kernel_moe_forward(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
+    disable_rocm_padding: bool = False,
 ) -> torch.Tensor:
     routing_data, gather_idx, scatter_idx = routing(
         gating_output, topk, sm_first=not renormalize
@@ -103,6 +104,7 @@ def triton_kernel_moe_forward(
         apply_router_weight_on_input=apply_router_weight_on_input,
         global_num_experts=global_num_experts,
         expert_map=expert_map,
+        disable_rocm_padding=disable_rocm_padding,
     )
 
 
@@ -131,6 +133,7 @@ def triton_kernel_fused_experts(
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
     a1q_scale: Optional[torch.Tensor] = None,
+    disable_rocm_padding: bool = False,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
@@ -151,7 +154,7 @@ def triton_kernel_fused_experts(
 
     w1_bias_padded, w2_bias_padded = None, None
     # Only apply padding optimization on AMD/ROCm hardware
-    if torch.version.hip is not None:
+    if torch.version.hip is not None and not disable_rocm_padding:
         # Apply padding for better memory alignment
         pad_align = get_padding_alignment()
         hidden_dim = hidden_states.shape[-1]
