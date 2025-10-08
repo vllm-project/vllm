@@ -101,6 +101,7 @@ run_tests_for_model() {
   for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     # Calculate GPU ID - we'll distribute across available GPUs
     GPU_ID=$((i % $(get_num_gpus)))
+    NEXT_GPU=${GPU_ID}
     # If PREFILLER_TP_SIZE is more than 1
     for (( j=1; j < PREFILLER_TP_SIZE; j++ )); do
       NEXT_GPU=$(((GPU_ID + j) % $(get_num_gpus)))
