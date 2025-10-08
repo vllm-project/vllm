@@ -476,15 +476,11 @@ class LLM:
         if (
             not default_mm_loras
             or not isinstance(prompt, dict)
-            or "multi_modal_data" not in prompt
+            or not (mm_data := prompt.get("multi_modal_data") or {})
         ):
             return lora_request
 
-        prompt = cast(Union[TextPrompt, TokensPrompt], prompt)
-
-        intersection = set(prompt["multi_modal_data"].keys()).intersection(
-            default_mm_loras.keys()
-        )
+        intersection = set(mm_data.keys()).intersection(default_mm_loras.keys())
         if not intersection:
             return lora_request
         if len(intersection) > 1:

@@ -386,9 +386,7 @@ class OpenAIServing:
                 )
                 tasks.append(task)
 
-            output = await asyncio.gather(*tasks)
-
-            output = [x[0] for x in output]
+            output = [x[0] for x in await asyncio.gather(*tasks)]
 
             new_beams = []
             for i, current_beam in enumerate(all_beams):
