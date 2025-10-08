@@ -597,7 +597,7 @@ class VllmConfig:
         # https://github.com/vllm-project/vllm/issues/25094
         if has_blocked_weights():
             custom_ops = self.compilation_config.custom_ops
-            if "none" not in custom_ops and "-quant_fp8" not in custom_ops:
+            if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
