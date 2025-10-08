@@ -16,9 +16,6 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes, sha256, sha256_cbor
 from vllm.v1.core.kv_cache_manager import KVCacheManager
-
-# disable yapf here as it formats differently than isort such that both fail
-# yapf: disable
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
@@ -47,8 +44,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
-
-# yapf: enable
 
 pytestmark = pytest.mark.cpu_test
 
@@ -686,10 +681,10 @@ def test_get_kv_cache_configs_multiple_workers():
             num_blocks=10,
             kv_cache_tensors=[
                 KVCacheTensor(
-                    size=ref_kv_cache_spec.page_size_bytes * 20, shared_by=["layer1"]
+                    size=ref_kv_cache_spec.page_size_bytes * 10, shared_by=["layer1"]
                 ),
                 KVCacheTensor(
-                    size=ref_kv_cache_spec.page_size_bytes * 20, shared_by=["layer2"]
+                    size=ref_kv_cache_spec.page_size_bytes * 10, shared_by=["layer2"]
                 ),
             ],
             kv_cache_groups=[
@@ -723,7 +718,7 @@ def test_get_kv_cache_configs_multiple_workers():
             num_blocks=10,
             kv_cache_tensors=[
                 KVCacheTensor(
-                    size=ref_kv_cache_spec.page_size_bytes * 20, shared_by=["layer1"]
+                    size=ref_kv_cache_spec.page_size_bytes * 10, shared_by=["layer1"]
                 ),
             ],
             kv_cache_groups=[
@@ -807,7 +802,7 @@ def test_get_kv_cache_configs_multiple_workers():
             num_blocks=10,
             kv_cache_tensors=[
                 KVCacheTensor(
-                    size=ref_kv_cache_spec.page_size_bytes * 20, shared_by=["layer3"]
+                    size=ref_kv_cache_spec.page_size_bytes * 10, shared_by=["layer3"]
                 ),
             ],
             kv_cache_groups=[
@@ -818,7 +813,7 @@ def test_get_kv_cache_configs_multiple_workers():
             num_blocks=10,
             kv_cache_tensors=[
                 KVCacheTensor(
-                    size=ref_kv_cache_spec.page_size_bytes * 20, shared_by=["layer3"]
+                    size=ref_kv_cache_spec.page_size_bytes * 10, shared_by=["layer3"]
                 ),
             ],
             kv_cache_groups=[

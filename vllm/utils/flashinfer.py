@@ -12,7 +12,7 @@ import functools
 import importlib
 import importlib.util
 import os
-from typing import Any, Callable, NoReturn, Optional
+from typing import Any, Callable, NoReturn
 
 import requests
 import torch
@@ -89,7 +89,7 @@ flashinfer_trtllm_fp8_per_tensor_scale_moe = _lazy_import_wrapper(
 flashinfer_cutlass_fused_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "cutlass_fused_moe"
 )
-fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
+flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer", "nvfp4_block_scale_interleave"
 )
@@ -202,14 +202,14 @@ def supports_trtllm_attention() -> bool:
 
 
 @functools.cache
-def _force_use_trtllm_attention(env_value: Optional[bool]) -> Optional[bool]:
+def _force_use_trtllm_attention(env_value: bool | None) -> bool | None:
     """Cache the env value for VLLM_USE_TRTLLM_ATTENTION"""
     if env_value is not None:
         logger.info_once("VLLM_USE_TRTLLM_ATTENTION is set to %s", env_value)
     return env_value
 
 
-def force_use_trtllm_attention() -> Optional[bool]:
+def force_use_trtllm_attention() -> bool | None:
     """
     Return ``None`` if VLLM_USE_TRTLLM_ATTENTION is not set,
     return ``True`` if TRTLLM attention is forced to be used,
@@ -220,6 +220,8 @@ def force_use_trtllm_attention() -> Optional[bool]:
 
 def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:
     """Check if the current configuration supports TRTLLM attention."""
+    if force_use_trtllm_attention() is False:
+        return False
     has_trtllm = supports_trtllm_attention()
     return has_trtllm and (num_qo_heads % num_kv_heads == 0)
 
@@ -283,11 +285,18 @@ def use_trtllm_attention(
 
     if force_use_trtllm is None:
         # Environment variable not set - use auto-detection
-        use_trtllm = (
-            num_tokens <= 256 and max_seq_len <= 131072 and kv_cache_dtype == "auto"
-        )
-        if use_trtllm:
-            logger.warning_once("Using TRTLLM attention (auto-detected).")
+        if is_prefill:
+            # Prefill auto-detection
+            use_trtllm = max_seq_len <= 131072 and kv_cache_dtype == "auto"
+            if use_trtllm:
+                logger.warning_once("Using TRTLLM prefill attention (auto-detected).")
+        else:
+            # Decode auto-detection
+            use_trtllm = (
+                num_tokens <= 256 and max_seq_len <= 131072 and kv_cache_dtype == "auto"
+            )
+            if use_trtllm:
+                logger.warning_once("Using TRTLLM decode attention (auto-detected).")
         return use_trtllm
 
     # Environment variable is set to 1 - respect it
@@ -401,7 +410,7 @@ def flashinfer_scaled_fp8_mm(
     scale_a: torch.Tensor,
     scale_b: torch.Tensor,
     out_dtype: torch.dtype,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert a.ndim == 2 and b.ndim == 2
     assert a.shape[1] == b.shape[0]
@@ -435,7 +444,7 @@ __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
-    "fp4_quantize",
+    "flashinfer_fp4_quantize",
     "nvfp4_block_scale_interleave",
     "trtllm_fp4_block_scale_moe",
     "autotune",

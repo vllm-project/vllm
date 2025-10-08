@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Union
+from typing import ClassVar, Union
 
 import numpy as np
 import torch
@@ -41,9 +41,6 @@ from vllm.utils.flashinfer import (
     supports_trtllm_attention,
     use_trtllm_attention,
 )
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -53,8 +50,6 @@ from vllm.v1.attention.backends.utils import (
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
-
-# yapf: enable
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
@@ -267,12 +262,12 @@ class FlashInferMetadata:
     # For cascade attention (CPU for planning).
     use_cascade: bool
 
-    prefill_wrapper: Optional[BatchPrefillWithPagedKVCacheWrapper] = None
-    decode_wrapper: Optional[BatchDecodeWithPagedKVCacheWrapper] = None
-    cascade_wrapper: Optional[MultiLevelCascadeAttentionWrapper] = None
+    prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = None
+    decode_wrapper: BatchDecodeWithPagedKVCacheWrapper | None = None
+    cascade_wrapper: MultiLevelCascadeAttentionWrapper | None = None
 
-    qo_indptr_gpu: Optional[torch.Tensor] = None
-    paged_kv_indptr_gpu: Optional[torch.Tensor] = None
+    qo_indptr_gpu: torch.Tensor | None = None
+    paged_kv_indptr_gpu: torch.Tensor | None = None
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -615,8 +610,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         else:
             # Regular attention (common case).
-            # Decodes are at the front and prefills are at the back,
-            # according to reorder_batch()
+            # Decodes are at the front and prefills are at the back.
             num_prefills = attn_metadata.num_prefills
             num_decodes = attn_metadata.num_decodes
             if num_prefills > 0:
@@ -740,13 +734,13 @@ class FlashInferImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float] = None,
+        logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[int] = None,
-        sinks: Optional[torch.Tensor] = None,
+        kv_sharing_target_layer_name: int | None = None,
+        sinks: torch.Tensor | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -776,7 +770,7 @@ class FlashInferImpl(AttentionImpl):
                 "FlashInferImpl"
             )
 
-        self.sinks: Optional[torch.Tensor] = None
+        self.sinks: torch.Tensor | None = None
         if sinks is not None:
             if sinks.shape[0] != num_heads:
                 raise ValueError(
@@ -789,9 +783,9 @@ class FlashInferImpl(AttentionImpl):
         self.support_trtllm_attn = (
             supports_trtllm_attention() and num_heads % num_kv_heads == 0
         )
-        self.bmm1_scale: Optional[float] = None
-        self.bmm2_scale: Optional[float] = None
-        self.o_sf_scale: Optional[float] = None
+        self.bmm1_scale: float | None = None
+        self.bmm2_scale: float | None = None
+        self.o_sf_scale: float | None = None
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return (
@@ -808,9 +802,9 @@ class FlashInferImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with FlashInfer.
 
@@ -938,8 +932,7 @@ class FlashInferImpl(AttentionImpl):
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
         kv_cache_permute = kv_cache.permute(*stride_order)
         # Regular attention (common case).
-        # Decodes are at the front and prefills are at the back,
-        # according to reorder_batch()
+        # Decodes are at the front and prefills are at the back.
         if num_prefill_tokens > 0:
             prefill_wrapper = attn_metadata.prefill_wrapper
             prefill_query = query[num_decode_tokens:]
@@ -1106,13 +1099,13 @@ def fast_plan_decode(
     page_size: int,
     pos_encoding_mode: str = "NONE",
     window_left: int = -1,
-    logits_soft_cap: Optional[float] = None,
-    q_data_type: Optional[Union[str, torch.dtype]] = "float16",
-    kv_data_type: Optional[Union[str, torch.dtype]] = None,
-    data_type: Optional[Union[str, torch.dtype]] = None,
-    sm_scale: Optional[float] = None,
-    rope_scale: Optional[float] = None,
-    rope_theta: Optional[float] = None,
+    logits_soft_cap: float | None = None,
+    q_data_type: Union[str, torch.dtype] | None = "float16",
+    kv_data_type: Union[str, torch.dtype] | None = None,
+    data_type: Union[str, torch.dtype] | None = None,
+    sm_scale: float | None = None,
+    rope_scale: float | None = None,
+    rope_theta: float | None = None,
     non_blocking: bool = True,
 ) -> None:
     """

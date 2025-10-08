@@ -134,15 +134,15 @@ def get_attention_backend(backend_name: _Backend):
             else "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend"
         ),
         _Backend.FLASHINFER: "vllm.v1.attention.backends.flashinfer.FlashInferBackend",
-        _Backend.FLEX_ATTENTION: "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",
-        _Backend.TRITON_ATTN: "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
+        _Backend.FLEX_ATTENTION: "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",  # noqa: E501
+        _Backend.TRITON_ATTN: "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",  # noqa: E501
         _Backend.TREE_ATTN: "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend",
-        _Backend.XFORMERS: "vllm.v1.attention.backends.xformers.XFormersAttentionBackend",
-        _Backend.CUTLASS_MLA: "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",
+        _Backend.XFORMERS: "vllm.v1.attention.backends.xformers.XFormersAttentionBackend",  # noqa: E501
+        _Backend.CUTLASS_MLA: "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",  # noqa: E501
         _Backend.FLASHMLA: "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",
-        _Backend.FLASH_ATTN_MLA: "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",
-        _Backend.FLASHINFER_MLA: "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend",
-        _Backend.TRITON_MLA: "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
+        _Backend.FLASH_ATTN_MLA: "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",  # noqa: E501
+        _Backend.FLASHINFER_MLA: "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend",  # noqa: E501
+        _Backend.TRITON_MLA: "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",  # noqa: E501
     }
 
     if backend_name not in backend_map:
@@ -181,6 +181,7 @@ def create_vllm_config(
     max_num_batched_tokens: int = 8192,
     enable_chunked_prefill: bool = True,
     add_mock_model_methods: bool = True,
+    hf_config_override: Optional[dict] = None,
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
 
@@ -234,6 +235,9 @@ def create_vllm_config(
         model_config.get_sm_scale_for_layer = types.MethodType(
             lambda self, i: 1.0 / model_config.get_head_size() ** 0.5, model_config
         )
+
+    if hf_config_override:
+        model_config.hf_config.update(hf_config_override)
 
     return VllmConfig(
         model_config=model_config,
@@ -305,7 +309,6 @@ full_cg_backend_configs = {
     "CutlassMLA": BackendConfig(
         name="CutlassMLA",
         env_vars={
-            "VLLM_USE_V1": "1",
             "VLLM_ATTENTION_BACKEND": "CUTLASS_MLA",
             "FORCE_NUM_KV_SPLITS": "1",  # TODO: remove this when hang issue is fixed
         },
