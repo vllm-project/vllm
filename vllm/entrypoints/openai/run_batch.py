@@ -348,7 +348,7 @@ async def run_batch(
     model_config = vllm_config.model_config
 
     supported_tasks = await engine_client.get_supported_tasks()
-    logger.info("Supported_tasks: %s", supported_tasks)
+    logger.info("Supported tasks: %s", supported_tasks)
 
     # Create the openai serving objects.
     openai_serving_models = OpenAIServingModels(
