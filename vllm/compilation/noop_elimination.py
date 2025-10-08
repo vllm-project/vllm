@@ -104,8 +104,6 @@ class NoOpEliminationPass(VllmInductorPass):
                 input_shape = input.meta["val"].shape
                 output_shape = node.meta["val"].shape
 
-                print(f"{input=} {node=} {input_shape=} {output_shape=}")
-                print(f"{input.name=} {node.name=} {input_shape=} {output_shape=}")
                 if self.all_dims_equivalent(
                     output_shape, input_shape, infer_minus_one=False
                 ):
