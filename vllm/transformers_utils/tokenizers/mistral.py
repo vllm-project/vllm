@@ -173,15 +173,15 @@ class MistralTokenizer(TokenizerBase):
         self.transformers_tokenizer = tokenizer
         self.mistral = tokenizer.tokenizer
         self.instruct = self.mistral.instruct_tokenizer
-        _mistral_version_str = str(self.instruct.tokenizer.version.value)
+        self.tokenizer = self.instruct.tokenizer
+
+        _mistral_version_str = str(self.tokenizer.version.value)
         self.version: int = int(_mistral_version_str.split("v")[-1])
 
-        raw_tokenizer = self.instruct.tokenizer
-
-        self.is_tekken = isinstance(raw_tokenizer, Tekkenizer)
-        self.is_spm = isinstance(raw_tokenizer, SentencePieceTokenizer)
+        self.is_tekken = isinstance(self.tokenizer, Tekkenizer)
+        self.is_spm = isinstance(self.tokenizer, SentencePieceTokenizer)
         if not (self.is_tekken or self.is_spm):
-            raise TypeError(f"Unsupported tokenizer: {type(raw_tokenizer)}")
+            raise TypeError(f"Unsupported tokenizer: {type(self.tokenizer)}")
 
         # Reverse order to ensure that the lowest token id is kept.
         self._vocab_dict = {
@@ -197,7 +197,6 @@ class MistralTokenizer(TokenizerBase):
                 key=lambda x: x[1],
             )
         ]
-        self.tokenizer = raw_tokenizer
         self._max_token_id = self.vocab_size - 1
 
     @classmethod
