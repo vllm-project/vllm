@@ -11,6 +11,7 @@ import pathlib
 import textwrap
 from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import regex as re
