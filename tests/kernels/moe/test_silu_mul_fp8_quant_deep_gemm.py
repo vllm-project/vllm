@@ -58,9 +58,9 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, fp8_type):
     )
 
     # Run the SiLU V2 kernel
-    y_q, y_s = silu_mul_fp8_quant_deep_gemm_cuda(y,
-                                                 tokens_per_expert,
-                                                 group_size=group_size)
+    y_q, y_s = silu_mul_fp8_quant_deep_gemm_cuda(
+        y, tokens_per_expert, group_size=group_size
+    )
 
     torch.cuda.synchronize()
     fp8_info = torch.finfo(fp8_dtype)
@@ -121,4 +121,5 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, fp8_type):
             atol=2,
             rtol=2e-1,
         )
+
         torch.testing.assert_close(y_se[:nt], ref_s[:nt], atol=1e-4, rtol=1e-2)
