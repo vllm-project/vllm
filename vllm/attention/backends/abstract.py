@@ -84,6 +84,135 @@ class AttentionBackend(ABC):
     def full_cls_name(cls) -> tuple[str, str]:
         return (cls.__module__, cls.__qualname__)
 
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []
+
+    @classmethod
+    def supports_head_size(cls, head_size: int) -> bool:
+        supported_head_sizes = cls.get_supported_head_sizes()
+        return (not supported_head_sizes) or head_size in supported_head_sizes
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def supports_dtype(cls, dtype: torch.dtype) -> bool:
+        supported_dtypes = cls.get_supported_dtypes()
+        return (not supported_dtypes) or dtype in supported_dtypes
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto"]
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: Optional[str]) -> bool:
+        supported_kv_cache_dtypes = cls.get_supported_kv_cache_dtypes()
+        return (not supported_kv_cache_dtypes) or (
+            kv_cache_dtype is not None and kv_cache_dtype in supported_kv_cache_dtypes
+        )
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return []
+
+    @classmethod
+    def supports_block_size(cls, block_size: int) -> bool:
+        supported_block_sizes = cls.get_supported_block_sizes()
+        return (not supported_block_sizes) or block_size in supported_block_sizes
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        raise NotImplementedError
+
+    @classmethod
+    def supports_sink(cls) -> bool:
+        return True
+
+    @classmethod
+    def is_sparse(cls) -> bool:
+        return False
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return None
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return None
+
+    @classmethod
+    def supports_compute_capability(cls, capability: int) -> bool:
+        min_capability = cls.get_min_compute_capability()
+        max_capability = cls.get_max_compute_capability()
+        return ((min_capability is None) or (capability >= min_capability)) and (
+            (max_capability is None) or (capability <= max_capability)
+        )
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: Optional[str],
+        block_size: int,
+        use_v1: bool,
+        use_mla: bool,
+        has_sink: bool,
+        device_capability: int,
+    ) -> Optional[str]:
+        return None
+
+    @classmethod
+    def validate_configuration(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: Optional[str],
+        block_size: int,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: int,
+    ) -> list[str]:
+        invalid_reasons = []
+        if not cls.supports_head_size(head_size):
+            invalid_reasons.append("head_size not supported")
+        if not cls.supports_dtype(dtype):
+            invalid_reasons.append("dtype not supported")
+        if not cls.supports_kv_cache_dtype(kv_cache_dtype):
+            invalid_reasons.append("kv_cache_dtype not supported")
+        if not cls.supports_block_size(block_size):
+            invalid_reasons.append("block_size not supported")
+        if use_mla != cls.is_mla():
+            if use_mla:
+                invalid_reasons.append("MLA not supported")
+            else:
+                invalid_reasons.append("non-MLA not supported")
+        if has_sink and not cls.supports_sink():
+            invalid_reasons.append("sink setting not supported")
+        if use_sparse != cls.is_sparse():
+            if use_sparse:
+                invalid_reasons.append("sparse not supported")
+            else:
+                invalid_reasons.append("non-sparse not supported")
+        if not cls.supports_compute_capability(device_capability):
+            invalid_reasons.append("compute capability not supported")
+        combination_reason = cls.supports_combination(
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            use_mla,
+            has_sink,
+            use_sparse,
+            device_capability,
+        )
+        if combination_reason is not None:
+            invalid_reasons.append(combination_reason)
+        return invalid_reasons
+
 
 class AttentionMetadata:
     pass
