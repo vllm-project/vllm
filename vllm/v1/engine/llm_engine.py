@@ -97,11 +97,11 @@ class LLMEngine:
         self.should_execute_dummy_batch = False
 
         if self.model_config.skip_tokenizer_init:
-            self.tokenizer = None
+            tokenizer = None
         else:
-            self.tokenizer = init_tokenizer_from_configs(self.model_config)
+            tokenizer = init_tokenizer_from_configs(self.model_config)
 
-        self.processor = Processor(self.vllm_config, self.tokenizer)
+        self.processor = Processor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
@@ -339,6 +339,14 @@ class LLMEngine:
     def get_metrics(self) -> list[Metric]:
         assert self.log_stats, "Stat logging disabled"
         return get_metrics_snapshot()
+
+    @property
+    def tokenizer(self) -> Optional[AnyTokenizer]:
+        return self.processor.tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, tokenizer: Optional[AnyTokenizer]) -> None:
+        self.processor.tokenizer = tokenizer
 
     def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
