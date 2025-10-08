@@ -47,26 +47,30 @@ def rocm_aiter_rmsnorm_fused_dynamic_quant_impl(
     out: torch.Tensor,
     input: torch.Tensor,
     weight: torch.Tensor,
-    yscale: torch.Tensor,
+    y_scale: torch.Tensor,
     epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     import aiter as rocm_aiter
 
-    rocm_aiter.rmsnorm2d_fwd_with_dynamicquant(
-        out, input, yscale, weight, epsilon, use_model_sensitive_rmsnorm=0
+    torch._dynamo.comptime._Comptime.print(
+        "Calling rocm_aiter_rmsnorm_fused__static_quant_impl"
     )
 
-    return out, yscale
+    rocm_aiter.rmsnorm2d_fwd_with_dynamicquant(
+        out, input, y_scale, weight, epsilon, use_model_sensitive_rmsnorm=0
+    )
+
+    return out, y_scale
 
 
 def rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
     out: torch.Tensor,
     input: torch.Tensor,
     weight: torch.Tensor,
-    yscale: torch.Tensor,
+    y_scale: torch.Tensor,
     epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return out, yscale
+    return out, y_scale
 
 
 def rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
@@ -74,7 +78,7 @@ def rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
     input: torch.Tensor,
     residual: torch.Tensor,
     weight: torch.Tensor,
-    yscale: torch.Tensor,
+    y_scale: torch.Tensor,
     epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     import aiter as rocm_aiter
@@ -86,13 +90,13 @@ def rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
         input,
         residual,
         residual_out,
-        yscale,
+        y_scale,
         weight,
         epsilon,
         use_model_sensitive_rmsnorm=0,
     )
 
-    return out, residual_out, yscale
+    return out, residual_out, y_scale
 
 
 def rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake(
@@ -100,17 +104,17 @@ def rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake(
     input: torch.Tensor,
     residual: torch.Tensor,
     weight: torch.Tensor,
-    yscale: torch.Tensor,
+    y_scale: torch.Tensor,
     epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return out, torch.empty_like(residual), yscale
+    return out, torch.empty_like(residual), y_scale
 
 
-if is_rocm_aiter_rmsnorm_enabled():
+if current_platform.is_rocm():
     direct_register_custom_op(
         op_name="rocm_aiter_rmsnorm_fused_dynamic_quant",
         op_func=rocm_aiter_rmsnorm_fused_dynamic_quant_impl,
-        mutates_args=["out", "yscale"],
+        mutates_args=["out", "y_scale"],
         fake_impl=rocm_aiter_rmsnorm_fused_dynamic_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
@@ -118,7 +122,7 @@ if is_rocm_aiter_rmsnorm_enabled():
     direct_register_custom_op(
         op_name="rocm_aiter_rmsnorm_fused_add_dynamic_quant",
         op_func=rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl,
-        mutates_args=["out", "yscale"],
+        mutates_args=["out", "y_scale"],
         fake_impl=rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
@@ -199,7 +203,7 @@ class RMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
                 out=result,
                 input=input,
                 weight=weight,
-                yscale=scale,
+                y_scale=scale,
                 epsilon=self.epsilon,
             )
 
@@ -269,7 +273,7 @@ class FusedAddRMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
                 input=input,
                 residual=residual,
                 weight=weight,
-                yscale=scale,
+                y_scale=scale,
                 epsilon=self.epsilon,
             )
 
@@ -292,8 +296,8 @@ class FusedAddRMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
 
 class RMSNormAiterQuantFusionPass(VllmPatternMatcherPass):
     """
-    This pass fuses rms_norm & quant custom ops into a fused rms_norm_quant op.
-    It also supports fused_add_rms_norm.
+    This pass fuses aiter rms_norm & quant custom ops into a fused rms_norm_quant op.
+    It also supports aiter fused_add_rms_norm.
     """
 
     @enable_fake_mode
@@ -301,7 +305,7 @@ class RMSNormAiterQuantFusionPass(VllmPatternMatcherPass):
         super().__init__(config)
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(
-            pass_name="rmsnorm_quant_fusion_pass"
+            pass_name="aiter_rmsnorm_quant_fusion_pass"
         )
 
         for epsilon in [1e-5, 1e-6]:
@@ -318,7 +322,6 @@ class RMSNormAiterQuantFusionPass(VllmPatternMatcherPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
         self.matched_count = self.patterns.apply(graph)
-        print(f"RMSNormAiterQuantFusionPass: Replaced {self.matched_count} patterns")
         logger.debug("Replaced %s patterns", self.matched_count)
 
     def uuid(self) -> Any:
