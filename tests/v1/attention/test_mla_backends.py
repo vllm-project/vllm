@@ -12,7 +12,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_standard_kv_cache_spec,
     create_vllm_config,
-    get_attention_backend,
+    try_get_attention_backend,
 )
 from vllm import _custom_ops as ops
 from vllm.attention.backends.registry import _Backend
@@ -239,7 +239,7 @@ def run_attention_backend(
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
-    builder_cls, impl_cls = get_attention_backend(backend)
+    builder_cls, impl_cls = try_get_attention_backend(backend)
 
     # Build metadata
     builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
@@ -400,7 +400,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         # Determine if this is decode or prefill
         is_decode = []
         for i, backend in enumerate(BACKENDS_TO_TEST):
-            builder_cls, _ = get_attention_backend(backend)
+            builder_cls, _ = try_get_attention_backend(backend)
             is_decode.append(q_len <= builder_cls.reorder_batch_threshold)
 
         # Split q into nope and rope components
