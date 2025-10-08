@@ -42,23 +42,9 @@ class SPTestOptions(NamedTuple):
 @dataclass
 class SPTestSettings:
     parallel_setups: list[ParallelSetup]
-    # NOTE: the length of distributed_backends and
-    # vllm_major_versions should be the same, and they
-    # are first zipped together to iterate over all
-    # test settings.
     distributed_backends: list[str]
-    # vllm major version: "0" for V0, "1" for V1
-    vllm_major_versions: list[str]
     runner: RunnerOption
     test_options: SPTestOptions
-
-    def __post_init__(self):
-        if len(self.distributed_backends) != len(self.vllm_major_versions):
-            raise ValueError(
-                f"Length mismatch: distributed_backends "
-                f"({len(self.distributed_backends)}) != "
-                f"vllm_major_versions ({len(self.vllm_major_versions)})"
-            )
 
     @staticmethod
     def detailed(
@@ -85,7 +71,6 @@ class SPTestSettings:
         return SPTestSettings(
             parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
-            vllm_major_versions=["1", "1"],
             runner=runner,
             test_options=SPTestOptions(
                 multi_node_only=multi_node_only, load_format=load_format
@@ -117,7 +102,6 @@ class SPTestSettings:
         return SPTestSettings(
             parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
-            vllm_major_versions=["1", "1"],
             runner=runner,
             test_options=SPTestOptions(
                 multi_node_only=multi_node_only, load_format=load_format
@@ -147,7 +131,6 @@ class SPTestSettings:
         return SPTestSettings(
             parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
-            vllm_major_versions=["1", "1"],
             runner=runner,
             test_options=SPTestOptions(
                 multi_node_only=multi_node_only, load_format=load_format
@@ -158,14 +141,11 @@ class SPTestSettings:
         opts = self.test_options
 
         for parallel_setup in self.parallel_setups:
-            for backend, vllm_major_version in zip(
-                self.distributed_backends, self.vllm_major_versions
-            ):
+            for backend in self.distributed_backends:
                 yield (
                     model_id,
                     parallel_setup,
                     backend,
-                    vllm_major_version,
                     self.runner,
                     opts,
                 )
@@ -175,7 +155,6 @@ def _compare_sp(
     model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
-    vllm_major_version: str,
     runner: RunnerOption,
     test_options: SPTestOptions,
     num_gpus_available: int,
@@ -265,10 +244,6 @@ def _compare_sp(
         },
     }
 
-    tp_sp_env = tp_env = {
-        "VLLM_USE_V1": vllm_major_version,
-    }
-
     tp_sp_args = [
         *common_args,
         "--tensor-parallel-size",
@@ -281,9 +256,6 @@ def _compare_sp(
         json.dumps(compilation_config),
     ]
 
-    tp_env = {
-        "VLLM_USE_V1": vllm_major_version,
-    }
     tp_args = [
         *common_args,
         "--tensor-parallel-size",
@@ -292,18 +264,7 @@ def _compare_sp(
         "mp",
     ]
 
-    try:
-        compare_two_settings(
-            model_id, tp_sp_args, tp_args, tp_sp_env, tp_env, method=method
-        )
-    except Exception:
-        testing_ray_compiled_graph = tp_sp_env is not None
-        if testing_ray_compiled_graph and vllm_major_version == "0":
-            # Ray Compiled Graph tests are flaky for V0,
-            # so we don't want to fail the test
-            logger.exception("Ray Compiled Graph tests failed")
-        else:
-            raise
+    compare_two_settings(model_id, tp_sp_args, tp_args, method=method)
 
 
 SP_TEXT_GENERATION_MODELS = {
@@ -325,7 +286,6 @@ SP_TEST_MODELS = [
         "model_id",
         "parallel_setup",
         "distributed_backend",
-        "vllm_major_version",
         "runner",
         "test_options",
     ),
@@ -341,7 +301,6 @@ def test_tp_sp_generation(
     model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
-    vllm_major_version: str,
     runner: RunnerOption,
     test_options: SPTestOptions,
     num_gpus_available,
@@ -350,7 +309,6 @@ def test_tp_sp_generation(
         model_id,
         parallel_setup,
         distributed_backend,
-        vllm_major_version,
         runner,
         test_options,
         num_gpus_available,
