@@ -3,9 +3,12 @@
 """Attention backend registry"""
 
 import enum
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from vllm.utils import resolve_obj_by_qualname
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionBackend
 
 
 class _Backend(enum.Enum):
@@ -83,7 +86,7 @@ def backend_to_class_str(backend: _Backend) -> str:
     return BACKEND_MAP[backend]
 
 
-def backend_to_class(backend: _Backend) -> type:
+def backend_to_class(backend: _Backend) -> "type[AttentionBackend]":
     """Get the backend class.
 
     Args:
@@ -93,7 +96,7 @@ def backend_to_class(backend: _Backend) -> type:
         The backend class
     """
     backend_class_name = backend_to_class_str(backend)
-    return resolve_obj_by_qualname(backend_class_name)
+    return resolve_obj_by_qualname(backend_class_name)  # type: ignore[return-value]
 
 
 def backend_name_to_enum(backend_name: str) -> Optional[_Backend]:
