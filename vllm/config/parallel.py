@@ -7,7 +7,7 @@ from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import torch
-from pydantic import model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
@@ -204,7 +204,7 @@ class ParallelConfig:
     not change by dcp, it simply reuse the GPUs of TP group, and tp_size
     needs to be divisible by dcp_size."""
 
-    _api_process_count: int = 1
+    _api_process_count: int = Field(default=1, gt=0)
     """
     The number of API processes initialized.
 
@@ -213,7 +213,7 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
-    _api_process_rank: int = 0
+    _api_process_rank: int = Field(default=0, ge=-1)
     """
     The rank of this API process, or `-1` for engine core processes
     under API server scale-out.
@@ -222,6 +222,66 @@ class ParallelConfig:
         This is an internal config that is only valid for and
         should only be set by API server scale-out.
     """
+
+    @field_validator("data_parallel_backend")
+    @classmethod
+    def _validate_data_parallel_backend(cls, data_parallel_backend: str) -> str:
+        if data_parallel_backend not in {"mp", "ray"}:
+            raise ValueError(
+                "data_parallel_backend must be either 'mp' or 'ray', "
+                f"but got {data_parallel_backend}."
+            )
+        return data_parallel_backend
+
+    @model_validator(mode="after")
+    def _configure_parallel(self) -> Self:
+        if self._api_process_rank >= self._api_process_count:
+            raise ValueError(
+                "Invalid value of `_api_process_rank`. "
+                f"Expected to be `-1` or `[0, {self._api_process_count})`, "
+                f"but found: {self._api_process_rank}"
+            )
+
+        if self.data_parallel_size_local > self.data_parallel_size:
+            raise ValueError(
+                f"data_parallel_size_local ({self.data_parallel_size_local}) "
+                f"must be <= data_parallel_size ({self.data_parallel_size})"
+            )
+
+        if self.data_parallel_size <= 1 and self.data_parallel_external_lb:
+            raise ValueError(
+                "data_parallel_external_lb can only be set when data_parallel_size > 1"
+            )
+
+        if self.enable_eplb:
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    "Expert parallelism load balancing is only supported on "
+                    "CUDA devices now."
+                )
+            if self.eplb_config.num_redundant_experts < 0:
+                raise ValueError(
+                    "num_redundant_experts must be non-negative, but got "
+                    f"{self.eplb_config.num_redundant_experts}."
+                )
+            if not self.enable_expert_parallel:
+                raise ValueError("enable_expert_parallel must be True to use EPLB.")
+            if self.tensor_parallel_size * self.data_parallel_size <= 1:
+                raise ValueError(
+                    "EPLB requires tensor_parallel_size or data_parallel_size "
+                    f"to be greater than 1, but got "
+                    f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
+                )
+        else:
+            if self.eplb_config.num_redundant_experts != 0:
+                raise ValueError(
+                    "num_redundant_experts is set to "
+                    f"{self.eplb_config.num_redundant_experts} but EPLB is not "
+                    "enabled. Either enable EPLB or unset "
+                    "num_redundant_experts."
+                )
+
+        return self
 
     @property
     def world_size_across_dp(self) -> int:
@@ -354,7 +414,7 @@ class ParallelConfig:
             factors.append(self.eplb_config.num_redundant_experts)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
         # Forward deprecated fields to their new location
         if self.num_redundant_experts is not None:
             self.eplb_config.num_redundant_experts = self.num_redundant_experts
@@ -396,12 +456,6 @@ class ParallelConfig:
             logger.info("Using external launcher for distributed inference.")
             self.world_size *= self.data_parallel_size
 
-        if self.data_parallel_size_local > self.data_parallel_size:
-            raise ValueError(
-                f"data_parallel_size_local ({self.data_parallel_size_local}) "
-                f"must be <= data_parallel_size ({self.data_parallel_size})"
-            )
-
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
             if self.distributed_executor_backend == "external_launcher":
@@ -431,43 +485,10 @@ class ParallelConfig:
             self.data_parallel_master_ip = envs.VLLM_DP_MASTER_IP
             self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
 
-            if self.data_parallel_external_lb:
-                raise ValueError(
-                    "data_parallel_external_lb can only "
-                    "be set when data_parallel_size > 1"
-                )
-
         if self.distributed_executor_backend == "external_launcher":
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 
-        if self.enable_eplb:
-            if not current_platform.is_cuda():
-                raise ValueError(
-                    "Expert parallelism load balancing is only supported on "
-                    "CUDA devices now."
-                )
-            if self.eplb_config.num_redundant_experts < 0:
-                raise ValueError(
-                    "num_redundant_experts must be non-negative, but got "
-                    f"{self.eplb_config.num_redundant_experts}."
-                )
-            if not self.enable_expert_parallel:
-                raise ValueError("enable_expert_parallel must be True to use EPLB.")
-            if self.tensor_parallel_size * self.data_parallel_size <= 1:
-                raise ValueError(
-                    "EPLB requires tensor_parallel_size or data_parallel_size "
-                    f"to be greater than 1, but got "
-                    f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
-                )
-        else:
-            if self.eplb_config.num_redundant_experts != 0:
-                raise ValueError(
-                    "num_redundant_experts is set to "
-                    f"{self.eplb_config.num_redundant_experts} but EPLB is not "
-                    "enabled. Either enable EPLB or unset "
-                    "num_redundant_experts."
-                )
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
@@ -513,13 +534,6 @@ class ParallelConfig:
 
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
-
-        if not -1 <= self._api_process_rank < self._api_process_count:
-            raise ValueError(
-                "Invalid value of `_api_process_rank`. "
-                f"Expected to be `-1` or `[0, {self._api_process_count})`, "
-                f"but found: {self._api_process_rank}"
-            )
 
     @property
     def use_ray(self) -> bool:
