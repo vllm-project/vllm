@@ -226,19 +226,19 @@ def test_compilation_config():
 
     # set to O3
     args = parser.parse_args(["-O0"])
-    assert args.compilation_config.level == 0
+    assert args.compilation_config.mode == 0
 
     # set to O 3 (space)
     args = parser.parse_args(["-O", "1"])
-    assert args.compilation_config.level == 1
+    assert args.compilation_config.mode == 1
 
     # set to O 3 (equals)
     args = parser.parse_args(["-O=2"])
-    assert args.compilation_config.level == 2
+    assert args.compilation_config.mode == 2
 
     # set to O.level 3
     args = parser.parse_args(["-O.level", "3"])
-    assert args.compilation_config.level == 3
+    assert args.compilation_config.mode == 3
 
     # set to string form of a dict
     args = parser.parse_args(
@@ -249,7 +249,7 @@ def test_compilation_config():
         ]
     )
     assert (
-        args.compilation_config.level == 3
+        args.compilation_config.mode == 3
         and args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
         and not args.compilation_config.use_inductor
     )
@@ -263,7 +263,7 @@ def test_compilation_config():
         ]
     )
     assert (
-        args.compilation_config.level == 3
+        args.compilation_config.mode == 3
         and args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
         and args.compilation_config.use_inductor
     )

@@ -236,7 +236,7 @@ def _support_torch_compile(
         # for CompilationMode.STOCK_TORCH_COMPILE , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
         self.do_not_compile = (
-            vllm_config.compilation_config.level
+            vllm_config.compilation_config.mode
             in [CompilationMode.NO_COMPILATION, CompilationMode.STOCK_TORCH_COMPILE]
             or not supports_dynamo()
             or _should_ignore_torch_compile(self.__class__)
@@ -247,7 +247,7 @@ def _support_torch_compile(
 
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
-            self, compilation_level=vllm_config.compilation_config.level
+            self, compilation_level=vllm_config.compilation_config.mode
         )
 
     cls.__init__ = __init__

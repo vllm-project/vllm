@@ -434,7 +434,7 @@ class CompilationConfig:
         the final hidden states.
         """
         factors: list[Any] = []
-        factors.append(self.level)
+        factors.append(self.mode)
         factors.append(self.backend)
         factors.append(self.custom_ops)
         factors.append(self.splitting_ops)
@@ -593,7 +593,7 @@ class CompilationConfig:
         # Currently only eager and inductor backend are supported.
         # for piecewise compilation. Custom backends are not suppported for
         # piecewise compilation. Update when more backends are supported.
-        if self.level == CompilationMode.VLLM_COMPILE and self.backend not in [
+        if self.mode == CompilationMode.VLLM_COMPILE and self.backend not in [
             "",
             "eager",
             "inductor",
@@ -621,19 +621,19 @@ class CompilationConfig:
         Returns:
             The backend for the compilation config.
         """
-        if self.level is None:
+        if self.mode is None:
             raise ValueError(
-                "No compilation level is set. This method should only be \
+                "No compilation mode is set. This method should only be \
                 called via vllm config where the level is set if none is \
                 provided."
             )
-        if self.level == CompilationMode.NO_COMPILATION:
+        if self.mode == CompilationMode.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
         from torch._dynamo.backends.registry import list_backends
 
         torch_backends = list_backends(exclude_tags=tuple())
-        if self.level in [
+        if self.mode in [
             CompilationMode.STOCK_TORCH_COMPILE,
             CompilationMode.DYNAMO_TRACE_ONCE,
         ]:
@@ -641,7 +641,7 @@ class CompilationConfig:
                 return self.backend
             return resolve_obj_by_qualname(self.backend)
 
-        assert self.level == CompilationMode.VLLM_COMPILE
+        assert self.mode == CompilationMode.VLLM_COMPILE
         if self.backend not in ["eager", "inductor"]:
             raise ValueError(
                 f"Invalid backend for piecewise compilation: {self.backend}"
@@ -708,7 +708,7 @@ class CompilationConfig:
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called only when level is
         # CompilationMode.VLLM_COMPILE
-        assert self.level == CompilationMode.VLLM_COMPILE, (
+        assert self.mode == CompilationMode.VLLM_COMPILE, (
             "set_splitting_ops_for_v1 should only be called when "
             "level is CompilationMode.VLLM_COMPILE"
         )
@@ -791,7 +791,7 @@ class CompilationConfig:
 
         if not self.use_inductor_graph_partition:
             # Dynamo-level FX split case
-            return self.level == CompilationMode.VLLM_COMPILE
+            return self.mode == CompilationMode.VLLM_COMPILE
 
         # Inductor partition case
         return (

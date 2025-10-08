@@ -308,23 +308,23 @@ class VllmConfig:
         # If the user does not explicitly set a compilation level, then
         # we use the default level. The default level depends on other
         # settings (see the below code).
-        if self.compilation_config.level is None:
+        if self.compilation_config.mode is None:
             if envs.VLLM_USE_V1:
                 if (
                     self.model_config is not None
                     and not self.model_config.enforce_eager
                 ):
-                    self.compilation_config.level = CompilationMode.VLLM_COMPILE
+                    self.compilation_config.mode = CompilationMode.VLLM_COMPILE
                 else:
-                    self.compilation_config.level = CompilationMode.NO_COMPILATION
+                    self.compilation_config.mode = CompilationMode.NO_COMPILATION
 
             else:
                 # NB: Passing both --enforce-eager and a compilation level
                 # in V0 means the compilation level wins out.
-                self.compilation_config.level = CompilationMode.NO_COMPILATION
+                self.compilation_config.mode = CompilationMode.NO_COMPILATION
         else:
-            assert self.compilation_config.level >= CompilationMode.NO_COMPILATION
-            assert self.compilation_config.level <= CompilationMode.VLLM_COMPILE
+            assert self.compilation_config.mode >= CompilationMode.NO_COMPILATION
+            assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
 
         # If user does not set custom ops via none or all set it here based on
         # compilation level and backend.
@@ -350,7 +350,7 @@ class VllmConfig:
             if self.compilation_config.cudagraph_mode is None:
                 if (
                     envs.VLLM_USE_V1
-                    and self.compilation_config.level == CompilationMode.VLLM_COMPILE
+                    and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
                 ):
                     # default to full and piecewise for most models
                     self.compilation_config.cudagraph_mode = (
@@ -486,10 +486,10 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        # Do this after all the updates to compilation_config.level
+        # Do this after all the updates to compilation_config.mode
         if (
             envs.VLLM_USE_V1
-            and self.compilation_config.level == CompilationMode.VLLM_COMPILE
+            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
         ):
             self.compilation_config.set_splitting_ops_for_v1()
 
@@ -508,7 +508,7 @@ class VllmConfig:
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
-                assert self.compilation_config.level == CompilationMode.VLLM_COMPILE, (
+                assert self.compilation_config.mode == CompilationMode.VLLM_COMPILE, (
                     "Compilation level should be CompilationMode.VLLM_COMPILE "
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
@@ -837,7 +837,7 @@ def set_current_vllm_config(
 
         if (
             check_compile
-            and vllm_config.compilation_config.level == CompilationMode.VLLM_COMPILE
+            and vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and compilation_counter.num_models_seen == num_models_seen
         ):
             # If the model supports compilation,
