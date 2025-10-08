@@ -29,7 +29,7 @@ __all__ = ["CompressedTensorsW4A4Fp4"]
 
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
     def __init__(self):
-        if envs.VLLM_USE_TRTLLM_FP4_GEMM:
+        if envs.VLLM_NVFP4_GEMM_BACKEND == "flashinfer-trtllm":
             assert has_flashinfer(), "TRTLLM FP4 GEMM requires FlashInfer"
             self.backend = "flashinfer-trtllm"
             logger.info_once("Using flashinfer-trtllm for FP4")
@@ -43,11 +43,12 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                     "Please install with: pip install fbgemm-gpu-genai"
                 ) from exc
             logger.info_once("Using FGBEMM-GPU-GENAI for FP4")
-        elif has_flashinfer():
-            self.backend = "flashinfer-cutlass"
-            logger.info_once("Using flashinfer-cutlass for FP4")
-        else:
-            self.backend = "cutlass"
+        elif envs.VLLM_NVFP4_GEMM_BACKEND is None:
+            if has_flashinfer():
+                self.backend = "flashinfer-cutlass"
+                logger.info_once("Using flashinfer-cutlass for FP4")
+            else:
+                self.backend = "cutlass"
         self.group_size = 16
 
     @classmethod
