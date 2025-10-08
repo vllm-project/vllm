@@ -12,9 +12,12 @@ from .backend import TestBackend
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("num_tokens", [256, 1024])
+# Important edge case is when `num_tokens == buffer_size`
+@pytest.mark.parametrize(
+    ("num_tokens", "buffer_size"), [(256, 256), (256, 512), (1024, 1024), (1024, 1025)]
+)
 @pytest.mark.parametrize("hidden_size", [64, 4096])
-def test_noop_elimination(dtype, num_tokens, hidden_size):
+def test_noop_elimination(dtype, num_tokens, hidden_size, buffer_size):
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(1)
@@ -22,7 +25,7 @@ def test_noop_elimination(dtype, num_tokens, hidden_size):
     class Model(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.pos_embed = torch.empty(num_tokens, hidden_size, dtype=dtype)
+            self.pos_embed = torch.empty(buffer_size, hidden_size, dtype=dtype)
 
         def forward(self, x):
             x += self.pos_embed[: x.shape[0]]
