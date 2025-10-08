@@ -236,15 +236,15 @@ def test_compilation_config():
     args = parser.parse_args(["-O=2"])
     assert args.compilation_config.mode == 2
 
-    # set to O.level 3
-    args = parser.parse_args(["-O.level", "3"])
+    # set to O.mode 3
+    args = parser.parse_args(["-O.mode", "3"])
     assert args.compilation_config.mode == 3
 
     # set to string form of a dict
     args = parser.parse_args(
         [
             "-O",
-            '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+            '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
             '"use_inductor": false}',
         ]
     )
@@ -258,7 +258,7 @@ def test_compilation_config():
     args = parser.parse_args(
         [
             "--compilation-config="
-            '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+            '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
             '"use_inductor": true}',
         ]
     )

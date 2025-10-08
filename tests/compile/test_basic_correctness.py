@@ -23,7 +23,7 @@ class TestSetting:
 
 
 # we cannot afford testing the full Cartesian product
-# of all models and all levels
+# of all models and all modes
 @pytest.mark.parametrize(
     "test_setting",
     [
@@ -122,11 +122,11 @@ def test_compile_correctness(
         all_args: list[list[str]] = []
         all_envs: list[dict[str, str] | None] = []
 
-        for level in [
+        for mode in [
             CompilationMode.NO_COMPILATION,
             CompilationMode.VLLM_COMPILE,
         ]:
-            all_args.append(final_args + [f"-O{level}"])
+            all_args.append(final_args + [f"-O{mode}"])
             all_envs.append({})
 
         # inductor will change the output, so we only compare if the output
@@ -140,12 +140,12 @@ def test_compile_correctness(
         all_envs.clear()
         all_args.clear()
 
-        for level in [
+        for mode in [
             CompilationMode.NO_COMPILATION,
             CompilationMode.STOCK_TORCH_COMPILE,
             CompilationMode.DYNAMO_TRACE_ONCE,
         ]:
-            all_args.append(final_args + [f"-O{level}"])
+            all_args.append(final_args + [f"-O{mode}"])
             all_envs.append({})
 
         compare_all_settings(model, all_args * 3, all_envs, method=method)

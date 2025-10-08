@@ -82,7 +82,7 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
 
 
 @pytest.mark.parametrize(
-    "optimization_level",
+    "optimization_mode",
     [CompilationMode.DYNAMO_TRACE_ONCE, CompilationMode.VLLM_COMPILE],
 )
 @pytest.mark.parametrize("model_info", models_list(all=True))
@@ -90,14 +90,14 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
 def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
     model_info: tuple[str, dict[str, Any]],
-    optimization_level: int,
+    optimization_mode: int,
 ):
     model, model_kwargs = model_info
 
     with monkeypatch.context():
         print(f"MODEL={model}")
 
-        run_model(optimization_level, model, model_kwargs)
+        run_model(optimization_mode, model, model_kwargs)
 
 
 # TODO(luka) add other supported compilation config scenarios here
@@ -106,7 +106,7 @@ def test_full_graph(
     [
         # additional compile sizes, only some of the models
         (
-            CompilationConfig(level=CompilationMode.VLLM_COMPILE, compile_sizes=[1, 2]),
+            CompilationConfig(mode=CompilationMode.VLLM_COMPILE, compile_sizes=[1, 2]),
             model,
         )
         for model in models_list(all=False)
@@ -115,7 +115,7 @@ def test_full_graph(
         # RMSNorm + quant fusion, only 8-bit quant models
         (
             CompilationConfig(
-                level=CompilationMode.VLLM_COMPILE,
+                mode=CompilationMode.VLLM_COMPILE,
                 custom_ops=["+rms_norm"],
                 pass_config=PassConfig(enable_fusion=True, enable_noop=True),
             ),
@@ -127,7 +127,7 @@ def test_full_graph(
         # Test depyf integration works
         (
             CompilationConfig(
-                level=CompilationMode.VLLM_COMPILE,
+                mode=CompilationMode.VLLM_COMPILE,
                 debug_dump_path=tempfile.gettempdir(),
             ),
             ("facebook/opt-125m", {}),
@@ -137,7 +137,7 @@ def test_full_graph(
         # graph inductor partition
         (
             CompilationConfig(
-                level=CompilationMode.VLLM_COMPILE,
+                mode=CompilationMode.VLLM_COMPILE,
                 # inductor graph partition uses
                 # torch._C.Tag.cudagraph_unsafe to specify splitting ops
                 use_inductor_graph_partition=True,
@@ -167,10 +167,10 @@ def test_custom_compile_config(
 
 
 @pytest.mark.parametrize(
-    "optimization_level",
+    "optimization_mode",
     [CompilationMode.NO_COMPILATION, CompilationMode.VLLM_COMPILE],
 )
-def test_fp8_kv_scale_compile(optimization_level: int):
+def test_fp8_kv_scale_compile(optimization_mode: int):
     model = "Qwen/Qwen2-0.5B"
     model_kwargs = {
         "quantization": "fp8",
@@ -178,7 +178,7 @@ def test_fp8_kv_scale_compile(optimization_level: int):
         "calculate_kv_scales": True,
         "max_model_len": 512,
     }
-    run_model(optimization_level, model, model_kwargs)
+    run_model(optimization_mode, model, model_kwargs)
 
 
 def test_inductor_graph_partition_attn_fusion(caplog_vllm):
@@ -187,7 +187,7 @@ def test_inductor_graph_partition_attn_fusion(caplog_vllm):
 
     model = "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8"
     compilation_config = CompilationConfig(
-        level=CompilationMode.VLLM_COMPILE,
+        mode=CompilationMode.VLLM_COMPILE,
         use_inductor_graph_partition=True,
         cudagraph_mode=CUDAGraphMode.PIECEWISE,
         custom_ops=["+quant_fp8"],

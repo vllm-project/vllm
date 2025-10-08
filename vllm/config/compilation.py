@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 
 
 class CompilationMode:
-    # constants for the levels of the compilation process
+    # constants for the modes of the compilation process
     NO_COMPILATION = 0
     STOCK_TORCH_COMPILE = 1
     DYNAMO_TRACE_ONCE = 2
@@ -129,7 +129,7 @@ class CompilationConfig:
     """Configuration for compilation. It has three parts:
 
     - Top-level Compilation control:
-        - [`level`][vllm.config.CompilationConfig.level]
+        - [`mode`][vllm.config.CompilationConfig.mode]
         - [`debug_dump_path`][vllm.config.CompilationConfig.debug_dump_path]
         - [`cache_dir`][vllm.config.CompilationConfig.cache_dir]
         - [`backend`][vllm.config.CompilationConfig.backend]
@@ -174,9 +174,9 @@ class CompilationConfig:
 
     # Top-level Compilation control
     mode: Optional[int] = None
-    """The level of compilation:
+    """The mode of compilation:
 
-    - None: If None, we will select the default compilation level.
+    - None: If None, we will select the default compilation mode.
       For V1 engine this is 3, for V0 engine this is 0.
     - 0: NONE: no compilation
     - 1: STOCK_TORCH_COMPILE: just applying default torch.compile to model.
@@ -200,11 +200,11 @@ class CompilationConfig:
 
     backend function.
     We use string to avoid serialization issues when using compilation in a
-    distributed setting. When the compilation level is 1 or 2, the backend is
+    distributed setting. When the compilation mode is 1 or 2, the backend is
     used for the compilation directly (it sees the whole graph). When the
-    compilation level is 3, the backend is used for the piecewise compilation
+    compilation mode is 3, the backend is used for the piecewise compilation
     (it sees a part of the graph). The backend can not be custom for compilation
-    level 3. Furthermore, compilation is only piecewise if splitting ops is set
+    mode 3. Furthermore, compilation is only piecewise if splitting ops is set
     accordingly and use_inductor_cudagraphs_partition is off. Note that the
     default options for splitting ops are sufficient for piecewise compilation.
     """
@@ -218,7 +218,7 @@ class CompilationConfig:
     - 'none,+op1,+op2' to enable only op1 and op2
 
     By default, all custom ops are enabled when running without Inductor and
-    disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
+    disabled when running with Inductor: mode>=PIECEWISE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: Optional[list[str]] = None
     """A list of ops to split the full graph into subgraphs, used in piecewise
@@ -238,7 +238,7 @@ class CompilationConfig:
         One graph for symbolic shape and one graph per size in compile_sizes
         are compiled using configurations in inductor_compile_config.
 
-    This setting is ignored if level<PIECEWISE.
+    This setting is ignored if mode<PIECEWISE.
 
     For future compatibility:
     If use_inductor is True, backend="inductor" otherwise backend="eager".
@@ -288,7 +288,7 @@ class CompilationConfig:
     Currently, the cudagraph mode is only used for the v1 engine.
     Note that the cudagraph logic is generally orthogonal to the 
     compilation logic. While piecewise cudagraphs require piecewise 
-    compilation (level=PIECEWISE and non-empty splitting_ops), full
+    compilation (mode=PIECEWISE and non-empty splitting_ops), full
     cudagraphs are supported with and without compilation.
     
     Warning: This flag is new and subject to change in addition 
@@ -597,7 +597,7 @@ class CompilationConfig:
                 provided."
             )
         if self.mode == CompilationMode.NO_COMPILATION:
-            raise ValueError("No compilation level is set.")
+            raise ValueError("No compilation mode is set.")
 
         from torch._dynamo.backends.registry import list_backends
 
@@ -675,11 +675,11 @@ class CompilationConfig:
         self.bs_to_padded_graph_size[self.max_capture_size] = self.max_capture_size
 
     def set_splitting_ops_for_v1(self):
-        # NOTE: this function needs to be called only when level is
+        # NOTE: this function needs to be called only when mode is
         # CompilationMode.VLLM_COMPILE
         assert self.mode == CompilationMode.VLLM_COMPILE, (
             "set_splitting_ops_for_v1 should only be called when "
-            "level is CompilationMode.VLLM_COMPILE"
+            "mode is CompilationMode.VLLM_COMPILE"
         )
 
         if self.use_inductor_graph_partition:
