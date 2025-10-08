@@ -1,44 +1,46 @@
 diff --git a/cmake/external_projects/flashmla.cmake b/cmake/external_projects/flashmla.cmake
+index c9e7aec88..b36bd6694 100644
 --- a/cmake/external_projects/flashmla.cmake
 +++ b/cmake/external_projects/flashmla.cmake
-@@
- if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.3 AND FLASH_MLA_ARCHS)
-     set(FlashMLA_SOURCES
-         ${flashmla_SOURCE_DIR}/csrc/flash_api.cpp
-         ${flashmla_SOURCE_DIR}/csrc/kernels/get_mla_metadata.cu
-         ${flashmla_SOURCE_DIR}/csrc/kernels/mla_combine.cu
-         ${flashmla_SOURCE_DIR}/csrc/kernels/splitkv_mla.cu
-         ${flashmla_SOURCE_DIR}/csrc/kernels_fp8/flash_fwd_mla_fp8_sm90.cu)
-@@
-     define_gpu_extension_target(
-         _flashmla_C
-         DESTINATION vllm
-         LANGUAGE ${VLLM_GPU_LANG}
-         SOURCES ${FlashMLA_SOURCES}
-         COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-         ARCHITECTURES ${VLLM_GPU_ARCHES}
+@@ -101,6 +101,20 @@ if(FLASH_MLA_ARCHS)
          INCLUDE_DIRECTORIES ${FlashMLA_INCLUDES}
          USE_SABI 3
          WITH_SOABI)
 +    if(CUDAToolkit_INCLUDE_DIRS)
 +        target_include_directories(_flashmla_C PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
 +    endif()
-+    # _flashmla_C_LIBCUDACXX_INJECT
 +    if(CUDAToolkit_ROOT)
 +        foreach(_cxx_inc
 +            "${CUDAToolkit_ROOT}/targets/x86_64-linux/include"
 +            "${CUDAToolkit_ROOT}/targets/x86_64-linux/include/cccl"
 +            "${CUDAToolkit_ROOT}/include/cccl"
-+          )
-+          if(EXISTS "${_cxx_inc}")
-+            target_include_directories(_flashmla_C PRIVATE "${_cxx_inc}")
-+          endif()
++        )
++            if(EXISTS "${_cxx_inc}")
++                target_include_directories(_flashmla_C PRIVATE "${_cxx_inc}")
++            endif()
 +        endforeach()
 +    endif()
-     if(CUDAToolkit_INCLUDE_DIRS)
-         target_include_directories(_flashmla_C PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
-     endif()
- else()
-     # Create an empty target for setup.py when not targeting sm90a systems
-     add_custom_target(_flashmla_C)
- endif()
+ 
+     # Keep Stable ABI for the module, but *not* for CUDA/C++ files.
+     # This prevents Py_LIMITED_API from affecting nvcc and C++ compiles.
+@@ -118,6 +132,20 @@ if(FLASH_MLA_ARCHS)
+         INCLUDE_DIRECTORIES ${FlashMLA_Extension_INCLUDES}
+         USE_SABI 3
+         WITH_SOABI)
++    if(CUDAToolkit_INCLUDE_DIRS)
++        target_include_directories(_flashmla_extension_C PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
++    endif()
++    if(CUDAToolkit_ROOT)
++        foreach(_cxx_inc
++            "${CUDAToolkit_ROOT}/targets/x86_64-linux/include"
++            "${CUDAToolkit_ROOT}/targets/x86_64-linux/include/cccl"
++            "${CUDAToolkit_ROOT}/include/cccl"
++        )
++            if(EXISTS "${_cxx_inc}")
++                target_include_directories(_flashmla_extension_C PRIVATE "${_cxx_inc}")
++            endif()
++        endforeach()
++    endif()
+ 
+     # Keep Stable ABI for the module, but *not* for CUDA/C++ files.
+     # This prevents Py_LIMITED_API from affecting nvcc and C++ compiles.

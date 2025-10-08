@@ -1,0 +1,5 @@
+# Each non-empty line maps a source file (relative to repo root)
+# to the destination path inside the overlay. Use "src -> dest".
+# If "dest" is omitted, the source path is reused.
+
+vllm/device_allocator/cumem.py -> vllm/device_allocator/cumem.py :: transform=cumem-env

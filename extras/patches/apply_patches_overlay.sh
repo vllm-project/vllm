@@ -46,6 +46,11 @@ apply_one() {
   fi
   rm -f "$tmp"
 
+  if [[ "$OVERLAY_MODE" == "1" ]]; then
+    echo "[patches] ERROR: failed to apply ${base} in overlay mode" >&2
+    return 1
+  fi
+
   case "$base" in
     0001-cumem-alloc-env-fallback.diff)
       if [[ "$OVERLAY_MODE" == "1" ]]; then
@@ -96,6 +101,16 @@ if os.path.exists(path):
     io.open(path, 'w', encoding='utf-8', newline='\n').write(new_src)
     print('[patches] Removed expandable_segments assert')
 PY
+fi
+
+if command -v git >/dev/null 2>&1; then
+  if [[ "$OVERLAY_MODE" == "1" ]]; then
+    if git status --porcelain --untracked-files=no | grep -q '.'; then
+      echo "[patches] ERROR: overlay mode left tracked files dirty" >&2
+      git status --short --untracked-files=no >&2 || true
+      exit 1
+    fi
+  fi
 fi
 
 echo '[patches] Done.'

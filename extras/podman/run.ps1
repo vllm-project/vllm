@@ -43,16 +43,51 @@ $ContainerName = "vllm-dev"
 $ImageTag = "vllm-dev:latest"
 $SourceDir = (Get-Location).Path
 
+function Get-DefaultPodmanMachine {
+	if ($Env:PODMAN_MACHINE_NAME) { return $Env:PODMAN_MACHINE_NAME }
+	try {
+		$machine = (& podman machine list --format "{{range .}}{{if .Default}}{{.Name}}{{end}}{{end}}" 2>$null)
+		if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($machine)) {
+			return $machine.Trim()
+		}
+	} catch {
+	}
+	return "podman-machine-default"
+}
+
+function Test-PodmanMachinePath {
+	param([string]$Path)
+	if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+	$escaped = $Path.Replace('"', '\"')
+	try {
+		& podman machine ssh -- "test -e \"$escaped\"" *> $null
+		if ($LASTEXITCODE -eq 0) { return $true }
+	} catch {
+	}
+	try {
+		$machine = Get-DefaultPodmanMachine
+		$unc = "\\\\wsl.localhost\\$machine" + ($Path -replace '/', '\\')
+		return (Test-Path -LiteralPath $unc)
+	} catch {
+		return $false
+	}
+}
+
 Write-Host "🐋 vLLM Dev Container (Podman)" -ForegroundColor Green
 
 # Normalize CRLF -> LF for mounted shell scripts to avoid /usr/bin/env 'bash\r' errors inside container
 try {
-	$scriptRoot = Join-Path $SourceDir 'extras'
-	$shellScripts = Get-ChildItem -Path $scriptRoot -Recurse -Include *.sh -ErrorAction SilentlyContinue
-	foreach ($f in $shellScripts) {
-		$raw = Get-Content -Raw -Path $f.FullName
-		if ($raw -like "*`r*") {
-			$raw -replace "`r", "" | Set-Content -NoNewline -Encoding UTF8 $f.FullName
+	$normalizeTargets = @()
+	$normalizeTargets += (Join-Path $SourceDir 'extras/podman')
+	$normalizeTargets += (Join-Path $SourceDir 'extras/patches')
+	foreach ($targetDir in $normalizeTargets) {
+		if (-not (Test-Path $targetDir)) { continue }
+		$shellScripts = Get-ChildItem -Path $targetDir -Recurse -Filter *.sh -File -ErrorAction SilentlyContinue
+		foreach ($f in $shellScripts) {
+			$raw = Get-Content -Raw -Path $f.FullName
+			if ($raw -like "*`r*") {
+				$raw -replace "`r", "" | Set-Content -NoNewline -Encoding UTF8 $f.FullName
+			}
 		}
 	}
 } catch { Write-Host "⚠️  Script newline normalization skipped: $($_.Exception.Message)" -ForegroundColor Yellow }
@@ -66,8 +101,6 @@ if ($Build) {
 	$archList = $null
 	$cudaArchs = $null
 	$requireFfmpegArg = '1'
-	$tvRef = $null
-	$taRef = $null
 	function Get-DockerArgDefault([string]$name, [string]$fallback) {
 		if (Test-Path $dockerfilePath) {
 			$df = Get-Content -Raw -Path $dockerfilePath
@@ -165,8 +198,20 @@ nvidia-smi || true
 		if ($Mirror) { $envs += @('LOCAL_MIRROR=1') }
 		if ($Progress) { $envs += @('PROGRESS_WATCH=1') }
 		$envs += @('NVIDIA_VISIBLE_DEVICES=all')
+			   $envs += @('PYTHON_PATCH_OVERLAY=1')
 		$envStr = ($envs | ForEach-Object { "export $_;" }) -join ' '
-		$cmd = "$envStr bash extras/patches/apply_patches.sh || true; chmod +x ./extras/dev-setup.sh 2>/dev/null || true; ./extras/dev-setup.sh"
+		$cmd = @'
+TMP_RUN=$(mktemp /tmp/run-dev-setup.XXXX.sh)
+tr -d '\r' < ./extras/podman/dev-setup.sh > "$TMP_RUN" 2>/dev/null || cp ./extras/podman/dev-setup.sh "$TMP_RUN"
+chmod +x "$TMP_RUN" 2>/dev/null || true
+if [ -x ./extras/patches/apply_patches_overlay.sh ]; then
+	bash ./extras/patches/apply_patches_overlay.sh || true
+elif [ -x ./extras/patches/apply_patches.sh ]; then
+	bash ./extras/patches/apply_patches.sh || true
+fi
+"$TMP_RUN"
+'@
+		$cmd = "$envStr $cmd"
 		if ($Progress) { podman exec -it $ContainerName bash -lc $cmd } else { podman exec $ContainerName bash -lc $cmd }
 		exit $LASTEXITCODE
 	}
@@ -195,12 +240,38 @@ $runArgs += @('--entrypoint','/workspace/extras/podman/entrypoint/apply-patches-
 $tmpfsSize = [Environment]::GetEnvironmentVariable('VLLM_TMPFS_TMP_SIZE')
 if (-not [string]::IsNullOrEmpty($tmpfsSize) -and $tmpfsSize -ne '0') { $runArgs += @('--tmpfs',"/tmp:size=$tmpfsSize") }
 
-if ($true) { # Request GPU via CDI hooks
-	$runArgs = @("run","--rm","--security-opt=label=disable","--device=nvidia.com/gpu=all") + $runArgs[2..($runArgs.Length-1)]
+if (-not $Env:VLLM_DISABLE_CDI) { # Request GPU via CDI hooks
+	$runArgs = @("run","--rm","--security-opt=label=disable","--device=nvidia.com/gpu=all") + $runArgs[3..($runArgs.Length-1)]
+} else {
+	Write-Host "⚠️  Skipping CDI GPU request (VLLM_DISABLE_CDI set)" -ForegroundColor Yellow
 }
 
-# WSL GPU: map /dev/dxg and mount WSL libs
-$runArgs += @('--device','/dev/dxg','-v','/usr/lib/wsl:/usr/lib/wsl:ro')
+$wslRoot = '/usr/lib/wsl'
+$wslRootExists = Test-PodmanMachinePath $wslRoot
+if ($wslRootExists) {
+	$runArgs += @('-v',"$($wslRoot):$($wslRoot):ro")
+	$libCandidates = @(
+		"$wslRoot/drivers/libcuda.so.1.1",
+		"$wslRoot/drivers/libcuda.so.1",
+		"$wslRoot/lib/libcuda.so.1",
+		"$wslRoot/lib/libcuda.so"
+	)
+	$libFound = $false
+	foreach ($candidate in $libCandidates) {
+		if (Test-PodmanMachinePath $candidate) { $libFound = $true; break }
+	}
+	if (-not $libFound) {
+		Write-Host "⚠️  Could not locate libcuda under $wslRoot; container GPU may fail" -ForegroundColor Yellow
+	}
+} else {
+	Write-Host "⚠️  WSL GPU libraries not detected; continuing without /usr/lib/wsl mount" -ForegroundColor Yellow
+}
+
+if (Test-PodmanMachinePath '/dev/dxg') {
+	$runArgs += @('--device','/dev/dxg')
+} else {
+	Write-Host "⚠️  /dev/dxg not available in podman machine; GPU passthrough may be disabled" -ForegroundColor Yellow
+}
 if ($Mirror) { $runArgs += @('--env','LOCAL_MIRROR=1') }
 foreach ($ev in 'NVIDIA_VISIBLE_DEVICES','NVIDIA_DRIVER_CAPABILITIES','NVIDIA_REQUIRE_CUDA') {
 	$val = [Environment]::GetEnvironmentVariable($ev)
@@ -267,7 +338,7 @@ rm -f /tmp/gpucheck.py
 } elseif ($Setup) {
 	# Use robust setup entrypoint that finds the right script (extras/dev-setup.sh or image helper)
 	# Avoid in-place edits on Windows-mounted files; run a CRLF-normalized temp copy instead
-	$prefix = 'TMP_RUN=$(mktemp /tmp/run-dev-setup.XXXX.sh); tr -d "\r" < ./extras/podman/dev-setup.sh > "$TMP_RUN" || cp ./extras/podman/dev-setup.sh "$TMP_RUN"; chmod +x "$TMP_RUN" 2>/dev/null || true; bash extras/patches/apply_patches.sh || true; '
+	$prefix = 'TMP_RUN=$(mktemp /tmp/run-dev-setup.XXXX.sh); tr -d "\r" < ./extras/podman/dev-setup.sh > "$TMP_RUN" || cp ./extras/podman/dev-setup.sh "$TMP_RUN"; chmod +x "$TMP_RUN" 2>/dev/null || true; export PYTHON_PATCH_OVERLAY=1; if [ -x ./extras/patches/apply_patches_overlay.sh ]; then bash ./extras/patches/apply_patches_overlay.sh || true; elif [ -x ./extras/patches/apply_patches.sh ]; then bash ./extras/patches/apply_patches.sh || true; fi; '
 	$envPrefix = ''
 	if ($Mirror) { $envPrefix += 'export LOCAL_MIRROR=1; ' }
 	if ($Progress) { $envPrefix += 'export PROGRESS_WATCH=1; ' }
