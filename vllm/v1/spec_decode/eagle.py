@@ -198,7 +198,6 @@ class SpecDecodeBaseProposer:
         last_token_indices: Optional[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        cudagraph_args: "CudaGraphArgs",
         mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]

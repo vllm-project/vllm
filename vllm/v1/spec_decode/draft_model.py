@@ -15,11 +15,7 @@ from vllm.v1.attention.backends.utils import (
     extend_flat_seqs,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.eagle import (
-    PADDING_SLOT_ID,
-    CudaGraphArgs,
-    SpecDecodeBaseProposer,
-)
+from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID, SpecDecodeBaseProposer
 
 
 class DraftModelProposer(SpecDecodeBaseProposer):
@@ -53,7 +49,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         last_token_indices: Optional[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        cudagraph_args: "CudaGraphArgs",
         mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]] = None,
     ) -> torch.Tensor:
         """
@@ -77,7 +72,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             target_token_ids=inputs.token_ids,
             target_positions=inputs.positions,
             common_attn_metadata=inputs.cad,
-            cudagraph_args=cudagraph_args,
             sampling_metadata=sampling_metadata,
             # below are are not used by draft model
             target_hidden_states=None,
