@@ -290,7 +290,7 @@ class OpenAIServing:
 
         processor = self.processor
         tokenizer = processor.tokenizer
-        eos_token_id = tokenizer.eos_token_id
+        eos_token_id: int = tokenizer.eos_token_id  # type: ignore
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise NotImplementedError
@@ -310,14 +310,17 @@ class OpenAIServing:
         #    this happens again in generation, so the double expansion causes
         #    a mismatch.
         # TODO - would be ideal to handle this more gracefully.
+        prompt_text: Optional[str]
+        prompt_token_ids: list[int]
+        multi_modal_data: Optional[MultiModalDataDict]
         if isinstance(prompt, str):
             prompt_text = prompt
             prompt_token_ids = []
             multi_modal_data = None
         else:
-            prompt_text = prompt.get("prompt")
-            prompt_token_ids = prompt.get("prompt_token_ids", [])
-            multi_modal_data = prompt.get("multi_modal_data")
+            prompt_text = prompt.get("prompt")  # type: ignore
+            prompt_token_ids = prompt.get("prompt_token_ids", [])  # type: ignore
+            multi_modal_data = prompt.get("multi_modal_data")  # type: ignore
 
         mm_processor_kwargs = processed_inputs.get("mm_processor_kwargs")
 
