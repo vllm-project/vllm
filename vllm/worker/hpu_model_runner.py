@@ -2775,14 +2775,16 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             num_image_tokens = int(image_h * image_w //
                                    (vit_cfg.hidden_stride**2))
             image_grid_thw = torch.tensor([[1, image_h, image_w]],
-                                          dtype=torch.int32)
+                                          dtype=torch.int64).to('hpu')
 
-            pixel_values = torch.randn(
-                image_grid_thw[0].prod(),
-                vit_cfg.num_channels * vit_cfg.temporal_patch_size *
-                vit_cfg.patch_size * vit_cfg.patch_size)
+            pixel_values = torch.randn(1,
+                                       image_grid_thw[0].prod(),
+                                       vit_cfg.num_channels *
+                                       vit_cfg.temporal_patch_size *
+                                       vit_cfg.patch_size * vit_cfg.patch_size,
+                                       dtype=torch.float32).to('hpu')
             indicator_tokens = torch.tensor([65532, 65533],
-                                            device='hpu:0').unsqueeze(0)
+                                            device='hpu').unsqueeze(0)
             multi_modal_data = {
                 "pixel_values": pixel_values,
                 "indicator_tokens": indicator_tokens,

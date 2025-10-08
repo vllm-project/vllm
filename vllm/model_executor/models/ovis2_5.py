@@ -515,12 +515,6 @@ class Ovis2_5(nn.Module, SupportsMultiModal):
         if padding_len <= 0:
             return pixel_values, image_grid_thw
 
-        logger_msg = "Padding current number pixel " \
-            + str(pixel_values.shape[0]) \
-            + " to " \
-            + str(desired_number_of_pixels)
-        logger.info(logger_msg)
-
         h_orig, w_orig = image_grid_thw[0, 1].item(), image_grid_thw[0,
                                                                      2].item()
         pad_h, pad_w = self.find_padding(h_orig, w_orig,

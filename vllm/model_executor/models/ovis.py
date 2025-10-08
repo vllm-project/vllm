@@ -211,7 +211,7 @@ class OvisImagePatchInputs(TypedDict):
     `(batch_size * num_patches, patch_size_x * patch_size_y * num_channels)`
     """
 
-    inducator_tokens: torch.Tensor
+    indicator_tokens: torch.Tensor
     """
     Shape: 
     `(batch_size * (num_patches + 1))`
