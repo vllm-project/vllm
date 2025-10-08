@@ -19,6 +19,11 @@ from ..conftest import HfRunner, VllmRunner
 from ..models.utils import check_outputs_equal
 from ..utils import multi_gpu_test
 
+MODELS = [
+    "hmellor/tiny-random-Gemma2ForCausalLM",
+    "hmellor/tiny-random-LlamaForCausalLM",
+]
+
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
 
 
@@ -51,14 +56,14 @@ def _fix_prompt_embed_outputs(
     return fixed_vllm_outputs
 
 
-@pytest.mark.parametrize("model", ["EleutherAI/pythia-14m"])
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [False])
 @pytest.mark.parametrize("async_scheduling", [True, False])
 @pytest.mark.parametrize("model_executor", ["uni", "mp"])
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
-def test_basic_correctness(
+def test_models(
     monkeypatch: pytest.MonkeyPatch,
     hf_runner,
     model: str,

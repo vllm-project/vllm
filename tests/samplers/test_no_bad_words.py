@@ -37,7 +37,7 @@ def _generate(
 
 
 class TestOneTokenBadWord:
-    MODEL = "EleutherAI/pythia-14m"
+    MODEL = "hmellor/tiny-random-LlamaForCausalLM"
 
     PROMPT = "Hi! How are"
     TARGET_TOKEN = "you"
