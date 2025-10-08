@@ -21,6 +21,7 @@ class _Backend(enum.Enum):
     TRITON_MLA = enum.auto()
     CUTLASS_MLA = enum.auto()
     FLASHMLA = enum.auto()
+    FLASHMLA_SPARSE = enum.auto()
     FLASH_ATTN_MLA = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
@@ -43,6 +44,7 @@ BACKEND_MAP = {
     _Backend.TRITON_MLA: "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",  # noqa: E501
     _Backend.CUTLASS_MLA: "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",  # noqa: E501
     _Backend.FLASHMLA: "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",  # noqa: E501
+    _Backend.FLASHMLA_SPARSE: "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseBackend",  # noqa: E501
     _Backend.FLASH_ATTN_MLA: "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",  # noqa: E501
     _Backend.PALLAS: "vllm.v1.attention.backends.pallas.PallasAttentionBackend",  # noqa: E501
     _Backend.FLEX_ATTENTION: "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",  # noqa: E501
