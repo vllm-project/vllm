@@ -124,7 +124,7 @@ def create_parser(add_cli_args, **kwargs) -> FlexibleArgumentParser:
     """
     parser = FlexibleArgumentParser(add_json_tip=False)
     parser.formatter_class = MarkdownFormatter
-    with patch("vllm.config.DeviceConfig.__post_init__"):
+    with patch("vllm.config.DeviceConfig._set_device_type", new=lambda self: self):
         _parser = add_cli_args(parser, **kwargs)
     # add_cli_args might be in-place so return parser if _parser is None
     return _parser or parser
