@@ -32,16 +32,15 @@ def select_2d_config(
     )
     if current_platform.is_rocm():
         TILE_SIZE = 64
-        # in case head_size is big
+        # in case head_size is large
         max_num_stages_2d = 4
         if head_size > 128:
             max_num_stages_2d = 2
-        half_max_num_stages_2d = max_num_stages_2d // 2
         if all_decode == False:
-            num_stages_2d = max_num_stages_2d
+            num_stages_2d = 4
             num_warps = 4
         else:
-            num_stages_2d = half_max_num_stages_2d + 1
+            num_stages_2d = 3
             num_warps = 2
             TILE_SIZE = block_size
 
@@ -50,6 +49,7 @@ def select_2d_config(
             num_stages_2d = 1
             num_warps = 4
         BLOCK_Q = BLOCK_M // num_queries_per_kv
+        num_stages_2d = min(max_num_stages_2d, num_stages_2d)
         return {
             "BLOCK_M": BLOCK_M,
             "BLOCK_Q": BLOCK_Q,
@@ -69,17 +69,16 @@ def select_3d_config(head_size, block_size, element_size, max_seqlen_k, num_2d_p
         cu_count = current_platform.get_cu_count()
         target_num_prgms = cu_count * 4
         reduce_num_warps = 2
-        attn_warps = 4
+        attn_warps = 2
         TILE_SIZE = block_size
         MAX_SEGMENTS = min(128, math.ceil(max_seqlen_k / TILE_SIZE))
         num_segments = math.ceil(target_num_prgms / num_2d_prgms)
         num_segments = triton.next_power_of_2(num_segments)
         num_segments = min(num_segments, 128)
-        MIN_SEGMENTS = 16 if block_size <= 16 else 2
-        if num_segments <= MIN_SEGMENTS:
+        MIN_SEGMENTS = 16 if TILE_SIZE <= 16 else 8
+        num_segments = max(num_segments, MIN_SEGMENTS)
+        if num_segments == MIN_SEGMENTS:
             reduce_num_warps = 1
-            attn_warps = 1
-            num_segments = MIN_SEGMENTS
         attn_config = {
             "TILE_SIZE": TILE_SIZE,
             "NUM_SEGMENTS_PER_SEQ": num_segments,
@@ -116,7 +115,7 @@ def use_2d_kernel(
         return (
             (sliding_window > 0)
             or (max_seqlen_k <= 512)
-            or (num_2d_prgms > target_num_prgms and not all_decode)
+            or (num_2d_prgms > target_num_prgms)
         )
     else:
         return max_seqlen_q > 1 or num_2d_prgms > 128
@@ -235,7 +234,10 @@ def kernel_unified_attention_2d(
     query_offset = (query_offset_0[:, None] * query_stride_0 +
                     query_offset_1[:, None] * query_stride_1 + offs_d[None, :])
 
-    dim_mask = offs_d < HEAD_SIZE
+    if HEAD_SIZE_PADDED != HEAD_SIZE:
+        dim_mask = offs_d < HEAD_SIZE
+    else:
+        dim_mask = tl.full((1,), 1, dtype=tl.int1)
     query_mask_0 = query_pos < cur_batch_query_len
     query_mask_1 = query_offset_1 < num_query_heads
 
@@ -243,7 +245,6 @@ def kernel_unified_attention_2d(
         Q_cache_modifier: tl.constexpr = ".cg"
     else:
         Q_cache_modifier: tl.constexpr = ""
-
     # Q : (BLOCK_M, HEAD_SIZE_PADDED)
     Q = tl.load(
         query_ptr + query_offset,
@@ -323,6 +324,7 @@ def kernel_unified_attention_2d(
     # iterate through tiles (now limited to the sliding window range)
     for j in range(tile_start, tile_end):
         seq_offset = j * TILE_SIZE + offs_t
+        # to reduce the masking effect when not needed
         if TILE_SIZE == BLOCK_SIZE:
             tile_mask = tl.full((1,), 1, dtype=tl.int1)
         else:  
@@ -537,7 +539,10 @@ def kernel_unified_attention_3d(
     query_offset = (query_offset_0[:, None] * query_stride_0 +
                     query_offset_1[:, None] * query_stride_1 + offs_d[None, :])
 
-    dim_mask = offs_d < HEAD_SIZE
+    if HEAD_SIZE_PADDED != HEAD_SIZE:
+        dim_mask = offs_d < HEAD_SIZE
+    else:
+        dim_mask = tl.full((1,), 1, dtype=tl.int1)
     query_mask_0 = query_pos < cur_batch_query_len
     query_mask_1 = query_offset_1 < num_query_heads
 
@@ -607,7 +612,7 @@ def kernel_unified_attention_3d(
 
         physical_block_idx = tl.load(block_tables_ptr + block_table_offset +
                                      seq_offset // BLOCK_SIZE).to(tl.int64)
-
+        
         v_offset = (physical_block_idx[:, None] * stride_v_cache_0 +
                     kv_head_idx * stride_v_cache_2 +
                     offs_d[None, :] * stride_v_cache_3 +
