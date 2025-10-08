@@ -153,21 +153,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 class TritonAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float32]
-
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        # Triton Attention supports any head size above 32
-        if head_size < 32:
-            raise ValueError(
-                f"Head size {head_size} is not supported by TritonAttention."
-                f"Head sizes need to be larger or equal 32 for this backend. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
-
     @staticmethod
     def get_name() -> str:
         return "TRITON_ATTN"
@@ -199,6 +184,41 @@ class TritonAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["TritonAttentionMetadataBuilder"]:
         return TritonAttentionMetadataBuilder
+
+    @classmethod
+    def validate_head_size(cls, head_size: int) -> None:
+        # Triton Attention supports any head size above 32
+        if head_size < 32:
+            raise ValueError(
+                f"Head size {head_size} is not supported by TritonAttention."
+                f"Head sizes need to be larger or equal 32 for this backend. "
+                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
+                "FlexAttention backend which supports all head sizes."
+            )
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float32]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "fp16", "bf16"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return []
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return False
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return None
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return None
 
 
 class TritonAttentionImpl(AttentionImpl):
@@ -238,8 +258,6 @@ class TritonAttentionImpl(AttentionImpl):
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        TritonAttentionBackend.validate_head_size(head_size)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
