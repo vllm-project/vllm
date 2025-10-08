@@ -8,10 +8,14 @@ from abc import ABC, abstractmethod
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Optional, Union
 
+from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm.entrypoints.harmony_utils import (
-    get_encoding, get_streamable_parser_for_assistant, render_for_completion)
+    get_encoding,
+    get_streamable_parser_for_assistant,
+    render_for_completion,
+)
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
@@ -20,6 +24,25 @@ if TYPE_CHECKING:
     from mcp.client import ClientSession
 
 logger = logging.getLogger(__name__)
+
+# This is currently needed as the tool type doesn't 1:1 match the
+# tool namespace, which is what is used to look up the
+# connection to the tool server
+_TOOL_NAME_TO_TYPE_MAP = {
+    "browser": "web_search_preview",
+    "python": "code_interpreter",
+    "container": "container",
+}
+
+
+def _map_tool_name_to_tool_type(tool_name: str) -> str:
+    if tool_name not in _TOOL_NAME_TO_TYPE_MAP:
+        available_tools = ", ".join(_TOOL_NAME_TO_TYPE_MAP.keys())
+        raise ValueError(
+            f"Built-in tool name '{tool_name}' not defined in mapping. "
+            f"Available tools: {available_tools}"
+        )
+    return _TOOL_NAME_TO_TYPE_MAP[tool_name]
 
 
 class TurnTokens:
@@ -40,7 +63,6 @@ class TurnTokens:
 
 
 class ConversationContext(ABC):
-
     @abstractmethod
     def append_output(self, output) -> None:
         pass
@@ -58,9 +80,13 @@ class ConversationContext(ABC):
         pass
 
     @abstractmethod
-    async def init_tool_sessions(self, tool_server: Optional[ToolServer],
-                                 exit_stack: AsyncExitStack,
-                                 request_id: str) -> None:
+    async def init_tool_sessions(
+        self,
+        tool_server: Optional[ToolServer],
+        exit_stack: AsyncExitStack,
+        request_id: str,
+        mcp_tools: dict[str, Mcp],
+    ) -> None:
         pass
 
     @abstractmethod
@@ -69,7 +95,6 @@ class ConversationContext(ABC):
 
 
 class SimpleContext(ConversationContext):
-
     def __init__(self):
         self.last_output = None
         self.num_prompt_tokens = 0
@@ -95,9 +120,13 @@ class SimpleContext(ConversationContext):
     def render_for_completion(self) -> list[int]:
         raise NotImplementedError("Should not be called.")
 
-    async def init_tool_sessions(self, tool_server: Optional[ToolServer],
-                                 exit_stack: AsyncExitStack,
-                                 request_id: str) -> None:
+    async def init_tool_sessions(
+        self,
+        tool_server: Optional[ToolServer],
+        exit_stack: AsyncExitStack,
+        request_id: str,
+        mcp_tools: dict[str, Mcp],
+    ) -> None:
         pass
 
     async def cleanup_session(self) -> None:
@@ -105,13 +134,13 @@ class SimpleContext(ConversationContext):
 
 
 class HarmonyContext(ConversationContext):
-
     def __init__(
         self,
         messages: list,
         available_tools: list[str],
     ):
         self._messages = messages
+        self.finish_reason: Optional[str] = None
         self.available_tools = available_tools
         self._tool_sessions: dict[str, Union[ClientSession, Tool]] = {}
         self.called_tools: set[str] = set()
@@ -135,7 +164,7 @@ class HarmonyContext(ConversationContext):
         if self.parser.current_channel in {"analysis", "commentary"}:
             self.num_reasoning_tokens += 1
 
-    def append_output(self, output) -> None:
+    def append_output(self, output: Union[RequestOutput, list[Message]]) -> None:
         if isinstance(output, RequestOutput):
             output_token_ids = output.outputs[0].token_ids
             self.parser = get_streamable_parser_for_assistant()
@@ -149,7 +178,12 @@ class HarmonyContext(ConversationContext):
             self._update_decode_token_usage(output)
             # Move current turn to previous turn for next turn's calculations
             self.previous_turn = self.current_turn.copy()
+            # append_output is called only once before tool calling
+            # in non-streaming case
+            # so we can append all the parser messages to _messages
             output_msgs = self.parser.messages
+            # The responses finish reason is set in the last message
+            self.finish_reason = output.outputs[0].finish_reason
         else:
             # Tool output.
             output_msgs = output
@@ -157,18 +191,18 @@ class HarmonyContext(ConversationContext):
 
     def _update_prefill_token_usage(self, output: RequestOutput) -> None:
         """Update token usage statistics for the prefill phase of generation.
-        
+
         The prefill phase processes the input prompt tokens. This method:
         1. Counts the prompt tokens for this turn
         2. Calculates tool output tokens for multi-turn conversations
         3. Updates cached token counts
         4. Tracks state for next turn calculations
-        
+
         Tool output tokens are calculated as:
-        current_prompt_tokens - last_turn_prompt_tokens - 
+        current_prompt_tokens - last_turn_prompt_tokens -
         last_turn_output_tokens
         This represents tokens added between turns (typically tool responses).
-        
+
         Args:
             output: The RequestOutput containing prompt token information
         """
@@ -176,8 +210,7 @@ class HarmonyContext(ConversationContext):
             this_turn_input_tokens = len(output.prompt_token_ids)
         else:
             this_turn_input_tokens = 0
-            logger.error(
-                "RequestOutput appended contains no prompt_token_ids.")
+            logger.error("RequestOutput appended contains no prompt_token_ids.")
 
         # Update current turn input tokens
         self.current_turn.input_tokens = this_turn_input_tokens
@@ -190,9 +223,11 @@ class HarmonyContext(ConversationContext):
             # start counting tool after first turn
             # tool tokens = this turn prefill - last turn prefill -
             # last turn decode
-            this_turn_tool_tokens = (self.current_turn.input_tokens -
-                                     self.previous_turn.input_tokens -
-                                     self.previous_turn.output_tokens)
+            this_turn_tool_tokens = (
+                self.current_turn.input_tokens
+                - self.previous_turn.input_tokens
+                - self.previous_turn.output_tokens
+            )
 
             # Handle negative tool token counts (shouldn't happen in normal
             # cases)
@@ -201,9 +236,11 @@ class HarmonyContext(ConversationContext):
                     "Negative tool output tokens calculated: %d "
                     "(current_input=%d, previous_input=%d, "
                     "previous_output=%d). Setting to 0.",
-                    this_turn_tool_tokens, self.current_turn.input_tokens,
+                    this_turn_tool_tokens,
+                    self.current_turn.input_tokens,
                     self.previous_turn.input_tokens,
-                    self.previous_turn.output_tokens)
+                    self.previous_turn.output_tokens,
+                )
                 this_turn_tool_tokens = 0
 
             self.num_tool_output_tokens += this_turn_tool_tokens
@@ -214,18 +251,18 @@ class HarmonyContext(ConversationContext):
 
     def _update_decode_token_usage(self, output: RequestOutput) -> int:
         """Update token usage statistics for the decode phase of generation.
-        
+
         The decode phase processes the generated output tokens. This method:
         1. Counts output tokens from all completion outputs
         2. Updates the total output token count
         3. Tracks tokens generated in the current turn
-        
+
         In streaming mode, this is called for each token generated.
         In non-streaming mode, this is called once with all output tokens.
-        
+
         Args:
             output: The RequestOutput containing generated token information
-            
+
         Returns:
             int: Number of output tokens processed in this call
         """
@@ -245,9 +282,11 @@ class HarmonyContext(ConversationContext):
     def need_builtin_tool_call(self) -> bool:
         last_msg = self.messages[-1]
         recipient = last_msg.recipient
-        return recipient is not None and (recipient.startswith("browser.")
-                                          or recipient.startswith("python") or
-                                          recipient.startswith("container."))
+        return recipient is not None and (
+            recipient.startswith("browser.")
+            or recipient.startswith("python")
+            or recipient.startswith("container.")
+        )
 
     async def call_tool(self) -> list[Message]:
         if not self.messages:
@@ -257,21 +296,24 @@ class HarmonyContext(ConversationContext):
         if recipient is not None:
             if recipient.startswith("browser."):
                 return await self.call_search_tool(
-                    self._tool_sessions["browser"], last_msg)
+                    self._tool_sessions["browser"], last_msg
+                )
             elif recipient.startswith("python"):
                 return await self.call_python_tool(
-                    self._tool_sessions["python"], last_msg)
+                    self._tool_sessions["python"], last_msg
+                )
             elif recipient.startswith("container."):
                 return await self.call_container_tool(
-                    self._tool_sessions["container"], last_msg)
+                    self._tool_sessions["container"], last_msg
+                )
         raise ValueError("No tool call found")
 
     def render_for_completion(self) -> list[int]:
         return render_for_completion(self.messages)
 
-    async def call_search_tool(self, tool_session: Union["ClientSession",
-                                                         Tool],
-                               last_msg: Message) -> list[Message]:
+    async def call_search_tool(
+        self, tool_session: Union["ClientSession", Tool], last_msg: Message
+    ) -> list[Message]:
         self.called_tools.add("browser")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
@@ -282,15 +324,17 @@ class HarmonyContext(ConversationContext):
         content = TextContent(text=result_str)
         author = Author(role=Role.TOOL, name=last_msg.recipient)
         return [
-            Message(author=author,
-                    content=[content],
-                    recipient=Role.ASSISTANT,
-                    channel=last_msg.channel)
+            Message(
+                author=author,
+                content=[content],
+                recipient=Role.ASSISTANT,
+                channel=last_msg.channel,
+            )
         ]
 
-    async def call_python_tool(self, tool_session: Union["ClientSession",
-                                                         Tool],
-                               last_msg: Message) -> list[Message]:
+    async def call_python_tool(
+        self, tool_session: Union["ClientSession", Tool], last_msg: Message
+    ) -> list[Message]:
         self.called_tools.add("python")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
@@ -304,41 +348,52 @@ class HarmonyContext(ConversationContext):
         author = Author(role=Role.TOOL, name="python")
 
         return [
-            Message(author=author,
-                    content=[content],
-                    channel=last_msg.channel,
-                    recipient=Role.ASSISTANT)
+            Message(
+                author=author,
+                content=[content],
+                channel=last_msg.channel,
+                recipient=Role.ASSISTANT,
+            )
         ]
 
-    async def init_tool_sessions(self, tool_server: Optional[ToolServer],
-                                 exit_stack: AsyncExitStack,
-                                 request_id: str) -> None:
+    async def init_tool_sessions(
+        self,
+        tool_server: Optional[ToolServer],
+        exit_stack: AsyncExitStack,
+        request_id: str,
+        mcp_tools: dict[str, Mcp],
+    ):
         if tool_server:
             for tool_name in self.available_tools:
                 if tool_name not in self._tool_sessions:
+                    tool_type = _map_tool_name_to_tool_type(tool_name)
+                    headers = (
+                        mcp_tools[tool_type].headers if tool_type in mcp_tools else None
+                    )
                     tool_session = await exit_stack.enter_async_context(
-                        tool_server.new_session(tool_name, request_id))
+                        tool_server.new_session(tool_name, request_id, headers)
+                    )
                     self._tool_sessions[tool_name] = tool_session
                     exit_stack.push_async_exit(self.cleanup_session)
 
-    async def call_container_tool(self, tool_session: Union["ClientSession",
-                                                            Tool],
-                                  last_msg: Message) -> list[Message]:
+    async def call_container_tool(
+        self, tool_session: Union["ClientSession", Tool], last_msg: Message
+    ) -> list[Message]:
         """
-            Call container tool. Expect this to be run in a stateful docker
-            with command line terminal.
-            The official container tool would at least
-            expect the following format:
-            - for tool name: exec
-                - args:
-                    {
-                        "cmd":List[str] "command to execute",
-                        "workdir":optional[str] "current working directory",
-                        "env":optional[object/dict] "environment variables",
-                        "session_name":optional[str] "session name",
-                        "timeout":optional[int] "timeout in seconds",
-                        "user":optional[str] "user name",
-                    }
+        Call container tool. Expect this to be run in a stateful docker
+        with command line terminal.
+        The official container tool would at least
+        expect the following format:
+        - for tool name: exec
+            - args:
+                {
+                    "cmd":List[str] "command to execute",
+                    "workdir":optional[str] "current working directory",
+                    "env":optional[object/dict] "environment variables",
+                    "session_name":optional[str] "session name",
+                    "timeout":optional[int] "timeout in seconds",
+                    "user":optional[str] "user name",
+                }
         """
         self.called_tools.add("container")
         if isinstance(tool_session, Tool):
@@ -350,10 +405,12 @@ class HarmonyContext(ConversationContext):
         content = TextContent(text=result_str)
         author = Author(role=Role.TOOL, name=last_msg.recipient)
         return [
-            Message(author=author,
-                    content=[content],
-                    recipient=Role.ASSISTANT,
-                    channel=last_msg.channel)
+            Message(
+                author=author,
+                content=[content],
+                recipient=Role.ASSISTANT,
+                channel=last_msg.channel,
+            )
         ]
 
     async def cleanup_session(self, *args, **kwargs) -> None:
@@ -361,17 +418,21 @@ class HarmonyContext(ConversationContext):
 
         async def cleanup_tool_session(tool_session):
             if not isinstance(tool_session, Tool):
-                logger.info("Cleaning up tool session for %s",
-                            tool_session._client_info)
+                logger.info(
+                    "Cleaning up tool session for %s", tool_session._client_info
+                )
                 with contextlib.suppress(Exception):
                     await tool_session.call_tool("cleanup_session", {})
 
-        await asyncio.gather(*(cleanup_tool_session(self._tool_sessions[tool])
-                               for tool in self.called_tools))
+        await asyncio.gather(
+            *(
+                cleanup_tool_session(self._tool_sessions[tool])
+                for tool in self.called_tools
+            )
+        )
 
 
 class StreamingHarmonyContext(HarmonyContext):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.last_output = None
@@ -383,9 +444,9 @@ class StreamingHarmonyContext(HarmonyContext):
 
     @property
     def messages(self) -> list:
-        return self.parser.messages
+        return self._messages
 
-    def append_output(self, output) -> None:
+    def append_output(self, output: Union[RequestOutput, list[Message]]) -> None:
         if isinstance(output, RequestOutput):
             # append_output is called for each output token in streaming case,
             # so we only want to add the prompt tokens once for each message.
@@ -407,6 +468,10 @@ class StreamingHarmonyContext(HarmonyContext):
             # Check if the current token is part of reasoning content
             self._update_num_reasoning_tokens()
             self.last_tok = tok
+            if len(self._messages) - self.num_init_messages < len(self.parser.messages):
+                self._messages.extend(
+                    self.parser.messages[len(self._messages) - self.num_init_messages :]
+                )
         else:
             # Handle the case of tool output in direct message format
             assert len(output) == 1, "Tool output should be a single message"
@@ -419,13 +484,13 @@ class StreamingHarmonyContext(HarmonyContext):
             for tok in toks:
                 self.parser.process(tok)
             self.last_tok = toks[-1]
+            # TODO: add tool_output messages to self._messages
 
     def is_expecting_start(self) -> bool:
         return self.parser.state == StreamState.EXPECT_START
 
     def is_assistant_action_turn(self) -> bool:
-        return self.last_tok in self.encoding.stop_tokens_for_assistant_actions(
-        )
+        return self.last_tok in self.encoding.stop_tokens_for_assistant_actions()
 
     def render_for_completion(self) -> list[int]:
         # now this list of tokens as next turn's starting tokens

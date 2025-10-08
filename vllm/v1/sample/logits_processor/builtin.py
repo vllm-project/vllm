@@ -6,9 +6,11 @@ from typing import TYPE_CHECKING, Callable, Optional, TypeVar
 import torch
 
 from vllm import SamplingParams
-from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
-                                                       LogitsProcessor,
-                                                       MoveDirectionality)
+from vllm.v1.sample.logits_processor.interface import (
+    BatchUpdate,
+    LogitsProcessor,
+    MoveDirectionality,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -17,25 +19,24 @@ T = TypeVar("T")
 
 
 class MinPLogitsProcessor(LogitsProcessor):
-
-    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
-                 is_pin_memory: bool):
+    def __init__(
+        self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
+    ):
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.min_p_count: int = 0
 
-        self.min_p_cpu_tensor = torch.zeros((max_num_reqs, ),
-                                            dtype=torch.float32,
-                                            device="cpu",
-                                            pin_memory=is_pin_memory)
+        self.min_p_cpu_tensor = torch.zeros(
+            (max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=is_pin_memory
+        )
         self.min_p_cpu = self.min_p_cpu_tensor.numpy()
 
         self.use_double_tensor = torch.device(device).type != "cpu"
 
         if self.use_double_tensor:
             # Pre-allocated device tensor
-            self.min_p_device: torch.Tensor = torch.empty((max_num_reqs, ),
-                                                          dtype=torch.float32,
-                                                          device=device)
+            self.min_p_device: torch.Tensor = torch.empty(
+                (max_num_reqs,), dtype=torch.float32, device=device
+            )
         else:
             self.min_p_device = self.min_p_cpu_tensor
         # Current slice of the device tensor
@@ -93,8 +94,7 @@ class MinPLogitsProcessor(LogitsProcessor):
         if self.min_p_count and (needs_update or self.min_p.shape[0] != size):
             self.min_p = self.min_p_device[:size]
             if self.use_double_tensor:
-                self.min_p.copy_(self.min_p_cpu_tensor[:size],
-                                 non_blocking=True)
+                self.min_p.copy_(self.min_p_cpu_tensor[:size], non_blocking=True)
             self.min_p.unsqueeze_(1)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
@@ -104,28 +104,27 @@ class MinPLogitsProcessor(LogitsProcessor):
         # Convert logits to probability distribution
         probability_values = torch.nn.functional.softmax(logits, dim=-1)
         # Calculate maximum probabilities per sequence
-        max_probabilities = torch.amax(probability_values,
-                                       dim=-1,
-                                       keepdim=True)
+        max_probabilities = torch.amax(probability_values, dim=-1, keepdim=True)
         # Adjust min_p
         adjusted_min_p = max_probabilities.mul_(self.min_p)
         # Identify valid tokens using threshold comparison
         invalid_token_mask = probability_values < adjusted_min_p
         # Apply mask using boolean indexing
-        logits[invalid_token_mask] = -float('inf')
+        logits[invalid_token_mask] = -float("inf")
         return logits
 
 
 class LogitBiasLogitsProcessor(LogitsProcessor):
-
     def __init__(self, _, device: torch.device, is_pin_memory: bool):
         self.device = device
         self.pin_memory = is_pin_memory
         self.biases: dict[int, dict[int, float]] = {}
 
         self.bias_tensor: torch.Tensor = torch.tensor(())
-        self.logits_slice = (self._device_tensor([], torch.int32),
-                             self._device_tensor([], torch.int32))
+        self.logits_slice = (
+            self._device_tensor([], torch.int32),
+            self._device_tensor([], torch.int32),
+        )
 
     def is_argmax_invariant(self) -> bool:
         """Logit bias can rebalance token probabilities and change the
@@ -134,8 +133,8 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
 
     def update_state(self, batch_update: Optional[BatchUpdate]):
         needs_update = process_dict_updates(
-            self.biases, batch_update,
-            lambda params, _, __: params.logit_bias or None)
+            self.biases, batch_update, lambda params, _, __: params.logit_bias or None
+        )
 
         # Update tensors if needed.
         if needs_update:
@@ -148,15 +147,15 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
                 biases.extend(lb.values())
 
             self.bias_tensor = self._device_tensor(biases, torch.float32)
-            self.logits_slice = (self._device_tensor(reqs, torch.int32),
-                                 self._device_tensor(tok_ids, torch.int32))
+            self.logits_slice = (
+                self._device_tensor(reqs, torch.int32),
+                self._device_tensor(tok_ids, torch.int32),
+            )
 
     def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
-        return (torch.tensor(data,
-                             device="cpu",
-                             dtype=dtype,
-                             pin_memory=self.pin_memory).to(device=self.device,
-                                                            non_blocking=True))
+        return torch.tensor(
+            data, device="cpu", dtype=dtype, pin_memory=self.pin_memory
+        ).to(device=self.device, non_blocking=True)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.biases:
@@ -165,20 +164,19 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
 
 
 class MinTokensLogitsProcessor(LogitsProcessor):
-
-    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
-                 is_pin_memory: bool):
+    def __init__(
+        self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
+    ):
         # index -> (min_toks, output_token_ids, stop_token_ids)
         self.device = device
         self.pin_memory = is_pin_memory
         self.min_toks: dict[int, tuple[int, Sequence[int], set[int]]] = {}
 
         # (req_idx_tensor,eos_tok_id_tensor)
-        self.logits_slice: tuple[torch.Tensor,
-                                 torch.Tensor] = (self._device_tensor(
-                                     [], torch.int32),
-                                                  self._device_tensor(
-                                                      [], torch.int32))
+        self.logits_slice: tuple[torch.Tensor, torch.Tensor] = (
+            self._device_tensor([], torch.int32),
+            self._device_tensor([], torch.int32),
+        )
 
     def is_argmax_invariant(self) -> bool:
         """By censoring stop tokens, min-tokens can change the outcome
@@ -187,7 +185,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
     @staticmethod
     def add_request(
-        params: SamplingParams, _: list[int], output_tok_ids: list[int]
+        params: SamplingParams, _: Optional[list[int]], output_tok_ids: list[int]
     ) -> Optional[tuple[int, Sequence[int], set[int]]]:
         min_tokens = params.min_tokens
         if not min_tokens or len(output_tok_ids) >= min_tokens:
@@ -195,13 +193,16 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         return min_tokens, output_tok_ids, params.all_stop_token_ids
 
     def update_state(self, batch_update: Optional[BatchUpdate]):
-        needs_update = process_dict_updates(self.min_toks, batch_update,
-                                            self.add_request)
+        needs_update = process_dict_updates(
+            self.min_toks, batch_update, self.add_request
+        )
         if self.min_toks:
             # Check for any requests that have attained their min tokens.
-            to_remove = tuple(index for index, (min_toks, out_tok_ids,
-                                                _) in self.min_toks.items()
-                              if len(out_tok_ids) >= min_toks)
+            to_remove = tuple(
+                index
+                for index, (min_toks, out_tok_ids, _) in self.min_toks.items()
+                if len(out_tok_ids) >= min_toks
+            )
             if to_remove:
                 needs_update = True
                 for index in to_remove:
@@ -215,15 +216,15 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                 reqs.extend([req] * len(stop_tok_ids))
                 tok_ids.extend(stop_tok_ids)
 
-            self.logits_slice = (self._device_tensor(reqs, torch.int32),
-                                 self._device_tensor(tok_ids, torch.int32))
+            self.logits_slice = (
+                self._device_tensor(reqs, torch.int32),
+                self._device_tensor(tok_ids, torch.int32),
+            )
 
     def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
-        return (torch.tensor(data,
-                             device="cpu",
-                             dtype=dtype,
-                             pin_memory=self.pin_memory).to(device=self.device,
-                                                            non_blocking=True))
+        return torch.tensor(
+            data, device="cpu", dtype=dtype, pin_memory=self.pin_memory
+        ).to(device=self.device, non_blocking=True)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.min_toks:
@@ -233,8 +234,9 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
 
 def process_dict_updates(
-    req_entries: dict[int, T], batch_update: Optional[BatchUpdate],
-    new_state: Callable[[SamplingParams, list[int], list[int]], Optional[T]]
+    req_entries: dict[int, T],
+    batch_update: Optional[BatchUpdate],
+    new_state: Callable[[SamplingParams, Optional[list[int]], list[int]], Optional[T]],
 ) -> bool:
     """Utility function to update dict state for sparse LogitsProcessors."""
 
@@ -244,8 +246,7 @@ def process_dict_updates(
 
     updated = False
     for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
-        if (state := new_state(params, prompt_tok_ids,
-                               output_tok_ids)) is not None:
+        if (state := new_state(params, prompt_tok_ids, output_tok_ids)) is not None:
             req_entries[index] = state
             updated = True
         elif req_entries.pop(index, None) is not None:

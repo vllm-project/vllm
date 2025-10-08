@@ -1,0 +1,32 @@
+[run]
+source = vllm
+omit =
+    */tests/*
+    */test_*
+    */__pycache__/*
+    */build/*
+    */dist/*
+    */vllm.egg-info/*
+    */third_party/*
+    */examples/*
+    */benchmarks/*
+    */docs/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    if self.debug:
+    if settings.DEBUG
+    raise AssertionError
+    raise NotImplementedError
+    if 0:
+    if __name__ == .__main__.:
+    class .*\bProtocol\):
+    @(abc\.)?abstractmethod
+
+[html]
+directory = htmlcov
+
+[xml]
+output = coverage.xml

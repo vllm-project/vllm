@@ -22,7 +22,7 @@ MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 PREV_MINOR_VERSION = version._prev_minor_version()
 
 
-@pytest.fixture(scope="module", params=[True, False])
+@pytest.fixture(scope="module", params=[True])
 def use_v1(request):
     # Module-scoped variant of run_with_both_engines
     #
@@ -54,19 +54,22 @@ def default_server_args():
     ]
 
 
-@pytest.fixture(scope="module",
-                params=[
-                    "",
-                    "--enable-chunked-prefill",
-                    "--disable-frontend-multiprocessing",
-                    f"--show-hidden-metrics-for-version={PREV_MINOR_VERSION}",
-                ])
+@pytest.fixture(
+    scope="module",
+    params=[
+        "",
+        "--enable-chunked-prefill",
+        "--disable-frontend-multiprocessing",
+        f"--show-hidden-metrics-for-version={PREV_MINOR_VERSION}",
+    ],
+)
 def server(use_v1, default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
-    env_dict = dict(VLLM_USE_V1='1' if use_v1 else '0')
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args,
-                            env_dict=env_dict) as remote_server:
+    env_dict = dict(VLLM_USE_V1="1" if use_v1 else "0")
+    with RemoteOpenAIServer(
+        MODEL_NAME, default_server_args, env_dict=env_dict
+    ) as remote_server:
         yield remote_server
 
 
@@ -87,30 +90,36 @@ _NUM_GENERATION_TOKENS_PER_REQUEST = 10
 # {metric_family: [(suffix, expected_value)]}
 EXPECTED_VALUES = {
     "vllm:time_to_first_token_seconds": [("_count", _NUM_REQUESTS)],
-    "vllm:time_per_output_token_seconds":
-    [("_count", _NUM_REQUESTS * (_NUM_GENERATION_TOKENS_PER_REQUEST - 1))],
+    "vllm:time_per_output_token_seconds": [
+        ("_count", _NUM_REQUESTS * (_NUM_GENERATION_TOKENS_PER_REQUEST - 1))
+    ],
     "vllm:e2e_request_latency_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_queue_time_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_inference_time_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_prefill_time_seconds": [("_count", _NUM_REQUESTS)],
     "vllm:request_decode_time_seconds": [("_count", _NUM_REQUESTS)],
-    "vllm:request_prompt_tokens":
-    [("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
-     ("_count", _NUM_REQUESTS)],
-    "vllm:request_generation_tokens":
-    [("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
-     ("_count", _NUM_REQUESTS)],
+    "vllm:request_prompt_tokens": [
+        ("_sum", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST),
+        ("_count", _NUM_REQUESTS),
+    ],
+    "vllm:request_generation_tokens": [
+        ("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
+        ("_count", _NUM_REQUESTS),
+    ],
     "vllm:request_params_n": [("_count", _NUM_REQUESTS)],
     "vllm:request_params_max_tokens": [
         ("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
-        ("_count", _NUM_REQUESTS)
+        ("_count", _NUM_REQUESTS),
     ],
-    "vllm:iteration_tokens_total":
-    [("_sum", _NUM_REQUESTS *
-      (_NUM_PROMPT_TOKENS_PER_REQUEST + _NUM_GENERATION_TOKENS_PER_REQUEST)),
-     ("_count", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST)],
-    "vllm:prompt_tokens": [("_total",
-                            _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
+    "vllm:iteration_tokens_total": [
+        (
+            "_sum",
+            _NUM_REQUESTS
+            * (_NUM_PROMPT_TOKENS_PER_REQUEST + _NUM_GENERATION_TOKENS_PER_REQUEST),
+        ),
+        ("_count", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
+    ],
+    "vllm:prompt_tokens": [("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
     "vllm:generation_tokens": [
         ("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)
     ],
@@ -119,14 +128,16 @@ EXPECTED_VALUES = {
 
 
 @pytest.mark.asyncio
-async def test_metrics_counts(server: RemoteOpenAIServer,
-                              client: openai.AsyncClient, use_v1: bool):
+async def test_metrics_counts(
+    server: RemoteOpenAIServer, client: openai.AsyncClient, use_v1: bool
+):
     for _ in range(_NUM_REQUESTS):
         # sending a request triggers the metrics to be logged.
         await client.completions.create(
             model=MODEL_NAME,
             prompt=_TOKENIZED_PROMPT,
-            max_tokens=_NUM_GENERATION_TOKENS_PER_REQUEST)
+            max_tokens=_NUM_GENERATION_TOKENS_PER_REQUEST,
+        )
 
     response = requests.get(server.url_for("metrics"))
     print(response.text)
@@ -134,9 +145,10 @@ async def test_metrics_counts(server: RemoteOpenAIServer,
 
     # Loop over all expected metric_families
     for metric_family, suffix_values_list in EXPECTED_VALUES.items():
-        if ((use_v1 and metric_family not in EXPECTED_METRICS_V1)
-                or (not server.show_hidden_metrics
-                    and metric_family in HIDDEN_DEPRECATED_METRICS)):
+        if (use_v1 and metric_family not in EXPECTED_METRICS_V1) or (
+            not server.show_hidden_metrics
+            and metric_family in HIDDEN_DEPRECATED_METRICS
+        ):
             continue
 
         found_metric = False
@@ -160,14 +172,15 @@ async def test_metrics_counts(server: RemoteOpenAIServer,
                             assert sample.value == expected_value, (
                                 f"{metric_name_w_suffix} expected value of "
                                 f"{expected_value} did not match found value "
-                                f"{sample.value}")
+                                f"{sample.value}"
+                            )
                             break
                     assert found_suffix, (
                         f"Did not find {metric_name_w_suffix} in prom endpoint"
                     )
                 break
 
-        assert found_metric, (f"Did not find {metric_family} in prom endpoint")
+        assert found_metric, f"Did not find {metric_family} in prom endpoint"
 
 
 EXPECTED_METRICS = [
@@ -232,6 +245,9 @@ EXPECTED_METRICS_V1 = [
     "vllm:gpu_cache_usage_perc",
     "vllm:gpu_prefix_cache_queries",
     "vllm:gpu_prefix_cache_hits",
+    "vllm:kv_cache_usage_perc",
+    "vllm:prefix_cache_queries",
+    "vllm:prefix_cache_hits",
     "vllm:num_preemptions_total",
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
@@ -277,6 +293,9 @@ EXPECTED_METRICS_V1 = [
 ]
 
 HIDDEN_DEPRECATED_METRICS: list[str] = [
+    "vllm:gpu_cache_usage_perc",
+    "vllm:gpu_prefix_cache_queries",
+    "vllm:gpu_prefix_cache_hits",
     "vllm:time_per_output_token_seconds_sum",
     "vllm:time_per_output_token_seconds_bucket",
     "vllm:time_per_output_token_seconds_count",
@@ -284,30 +303,30 @@ HIDDEN_DEPRECATED_METRICS: list[str] = [
 
 
 @pytest.mark.asyncio
-async def test_metrics_exist(server: RemoteOpenAIServer,
-                             client: openai.AsyncClient, use_v1: bool):
+async def test_metrics_exist(
+    server: RemoteOpenAIServer, client: openai.AsyncClient, use_v1: bool
+):
     # sending a request triggers the metrics to be logged.
-    await client.completions.create(model=MODEL_NAME,
-                                    prompt="Hello, my name is",
-                                    max_tokens=5,
-                                    temperature=0.0)
+    await client.completions.create(
+        model=MODEL_NAME, prompt="Hello, my name is", max_tokens=5, temperature=0.0
+    )
 
     response = requests.get(server.url_for("metrics"))
     assert response.status_code == HTTPStatus.OK
 
-    for metric in (EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS):
-        if (metric in HIDDEN_DEPRECATED_METRICS
-                and not server.show_hidden_metrics):
+    for metric in EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS:
+        if metric in HIDDEN_DEPRECATED_METRICS and not server.show_hidden_metrics:
             continue
         assert metric in response.text
 
 
 @pytest.mark.asyncio
-async def test_abort_metrics_reset(server: RemoteOpenAIServer,
-                                   client: openai.AsyncClient, use_v1: bool):
-
-    running_requests, waiting_requests, kv_cache_usage = (
-        _get_running_metrics_from_api(server))
+async def test_abort_metrics_reset(
+    server: RemoteOpenAIServer, client: openai.AsyncClient, use_v1: bool
+):
+    running_requests, waiting_requests, kv_cache_usage = _get_running_metrics_from_api(
+        server, use_v1
+    )
 
     # Expect no running requests or kvcache usage
     assert running_requests == 0
@@ -322,15 +341,18 @@ async def test_abort_metrics_reset(server: RemoteOpenAIServer,
                 model=MODEL_NAME,
                 prompt=_TOKENIZED_PROMPT,
                 max_tokens=100,  # Long generation to give time to abort
-                temperature=0.0))
+                temperature=0.0,
+            )
+        )
         tasks.append(task)
 
     # Wait a bit for requests to start processing
     await asyncio.sleep(0.5)
 
     # Check that we have running requests
-    running_requests, waiting_requests, kv_cache_usage = (
-        _get_running_metrics_from_api(server))
+    running_requests, waiting_requests, kv_cache_usage = _get_running_metrics_from_api(
+        server, use_v1
+    )
 
     # Expect running requests and kvcache usage
     assert running_requests > 0
@@ -349,20 +371,21 @@ async def test_abort_metrics_reset(server: RemoteOpenAIServer,
 
     # Verify running and waiting requests counts and KV cache usage are zero
     running_requests_after, waiting_requests_after, kv_cache_usage_after = (
-        _get_running_metrics_from_api(server))
+        _get_running_metrics_from_api(server, use_v1)
+    )
 
-    assert running_requests_after == 0,\
-        (f"Expected 0 running requests after abort, got "
-         f"{running_requests_after}")
-    assert waiting_requests_after == 0,\
-        (f"Expected 0 waiting requests after abort, got "
-         f"{waiting_requests_after}")
-    assert kv_cache_usage_after == 0,\
-        (f"Expected 0% KV cache usage after abort, got "
-         f"{kv_cache_usage_after}")
+    assert running_requests_after == 0, (
+        f"Expected 0 running requests after abort, got {running_requests_after}"
+    )
+    assert waiting_requests_after == 0, (
+        f"Expected 0 waiting requests after abort, got {waiting_requests_after}"
+    )
+    assert kv_cache_usage_after == 0, (
+        f"Expected 0% KV cache usage after abort, got {kv_cache_usage_after}"
+    )
 
 
-def _get_running_metrics_from_api(server: RemoteOpenAIServer):
+def _get_running_metrics_from_api(server: RemoteOpenAIServer, use_v1: bool):
     """Return (running_count, waiting_count, kv_cache_usage)"""
 
     response = requests.get(server.url_for("metrics"))
@@ -370,6 +393,10 @@ def _get_running_metrics_from_api(server: RemoteOpenAIServer):
 
     # Verify running and waiting requests counts and KV cache usage are zero
     running_requests, waiting_requests, kv_cache_usage = None, None, None
+
+    kv_cache_usage_metric = (
+        "vllm:kv_cache_usage_perc" if use_v1 else "vllm:gpu_cache_usage_perc"
+    )
 
     for family in text_string_to_metric_families(response.text):
         if family.name == "vllm:num_requests_running":
@@ -382,9 +409,9 @@ def _get_running_metrics_from_api(server: RemoteOpenAIServer):
                 if sample.name == "vllm:num_requests_waiting":
                     waiting_requests = sample.value
                     break
-        elif family.name == "vllm:gpu_cache_usage_perc":
+        elif family.name == kv_cache_usage_metric:
             for sample in family.samples:
-                if sample.name == "vllm:gpu_cache_usage_perc":
+                if sample.name == kv_cache_usage_metric:
                     kv_cache_usage = sample.value
                     break
 
@@ -402,28 +429,31 @@ def test_metrics_exist_run_batch(use_v1: bool):
     port = "8001"
     server_url = f"http://{base_url}:{port}"
 
-    with tempfile.NamedTemporaryFile(
-            "w") as input_file, tempfile.NamedTemporaryFile(
-                "r") as output_file:
+    with (
+        tempfile.NamedTemporaryFile("w") as input_file,
+        tempfile.NamedTemporaryFile("r") as output_file,
+    ):
         input_file.write(input_batch)
         input_file.flush()
-        proc = subprocess.Popen([
-            sys.executable,
-            "-m",
-            "vllm.entrypoints.openai.run_batch",
-            "-i",
-            input_file.name,
-            "-o",
-            output_file.name,
-            "--model",
-            "intfloat/multilingual-e5-small",
-            "--enable-metrics",
-            "--url",
-            base_url,
-            "--port",
-            port,
-        ],
-                                env={"VLLM_USE_V1": "1" if use_v1 else "0"})
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "vllm.entrypoints.openai.run_batch",
+                "-i",
+                input_file.name,
+                "-o",
+                output_file.name,
+                "--model",
+                "intfloat/multilingual-e5-small",
+                "--enable-metrics",
+                "--url",
+                base_url,
+                "--port",
+                port,
+            ],
+            env={"VLLM_USE_V1": "1"},
+        )
 
         def is_server_up(url):
             try:

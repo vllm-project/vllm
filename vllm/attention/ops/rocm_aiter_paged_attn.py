@@ -12,7 +12,6 @@ FP8_DTYPE = current_platform.fp8_dtype()
 
 
 class AITERPagedAttention(PagedAttention):
-
     @staticmethod
     def write_to_paged_cache(
         key: torch.Tensor,
@@ -27,8 +26,7 @@ class AITERPagedAttention(PagedAttention):
         is_8bit_kvcache = kv_cache_dtype in ["int8", "fp8", "fp8_e4m3"]
 
         if is_8bit_kvcache:
-            kv_cache_torch_dtype = (FP8_DTYPE
-                                    if "fp8" in kv_cache_dtype else torch.int8)
+            kv_cache_torch_dtype = FP8_DTYPE if "fp8" in kv_cache_dtype else torch.int8
             key_cache = key_cache.view(kv_cache_torch_dtype)
             value_cache = value_cache.view(kv_cache_torch_dtype)
 
@@ -41,7 +39,8 @@ class AITERPagedAttention(PagedAttention):
             kv_cache_dtype,
             k_scale=k_scale if is_8bit_kvcache else None,
             v_scale=v_scale if is_8bit_kvcache else None,
-            asm_layout=True)
+            asm_layout=True,
+        )
 
     @staticmethod
     def forward_decode(
@@ -69,23 +68,24 @@ class AITERPagedAttention(PagedAttention):
         is_8bit_kvcache = kv_cache_dtype in ["int8", "fp8", "fp8_e4m3"]
 
         if "fp8" in kv_cache_dtype:
-            key_cache = key_cache.view(torch.float8_e4m3fnuz)
-            value_cache = value_cache.view(torch.float8_e4m3fnuz)
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
 
-            if (blocksparse_vert_stride is not None
-                    and blocksparse_vert_stride > 1):
+            if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
                 assert NotImplementedError(
-                    "Blocksparse paged attention is not "
-                    "supported for fp8 kvcache.")
+                    "Blocksparse paged attention is not supported for fp8 kvcache."
+                )
 
-        rocm_aiter.pa_fwd_asm(Q=query,
-                              K=key_cache,
-                              V=value_cache,
-                              block_tables=block_tables,
-                              context_lens=seq_lens,
-                              block_tables_stride0=block_tables.stride(0),
-                              K_QScale=k_scale if is_8bit_kvcache else None,
-                              V_QScale=v_scale if is_8bit_kvcache else None,
-                              out_=output)
+        rocm_aiter.pa_fwd_asm(
+            Q=query,
+            K=key_cache,
+            V=value_cache,
+            block_tables=block_tables,
+            context_lens=seq_lens,
+            block_tables_stride0=block_tables.stride(0),
+            K_QScale=k_scale if is_8bit_kvcache else None,
+            V_QScale=v_scale if is_8bit_kvcache else None,
+            out_=output,
+        )
 
         return output
