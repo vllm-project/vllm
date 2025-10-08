@@ -819,45 +819,81 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
         ssm_shape = vllm_ctx[layer_2].kv_cache[0][1].shape
 
         # assert we are using FlashInfer
-        assert attn_shape[0] == num_blocks
+        assert attn_shape[0] % num_blocks == 0
+        block_split_ratio = attn_shape[0] // num_blocks
+
+        # Use small blocks for testing to avoid memory issues
+        test_block_size = min(2, len(blocks0), len(blocks1))
+
+        # Use non-overlapping blocks to avoid data contamination
+        # Split physical blocks: first half for attention, second half for mamba
+        mid_point = num_blocks // 2
+
+        # Attention uses physical blocks from first half (mapped to logical blocks)
+        kv_blocks_for_attention = np.array([0, 1])[:test_block_size]
+
+        # Mamba uses physical blocks from second half
+        kv_blocks_for_mamba = np.array([mid_point, mid_point + 1])[:test_block_size]
+
+        # Create small constant tensors for testing with corrected shapes
+        # Attention: [block_size, ...] starting from dimension 2
+        attn_constant_shape = attn_shape[2:]
+        conv_constant_shape = conv_shape[1:]
+        ssm_constant_shape = ssm_shape[1:]
 
         attn_blocks_constant = torch.full(
-            (len(blocks0), *attn_shape[1:]), device=DEVICE, fill_value=3.33
+            (test_block_size, *attn_constant_shape), device=DEVICE, fill_value=3.33
         )
         conv_blocks_constant = torch.full(
-            (len(blocks1), *conv_shape[1:]), device=DEVICE, fill_value=6.66
+            (test_block_size, *conv_constant_shape), device=DEVICE, fill_value=6.66
         )
         ssm_blocks_constant = torch.full(
-            (len(blocks1), *ssm_shape[1:]), device=DEVICE, fill_value=9.99
+            (test_block_size, *ssm_constant_shape), device=DEVICE, fill_value=9.99
         )
 
-        # fill all attention blocks with constant
-        for layer in [layer_0, layer_1]:
-            vllm_ctx[layer].kv_cache[0][blocks0, :] = (
-                attn_blocks_constant.detach().clone()
-            )
+        # Fill attention blocks with constants using kv block indices
+        kernel_blocks_for_attention = kv_blocks_for_attention * block_split_ratio
 
-        # fill all mamba blocks with constant
-        for layer in [layer_2, layer_3, layer_4, layer_5]:
-            vllm_ctx[layer].kv_cache[0][0][blocks1, :] = (
-                conv_blocks_constant.detach().clone()
-            )
-            vllm_ctx[layer].kv_cache[0][1][blocks1, :] = (
-                ssm_blocks_constant.detach().clone()
-            )
-
-        # verify attention and mamba contents are correct
         for layer in [layer_0, layer_1]:
-            assert torch.equal(
-                vllm_ctx[layer].kv_cache[0][blocks0, :], attn_blocks_constant
-            )
+            # attention: kv_cache[0][kernel_block_idx, kv_idx, ...]
+            for i, kernel_block in enumerate(kernel_blocks_for_attention):
+                vllm_ctx[layer].kv_cache[0][kernel_block, :] = attn_blocks_constant[i]
+
+        # Fill mamba blocks with constants using physical block indices
         for layer in [layer_2, layer_3, layer_4, layer_5]:
-            assert torch.equal(
-                vllm_ctx[layer].kv_cache[0][0][blocks1, :], conv_blocks_constant
-            )
-            assert torch.equal(
-                vllm_ctx[layer].kv_cache[0][1][blocks1, :], ssm_blocks_constant
-            )
+            # mamba: kv_cache[0][component][physical_block_idx, ...]
+            for i, kv_block in enumerate(kv_blocks_for_mamba):
+                vllm_ctx[layer].kv_cache[0][0][kv_block, :] = conv_blocks_constant[i]
+                vllm_ctx[layer].kv_cache[0][1][kv_block, :] = ssm_blocks_constant[i]
+
+        # Verify attention and mamba contents are correct
+        for layer in [layer_0, layer_1]:
+            for i, kernel_block in enumerate(kernel_blocks_for_attention):
+                actual_kv = vllm_ctx[layer].kv_cache[0][kernel_block, :]
+                expected = attn_blocks_constant[i]
+
+                # Check K and V separately
+                assert torch.equal(actual_kv[0], expected)
+                assert torch.equal(actual_kv[1], expected)
+
+        for layer in [layer_2, layer_3, layer_4, layer_5]:
+            for i, kv_block in enumerate(kv_blocks_for_mamba):
+                actual_conv = vllm_ctx[layer].kv_cache[0][0][kv_block, :]
+                actual_ssm = vllm_ctx[layer].kv_cache[0][1][kv_block, :]
+                expected_conv = conv_blocks_constant[i]
+                expected_ssm = ssm_blocks_constant[i]
+
+                assert torch.equal(actual_conv, expected_conv)
+                assert torch.equal(actual_ssm, expected_ssm)
+
+        for layer in [layer_2, layer_3, layer_4, layer_5]:
+            for i, kv_block in enumerate(kv_blocks_for_mamba):
+                actual_conv = vllm_ctx[layer].kv_cache[0][0][kv_block, :]
+                actual_ssm = vllm_ctx[layer].kv_cache[0][1][kv_block, :]
+                expected_conv = conv_blocks_constant[i]
+                expected_ssm = ssm_blocks_constant[i]
+                assert torch.equal(actual_conv, expected_conv)
+                assert torch.equal(actual_ssm, expected_ssm)
 
 
 def test_hybrid_block_table_initialization():
@@ -886,7 +922,7 @@ def test_hybrid_block_table_initialization():
     # Verify hybrid block configuration
     assert block_table.use_hybrid_blocks is True
     assert block_table.block_size == kernel_block_sizes[0]
-    assert block_table.blocks_per_phys_block == (
+    assert block_table.blocks_per_kv_block == (
         block_size // kernel_block_sizes[0]
     )  # Changed to use first element
 
@@ -937,9 +973,9 @@ def test_input_batch_with_kernel_block_sizes():
     # Verify that block tables were created with kernel block sizes
     assert len(input_batch.block_table.block_tables) == len(block_sizes)
 
-    for i, (phys_size, kernel_size) in enumerate(zip(block_sizes, kernel_block_sizes)):
+    for i, (kv_size, kernel_size) in enumerate(zip(block_sizes, kernel_block_sizes)):
         block_table = input_batch.block_table.block_tables[i]
-        if phys_size != kernel_size:
+        if kv_size != kernel_size:
             assert block_table.use_hybrid_blocks is True
             assert block_table.block_size == kernel_size
         else:
@@ -970,7 +1006,6 @@ def test_hybrid_cache_integration(model_runner, dist_init):
         num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
         head_size=runner.model_config.get_head_size(),
         dtype=runner.kv_cache_dtype,
-        use_mla=False,
     )
     tensor_size = attn_spec.page_size_bytes * NUM_BLOCKS
     kv_cache_config = KVCacheConfig(

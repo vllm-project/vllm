@@ -4088,28 +4088,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return compatible_sizes if return_all else [max(compatible_sizes)]
 
-    def _get_all_compatible_block_sizes(
-        self, kv_manager_block_size: int, backend_cls: type[AttentionBackend]
-    ) -> list[int]:
-        """
-        Get all compatible block sizes for a backend.
-
-        Args:
-            kv_manager_block_size: Physical block size of KV cache
-            backend_cls: Attention backend class
-
-        Returns:
-            List of all compatible block sizes in descending order
-
-        Raises:
-            ValueError: If no compatible block size found
-        """
-        compatible_sizes = self._find_compatible_block_sizes(
-            kv_manager_block_size, backend_cls, return_all=True
-        )
-
-        return sorted(list(set(compatible_sizes)), reverse=True)
-
     def _select_common_block_size(
         self, kv_manager_block_size: int, attn_groups: list[AttentionGroup]
     ) -> int:
@@ -4117,7 +4095,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Select common block size for all backends.
 
         Args:
-            kv_manager_block_size: Physical block size of KV cache
+            kv_manager_block_size: Block size of KV cache
             attn_groups: List of attention groups
 
         Returns:
@@ -4130,9 +4108,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         all_backend_supports = []
 
         for attn_group in attn_groups:
-            supported_sizes = self._get_all_compatible_block_sizes(
-                kv_manager_block_size, attn_group.backend
+            compatible_sizes = self._find_compatible_block_sizes(
+                kv_manager_block_size, attn_group.backend, return_all=True
             )
+            supported_sizes = sorted(list(set(compatible_sizes)), reverse=True)
             all_backend_supports.append(set(supported_sizes))
 
         common_supported_sizes = set.intersection(*all_backend_supports)
@@ -4307,25 +4286,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     kv_manager_block_size = kv_cache_spec.block_size
-                    logical_kernel_size_list = self._find_compatible_block_sizes(
+                    kernel_size_list = self._find_compatible_block_sizes(
                         kv_manager_block_size, attn_backend, return_all=False
                     )
-                    logical_kernel_size = logical_kernel_size_list[0]
-                    num_blocks_per_phys_block = (
-                        kv_manager_block_size // logical_kernel_size
-                    )
-                    logical_num_blocks = num_blocks * num_blocks_per_phys_block
+                    kernel_size = kernel_size_list[0]
+                    num_blocks_per_kv_block = kv_manager_block_size // kernel_size
+                    kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        logical_num_blocks,
-                        logical_kernel_size,
+                        kernel_num_blocks,
+                        kernel_size,
                         kv_cache_spec.num_kv_heads,
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,
                     )
                     dtype = kv_cache_spec.dtype
                     try:
-                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()  # noqa: E501
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
@@ -4482,6 +4459,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
+
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)

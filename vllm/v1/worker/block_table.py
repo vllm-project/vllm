@@ -45,7 +45,7 @@ class BlockTable:
             # Standard case: allocation and computation use same block size
             # No block splitting needed, direct mapping
             self.block_size = block_size
-            self.blocks_per_phys_block = 1
+            self.blocks_per_kv_block = 1
             self.use_hybrid_blocks = False
         else:
             # Hybrid case: allocation block size differs from kernel block size
@@ -59,12 +59,10 @@ class BlockTable:
                 )
 
             self.block_size = kernel_block_size
-            self.blocks_per_phys_block = block_size // kernel_block_size
+            self.blocks_per_kv_block = block_size // kernel_block_size
             self.use_hybrid_blocks = True
 
-        self.max_num_blocks_per_req = (
-            max_num_blocks_per_req * self.blocks_per_phys_block
-        )
+        self.max_num_blocks_per_req = max_num_blocks_per_req * self.blocks_per_kv_block
 
         self.block_table = self._make_buffer(
             self.max_num_reqs, self.max_num_blocks_per_req, dtype=torch.int32
@@ -76,9 +74,9 @@ class BlockTable:
         )
 
         if self.use_hybrid_blocks:
-            self._kernel_block_arange = np.arange(
-                0, self.blocks_per_phys_block
-            ).reshape(1, -1)
+            self._kernel_block_arange = np.arange(0, self.blocks_per_kv_block).reshape(
+                1, -1
+            )
         else:
             self._kernel_block_arange = None
 
@@ -185,7 +183,7 @@ class BlockTable:
         Example:
             # kv_manager_block_ids: 32 tokens,
             # Kernel block size: 16 tokens
-            # blocks_per_phys_block = 2
+            # blocks_per_kv_block = 2
             >>> kv_manager_block_ids = np.array([0, 1, 2])
             >>> Result: [0, 1, 2, 3, 4, 5]
 
@@ -198,7 +196,7 @@ class BlockTable:
             return kv_manager_block_ids
 
         kernel_block_ids = (
-            kv_manager_block_ids.reshape(-1, 1) * self.blocks_per_phys_block
+            kv_manager_block_ids.reshape(-1, 1) * self.blocks_per_kv_block
             + self._kernel_block_arange
         )
 
