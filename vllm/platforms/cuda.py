@@ -146,11 +146,11 @@ class CudaPlatformBase(Platform):
                 use_cutlass_mla = envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA"
                 use_flashinfer_mla = envs.VLLM_ATTENTION_BACKEND == "FLASHINFER_MLA"
 
-            from vllm.attention.ops.flashmla import is_flashmla_supported
+            from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 
             if (
                 use_flashmla
-                and is_flashmla_supported()[0]
+                and is_flashmla_dense_supported()[0]
                 and cache_config.block_size != 64
             ):
                 cache_config.block_size = 64
@@ -256,7 +256,7 @@ class CudaPlatformBase(Platform):
                     "Set VLLM_USE_V1=1 to enable them."
                 )
 
-            from vllm.attention.ops.flashmla import is_flashmla_supported
+            from vllm.attention.ops.flashmla import is_flashmla_dense_supported
             from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 
             if use_sparse:
@@ -277,7 +277,7 @@ class CudaPlatformBase(Platform):
                 and block_size in [32, 64]
             )
             use_flashmla = selected_backend == _Backend.FLASHMLA or (
-                selected_backend is None and is_flashmla_supported()[0]
+                selected_backend is None and is_flashmla_dense_supported()[0]
             )
             use_flashattn = selected_backend == _Backend.FLASH_ATTN_MLA or (
                 selected_backend is None and flash_attn_supports_mla()
