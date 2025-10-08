@@ -80,7 +80,7 @@ class KVTransferConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @field_validator("engine_id", mode="before")
+    @field_validator("engine_id", mode="after")
     @classmethod
     def _generate_engine_id(cls, engine_id: Optional[str]) -> str:
         if engine_id is None:
