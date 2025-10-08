@@ -26,19 +26,10 @@ def test_gptq_gemm_opcheck():
     idx = torch.empty((0,), device="cuda", dtype=torch.int32)
     use_exllama = True
     bit = 4
-    opcheck(torch.ops._C.gptq_gemm, (a, weight, zeros, scales, idx, use_exllama, bit))
-
-
-def test_gptq_gemm_v2_opcheck():
-    a = torch.rand((240, 4096), device="cuda", dtype=torch.float16)
-    weight = torch.randint(
-        -2000000, 2000000, (512, 6144), device="cuda", dtype=torch.int32
-    )
-    zeros = torch.zeros((32, 768), device="cuda", dtype=torch.int32)
-    scales = torch.rand((32, 6144), device="cuda", dtype=torch.float16)
-    idx = torch.empty((0,), device="cuda", dtype=torch.int32)
-    use_exllama = True
-    bit = 4
+    # Test both GPTQv1 and GPTQv2 format
     opcheck(
-        torch.ops._C.gptq_gemm_v2, (a, weight, zeros, scales, idx, use_exllama, bit)
+        torch.ops._C.gptq_gemm, (a, weight, zeros, scales, idx, use_exllama, True, bit)
+    )
+    opcheck(
+        torch.ops._C.gptq_gemm, (a, weight, zeros, scales, idx, use_exllama, False, bit)
     )

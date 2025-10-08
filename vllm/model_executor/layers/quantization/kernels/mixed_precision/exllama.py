@@ -145,12 +145,14 @@ class ExllamaLinearKernel(MPLinearKernel):
 
         w_q, w_s, w_zp, w_g_idx = self._get_weight_params(layer)
 
+        use_v2_format = False
+        # TODO: use v2 if checkpoint format is gptq_v2 (see gptq.py)
+
         assert w_zp is not None, "Zero points are required by Exllama"
         assert w_g_idx is not None, "Group index is required by Exllama"
         output = ops.gptq_gemm(
-            x_2d, w_q, w_zp, w_s, w_g_idx, True, c.weight_type.size_bits
+            x_2d, w_q, w_zp, w_s, w_g_idx, True, use_v2_format, c.weight_type.size_bits
         )
-        # TODO: use gptq_gemm_v2 if checkpoint format is gptq_v2 (see gptq.py)
 
         if bias is not None:
             output.add_(bias)

@@ -41,7 +41,7 @@ def test_model_load(
                     config = submodule.quant_method.quant_config
                     assert config.checkpoint_format == checkpoint_format
                     if checkpoint_format == "gptq_v2":
-                        assert submodule.quant_method.use_gptq_gemm_v2
+                        assert submodule.quant_method.use_v2_format
 
                     # Just break since currently we only check 1 module
                     break
