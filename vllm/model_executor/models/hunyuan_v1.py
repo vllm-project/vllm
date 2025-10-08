@@ -26,6 +26,7 @@
 
 import typing
 from collections.abc import Callable, Iterable
+from itertools import islice
 from typing import Any, Optional, Union
 
 import regex as re
@@ -672,8 +673,9 @@ class HunYuanModel(nn.Module):
 
         cla_factor = _get_cla_factor(self.config)
         prev_kv_states = None
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for i, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer)
+        ):
             hidden_states, residual, kv_states = layer(
                 positions,
                 hidden_states,
@@ -681,10 +683,7 @@ class HunYuanModel(nn.Module):
                 prev_kv_states,
             )
 
-            if (
-                getattr(self.config, "use_cla", False)
-                and (i - self.start_layer) % cla_factor == 0
-            ):
+            if getattr(self.config, "use_cla", False) and i % cla_factor == 0:
                 prev_kv_states = kv_states
             else:
                 prev_kv_states = None

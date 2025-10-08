@@ -3,6 +3,7 @@
 """Inference-only FalconH1 model."""
 
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional
 
 import torch
@@ -480,8 +481,7 @@ class FalconH1Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(
                 positions=positions,
                 hidden_states=hidden_states,
