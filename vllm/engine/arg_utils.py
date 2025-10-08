@@ -31,43 +31,41 @@ from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm.config import (
-    BlockSize,
     CacheConfig,
-    CacheDType,
     CompilationConfig,
     ConfigType,
-    ConvertOption,
-    DetailedTraceModules,
-    Device,
     DeviceConfig,
-    DistributedExecutorBackend,
     EPLBConfig,
-    HfOverrides,
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
-    LogprobsMode,
     LoRAConfig,
-    MambaDType,
-    MMEncoderTPMode,
     ModelConfig,
-    ModelDType,
+    MultiModalConfig,
     ObservabilityConfig,
     ParallelConfig,
     PoolerConfig,
-    PrefixCachingHashAlgo,
-    RunnerOption,
     SchedulerConfig,
-    SchedulerPolicy,
     SpeculativeConfig,
     StructuredOutputsConfig,
-    TaskOption,
-    TokenizerMode,
     VllmConfig,
     get_attr_docs,
 )
-from vllm.config.multimodal import MMCacheType, MultiModalConfig
-from vllm.config.parallel import ExpertPlacementStrategy
+from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
+from vllm.config.device import Device
+from vllm.config.model import (
+    ConvertOption,
+    HfOverrides,
+    LogprobsMode,
+    ModelDType,
+    RunnerOption,
+    TaskOption,
+    TokenizerMode,
+)
+from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
+from vllm.config.observability import DetailedTraceModules
+from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
+from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
