@@ -1370,7 +1370,7 @@ class EngineArgs:
         """
 
         # Warn if VLLM_ATTENTION_BACKEND env var is used instead of CLI arg
-        if envs.is_set("VLLM_ATTENTION_BACKEND") and self.attention_backend is None:
+        if envs.is_set("VLLM_ATTENTION_BACKEND"):
             logger.warning(
                 "Using VLLM_ATTENTION_BACKEND environment variable is deprecated "
                 "and will be removed in a future release. "
