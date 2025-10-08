@@ -237,7 +237,7 @@ def _support_torch_compile(
         # will handle the compilation, so we don't need to do anything here.
         self.do_not_compile = (
             vllm_config.compilation_config.mode
-            in [CompilationMode.NO_COMPILATION, CompilationMode.STOCK_TORCH_COMPILE]
+            in [CompilationMode.NONE, CompilationMode.STOCK_TORCH_COMPILE]
             or not supports_dynamo()
             or _should_ignore_torch_compile(self.__class__)
             or not enable_compile

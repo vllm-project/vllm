@@ -251,7 +251,7 @@ def test_multi_graph_piecewise_compile(use_inductor_graph_partition: bool):
     # no compile or cudagraph
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            mode=CompilationMode.NO_COMPILATION,
+            mode=CompilationMode.NONE,
         )
     )
     cudagraph_runtime_mode = CUDAGraphMode.NONE

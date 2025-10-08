@@ -121,7 +121,7 @@ def test_compile_correctness(
         all_args: list[list[str]] = []
         all_envs: list[dict[str, str] | None] = []
 
-        for comp_level in [
+        for comp_mode in [
             CompilationMode.STOCK_TORCH_COMPILE,
             CompilationMode.DYNAMO_TRACE_ONCE,
             CompilationMode.VLLM_COMPILE,
@@ -143,10 +143,10 @@ def test_compile_correctness(
             all_args.clear()
 
         for mode in [
-            CompilationMode.NO_COMPILATION,
+            CompilationMode.NONE,
             CompilationMode.STOCK_TORCH_COMPILE,
             CompilationMode.DYNAMO_TRACE_ONCE,
-            CompilationMode.PIECEWISE,
+            CompilationMode.VLLM_COMPILE,
         ]:
             all_args.append(final_args + [f"-O.level={level}", "-O.backend=eager"])
             all_envs.append({})

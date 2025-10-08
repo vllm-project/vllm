@@ -77,7 +77,7 @@ def test_kv_sharing_fast_prefill(
         cudagraph_copy_inputs=True,
         mode=CompilationMode.VLLM_COMPILE
         if not enforce_eager
-        else CompilationMode.NO_COMPILATION,
+        else CompilationMode.NONE,
     )
 
     with monkeypatch.context() as m:

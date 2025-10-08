@@ -3986,7 +3986,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # if not supported any full cudagraphs, just raise it.
                 msg += (
                     "; please try cudagraph_mode=PIECEWISE, and "
-                    "make sure compilation mode is piecewise"
+                    "make sure compilation mode is VLLM_CONFIG"
                 )
                 raise ValueError(msg)
 
@@ -4069,7 +4069,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f"supported with {min_cg_builder_name} backend ("
                 f"support:{min_cg_support}) "
                 "; please try cudagraph_mode=PIECEWISE, "
-                "and make sure compilation mode is piecewise"
+                "and make sure compilation mode is VLLM_CONFIG"
             )
 
         # Trigger cudagraph dispatching keys initialization here (after

@@ -166,7 +166,7 @@ def test_custom_compile_config(
 
 @pytest.mark.parametrize(
     "optimization_mode",
-    [CompilationMode.NO_COMPILATION, CompilationMode.VLLM_COMPILE],
+    [CompilationMode.NONE, CompilationMode.VLLM_COMPILE],
 )
 def test_fp8_kv_scale_compile(optimization_mode: int):
     model = "Qwen/Qwen2-0.5B"

@@ -316,14 +316,14 @@ class VllmConfig:
                 ):
                     self.compilation_config.mode = CompilationMode.VLLM_COMPILE
                 else:
-                    self.compilation_config.mode = CompilationMode.NO_COMPILATION
+                    self.compilation_config.mode = CompilationMode.NONE
 
             else:
                 # NB: Passing both --enforce-eager and a compilation mode
                 # in V0 means the compilation mode wins out.
-                self.compilation_config.mode = CompilationMode.NO_COMPILATION
+                self.compilation_config.mode = CompilationMode.NONE
         else:
-            assert self.compilation_config.mode >= CompilationMode.NO_COMPILATION
+            assert self.compilation_config.mode >= CompilationMode.NONE
             assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
 
         # If user does not set custom ops via none or all set it here based on

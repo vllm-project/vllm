@@ -155,7 +155,7 @@ class XPUPlatform(Platform):
         )
 
         if vllm_config.lora_config is not None:
-            compilation_config.mode = CompilationMode.NO_COMPILATION
+            compilation_config.mode = CompilationMode.NONE
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config

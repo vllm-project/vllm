@@ -28,7 +28,7 @@ logger = init_logger(__name__)
 
 class CompilationMode:
     # constants for the modes of the compilation process
-    NO_COMPILATION = 0
+    NONE = 0
     STOCK_TORCH_COMPILE = 1
     DYNAMO_TRACE_ONCE = 2
     VLLM_COMPILE = 3
@@ -224,7 +224,7 @@ class CompilationConfig:
     - 'none,+op1,+op2' to enable only op1 and op2
 
     By default, all custom ops are enabled when running without Inductor and
-    disabled when running with Inductor: mode>=PIECEWISE and use_inductor=True.
+    disabled when running with Inductor: mode>=VLLM_CONFIG and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: list[str] | None = None
     """A list of ops to exclude from cudagraphs, used in piecewise compilation.
@@ -259,7 +259,7 @@ class CompilationConfig:
         One graph for symbolic shape and one graph per size in compile_sizes
         are compiled using configurations in inductor_compile_config.
 
-    This setting is ignored if mode<PIECEWISE.
+    This setting is ignored if mode<VLLM_CONFIG.
 
     For future compatibility:
     If use_inductor is True, backend="inductor" otherwise backend="eager".
@@ -309,7 +309,7 @@ class CompilationConfig:
     Currently, the cudagraph mode is only used for the v1 engine.
     Note that the cudagraph logic is generally orthogonal to the 
     compilation logic. While piecewise cudagraphs require piecewise 
-    compilation (mode=PIECEWISE and non-empty splitting_ops), full
+    compilation (mode=VLLM_CONFIG and non-empty splitting_ops), full
     cudagraphs are supported with and without compilation.
     
     Warning: This flag is new and subject to change in addition 
@@ -629,7 +629,7 @@ class CompilationConfig:
                 called via vllm config where the level is set if none is \
                 provided."
             )
-        if self.mode == CompilationMode.NO_COMPILATION:
+        if self.mode == CompilationMode.NONE:
             raise ValueError("No compilation mode is set.")
 
         from torch._dynamo.backends.registry import list_backends
