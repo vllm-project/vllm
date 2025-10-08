@@ -366,7 +366,7 @@ class MultiModalDataParser:
         if isinstance(data, torch.Tensor):
             return data.ndim == 3
         if is_list_of(data, torch.Tensor):
-            return data[0].ndim == 2
+            return data[0].ndim == 2  # type: ignore[index]
 
         return False
 
@@ -434,7 +434,7 @@ class MultiModalDataParser:
         elif isinstance(data, (np.ndarray, torch.Tensor)):
             data_items = [elem for elem in data]
         else:
-            data_items = data
+            data_items = data  # type: ignore[assignment]
 
         new_audios = list[np.ndarray]()
         for data_item in data_items:
@@ -498,7 +498,7 @@ class MultiModalDataParser:
         elif isinstance(data, tuple) and len(data) == 2:
             data_items = [data]
         else:
-            data_items = data
+            data_items = data  # type: ignore[assignment]
 
         new_videos = list[tuple[np.ndarray, Optional[dict[str, Any]]]]()
         metadata_lst: list[Optional[dict[str, Any]]] = []
