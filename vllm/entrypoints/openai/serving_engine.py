@@ -359,11 +359,12 @@ class OpenAIServing:
             )
 
             tasks = []
+            request_id_batch = f"{request_id}-{random_uuid()}"
 
             for i, (individual_prompt, lora_req) in enumerate(
                 zip(prompts_batch, lora_req_batch)
             ):
-                request_id_item = f"{request_id}-beam-{i}"
+                request_id_item = f"{request_id_batch}-beam-{i}"
                 task = asyncio.create_task(
                     collect_from_async_generator(
                         self.engine_client.generate(
