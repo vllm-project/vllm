@@ -97,12 +97,12 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.layer_idx == 0:
+            # First layer: concatenate embeds with hidden_states
             embeds = self.input_layernorm(embeds)
             hidden_states, residual = self._residual_norm(hidden_states=hidden_states)
             hidden_states = torch.cat([embeds, hidden_states], dim=-1)
         else:
-            # Subsequent layers: only process hidden_states
-            # and residuals
+            # Subsequent layers: process hidden_states and residuals only
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         # Self Attention
