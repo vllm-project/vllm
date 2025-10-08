@@ -66,6 +66,9 @@ Restrict domains that vLLM can access for media URLs by setting
 `--allowed-media-domains` to prevent Server-Side Request Forgery (SSRF) attacks.
 (e.g. `--allowed-media-domains upload.wikimedia.org github.com www.bogotobogo.com`)
 
+Also, consider setting `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to prevent HTTP
+redirects from being followed to bypass domain restrictions.
+
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
 While vLLM is designed to allow unsafe network services to be isolated to
