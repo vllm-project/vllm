@@ -101,7 +101,7 @@ class LoRAConfig:
         return hash_str
 
     @model_validator(mode="after")
-    def _validate_max_loras_and_max_cpu_loras(self) -> Self:
+    def _validate_lora_config(self) -> Self:
         if self.max_cpu_loras is None:
             self.max_cpu_loras = self.max_loras
         elif self.max_cpu_loras < self.max_loras:
