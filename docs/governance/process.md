@@ -77,7 +77,7 @@ While there isn't a quantitative bar, past committers have:
 
 ### Working Groups
 
-vLLM runs informal working groups such as CI, CI infrastructure, torch compile, and startup UX. These can be loosely tracked via `#sig-` channels in vLLM Slack. Some groups have regular sync meetings.
+vLLM runs informal working groups such as CI, CI infrastructure, torch compile, and startup UX. These can be loosely tracked via `#sig-` (or `#feat-`) channels in vLLM Slack. Some groups have regular sync meetings.
 
 ### Advisory Board
 
