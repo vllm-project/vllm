@@ -71,7 +71,7 @@ class CacheConfig:
     - "sha256" uses Pickle for object serialization before hashing.\n
     - "sha256_cbor" provides a reproducible, cross-language compatible hash. It
     serializes objects using canonical CBOR and hashes them with SHA-256."""
-    cpu_offload_gb: float = Field(default=4, ge=0)
+    cpu_offload_gb: float = Field(default=0, ge=0)
     """The space in GiB to offload to CPU, per GPU. Default is 0, which means
     no offloading. Intuitively, this argument can be seen as a virtual way to
     increase the GPU memory size. For example, if you have one 24 GB GPU and
