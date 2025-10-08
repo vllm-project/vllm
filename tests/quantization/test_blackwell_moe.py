@@ -24,6 +24,7 @@ def set_test_environment():
     # Set compilation threads to 16 to speed up startup
     os.environ["FLASHINFER_NVCC_THREADS"] = "16"
 
+
 # Make sure TRTLLM attention is available
 os.environ["VLLM_HAS_FLASHINFER_CUBIN"] = "1"
 # Set compilation threads to 16 to speed up startup
