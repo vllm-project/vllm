@@ -104,12 +104,38 @@ if current_platform.is_rocm():
     if (
         envs.VLLM_ROCM_USE_AITER
         and envs.VLLM_ROCM_USE_AITER_LINEAR
-        and current_platform.is_fp8_fnuz()
+        and current_platform.supports_aiter_w8a8_block_fp8_linear()
     ):
         import aiter as rocm_aiter
-        from aiter import get_hip_quant
+        from aiter import per_group_quant_hip
 
-        aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
+        def rocm_aiter_per1x128_quant_impl(
+            x: torch.Tensor,
+            scale: torch.Tensor | None = None,
+            quant_dtype: torch.dtype = torch.float8_e4m3fn,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            return per_group_quant_hip(x, scale, quant_dtype, group_size=128)
+
+        def rocm_aiter_per1x128_quant_fake(
+            x: torch.Tensor,
+            scale: torch.Tensor | None = None,
+            quant_dtype: torch.dtype = torch.float8_e4m3fn,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            group_size = 128
+            y = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
+            scale = torch.empty(
+                (*x.shape[:-1], x.shape[-1] // group_size),
+                dtype=torch.float32,
+                device=x.device,
+            )
+            return y, scale
+
+        direct_register_custom_op(
+            op_name="rocm_aiter_per1x128_quant",
+            op_func=rocm_aiter_per1x128_quant_impl,
+            mutates_args=[],
+            fake_impl=rocm_aiter_per1x128_quant_fake,
+        )
 
 
 # TODO we should be able to change the type of block_size to GroupShape
@@ -352,7 +378,7 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
         assert self.act_quant_group_shape == GroupShape(1, 128)
-        q_input, input_scale = aiter_per1x128_quant(
+        q_input, input_scale = torch.ops.vllm.rocm_aiter_per1x128_quant(
             input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8
         )
         return torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale(
@@ -938,14 +964,13 @@ def requant_weight_ue8m0_inplace(
         s_old.copy_(s_requant)
 
 
-def check_aiter_fp8_linear_support() -> bool:
-    """AITER is only supported on ROCm and only for FP8_FNUZ
-    and at the moment are MI300 series"""
+def use_aiter_fp8_linear() -> bool:
+    """Check whether the ROCm AITER FP8 linear op is supported and activated"""
     return (
         current_platform.is_rocm()
         and envs.VLLM_ROCM_USE_AITER
         and envs.VLLM_ROCM_USE_AITER_LINEAR
-        and current_platform.is_fp8_fnuz()
+        and current_platform.supports_aiter_w8a8_block_fp8_linear()
     )
 
 
