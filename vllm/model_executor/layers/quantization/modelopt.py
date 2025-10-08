@@ -1345,12 +1345,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         intermediate_size,
         num_experts,
     ):
+        from flashinfer import nvfp4_block_scale_interleave
         from flashinfer.fused_moe.core import (
             _maybe_get_cached_w2_permute_indices,
             _maybe_get_cached_w3_w1_permute_indices,
         )
-
-        from flashinfer import nvfp4_block_scale_interleave
 
         """Prepare quantized weights for kernel (done offline with weights)."""
         epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
@@ -1637,6 +1636,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
             import flashinfer
+
             from vllm.model_executor.models.llama4 import Llama4MoE
 
             assert self.fused_experts is None
