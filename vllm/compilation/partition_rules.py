@@ -4,25 +4,29 @@
 from __future__ import annotations
 
 import contextlib
+from typing import TYPE_CHECKING
 
 from torch._library.utils import lookup_op
 
 from vllm.logger import init_logger
 
+if TYPE_CHECKING:
+    import torch
+
 logger = init_logger(__name__)
 
 
-def _resolve_operator_overload(op_name: str):
+def _resolve_operator_overload(op_name: str) -> torch._ops.OpOverload:
     """Resolve operator name to torch.ops OpOverload.
 
     Uses PyTorch's lookup_op utility.
 
     Args:
-        op_name: Operator name in PyTorch format "namespace::name.overload"
-                 Example: "aten::addmm.default"
+        op_name (str): Operator name in PyTorch format "namespace::name.overload"
+            Example: "aten::addmm.default"
 
     Returns:
-        torch.ops OpOverload object
+        torch._ops.OpOverload: The resolved operator overload object
     """
     try:
         return lookup_op(op_name)
@@ -32,6 +36,16 @@ def _resolve_operator_overload(op_name: str):
 
 @contextlib.contextmanager
 def inductor_partition_rule_context(op_names: list[str]):
+    """Context manager to temporarily register Inductor partition rules.
+
+    Registers custom partition rules for specified operators, forcing the
+    Inductor scheduler to partition the graph at these operators. The rules
+    are automatically restored to their previous state on exit.
+
+    Args:
+        op_names (list[str]): List of operator names in PyTorch format
+            (e.g., ["aten::addmm.default", "vllm::unified_attention"]).
+    """
     if not op_names:
         logger.debug("No partition ops provided; skipping rule registration.")
         yield
