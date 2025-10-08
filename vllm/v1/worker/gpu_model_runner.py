@@ -4389,6 +4389,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         cache_dtype_str = self.vllm_config.cache_config.cache_dtype
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+
+        # TODO in this PR: revert this
+        def get_torch_dtype(kv_cache_dtype: str) -> torch.dtype:
+            if kv_cache_dtype == "auto":
+                return self.kv_cache_dtype
+            return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
+
         for layer_name, attn_module in attn_layers.items():
             if (kv_tgt_layer := attn_module.kv_sharing_target_layer_name) is not None:
                 # The layer doesn't need its own KV cache and will use that of
@@ -4410,7 +4417,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
+                        dtype=get_torch_dtype(attn_module.kv_cache_dtype),
                         sliding_window=attn_module.sliding_window,
                     )
                 elif use_mla:
@@ -4428,7 +4435,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
+                        dtype=get_torch_dtype(attn_module.kv_cache_dtype),
                         attention_chunk_size=self.attention_chunk_size,
                     )
                 else:
@@ -4436,14 +4443,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
+                        dtype=get_torch_dtype(attn_module.kv_cache_dtype),
                     )
             elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
                 kv_cache_spec[layer_name] = CrossAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
-                    dtype=self.kv_cache_dtype,
+                    dtype=get_torch_dtype(attn_module.kv_cache_dtype),
                 )
             elif attn_module.attn_type in (
                 AttentionType.ENCODER,
