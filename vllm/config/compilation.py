@@ -183,10 +183,12 @@ class CompilationConfig:
 
     - None: If None, we will select the default compilation level.
       For V1 engine this is 3, for V0 engine this is 0.
-    - 0: NONE.
-    - 1: STOCK_TORCH_COMPILE.
-    - 2: DYNAMO_TRACE_ONCE.
-    - 3: VLLM_COMPILE, piecewise compilation."""
+    - 0: NONE: no compilation
+    - 1: STOCK_TORCH_COMPILE: just applying default torch.compile to model.
+    - 2: DYNAMO_TRACE_ONCE: force a single Dynamo trace step by removing guards.
+         Requires no dynamic-shape-dependent control-flow.
+    - 3: VLLM_COMPILE, single Dynamo trace, custom vLLM caching, custom passes,
+         custom cudagraph partitioning, etc."""
     debug_dump_path: Optional[Path] = None
     """The path to dump the debug information."""
     cache_dir: str = ""
