@@ -15,7 +15,8 @@ from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
-    from vllm.config import BlockSize, ModelConfig, VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config.cache import BlockSize
     from vllm.pooling_params import PoolingParams
 else:
     BlockSize = None
