@@ -255,8 +255,6 @@ class OAITritonExperts(BaseOAITritonExperts):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
@@ -264,12 +262,12 @@ class OAITritonExperts(BaseOAITritonExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
         workspace1 = (M, K)
         workspace2 = (0, 0)
         output = (M, K)
-        return (workspace1, workspace2, output, a.dtype)
+        return (workspace1, workspace2, output)
 
     def apply(
         self,

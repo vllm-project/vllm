@@ -331,8 +331,6 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
@@ -340,7 +338,7 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # Modular Kernel provisions output buffer from workspace1. However in
         # the fused_marlin_moe() function, the final torch.sum(), is defined
         # essentially as,
@@ -360,7 +358,7 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2 = (M * topk * max(2 * N, K),)
         output = (M, K)
 
-        return (workspace1, workspace2, output, a.dtype)
+        return (workspace1, workspace2, output)
 
     def apply(
         self,
