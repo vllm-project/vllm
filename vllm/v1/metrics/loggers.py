@@ -60,7 +60,7 @@ class LoggingStatLogger(StatLoggerBase):
         self._reset(time.monotonic())
 
         self.last_scheduler_stats = SchedulerStats()
-        self.last_mm_cache_stats = MultiModalCacheStats()
+        self.last_mm_cache_stats: Optional[MultiModalCacheStats] = None
 
         # Caching metrics. This cannot be reset.
         # TODO: Make the interval configurable.
