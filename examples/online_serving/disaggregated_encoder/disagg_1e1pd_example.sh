@@ -20,7 +20,7 @@ GPU_PD="${GPU_PD:-3}"
 EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/tmp/}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
 
-NUM_PROMPTS="${NUM_PROMPTS:100}"    # number of prompts to send in benchmark
+NUM_PROMPTS="${NUM_PROMPTS:-100}"    # number of prompts to send in benchmark
 
 ###############################################################################
 # Helpers
@@ -99,6 +99,8 @@ CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
     }' \
     >"${ENC_LOG}" 2>&1 &
 
+PIDS+=($!)
+
 ###############################################################################
 # Prefill+Decode worker
 ###############################################################################
@@ -107,11 +109,16 @@ CUDA_VISIBLE_DEVICES="$GPU_PD" VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve "$MOD
     --port "$PREFILL_DECODE_PORT" \
     --enable-request-id-headers \
     --max-num-seqs 128 \
-    --kv-transfer-config '{
-        "kv_connector": "NixlConnector",
-        "kv_role": "kv_consumer"
+    --ec-transfer-config '{
+        "ec_connector": "ECSharedStorageConnector",
+        "ec_role": "ec_consumer",
+        "ec_connector_extra_config": {
+            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
+        }
     }' \
     >"${PD_LOG}" 2>&1 &
+
+PIDS+=($!)
 
 # Wait for workers
 wait_for_server $ENCODE_PORT
@@ -133,7 +140,7 @@ echo "All services are up!"
 
 ###############################################################################
 # Benchmark
-cd ../../../../benchmarks/
+cd ../../../benchmarks/
 python benchmark_serving.py \
   --backend           openai-chat \
   --model             $MODEL \

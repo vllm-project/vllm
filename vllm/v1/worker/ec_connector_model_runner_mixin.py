@@ -85,7 +85,9 @@ class ECConnectorModelRunnerMixin:
         ec_connector.bind_connector_metadata(
             scheduler_output.ec_connector_metadata)
 
-        ec_connector.start_load_caches(**kwargs)
+        if not ec_connector.is_producer:
+            ec_connector.start_load_caches(**kwargs)
+
         try:
             yield output
         finally:

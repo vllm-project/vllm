@@ -22,7 +22,10 @@ GPU_D="${GPU_D:-3}"
 EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/tmp/}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
 
-NUM_PROMPTS="${NUM_PROMPTS:100}"    # number of prompts to send in benchmark
+NUM_PROMPTS="${NUM_PROMPTS:-100}"    # number of prompts to send in benchmark
+
+export UCX_TLS=all
+export UCX_NET_DEVICES=all
 
 ###############################################################################
 # Helpers
@@ -102,10 +105,15 @@ CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
     }' \
     >"${ENC_LOG}" 2>&1 &
 
+PIDS+=($!)
+
 ###############################################################################
 # Prefill worker
 ###############################################################################
-CUDA_VISIBLE_DEVICES="$GPU_P" VLLM_NIXL_SIDE_CHANNEL_PORT=5559 vllm serve "$MODEL" \
+CUDA_VISIBLE_DEVICES="$GPU_P" \
+UCX_NET_DEVICES=all \
+VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
+vllm serve "$MODEL" \
     --gpu-memory-utilization 0.7 \
     --port "$PREFILL_PORT" \
     --enable-request-id-headers \
@@ -123,10 +131,15 @@ CUDA_VISIBLE_DEVICES="$GPU_P" VLLM_NIXL_SIDE_CHANNEL_PORT=5559 vllm serve "$MODE
     }' \
     >"${P_LOG}" 2>&1 &
 
+PIDS+=($!)
+
 ###############################################################################
 # Decode worker
 ###############################################################################
-CUDA_VISIBLE_DEVICES="$GPU_D" VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve "$MODEL" \
+CUDA_VISIBLE_DEVICES="$GPU_D" \
+UCX_NET_DEVICES=all \
+VLLM_NIXL_SIDE_CHANNEL_PORT=6000 \
+vllm serve "$MODEL" \
     --gpu-memory-utilization 0.7 \
     --port "$DECODE_PORT" \
     --enable-request-id-headers \
@@ -136,6 +149,8 @@ CUDA_VISIBLE_DEVICES="$GPU_D" VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve "$MODE
         "kv_role": "kv_consumer"
     }' \
     >"${D_LOG}" 2>&1 &
+
+PIDS+=($!)
 
 # Wait for workers
 wait_for_server $ENCODE_PORT
@@ -158,7 +173,7 @@ echo "All services are up!"
 
 ###############################################################################
 # Benchmark
-cd ../../../../benchmarks/
+cd ../../../benchmarks/
 python benchmark_serving.py \
   --backend           openai-chat \
   --model             $MODEL \
