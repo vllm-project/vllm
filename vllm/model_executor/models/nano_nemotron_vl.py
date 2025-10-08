@@ -93,6 +93,7 @@ IMG_CONTEXT = "<image>"
 
 # Profiling
 MAX_FRAMES = 16
+DEFAULT_NUM_TILES = 12
 
 
 class NanoNemotronVLImagePixelInputs(TypedDict):
@@ -227,6 +228,8 @@ def video_to_pixel_values(
     max_num_tiles: int = 1,
     use_thumbnail: bool,
 ) -> torch.Tensor:
+    assert max_num_tiles == 1, "Video modality always uses one tile"
+
     # Convert each frame to a single resized tile tensor consistent
     # with image path
     frames_tensors: list[torch.Tensor] = []
@@ -255,13 +258,19 @@ class BaseNanoNemotronVLProcessor(ABC):
     """
 
     def __init__(
-        self, config: PretrainedConfig, tokenizer: AnyTokenizer, *args, **kwargs
+        self,
+        config: PretrainedConfig,
+        tokenizer: AnyTokenizer,
+        *args,
+        max_num_tiles: Optional[int] = None,
+        **kwargs,
     ) -> None:
         super().__init__()
 
         self.config = config
         self.tokenizer = tokenizer
 
+        self.max_num_tiles = max_num_tiles or DEFAULT_NUM_TILES
         image_size: int = config.force_image_size
         patch_size: int = config.patch_size
 
@@ -361,7 +370,7 @@ class BaseNanoNemotronVLProcessor(ABC):
     ) -> BatchFeature:
         # Use default if not provided
         if max_num_tiles is None:
-            max_num_tiles = 12
+            max_num_tiles = self.max_num_tiles
 
         text, images = [self._make_batch_input(x) for x in (text, images)]
 
@@ -390,6 +399,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         config: PretrainedConfig,
         tokenizer: AnyTokenizer,
         *,
+        max_num_tiles: Optional[int] = None,
         min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
@@ -399,6 +409,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         super().__init__(
             config=config,
             tokenizer=tokenizer,
+            max_num_tiles=max_num_tiles,
             min_dynamic_patch=min_dynamic_patch,
             max_dynamic_patch=max_dynamic_patch,
             dynamic_image_size=dynamic_image_size,
@@ -506,7 +517,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
     ) -> BatchFeature:
         # Use default if not provided
         if max_num_tiles is None:
-            max_num_tiles = 12
+            max_num_tiles = self.max_num_tiles
 
         text, images, videos = [
             self._make_batch_input(x) for x in (text, images, videos)
@@ -521,7 +532,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         text, video_inputs = self._preprocess_video(
             text=text,
             videos=videos,
-            max_num_tiles=max_num_tiles,
+            max_num_tiles=1,
             dynamic_image_size=dynamic_image_size,
         )
 
@@ -635,7 +646,7 @@ class BaseNanoNemotronVLProcessingInfo(BaseProcessingInfo):
     def get_max_image_tokens(self) -> int:
         processor = self.get_hf_processor()
         # Use default max_num_tiles for max tokens calculation
-        max_num_tiles = 12
+        max_num_tiles = processor.max_num_tiles
         target_width, target_height = self.get_image_size_with_most_features(
             max_num_tiles
         )
@@ -768,7 +779,9 @@ class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             else:
                 image_size = images.get_image_size(item_idx)
                 # Extract max_num_tiles from kwargs, default to 12
-                max_num_tiles = hf_processor_mm_kwargs.get("max_num_tiles", 12)
+                max_num_tiles = hf_processor_mm_kwargs.get(
+                    "max_num_tiles", hf_processor.max_num_tiles
+                )
                 feature_size = self.info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,

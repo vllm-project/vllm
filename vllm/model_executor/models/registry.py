@@ -119,6 +119,7 @@ _TEXT_GENERATION_MODELS = {
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
     "Lfm2ForCausalLM": ("lfm2", "Lfm2ForCausalLM"),
+    "Lfm2MoeForCausalLM": ("lfm2_moe", "Lfm2MoeForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     "Llama4ForCausalLM": ("llama4", "Llama4ForCausalLM"),
     # For decapoda-research/llama-*
@@ -608,7 +609,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
         if model_path.exists():
             with open(model_path, "rb") as f:
-                module_hash = hashlib.md5(f.read()).hexdigest()
+                module_hash = hashlib.md5(f.read(), usedforsecurity=False).hexdigest()
 
             mi = self._load_modelinfo_from_cache(module_hash)
             if mi is not None:
