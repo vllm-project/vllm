@@ -377,6 +377,9 @@ class FlashInferAllToAllManager(All2AllManagerBase):
     All2All communication based on flashinfer kernels.
     """
 
+    rank: int
+    world_size: int
+
     def __init__(self, cpu_group):
         assert has_flashinfer_all2all(), (
             "flashinfer all2all module not found. Please install/check flashinfer"
