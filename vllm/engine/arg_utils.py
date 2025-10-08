@@ -218,7 +218,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
                     default.default
                     if default.default_factory is None
                     else default.default_factory()
-            )
+                )
         elif field.default_factory is not MISSING:
             default = field.default_factory()
 
