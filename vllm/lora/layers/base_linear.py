@@ -24,11 +24,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         super().__init__()
         self.base_layer = base_layer
         self.input_size = self.base_layer.input_size
+        # Ensure tp_size and tp_rank consistency with the base_layer.
+        self.tp_size = self.base_layer.tp_size
+        self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(self.base_layer)
         self.lora_bias_stacked: Optional[tuple[torch.Tensor, ...]] = None
-
         self.output_slices: tuple[int, ...]
-        self.tp_size: int
         self.output_size: int
         self.n_slices: int
 
@@ -121,18 +122,18 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 lora_bias = self.slice_bias(lora_bias)
 
         self.lora_a_stacked[0][index,
-                               0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
-                                   lora_a.T, non_blocking=True)
+                               0, :lora_a.shape[0], :lora_a.shape[1]].copy_(
+                                   lora_a, non_blocking=True)
         self.lora_b_stacked[0][index,
-                               0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
-                                   lora_b.T, non_blocking=True)
+                               0, :lora_b.shape[0], :lora_b.shape[1]].copy_(
+                                   lora_b, non_blocking=True)
         if lora_bias is not None:
 
             self.lora_bias_stacked = cast(tuple[torch.Tensor, ...],
                                           self.lora_bias_stacked)
             assert len(self.lora_bias_stacked)
             self.lora_bias_stacked[0][index, 0, :lora_bias.shape[0]].copy_(
-                lora_bias.T, non_blocking=True)
+                lora_bias, non_blocking=True)
 
     def apply(self,
               x: torch.Tensor,

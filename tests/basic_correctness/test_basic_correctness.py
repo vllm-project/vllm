@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm import LLM, envs
+from vllm import LLM
 from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
 
 from ..conftest import HfRunner, VllmRunner
@@ -19,14 +19,6 @@ from ..models.utils import check_outputs_equal
 from ..utils import multi_gpu_test
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 def test_vllm_gc_ed():
@@ -71,73 +63,6 @@ def test_basic_correctness(
     model_executor: str,
     enable_prompt_embeds: bool,
 ) -> None:
-    """Test basic model correctness with a small model and simple prompt."""
-
-    if enable_prompt_embeds and envs.is_set(
-            "VLLM_USE_V1") and envs.VLLM_USE_V1:
-        pytest.skip("enable_prompt_embeds is not supported in v1.")
-
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", backend)
-
-        prompt = "Hello, my name is"
-        example_prompts = [prompt]
-
-        with hf_runner(model) as hf_model:
-            hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
-            if enable_prompt_embeds:
-                with torch.no_grad():
-                    prompt_embeds = hf_model.get_prompt_embeddings(
-                        example_prompts)
-
-        with VllmRunner(model,
-                        max_model_len=2048,
-                        enforce_eager=enforce_eager,
-                        enable_prompt_embeds=enable_prompt_embeds,
-                        gpu_memory_utilization=0.7) as vllm_model:
-            if enable_prompt_embeds:
-                vllm_outputs = vllm_model.generate_greedy(
-                    prompt_embeds, max_tokens)
-                vllm_outputs = _fix_prompt_embed_outputs(
-                    vllm_outputs, hf_model, example_prompts)
-            else:
-                vllm_outputs = vllm_model.generate_greedy(
-                    example_prompts, max_tokens)
-
-        check_outputs_equal(
-            outputs_0_lst=hf_outputs,
-            outputs_1_lst=vllm_outputs,
-            name_0="hf",
-            name_1="vllm",
-        )
-
-
-@pytest.mark.parametrize("model", ["google/gemma-2-2b-it"])
-@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
-@pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize("enable_prompt_embeds", [True, False])
-def test_gemma_sliding_window(
-    monkeypatch: pytest.MonkeyPatch,
-    hf_runner,
-    model: str,
-    backend: str,
-    max_tokens: int,
-    enforce_eager: bool,
-    enable_prompt_embeds: bool,
-) -> None:
-    """Test Gemma-2's sliding window attention with long context."""
-
-    if enable_prompt_embeds and envs.is_set(
-            "VLLM_USE_V1") and envs.VLLM_USE_V1:
-        pytest.skip("enable_prompt_embeds is not supported in v1.")
-
-    if not envs.VLLM_USE_V1:
-        if async_scheduling:
-            pytest.skip("async_scheduling only supported in v1.")
-        if model_executor != "uni":
-            pytest.skip("only test uniproc executor for v0.")
-
     if backend == "XFORMERS" and model == "google/gemma-2-2b-it":
         pytest.skip(
             f"{backend} does not support gemma2 with full context length.")

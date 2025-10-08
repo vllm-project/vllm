@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from dataclasses import field
-from typing import Any, Literal, Optional, Union
+from dataclasses import InitVar, field
+from typing import Any, Literal, Union
 
 from pydantic import SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
@@ -18,7 +18,6 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
 logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
-PreemptionMode = Literal["swap", "recompute"]
 SchedulerPolicy = Literal["fcfs", "priority"]
 
 
@@ -78,16 +77,19 @@ class SchedulerConfig:
     3. more than one value (e.g. 1 2 128) is provided, then the capture list
     will follow the provided list."""
 
-    delay_factor: float = 0.0
-    """Apply a delay (of delay factor multiplied by previous
-    prompt latency) before scheduling next prompt."""
-
     enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
 
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
+
+    is_encoder_decoder: InitVar[bool] = False
+    """True if the model is an encoder-decoder model.
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    disable chunked prefill and prefix caching for encoder-decoder models.
+    """
 
     # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = field(init=False)
@@ -102,14 +104,6 @@ class SchedulerConfig:
 
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
-
-    preemption_mode: Optional[PreemptionMode] = None
-    """Whether to perform preemption by swapping or
-    recomputation. If not specified, we determine the mode as follows:
-    We use recomputation by default since it incurs lower overhead than
-    swapping. However, when the sequence group has multiple sequences
-    (e.g., beam search), recomputation is not currently supported. In
-    such a case, we use swapping instead."""
 
     send_delta_data: bool = False
     """Private API. If used, scheduler sends delta data to
@@ -174,12 +168,22 @@ class SchedulerConfig:
                                usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, is_encoder_decoder: bool) -> None:
         if self.max_model_len is None:
             self.max_model_len = 8192
 
         if self.max_num_seqs is None:
             self.max_num_seqs = 128
+
+        if is_encoder_decoder:
+            # Chunked prefill should be disabled for encoder-decoder models.
+            self.disable_chunked_mm_input = True
+            self.chunked_prefill_enabled = False
+            self.enable_chunked_prefill = False
+            self.long_prefill_token_threshold = 0
+            logger.info(
+                "Encoder-decoder models do not support chunked prefill nor"
+                " prefix caching; disabling both.")
 
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:

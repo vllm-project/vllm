@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, TypedDict, Union, cast
+from typing import Annotated, Any, Literal, Optional, Union, cast
 
 import numpy as np
 import torch
@@ -16,6 +16,7 @@ from transformers.models.gemma3n import (Gemma3nAudioConfig,
 from transformers.models.siglip import SiglipImageProcessorFast
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -25,7 +26,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.gemma3n import Gemma3nForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
@@ -42,12 +42,12 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
                          SupportsTranscription)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+                    init_vllm_registered_model, maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -56,17 +56,28 @@ TOKENS_PER_IMAGE = 256
 TOKENS_PER_AUDIO = 188
 
 
-class Gemma3nImagePixelInputs(TypedDict):
-    pixel_values: torch.Tensor
-    """Shape: `(batch_size * num_images, num_channels, height, width)`"""
+class Gemma3nImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - c: Number of channels (3)
+        - h: Height of each patch
+        - w: Width of each patch
+    """
+    type: Literal["pixel_values"] = "pixel_values"
+    pixel_values: Annotated[torch.Tensor, TensorShape("bn", 3, "h", "w")]
 
 
-class Gemma3nAudioInputs(TypedDict):
-    input_features: Union[torch.Tensor, list[torch.Tensor]]
-    input_features_padded: torch.Tensor
-    """Shape: `(batch_size * num_audio, seq_length, num_features)`"""
-    input_features_mask: torch.Tensor
-    """Shape: `(batch_size * num_audio, seq_length)`"""
+class Gemma3nAudioInputs(TensorSchema):
+    """
+    Dimensions:
+        - bn: Batch size * number of audios
+        - s: seq_length
+        - f: num_features
+    """
+    type: Literal["audio"] = "audio"
+    input_features_padded: Annotated[torch.Tensor, TensorShape("bn", "s", "f")]
+    input_features_mask: Annotated[torch.Tensor, TensorShape("bn", "s")]
 
 
 Gemma3nImageInputs = Gemma3nImagePixelInputs
@@ -143,6 +154,7 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_audios = mm_counts.get("audio", 0)
@@ -153,13 +165,19 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
         img_width = image_processor.size.get("width", 224)
         img_height = image_processor.size.get("height", 224)
 
+        image_overrides = mm_options.get("image") if mm_options else None
+        audio_overrides = mm_options.get("audio") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=img_width,
                                    height=img_height,
-                                   num_images=num_images),
+                                   num_images=num_images,
+                                   overrides=image_overrides),
             "audio":
-            self._get_dummy_audios(length=audio_len, num_audios=num_audios)
+            self._get_dummy_audios(length=audio_len,
+                                   num_audios=num_audios,
+                                   overrides=audio_overrides)
         }
 
 
@@ -214,9 +232,9 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
 
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            input_features=MultiModalFieldConfig.batched("audio"),
             input_features_padded=MultiModalFieldConfig.batched("audio"),
-            input_features_mask=MultiModalFieldConfig.batched("audio"))
+            input_features_mask=MultiModalFieldConfig.batched("audio"),
+        )
 
     def _get_prompt_updates(
         self,
@@ -424,6 +442,7 @@ class Gemma3nMultimodalEmbedder(nn.Module):
                                         dummy_inputs=Gemma3nDummyInputsBuilder)
 class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
                                       SupportsTranscription):
+    merge_by_field_config = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     packed_modules_mapping = {
@@ -484,14 +503,6 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
             device=self.language_model.model.embed_tokens.weight.device,
             dtype=self.language_model.model.embed_tokens.weight.dtype)
 
-    @property
-    def dtype(self):
-        return next(self.parameters()).dtype
-
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        # TODO check if there are any
-        return data
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Gemma3nImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -501,34 +512,22 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
         if pixel_values is None:
             return None
 
-        if not isinstance(pixel_values, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
-
-        pixel_values = flatten_bn(pixel_values, concat=True)
-        pixel_values = pixel_values.contiguous()
-
-        return Gemma3nImagePixelInputs(
-            pixel_values=self._validate_pixel_values(pixel_values), )
+        return Gemma3nImagePixelInputs(pixel_values=pixel_values)
 
     def _parse_and_validate_audio_input(
             self, **kwargs: object) -> Optional[Gemma3nAudioInputs]:
-        input_features = kwargs.pop("input_features", None)
-        if input_features is None:
+
+        input_features_padded = kwargs.pop("input_features_padded", None)
+        if input_features_padded is None:
             return None
 
         input_features_mask = kwargs.pop("input_features_mask", None)
         if input_features_mask is None:
             return None
 
-        input_features_padded = kwargs.pop("input_features_padded", None)
-        if input_features_padded is None:
-            return None
-
         return Gemma3nAudioInputs(
-            input_features=input_features,
-            input_features_mask=input_features_mask,
             input_features_padded=input_features_padded,
+            input_features_mask=input_features_mask,
         )
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
@@ -541,7 +540,7 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
                              ) and "image" not in mm_input_by_modality:
                 mm_input_by_modality[
                     "image"] = self._parse_and_validate_image_input(**kwargs)
-            if input_key == "input_features" \
+            if input_key == "input_features_padded" \
                 and "audio" not in mm_input_by_modality:
                 mm_input_by_modality[
                     "audio"] = self._parse_and_validate_audio_input(**kwargs)
@@ -633,8 +632,10 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         # NOTE (NickLucche) Each pass needs tokens to compute PLE so we cache
         # them here, as the model  forward has only access to the input_embeds.
         if input_ids is not None:
@@ -646,15 +647,16 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
             self.per_layer_embeddings[:per_layer_inputs.shape[0]].copy_(
                 per_layer_inputs)
 
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                # NOTE: this order of processing mm items is important
-                [self.config.image_token_id, self.config.audio_token_id])
-        return inputs_embeds
+        # This is to satisfy the type checker for each overload
+        if multimodal_embeddings is None or is_multimodal is None:
+            return super().get_input_embeddings(input_ids)
+
+        return super().get_input_embeddings(
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
 
     def forward(self,
                 input_ids: torch.Tensor,
@@ -685,10 +687,8 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

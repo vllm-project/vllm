@@ -33,11 +33,11 @@ from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import CacheConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
@@ -53,8 +53,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .blip2 import Blip2QFormerModel
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .utils import (AutoWeightsLoader, embed_multimodal,
-                    init_vllm_registered_model, maybe_prefix)
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 
 ### Audio Input
@@ -170,10 +169,8 @@ class GraniteSpeechMultiModalProcessor(
             # Calculate the number of audio tokens per entry in the batch;
             # This is used to split the batch back out after padding.
             audio_token_index = self.info.get_hf_config().audio_token_index
-            processed_outputs["audio_embed_sizes"] = [
-                torch.sum(indices == audio_token_index).item()
-                for indices in processed_outputs["input_ids"]
-            ]
+            processed_outputs["audio_embed_sizes"] = (
+                processed_outputs["input_ids"] == audio_token_index).sum(-1)
 
         return processed_outputs
 
@@ -185,13 +182,17 @@ class GraniteSpeechDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
+        audio_overrides = mm_options.get("audio") if mm_options else None
+
         return {
             "audio":
             self._get_dummy_audios(
                 length=self.info.get_max_audio_len(),
                 num_audios=num_audios,
+                overrides=audio_overrides,
             )
         }
 
@@ -529,6 +530,7 @@ class GraniteSpeechForConditionalGeneration(
         SupportsPP,
         SupportsLoRA,
 ):
+    merge_by_field_config = True
 
     packed_modules_mapping = {
         "qkv_proj": [
@@ -721,6 +723,9 @@ class GraniteSpeechForConditionalGeneration(
         # Split variable length features into a tuple
         return torch.split(masked_embeds, audio_input["audio_embed_sizes"])
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
+
     def get_multimodal_embeddings(
         self,
         **kwargs: object,
@@ -729,7 +734,7 @@ class GraniteSpeechForConditionalGeneration(
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
             return []
-            return None
+
         audio_features = self._process_audio_input(audio_input)
         return audio_features
 
@@ -737,19 +742,21 @@ class GraniteSpeechForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        # Multi-modal token ID may exceed vocab size
+        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
-        """Compute the merged LLM / audio embeddings."""
-        if multimodal_embeddings is None \
-            or len(multimodal_embeddings) == 0:
-            return self.language_model.get_input_embeddings(input_ids)
+        # This is to satisfy the type checker for each overload
+        if multimodal_embeddings is None or is_multimodal is None:
+            return super().get_input_embeddings(input_ids)
 
-        inputs_embeds = embed_multimodal(
+        return super().get_input_embeddings(
             input_ids,
-            self.config.audio_token_index,
-            self.language_model.model.get_input_embeddings,
-            multimodal_embeddings,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
         )
-        return inputs_embeds
 
     def forward(
         self,
@@ -762,13 +769,6 @@ class GraniteSpeechForConditionalGeneration(
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            audio_embeds = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids, audio_embeds)
-            input_ids = None
-
         model_output = self.language_model(input_ids, positions,
                                            intermediate_tensors, inputs_embeds)
         return model_output
@@ -776,12 +776,8 @@ class GraniteSpeechForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(
-            hidden_states,
-            sampling_metadata,
-        )
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(
         self,

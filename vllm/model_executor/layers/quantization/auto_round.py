@@ -9,9 +9,8 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import (QuantizationConfig,
+                                                     QuantizationMethods)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
@@ -241,7 +240,7 @@ class AutoRoundConfig(QuantizationConfig):
 
         if isinstance(layer, FusedMoE):
             if use_marlin:
-                return AWQMoEMethod(quant_args_marlin, layer.moe)
+                return AWQMoEMethod(quant_args_marlin, layer.moe_config)
             from vllm.model_executor.layers.quantization.moe_wna16 import (
                 MoeWNA16Config)
 
@@ -327,7 +326,7 @@ class AutoRoundConfig(QuantizationConfig):
 
         if isinstance(layer, FusedMoE):
             if use_marlin:
-                return GPTQMarlinMoEMethod(quant_args_marlin, layer.moe)
+                return GPTQMarlinMoEMethod(quant_args_marlin, layer.moe_config)
             else:
                 from vllm.model_executor.layers.quantization.moe_wna16 import (
                     MoeWNA16Config)

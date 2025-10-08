@@ -29,8 +29,8 @@ def test_lm_head(
     lm_head_quantized: bool,
     monkeypatch,
 ) -> None:
-    # vllm_runner.apply_model() relies on V0 internals.
-    monkeypatch.setenv("VLLM_USE_V1", "0")
+    # `LLM.apply_model` requires pickling a function.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(model_id, dtype=torch.float16,
                      max_model_len=2048) as vllm_model:
 

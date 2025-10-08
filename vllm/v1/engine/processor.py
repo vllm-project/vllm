@@ -79,7 +79,7 @@ class Processor:
             if num_logprobs > max_logprobs:
                 raise ValueError(
                     f"Requested sample logprobs of {num_logprobs}, "
-                    f"which is is greater than max allowed: {max_logprobs}")
+                    f"which is greater than max allowed: {max_logprobs}")
 
         # Validate prompt logprobs.
         if params.prompt_logprobs:
@@ -89,7 +89,7 @@ class Processor:
             if num_prompt_logprobs > max_logprobs:
                 raise ValueError(
                     f"Requested prompt logprobs of {num_prompt_logprobs}, "
-                    f"which is is greater than max allowed: {max_logprobs}")
+                    f"which is greater than max allowed: {max_logprobs}")
 
     def _validate_sampling_params(
         self,
@@ -334,9 +334,7 @@ class Processor:
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
-    ) -> tuple[Optional[str], EngineCoreRequest]:
-
-        # TODO(woosuk): Support pooling models.
+    ) -> EngineCoreRequest:
         self._validate_lora(lora_request)
         self._validate_params(params)
 
@@ -388,15 +386,13 @@ class Processor:
 
         eos_token_id = self.input_preprocessor.get_eos_token_id()
 
-        self._validate_model_inputs(processed_inputs)
-
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
+        self._validate_model_inputs(encoder_inputs, decoder_inputs)
+
         # Mypy does not always properly infer the types of some elements of
         # discriminated unions of TypedDicts, because of how it handles
         # inheritance of TypedDict. If we explicitly extract the items we want
         # we can avoid type errors from using `dict.get` later in the method.
-        prompt_str: Optional[str] = None if decoder_inputs[
-            "type"] == "embeds" else decoder_inputs.get("prompt")
         prompt_token_ids = decoder_inputs[
             "prompt_token_ids"] if decoder_inputs["type"] != "embeds" else None
         prompt_embeds = decoder_inputs["prompt_embeds"] if decoder_inputs[
@@ -442,7 +438,7 @@ class Processor:
                         identifier=decoder_mm_hashes[modality][idx],
                         mm_position=decoder_mm_positions[modality][idx]))
 
-        return prompt_str, EngineCoreRequest(
+        return EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
             prompt_embeds=prompt_embeds,
@@ -458,9 +454,8 @@ class Processor:
             trace_headers=trace_headers,
         )
 
-    def _validate_model_inputs(self, inputs: ProcessorInputs):
-        encoder_inputs, decoder_inputs = split_enc_dec_inputs(inputs)
-
+    def _validate_model_inputs(self, encoder_inputs: Optional[SingletonInputs],
+                               decoder_inputs: SingletonInputs):
         if encoder_inputs is not None:
             self._validate_model_input(encoder_inputs, prompt_type="encoder")
 

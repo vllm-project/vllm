@@ -25,11 +25,11 @@ from transformers import (BatchFeature, CLIPVisionConfig, PretrainedConfig,
                           ProcessorMixin)
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
@@ -52,9 +52,9 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .clip import CLIPVisionModel
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
                          SupportsQuant)
-from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    init_vllm_registered_model, maybe_prefix,
-                    merge_multimodal_embeddings)
+from .utils import (AutoWeightsLoader, WeightsMapper,
+                    _merge_multimodal_embeddings, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -109,7 +109,7 @@ class Phi3VImagePixelInputs(TensorSchema):
     type: Literal["pixel_values", "image_embeds"] = "pixel_values"
 
     # Supports either a stacked tensor or a list of (p, 3, h, w) tensors
-    data: Annotated[
+    pixel_values: Annotated[
         Union[torch.Tensor, list[torch.Tensor]],
         TensorShape("bn", "p", 3, "h", "w", dynamic_dims={"p"}
                     ),  # 'p' may vary across items
@@ -357,17 +357,21 @@ class Phi3VDummyInputsBuilder(BaseDummyInputsBuilder[Phi3VProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
-                                   num_images=num_images)
+                                   num_images=num_images,
+                                   overrides=image_overrides)
         }
 
 
@@ -462,7 +466,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         self,
         token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
-    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         # align to hf behavior when there are images
         if len(mm_prompt_updates):
             tokenizer = self.info.get_tokenizer()
@@ -497,14 +501,14 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                 for ele in sublist for e in ele
             ]
 
-        token_ids, text, placeholders = super()._apply_prompt_updates(
+        token_ids, placeholders = super()._apply_prompt_updates(
             token_ids=token_ids,
             mm_prompt_updates=mm_prompt_updates,
         )
 
         # Keep the behavior in line with HF processor
-        if text.startswith("<s> <|image|>"):
-            text = text.replace("<s> <|image|>", "<s><|image|>", 1)
+        if len(mm_prompt_updates) and (token_ids[:2] == tokenizer.encode(
+                "<s> <|image|>", add_special_tokens=False)):
             token_ids = [token_ids[0], *token_ids[2:]]
             placeholders = {
                 modality: [
@@ -519,7 +523,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                 for modality, ps in placeholders.items()
             }
 
-        return token_ids, text, placeholders
+        return token_ids, placeholders
 
 
 @MULTIMODAL_REGISTRY.register_processor(Phi3VMultiModalProcessor,
@@ -590,7 +594,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         if pixel_values is not None:
             return Phi3VImagePixelInputs(
                 type="pixel_values",
-                data=flatten_bn(pixel_values),
+                pixel_values=flatten_bn(pixel_values),
                 image_sizes=flatten_bn(image_sizes, concat=True),
                 resolve_bindings={
                     "h": CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size,
@@ -624,7 +628,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             )
 
         assert self.vision_embed_tokens is not None
-        image_embeds = self.vision_embed_tokens(image_input["data"],
+        image_embeds = self.vision_embed_tokens(image_input["pixel_values"],
                                                 image_input["image_sizes"])
 
         return image_embeds
@@ -644,14 +648,31 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        inputs_embeds = self.embed_tokens(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.image_token_id)
-        return inputs_embeds
+        inputs_embeds = self._get_text_embeddings(
+            input_ids,
+            self.embed_tokens,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
+        if is_multimodal is None:
+            raise ValueError(
+                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "please update your model runner according to "
+                "https://github.com/vllm-project/vllm/pull/16229.")
+
+        return _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
 
     def forward(self,
                 input_ids: torch.Tensor,
@@ -663,14 +684,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
-            input_ids = None
-
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
                                                   intermediate_tensors,
@@ -681,10 +694,8 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

@@ -13,7 +13,6 @@ from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
 
 from vllm.config import VllmConfig
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.multimodal.parse import ImageSize
@@ -26,8 +25,9 @@ from .llava import (BaseLlavaMultiModalProcessor, BaseLlavaProcessingInfo,
                     LlavaDummyInputsBuilder, LlavaLikeConfig,
                     LlavaMultiModalProjector, init_vision_tower_for_llava)
 from .siglip import SiglipVisionModel
-from .utils import (AutoWeightsLoader, WeightsMapper, embed_multimodal,
-                    flatten_bn, init_vllm_registered_model, maybe_prefix)
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix)
+from .vision import get_num_selected_vision_tokens
 
 
 class LlavaNextImagePixelInputs(TensorSchema):
@@ -96,12 +96,12 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         hf_config = self.get_hf_config()
         vision_encoder_info = self.get_vision_encoder_info()
 
-        base_feature_size = self._apply_feature_select_strategy(
-            hf_config.vision_feature_select_strategy,
+        base_feature_size = get_num_selected_vision_tokens(
             vision_encoder_info.get_num_image_tokens(
                 image_width=image_width,
                 image_height=image_height,
             ),
+            hf_config.vision_feature_select_strategy,
         )
 
         num_patch_height, num_patch_width = get_anyres_image_grid_shape(
@@ -236,12 +236,12 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Determine the layer up to which we will initialize the vision tower
         if isinstance(vision_feature_layer, int):
             vision_hidden_size = config.vision_config.hidden_size
-            self.feature_sample_layers = None
+            self.select_layers = None
         # Used for multimodal granite models to control encoder outputs
         elif isinstance(vision_feature_layer, (list, tuple)):
             vision_hidden_size = config.vision_config.hidden_size * len(
                 vision_feature_layer)
-            self.feature_sample_layers = vision_feature_layer
+            self.select_layers = vision_feature_layer
         else:
             raise TypeError(
                 f"vision_layer_feature type: {type(vision_feature_layer)}"
@@ -313,30 +313,17 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         raise AssertionError("This line should be unreachable.")
 
-    def _select_image_features(self, image_features: torch.Tensor, *,
-                               strategy: str) -> torch.Tensor:
-        # Copied from https://github.com/huggingface/transformers/blob/39c3c0a72af6fbda5614dde02ff236069bb79827/src/transformers/models/llava/modeling_llava.py#L421  # noqa
-        if strategy == "default":
-            return image_features[:, 1:]
-        elif strategy == "full":
-            return image_features
-
-        raise ValueError(f"Unexpected select feature strategy: {strategy}")
-
     def _image_pixels_to_features(
         self,
         vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
-
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features = vision_tower(
-            pixel_values, feature_sample_layers=self.feature_sample_layers)
-
-        return self._select_image_features(
-            image_features,
-            strategy=self.config.vision_feature_select_strategy,
+        return vision_tower(
+            pixel_values,
+            select_layers=self.select_layers,
+            feature_select_strategy=self.config.vision_feature_select_strategy,
         )
 
     # Based on: https://github.com/haotian-liu/LLaVA/blob/main/llava/model/llava_arch.py
@@ -475,19 +462,21 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[torch.Tensor] = None,
+        # Multi-modal token ID may exceed vocab size
+        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
+        # This is to satisfy the type checker for each overload
+        if multimodal_embeddings is None or is_multimodal is None:
+            return super().get_input_embeddings(input_ids)
 
-        if multimodal_embeddings is None \
-            or len(multimodal_embeddings) == 0:
-            return self.language_model.get_input_embeddings(input_ids)
-
-        inputs_embeds = embed_multimodal(
+        return super().get_input_embeddings(
             input_ids,
-            self.config.image_token_index,
-            self.language_model.model.get_input_embeddings,
-            multimodal_embeddings,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
         )
-        return inputs_embeds
 
     def forward(
         self,
@@ -546,14 +535,6 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
-            input_ids = None
-
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
                                                   intermediate_tensors,
@@ -563,10 +544,8 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

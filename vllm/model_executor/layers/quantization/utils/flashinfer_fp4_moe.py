@@ -12,7 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    FlashInferCutlassMoEPrepareAndFinalize)
+    create_flashinfer_prepare_finalize)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
@@ -51,7 +51,9 @@ def build_flashinfer_fp4_cutlass_moe_prepare_finalize(
         moe: FusedMoEConfig) -> mk.FusedMoEPrepareAndFinalize:
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
     use_dp = moe.moe_parallel_config.dp_size > 1
-    return FlashInferCutlassMoEPrepareAndFinalize(use_dp)
+    enable_alltoallv = envs.VLLM_ALL2ALL_BACKEND == "flashinfer_all2allv"
+    return create_flashinfer_prepare_finalize(
+        use_dp=use_dp, use_nvfp4=True, enable_alltoallv=enable_alltoallv)
 
 
 def select_nvfp4_gemm_impl(

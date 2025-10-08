@@ -19,7 +19,7 @@ from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.utils import get_and_update_mm_cache
 from vllm.v1.outputs import AsyncModelRunnerOutput
-from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
@@ -137,10 +137,6 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model.
         """
-        assert self.vllm_config.scheduler_config.delay_factor == 0.0, \
-            ("ExecutorWithExternalLauncher needs deterministic "
-            "execution, so it"
-            "does not support delay_factor in scheduling")
         if envs.VLLM_USE_V1:
             assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, \
             ("To get deterministic execution in V1, "
@@ -164,10 +160,10 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
         """
         Determine the number of available KV blocks.
         Add an additional all_reduce to get the min across all ranks.
-        Note that even if we have the same `gpu_memory_utilization` and 
-        `swap_space`, the available memory in every rank might still 
-        differ because NCCL can take different amounts of memory in 
-        different ranks. Therefore, it is necessary to test if all ranks 
+        Note that even if we have the same `gpu_memory_utilization` and
+        `swap_space`, the available memory in every rank might still
+        differ because NCCL can take different amounts of memory in
+        different ranks. Therefore, it is necessary to test if all ranks
         agree on the same KV cache configuration.
         """
         a, b = super().determine_num_available_blocks()

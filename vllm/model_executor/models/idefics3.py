@@ -26,12 +26,12 @@ from transformers import (BatchFeature, Idefics3Config, Idefics3ImageProcessor,
                           Idefics3Processor)
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
@@ -53,8 +53,7 @@ from .idefics2_vision_model import (
 # yapf: enable
 from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal
 from .llama import LlamaModel
-from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
-                    merge_multimodal_embeddings)
+from .utils import AutoWeightsLoader, maybe_prefix
 
 
 class Idefics3ImagePixelInputs(TensorSchema):
@@ -68,7 +67,7 @@ class Idefics3ImagePixelInputs(TensorSchema):
     """
     type: Literal["pixel_values"]
     pixel_values: Annotated[torch.Tensor, TensorShape("bnp", 3, "h", "w")]
-    pixel_attention_mask: torch.Tensor
+    pixel_attention_mask: Annotated[torch.Tensor, TensorShape("bnp", "h", "w")]
     num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
 
@@ -294,17 +293,21 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         hf_processor = self.info.get_hf_processor()
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
         longest_edge = image_processor.max_image_size['longest_edge']
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
             "image":
             self._get_dummy_images(width=longest_edge,
                                    height=longest_edge,
-                                   num_images=num_images)
+                                   num_images=num_images,
+                                   overrides=image_overrides)
         }
 
 
@@ -540,10 +543,7 @@ class Idefics3Model(nn.Module):
 
         return image_hidden_states
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-    ) -> torch.Tensor:
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.text_model.get_input_embeddings(input_ids)
 
     def forward(
@@ -569,6 +569,8 @@ class Idefics3Model(nn.Module):
     dummy_inputs=Idefics3DummyInputsBuilder)
 class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
                                        SupportsLoRA):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -609,7 +611,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.text_config.tie_word_embeddings:
-            self.lm_head.weight = self.model.text_model.wte.weight
+            self.lm_head.weight = self.model.text_model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
 
     def _parse_and_validate_image_input(
@@ -621,37 +623,21 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             return None
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image embeddings. "
-                                 f"Got type: {type(image_embeds)}")
-
             return Idefics3ImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds, concat=True),
+                data=image_embeds,
             )
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
             pixel_attention_mask = kwargs.pop("pixel_attention_mask")
-            if not isinstance(pixel_attention_mask, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel_attention_mask. "
-                                 f"Got type: {type(pixel_attention_mask)}")
-
             num_patches = kwargs.pop("num_patches")
-            if not isinstance(num_patches, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of num_patches. "
-                                 f"Got type: {type(num_patches)}")
-
             expected_h = expected_w = self.config.vision_config.image_size
+
             return Idefics3ImagePixelInputs(
                 type="pixel_values",
-                pixel_values=flatten_bn(pixel_values, concat=True),
-                pixel_attention_mask=flatten_bn(pixel_attention_mask,
-                                                concat=True),
-                num_patches=flatten_bn(num_patches, concat=True),
+                pixel_values=pixel_values,
+                pixel_attention_mask=pixel_attention_mask,
+                num_patches=num_patches,
                 resolve_bindings={
                     "h": expected_h,
                     "w": expected_w
@@ -696,22 +682,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return self._process_image_input(image_input)
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                self.config.image_token_id,
-            )
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -723,14 +693,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
-            input_ids = None
-
         hidden_states = self.model.text_model(input_ids,
                                               positions,
                                               intermediate_tensors,
@@ -738,10 +700,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
                     cast)
 
+import jinja2
+import jinja2.ext
+import jinja2.meta
 import jinja2.nodes
+import jinja2.parser
+import jinja2.sandbox
 import transformers.utils.chat_template_utils as hf_chat_utils
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -50,7 +55,7 @@ from vllm.transformers_utils.chat_templates import (
 # yapf: enable
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import random_uuid
+from vllm.utils import random_uuid, supports_kw
 
 logger = init_logger(__name__)
 
@@ -421,6 +426,51 @@ def resolve_mistral_chat_template(
     return None
 
 
+_PROCESSOR_CHAT_TEMPLATES = dict[tuple[str, bool], Optional[str]]()
+"""
+Used in `_try_get_processor_chat_template` to avoid calling
+`cached_get_processor` again if the processor fails to be loaded.
+
+This is needed because `lru_cache` does not cache when an exception happens.
+"""
+
+
+def _try_get_processor_chat_template(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    model_config: ModelConfig,
+) -> Optional[str]:
+    cache_key = (tokenizer.name_or_path, model_config.trust_remote_code)
+    if cache_key in _PROCESSOR_CHAT_TEMPLATES:
+        return _PROCESSOR_CHAT_TEMPLATES[cache_key]
+
+    try:
+        processor = cached_get_processor(
+            tokenizer.name_or_path,
+            processor_cls=(
+                PreTrainedTokenizer,
+                PreTrainedTokenizerFast,
+                ProcessorMixin,
+            ),
+            trust_remote_code=model_config.trust_remote_code,
+        )
+        if (
+            isinstance(processor, ProcessorMixin)
+            and hasattr(processor, "chat_template")
+            and (chat_template := processor.chat_template) is not None
+        ):
+            _PROCESSOR_CHAT_TEMPLATES[cache_key] = chat_template
+            return chat_template
+    except Exception:
+        logger.debug(
+            "Failed to load AutoProcessor chat template for %s",
+            tokenizer.name_or_path,
+            exc_info=True,
+        )
+
+    _PROCESSOR_CHAT_TEMPLATES[cache_key] = None
+    return None
+
+
 def resolve_hf_chat_template(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     chat_template: Optional[str],
@@ -434,28 +484,10 @@ def resolve_hf_chat_template(
 
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
-        try:
-            processor = cached_get_processor(
-                tokenizer.name_or_path,
-                processor_cls=(
-                    PreTrainedTokenizer,
-                    PreTrainedTokenizerFast,
-                    ProcessorMixin,
-                ),
-                trust_remote_code=model_config.trust_remote_code,
-            )
-            if (
-                isinstance(processor, ProcessorMixin)
-                and hasattr(processor, "chat_template")
-                and processor.chat_template is not None
-            ):
-                return processor.chat_template
-        except Exception:
-            logger.debug(
-                "Failed to load AutoProcessor chat template for %s",
-                tokenizer.name_or_path,
-                exc_info=True,
-            )  # noqa: E501
+        chat_template = _try_get_processor_chat_template(tokenizer,
+                                                         model_config)
+        if chat_template is not None:
+            return chat_template
 
     # 3rd priority: AutoTokenizer chat template
     try:
@@ -604,6 +636,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     @property
     def allowed_local_media_path(self):
         return self._model_config.allowed_local_media_path
+
+    @property
+    def allowed_media_domains(self):
+        return self._model_config.allowed_media_domains
 
     @property
     def mm_registry(self):
@@ -805,6 +841,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._connector = MediaConnector(
             media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
+            allowed_media_domains=tracker.allowed_media_domains,
         )
 
     def parse_image(
@@ -889,6 +926,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._connector = MediaConnector(
             media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
+            allowed_media_domains=tracker.allowed_media_domains,
         )
 
     def parse_image(
@@ -1450,9 +1488,11 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
             and isinstance(message["tool_calls"], list)
         ):
             for item in message["tool_calls"]:
-                item["function"]["arguments"] = json.loads(
-                    item["function"]["arguments"]
-                )
+                # if arguments is None or empty string, set to {}
+                if content := item["function"].get("arguments"):
+                    item["function"]["arguments"] = json.loads(content)
+                else:
+                    item["function"]["arguments"] = {}
 
 
 def parse_chat_messages(
@@ -1519,6 +1559,56 @@ def parse_chat_messages_futures(
     return conversation, mm_tracker.all_mm_data(), mm_tracker.all_mm_uuids()
 
 
+# adapted from https://github.com/huggingface/transformers/blob/v4.56.2/src/transformers/utils/chat_template_utils.py#L398-L412
+# only preserve the parse function used to resolve chat template kwargs
+class AssistantTracker(jinja2.ext.Extension):
+    tags = {"generation"}
+
+    def parse(self, parser: jinja2.parser.Parser) -> jinja2.nodes.CallBlock:
+        lineno = next(parser.stream).lineno
+        body = parser.parse_statements(["name:endgeneration"], drop_needle=True)
+        call = self.call_method("_generation_support")
+        call_block = jinja2.nodes.CallBlock(call, [], [], body)
+        return call_block.set_lineno(lineno)
+
+
+def _resolve_chat_template_kwargs(
+    chat_template: str,
+):
+    env = jinja2.sandbox.ImmutableSandboxedEnvironment(
+        trim_blocks=True,
+        lstrip_blocks=True,
+        extensions=[AssistantTracker, jinja2.ext.loopcontrols],
+    )
+    parsed_content = env.parse(chat_template)
+    template_vars = jinja2.meta.find_undeclared_variables(parsed_content)
+    return template_vars
+
+
+_cached_resolve_chat_template_kwargs = lru_cache(_resolve_chat_template_kwargs)
+
+
+def resolve_chat_template_kwargs(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    chat_template: str,
+    chat_template_kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    fn_kw = {
+        k for k in chat_template_kwargs
+        if supports_kw(tokenizer.apply_chat_template, k, allow_var_kwargs=False)
+    }
+
+    template_vars = _cached_resolve_chat_template_kwargs(chat_template)
+
+    # We exclude chat_template from kwargs here, because
+    # chat template has been already resolved at this stage
+    unexpected_vars = {"chat_template"}
+    accept_vars = (fn_kw | template_vars) - unexpected_vars
+    return {
+        k: v for k, v in chat_template_kwargs.items() if k in accept_vars
+    }
+
+
 def apply_hf_chat_template(
     tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
     conversation: list[ConversationMessage],
@@ -1544,12 +1634,17 @@ def apply_hf_chat_template(
         )
 
     try:
+        resolved_kwargs = resolve_chat_template_kwargs(
+            tokenizer=tokenizer,
+            chat_template=hf_chat_template,
+            chat_template_kwargs=kwargs,
+        )
         return tokenizer.apply_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
             chat_template=hf_chat_template,
             tokenize=tokenize,
-            **kwargs,
+            **resolved_kwargs,
         )
 
     # External library exceptions can sometimes occur despite the framework's

@@ -9,24 +9,8 @@ import pytest
 
 from vllm import SamplingParams
 
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    """We can run both engines for this test."""
-    pass
-
-
-# Test ignore_eos with models that have different eos_token_id configurations.
-# This ensures vLLM correctly handles EOS tokens from generation_config.json
-# (PR #4182).
-#
-# distilgpt2: Has single eos_token_id (int type: 50256)
-# Llama-3.2-1B: Has multiple eos_token_ids (list type: [128001, 128008, 128009])
-#
-# Why both are needed:
-# - The single int case tests the common scenario
-# - The list/array case tests models like Llama 3 that use multiple EOS tokens
-#   (e.g., <|end_of_text|> and <|eot_id|> for different stopping contexts)
+# We also test with llama because it has generation_config to specify EOS
+# (past regression).
 MODELS = ["distilbert/distilgpt2", "meta-llama/Llama-3.2-1B"]
 
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import (Callable, Generator, ItemsView, Iterable, Mapping,
@@ -7,18 +8,20 @@ from collections.abc import (Callable, Generator, ItemsView, Iterable, Mapping,
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache
-from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
-                    TypeVar, Union, cast)
+from typing import (TYPE_CHECKING, Any, Generic, NamedTuple, Optional,
+                    Protocol, Union, cast, overload)
 
 import regex as re
 import torch
-from typing_extensions import assert_never
+from typing_extensions import TypeVar, assert_never
 
-from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
+from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
-from vllm.utils import flatten_2d_lists, full_groupby
+from vllm.utils import (flatten_2d_lists, full_groupby,
+                        get_allowed_kwarg_only_overrides)
+from vllm.utils.jsontree import JSONTree, json_map_leaves
 
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
@@ -33,6 +36,8 @@ if TYPE_CHECKING:
     from transformers.configuration_utils import PretrainedConfig
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
+
+    from vllm.config import ModelConfig
 
     from .cache import BaseMultiModalProcessorCache
     from .profiling import BaseDummyInputsBuilder
@@ -875,6 +880,222 @@ def find_mm_placeholders(
     return dict(full_groupby_modality(it))
 
 
+_T = TypeVar("_T")
+_C = TypeVar("_C", bound="PretrainedConfig", default="PretrainedConfig")
+_P = TypeVar("_P", bound="ProcessorMixin", default="ProcessorMixin")
+
+
+@dataclass(frozen=True)
+class InputProcessingContext:
+    """
+    Contains information about the model which may be used to
+    modify the inputs.
+    """
+
+    model_config: "ModelConfig"
+    """The configuration of the model."""
+
+    tokenizer: AnyTokenizer
+    """The tokenizer used to tokenize the inputs."""
+
+    @overload
+    def get_hf_config(self, /) -> "PretrainedConfig":
+        ...
+
+    @overload
+    def get_hf_config(
+        self,
+        typ: Union[type[_C], tuple[type[_C], ...]],
+        /,
+    ) -> _C:
+        ...
+
+    def get_hf_config(
+        self,
+        typ: Optional[Union[type[Any], tuple[type[Any], ...]]] = None,
+        /,
+    ) -> Any:
+        """
+        Get the HuggingFace configuration
+        (`transformers.PretrainedConfig`) of the model,
+        additionally checking its type.
+
+        Raises:
+            TypeError: If the configuration is not of the specified type.
+        """
+        if typ is None:
+            from transformers.configuration_utils import PretrainedConfig
+
+            typ = PretrainedConfig
+
+        hf_config = self.model_config.hf_config
+        if not isinstance(hf_config, typ):
+            raise TypeError("Invalid type of HuggingFace config. "
+                            f"Expected type: {typ}, but "
+                            f"found type: {type(hf_config)}")
+
+        return hf_config
+
+    def get_hf_image_processor_config(self) -> dict[str, Any]:
+        """
+        Get the HuggingFace image processor configuration of the model.
+        """
+        return self.model_config.hf_image_processor_config
+
+    def get_mm_config(self):
+        """
+        Get the multimodal config of the model.
+
+        Raises:
+            RuntimeError: If the model is not a multimodal model.
+        """
+        mm_config = self.model_config.multimodal_config
+        if mm_config is None:
+            raise RuntimeError("Not a multimodal model")
+
+        return mm_config
+
+    @overload
+    def get_hf_processor(self, /, **kwargs: object) -> "ProcessorMixin":
+        ...
+
+    @overload
+    def get_hf_processor(
+        self,
+        typ: Union[type[_P], tuple[type[_P], ...]],
+        /,
+        **kwargs: object,
+    ) -> _P:
+        ...
+
+    def get_hf_processor(
+        self,
+        typ: Optional[Union[type[Any], tuple[type[Any], ...]]] = None,
+        /,
+        **kwargs: object,
+    ) -> Any:
+        """
+        Get the HuggingFace processor
+        (`transformers.ProcessorMixin`) of the model,
+        additionally checking its type.
+
+        Raises:
+            TypeError: If the processor is not of the specified type.
+        """
+        if typ is None:
+            from transformers.processing_utils import ProcessorMixin
+
+            typ = ProcessorMixin
+
+        return cached_processor_from_config(
+            self.model_config,
+            processor_cls=typ,
+            tokenizer=self.tokenizer,
+            **kwargs,
+        )
+
+    def init_processor(
+        self,
+        typ: type[_T],
+        /,
+        **kwargs: object,
+    ) -> _T:
+        """
+        Initialize a HuggingFace-like processor class, merging the
+        keyword arguments with those in the model's configuration.
+        """
+        mm_config = self.model_config.get_multimodal_config()
+        base_kwargs = mm_config.mm_processor_kwargs
+        if base_kwargs is None:
+            base_kwargs = {}
+
+        merged_kwargs = {**base_kwargs, **kwargs}
+
+        return typ(**merged_kwargs)
+
+    def _postprocess_output(
+        self,
+        output: JSONTree,
+    ) -> JSONTree:
+
+        def _postprocess_one(x: object):
+            if isinstance(x, torch.Tensor):  # noqa: SIM102
+                # This mimics the behavior of transformers.BatchFeature
+                if x.is_floating_point():
+                    x = x.to(dtype=self.model_config.dtype)
+
+            return x
+
+        return json_map_leaves(_postprocess_one, output)
+
+    def call_hf_processor(
+        self,
+        hf_processor: "ProcessorMixin",
+        data: Mapping[str, object],
+        kwargs: Mapping[str, object] = {},
+        *,
+        num_tries: int = 1,
+        max_tries: int = 5,
+    ) -> Union["BatchFeature", JSONTree]:
+        """
+        Call `hf_processor` on the prompt `data`
+        (text, image, audio...) with configurable options `kwargs`.
+        """
+        assert callable(hf_processor)
+
+        mm_config = self.model_config.get_multimodal_config()
+        merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
+
+        allowed_kwargs = get_allowed_kwarg_only_overrides(
+            hf_processor,
+            merged_kwargs,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
+        )
+
+        try:
+            output = hf_processor(**data,
+                                  **allowed_kwargs,
+                                  return_tensors="pt")
+        except Exception as exc:
+            # See https://github.com/huggingface/tokenizers/issues/537
+            if (isinstance(exc, RuntimeError) and exc
+                    and exc.args[0] == "Already borrowed"
+                    and num_tries < max_tries):
+                logger.warning(
+                    "Failed to acquire tokenizer in current thread. "
+                    "Retrying (%d/%d)...", num_tries, max_tries)
+                time.sleep(0.5)
+                return self.call_hf_processor(
+                    hf_processor,
+                    data,
+                    kwargs,
+                    num_tries=num_tries + 1,
+                    max_tries=max_tries,
+                )
+
+            msg = (f"Failed to apply {type(hf_processor).__name__} "
+                   f"on data={data} with kwargs={allowed_kwargs}")
+
+            raise ValueError(msg) from exc
+
+        # this emulates output.to(dtype=self.model_config.dtype)
+        from transformers.feature_extraction_utils import BatchFeature
+
+        if isinstance(output, BatchFeature):
+            output_ = self._postprocess_output(output.data)
+            return BatchFeature(output_)
+
+        logger.warning_once(
+            "%s did not return `BatchFeature`. "
+            "Make sure to match the behaviour of `ProcessorMixin` when "
+            "implementing custom processors.",
+            type(hf_processor).__name__,
+        )
+
+        return self._postprocess_output(output)
+
+
 class BaseProcessingInfo:
     """Base class to provide the information necessary for data processing."""
 
@@ -1364,7 +1585,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         *,
         mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> MultiModalHashes:
-        """Create MM hashes to be returned (only used in V1).
+        """Create MM hashes to be returned.
 
 
         Note: When overrides are provided via callers of `apply`,
@@ -1657,7 +1878,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
-    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         tokenizer = self.info.get_tokenizer()
 
         new_token_ids, match_result = self._apply_token_matches(
@@ -1675,11 +1896,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         # Since it is inefficient to search for all possible tokenizations
         # of the search text in the prompt, we instead perform string-based
         # updates on the decoded token IDs, then encode them back.
-        if all(
+        if not all(
                 all(update_idx is not None for update_idx in update_idxs)
                 for update_idxs in match_result.values()):
-            new_text = decode_tokens(tokenizer, new_token_ids)
-        else:
             new_text, match_result = self._apply_text_matches(
                 decode_tokens(tokenizer, token_ids),
                 mm_prompt_updates,
@@ -1707,7 +1926,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             dict(matched_updates),
         )
 
-        return new_token_ids, new_text, placeholders
+        return new_token_ids, placeholders
 
     def _validate_mm_kwargs(
         self,
@@ -1727,18 +1946,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     "model (usually arising from an inconsistency between "
                     "`_call_hf_processor` and `_get_mm_fields_config`).")
 
-    def _validate_mm_placeholders(
+    def _validate_mm_updates(
         self,
-        mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
+        mm_updates: MultiModalPromptUpdates,
         mm_item_counts: Mapping[str, int],
     ) -> None:
         for modality, item_count in mm_item_counts.items():
-            placeholders = mm_placeholders.get(modality, [])
+            placeholders = mm_updates.get(modality, [])
 
             if len(placeholders) != item_count:
-                # NOTE: If you are a model developer, this can also arise from
-                # an inconsistency between `_call_hf_processor` and
-                # `_get_mm_fields_config` implementations
                 raise RuntimeError(
                     f"Expected there to be {item_count} prompt updates "
                     f"corresponding to {item_count} {modality} items, but "
@@ -1748,6 +1964,22 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     "in the prompt. If the model has a chat template, make "
                     "sure you have applied it before calling `LLM.generate`.")
 
+    def _validate_mm_placeholders(
+        self,
+        mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
+        mm_item_counts: Mapping[str, int],
+    ) -> None:
+        for modality, item_count in mm_item_counts.items():
+            placeholders = mm_placeholders.get(modality, [])
+
+            if len(placeholders) != item_count:
+                raise RuntimeError(
+                    f"Expected there to be {item_count} prompt placeholders "
+                    f"corresponding to {item_count} {modality} items, but "
+                    f"instead found {len(placeholders)} prompt placeholders! "
+                    "Make sure the implementation of `_call_hf_processor` and "
+                    "`_get_mm_fields_config` are consistent with each other.")
+
     def _maybe_apply_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -1755,9 +1987,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_kwargs: MultiModalKwargsOptionalItems,
         mm_prompt_updates: MultiModalPromptUpdates,
         is_update_applied: bool,
-    ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
+    ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
+        self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
 
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
@@ -1765,21 +1998,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_prompt_updates,
             )
             self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
-
-            tokenizer = self.info.get_tokenizer()
-            prompt = decode_tokens(tokenizer, prompt_ids)
         else:
-            (
-                prompt_ids,
-                prompt,
-                mm_placeholders,
-            ) = self._apply_prompt_updates(
+            prompt_ids, mm_placeholders = self._apply_prompt_updates(
                 prompt_ids,
                 mm_prompt_updates,
             )
             self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
-        return prompt_ids, prompt, mm_placeholders
+        return prompt_ids, mm_placeholders
 
     def apply(
         self,
@@ -1821,7 +2047,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
 
         # NOTE: tokenization_kwargs are not required to init processor
-        prompt_ids, prompt, mm_placeholders = self._maybe_apply_prompt_updates(
+        prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
             mm_items=mm_items,
             prompt_ids=prompt_ids,
             mm_kwargs=mm_info.kwargs,
@@ -1836,7 +2062,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return MultiModalInputs(
             type="multimodal",
-            prompt=prompt,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_info.kwargs,
             mm_hashes=mm_info.hashes,
@@ -1877,23 +2102,18 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         encoder_inputs: MultiModalInputs,
     ):
         tokenizer = self.info.get_tokenizer()
-        decoder_prompt = self.create_decoder_prompt(prompt, mm_data)
-        if isinstance(decoder_prompt, str):
+        decoder_prompt_raw = self.create_decoder_prompt(prompt, mm_data)
+        if isinstance(decoder_prompt_raw, str):
             decoder_prompt_ids = encode_tokens(tokenizer,
-                                               decoder_prompt,
+                                               decoder_prompt_raw,
                                                add_special_tokens=False)
         else:
-            decoder_prompt_ids = decoder_prompt
-            decoder_prompt = decode_tokens(tokenizer, decoder_prompt)
+            decoder_prompt_ids = decoder_prompt_raw
 
         mm_inputs = MultiModalEncDecInputs(
-            encoder_prompt=encoder_inputs["prompt"],
             encoder_prompt_token_ids=encoder_inputs["prompt_token_ids"],
             **encoder_inputs)
-        mm_inputs.update({
-            "prompt": decoder_prompt,
-            "prompt_token_ids": decoder_prompt_ids
-        })
+        mm_inputs["prompt_token_ids"] = decoder_prompt_ids
         return mm_inputs
 
     def apply(

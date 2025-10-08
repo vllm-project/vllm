@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import weakref
 from collections.abc import Sequence
 from copy import deepcopy
 from typing import Callable, Union
@@ -10,7 +11,26 @@ from torch._ops import OpOverload
 
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.inductor_pass import InductorPass
-from vllm.config import get_current_vllm_config
+from vllm.compilation.pass_manager import with_pattern_match_debug
+from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+from vllm.config import VllmConfig, get_current_vllm_config
+
+
+class LazyInitPass(InductorPass):
+    """
+    If there's a pass that we want to initialize lazily in a test,
+    we can wrap it in LazyInitPass, which will initialize the pass when invoked
+    and then immediately invoke it.
+    """
+
+    def __init__(self, pass_cls: type[VllmInductorPass],
+                 vllm_config: VllmConfig):
+        self.pass_cls = pass_cls
+        self.vllm_config = weakref.proxy(vllm_config)  # avoid cycle
+
+    def __call__(self, graph: fx.Graph) -> None:
+        self.pass_ = self.pass_cls(self.vllm_config)
+        self.pass_(graph)
 
 
 class TestBackend:
@@ -40,10 +60,16 @@ class TestBackend:
                           example_inputs,
                           config_patches=self.inductor_config)
 
+    @with_pattern_match_debug
     def post_pass(self, graph: fx.Graph):
         self.graph_pre_pass = deepcopy(graph)
+
+        VllmInductorPass.dump_prefix = 0
         for pass_ in self.custom_passes:
             pass_(graph)
+            VllmInductorPass.dump_prefix += 1
+
+        VllmInductorPass.dump_prefix = None
 
         self.graph_post_pass = deepcopy(graph)
         # assign by reference, will reflect the final state of the graph

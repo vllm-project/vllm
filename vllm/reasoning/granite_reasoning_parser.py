@@ -24,8 +24,8 @@ class GraniteReasoningParser(ReasoningParser):
     and "Here is my response:" to separate its thinking / response outputs.
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
+        super().__init__(tokenizer, *args, **kwargs)
 
         # NOTE: There have been some observed occurrences of quantized
         # instances of the current models using "Here's" instead of "Here is",
@@ -278,11 +278,11 @@ class GraniteReasoningParser(ReasoningParser):
         content and normal (response) content.
 
         Args:
-            delta_text (str): Text to consider and parse content from.
-            reasoning_content (str): reasoning content from current_text.
-            response_content (str): response content from current_text.
-            current_text (str): The full previous + delta text.
-            response_seq_len(str): Len of the complete response sequence used.
+            delta_text: Text to consider and parse content from.
+            reasoning_content: reasoning content from current_text.
+            response_content: response content from current_text.
+            current_text: The full previous + delta text.
+            response_seq_len: Len of the complete response sequence used.
 
         Returns:
             DeltaMessage: Message containing the parsed content.

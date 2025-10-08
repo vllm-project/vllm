@@ -17,7 +17,7 @@ PLACEHOLDER_TOKEN_ID: tl.constexpr = -1
 GREEDY_TEMPERATURE: tl.constexpr = -1
 # Maximum number of speculative draft tokens allowed per request in a single
 # step. This value is chosen to be large enough to handle typical use cases.
-MAX_SPEC_LEN = 32
+MAX_SPEC_LEN = 128
 
 
 class RejectionSampler(nn.Module):
@@ -164,12 +164,12 @@ def rejection_sample(
     assert target_probs.shape == (num_tokens, vocab_size)
 
     # Create output buffer.
-    output_token_ids = torch.empty(
+    output_token_ids = torch.full(
         (batch_size, max_spec_len + 1),
+        PLACEHOLDER_TOKEN_ID,
         dtype=torch.int32,  # Consistent with SamplerOutput.sampled_token_ids.
         device=device,
     )
-    output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
 
     if sampling_metadata.all_greedy:
         is_greedy = None
@@ -186,7 +186,6 @@ def rejection_sample(
             bonus_token_ids,
             is_greedy,
             max_spec_len,
-            num_warps=1,
         )
         if sampling_metadata.all_greedy:
             return output_token_ids
@@ -227,7 +226,6 @@ def rejection_sample(
         max_spec_len,
         vocab_size,
         NO_DRAFT_PROBS=draft_probs is None,
-        num_warps=1,
     )
     return output_token_ids
 
@@ -329,7 +327,6 @@ def expand_batch_to_tokens(
         replace_from,
         replace_to,
         MAX_NUM_TOKENS=MAX_SPEC_LEN,  # To avoid recompilation.
-        num_warps=1,
     )
     return expanded_x
 
@@ -351,17 +348,17 @@ def generate_uniform_probs(
     without a seed.
 
     Args:
-        num_tokens : int
+        num_tokens: int
             Total number of tokens.
-        num_draft_tokens : List[List[int]]
+        num_draft_tokens: List[List[int]]
             Number of draft tokens per request.
-        generators : Optional[Dict[int, torch.Generator]]
+        generators: Optional[Dict[int, torch.Generator]]
             A dictionary mapping indices in the batch to
             `torch.Generator` objects.
-        device : torch.device
+        device: torch.device
             The device on which to allocate the tensor.
     Returns:
-        uniform_rand : torch.Tensor
+        uniform_rand: torch.Tensor
             A tensor of shape `(num_tokens, )` containing uniform
             random values in the range [0, 1).
     """

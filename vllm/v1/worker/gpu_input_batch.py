@@ -7,10 +7,9 @@ from typing import Optional, cast
 
 import numpy as np
 import torch
-from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItems
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import length_from_prompt_token_ids_or_embeds, swap_dict_values
@@ -52,16 +51,6 @@ class CachedRequestState:
     @property
     def num_tokens(self) -> int:
         return self.num_prompt_tokens + len(self.output_token_ids)
-
-    # Temporary back-compatibility for plugins that define model runner
-    @property
-    @deprecated("`mm_inputs` is superseded by `mm_kwargs` and will be "
-                "removed in v0.13. Please use `mm_kwargs` instead.")
-    def mm_inputs(self) -> list[MultiModalKwargsItems]:
-        return [
-            MultiModalKwargsItems.from_seq([f.data]) for f in self.mm_features
-            if f.data is not None
-        ]
 
     def get_token_id(self, idx: int) -> int:
         if idx < self.num_prompt_tokens:
@@ -354,8 +343,8 @@ class InputBatch:
                     and is_spec_decode_unsupported(sampling_params)):
                 self.spec_decode_unsupported_reqs.add(req_id)
             if sampling_params.sampling_type == SamplingType.GREEDY:
-                # Avoid later division by zero.
-                self.temperature_cpu[req_index] = -1.0
+                # Should avoid division by zero later when apply_temperature.
+                self.temperature_cpu[req_index] = 0.0
                 self.greedy_reqs.add(req_id)
             else:
                 self.temperature_cpu[req_index] = sampling_params.temperature

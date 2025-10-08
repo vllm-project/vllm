@@ -138,13 +138,15 @@ class ModelOptFp8Config(QuantizationConfig):
             if not quant_method:
                 raise ValueError("Missing 'quant_algo' in quantization config")
             kv_cache_quant_method = quant_config.get("kv_cache_quant_algo")
+            # "exclude_modules" is the key in the legacy hf_quant_config.json
             exclude_modules = quant_config.get("exclude_modules")
         else:
             # Compressed-tensors style format:
             # {"quant_algo": "...", "quant_method": "modelopt"}
             quant_method = config.get("quant_algo", "")
             kv_cache_quant_method = config.get("kv_cache_quant_algo")
-            exclude_modules = config.get("exclude_modules")
+            # "ignore" is the key in config.json
+            exclude_modules = config.get("ignore")
 
         if quant_method not in QUANT_ALGOS:
             raise ValueError(
@@ -160,6 +162,7 @@ class ModelOptFp8Config(QuantizationConfig):
     def is_layer_excluded(self, prefix: str) -> bool:
         """
         Check if a layer should be excluded from quantization.
+        Handles both exact matching (for fused layers) and substring matching.
 
         This method handles both regular models and multimodal models that use
         the language_model prefix. For multimodal models, it checks if the
@@ -168,11 +171,18 @@ class ModelOptFp8Config(QuantizationConfig):
         if self.exclude_modules is None:
             return False
 
-        # Check if any excluded module matches the prefix
+        # First check exact matching with fused layer support
+        if is_layer_skipped(prefix, self.exclude_modules,
+                            self.packed_modules_mapping):
+            return True
+
+        # Then check substring matching for patterns not caught by exact match
         for module in self.exclude_modules:
-            if (module in prefix
-                    or (prefix.startswith("language_model.")
-                        and module in prefix.removeprefix("language_model."))):
+            # Skip exact matches already handled above
+            if (module != prefix and
+                (module in prefix or
+                 (prefix.startswith("language_model.")
+                  and module in prefix.removeprefix("language_model.")))):
                 return True
         return False
 
@@ -180,9 +190,10 @@ class ModelOptFp8Config(QuantizationConfig):
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
         if isinstance(layer, LinearBase):
-            if (is_layer_skipped(prefix, self.exclude_modules,
-                                 self.packed_modules_mapping)
-                    or self.is_layer_excluded(prefix)):
+            if self.is_layer_excluded(prefix):
+                return UnquantizedLinearMethod()
+            # Check if this is a vision model layer that should not be quantized
+            if ("vision_tower" in prefix or "vision_model" in prefix):
                 return UnquantizedLinearMethod()
             return ModelOptFp8LinearMethod(self)
         elif isinstance(layer, Attention):
@@ -534,7 +545,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=apply_router_weight_on_input)
 
         # Expert selection
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -714,6 +725,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
                     raise ValueError(f"group_size must be an integer, got "
                                      f"{type(group_size_raw)}") from None
 
+            # "exclude_modules" is the key in the legacy hf_quant_config.json
             exclude_modules = quant_config.get("exclude_modules", [])
             if not isinstance(exclude_modules, list):
                 raise ValueError(f"exclude_modules must be a list, got "
@@ -747,7 +759,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
                     raise ValueError(f"group_size must be an integer, got "
                                      f"{type(group_size_raw)}") from None
 
-            exclude_modules = config.get("exclude_modules", [])
+            # "ignore" is the key in config.json
+            exclude_modules = config.get("ignore", [])
             if not isinstance(exclude_modules, list):
                 raise ValueError(f"exclude_modules must be a list, got "
                                  f"{type(exclude_modules)}")
@@ -778,22 +791,34 @@ class ModelOptNvFp4Config(QuantizationConfig):
         return cls(is_checkpoint_nvfp4_serialized, kv_cache_quant_algo,
                    exclude_modules, group_size)
 
-    def is_layer_excluded(self, prefix: str,
-                          exclude_modules: list[str]) -> bool:
+    def is_layer_excluded(self, prefix: str) -> bool:
+        """
+        Check if a layer should be excluded from quantization.
+        Handles both exact matching (for fused layers) and pattern matching.
+        """
+        # First check exact matching with fused layer support
+        if is_layer_skipped(prefix, self.exclude_modules,
+                            self.packed_modules_mapping):
+            return True
+
+        # Check regex pattern matching for patterns not caught by exact match
         import regex as re
-        for pattern in exclude_modules:
-            regex_str = pattern.replace('.', r'\.').replace('*', r'.*')
-            if re.fullmatch(regex_str, prefix):
-                return True
+        for pattern in self.exclude_modules:
+            # Skip patterns that would be caught by exact matching
+            if '*' in pattern or '.' in pattern:
+                regex_str = pattern.replace('.', r'\.').replace('*', r'.*')
+                if re.fullmatch(regex_str, prefix):
+                    return True
         return False
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
         if isinstance(layer, LinearBase):
-            if (is_layer_skipped(prefix, self.exclude_modules,
-                                 self.packed_modules_mapping)
-                    or self.is_layer_excluded(prefix, self.exclude_modules)):
+            if self.is_layer_excluded(prefix):
+                return UnquantizedLinearMethod()
+            # Check if this is a vision model layer that should not be quantized
+            if ("vision_tower" in prefix or "vision_model" in prefix):
                 return UnquantizedLinearMethod()
             return ModelOptNvFp4LinearMethod(self)
         elif isinstance(layer, Attention):
@@ -1039,7 +1064,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.allow_flashinfer = _nvfp4.allow_flashinfer
         self.use_marlin = _nvfp4.use_marlin
         self.flashinfer_moe_backend = None
-
+        self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         if self.allow_flashinfer:
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
             logger.info_once(
@@ -1172,19 +1197,23 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                                                  weight_loader=weight_loader)
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
-    def prepare_static_weight_layouts_for_trtllm_moe(
+    def prepare_static_weights_for_trtllm_fp4_moe(
         self,
-        gemm1_weights: torch.Tensor,
-        gemm2_weights: torch.Tensor,
-        gemm1_scales_linear_fp4_bytes: torch.Tensor,
-        gemm2_scales_linear_fp4_bytes: torch.Tensor,
-        hidden_size: int,
-        intermediate_size: int,
-        num_experts: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # args_dequant,
+        # args,
+        gemm1_weights,
+        gemm2_weights,
+        gemm1_scales_linear_fp4_bytes,
+        gemm2_scales_linear_fp4_bytes,
+        hidden_size,
+        intermediate_size,
+        num_experts,
+    ):
+        from flashinfer import nvfp4_block_scale_interleave
+        from flashinfer.fused_moe.core import (
+            _maybe_get_cached_w2_permute_indices,
+            _maybe_get_cached_w3_w1_permute_indices)
         """Prepare quantized weights for kernel (done offline with weights)."""
-        from flashinfer import (reorder_rows_for_gated_act_gemm,
-                                shuffle_matrix_a, shuffle_matrix_sf_a)
         epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
 
         # Convert quantized weights to proper formats
@@ -1202,48 +1231,54 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                                          intermediate_size //
                                          16)  # fp8 scaling factors
 
-        # Reorder rows of W1 and scales for fused gated activation
-        gemm1_weights_fp4_interleaved = []
-        gemm1_scales_fp4_interleaved = []
-        for i in range(num_experts):
-            gemm1_weights_fp4_interleaved.append(
-                reorder_rows_for_gated_act_gemm(gemm1_weights_fp4[i].clone()))
-            gemm1_scales_fp4_interleaved.append(
-                reorder_rows_for_gated_act_gemm(
-                    gemm1_scales_linear_fp4[i].clone()))
-
-        # Stack weights and scales for all experts
-        gemm1_weights_fp4_interleaved = torch.stack(
-            gemm1_weights_fp4_interleaved).reshape(num_experts,
-                                                   2 * intermediate_size,
-                                                   hidden_size // 2)
-        gemm1_scales_fp4_interleaved = torch.stack(
-            gemm1_scales_fp4_interleaved).reshape(num_experts,
-                                                  2 * intermediate_size,
-                                                  hidden_size // 16)
-
-        # Shuffle weights and scaling factors for transposed mma output
         gemm1_weights_fp4_shuffled = []
         gemm1_scales_fp4_shuffled = []
         gemm2_weights_fp4_shuffled = []
         gemm2_scales_fp4_shuffled = []
         for i in range(num_experts):
-            gemm1_weights_fp4_shuffled.append(
-                shuffle_matrix_a(
-                    gemm1_weights_fp4_interleaved[i].view(torch.uint8),
-                    epilogue_tile_m))
-            gemm1_scales_fp4_shuffled.append(
-                shuffle_matrix_sf_a(
-                    gemm1_scales_fp4_interleaved[i].view(torch.uint8),
-                    epilogue_tile_m))
+            # Calculate the permute indices for the following:
+            # 1. Reorder rows of W1 and scales for fused gated activation
+            # 2. Shuffle weights and scaling factors for transposed mma output
+            # for both w3_w1 and w2 weights and scale factors
+            permute_indices = _maybe_get_cached_w3_w1_permute_indices(
+                self._cache_permute_indices,
+                gemm1_weights_fp4[i].view(torch.uint8),
+                epilogue_tile_m,
+            )
+            gemm1_weights_fp4_shuffled.append(gemm1_weights_fp4[i].view(
+                torch.uint8)[permute_indices.to(
+                    gemm1_weights_fp4.device)].contiguous())
 
-            gemm2_weights_fp4_shuffled.append(
-                shuffle_matrix_a(gemm2_weights_fp4[i].view(torch.uint8),
-                                 epilogue_tile_m))
+            permute_sf_indices = _maybe_get_cached_w3_w1_permute_indices(
+                self._cache_permute_indices,
+                gemm1_scales_linear_fp4[i].view(torch.uint8),
+                epilogue_tile_m,
+                num_elts_per_sf=16,
+            )
+            gemm1_scales_fp4_shuffled.append(
+                nvfp4_block_scale_interleave(gemm1_scales_linear_fp4[i].view(
+                    torch.uint8)[permute_sf_indices.to(
+                        gemm1_scales_linear_fp4.device)].contiguous()))
+
+            permute_indices = _maybe_get_cached_w2_permute_indices(
+                self._cache_permute_indices,
+                gemm2_weights_fp4[i].view(torch.uint8),
+                epilogue_tile_m,
+            )
+            gemm2_weights_fp4_shuffled.append(gemm2_weights_fp4[i].view(
+                torch.uint8)[permute_indices.to(
+                    gemm2_weights_fp4.device)].contiguous())
+
+            permute_sf_indices = _maybe_get_cached_w2_permute_indices(
+                self._cache_permute_indices,
+                gemm2_scales_linear_fp4[i].view(torch.uint8),
+                epilogue_tile_m,
+                num_elts_per_sf=16,
+            )
             gemm2_scales_fp4_shuffled.append(
-                shuffle_matrix_sf_a(
-                    gemm2_scales_linear_fp4[i].view(torch.uint8),
-                    epilogue_tile_m))
+                nvfp4_block_scale_interleave(gemm2_scales_linear_fp4[i].view(
+                    torch.uint8)[permute_sf_indices.to(
+                        gemm2_scales_linear_fp4.device)].contiguous()))
 
         # Stack weights for all experts
         gemm1_weights_fp4_shuffled = torch.stack(gemm1_weights_fp4_shuffled)
@@ -1258,8 +1293,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             torch.stack(gemm2_scales_fp4_shuffled).view(
                 torch.float8_e4m3fn).reshape(num_experts, hidden_size,
                                              intermediate_size // 16))
-        return (gemm1_weights_fp4_shuffled, gemm1_scales_fp4_shuffled,
-                gemm2_weights_fp4_shuffled, gemm2_scales_fp4_shuffled)
+        return (
+            gemm1_weights_fp4_shuffled,
+            gemm1_scales_fp4_shuffled,
+            gemm2_weights_fp4_shuffled,
+            gemm2_scales_fp4_shuffled,
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # GEMM 1 processing
@@ -1309,9 +1348,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if self.allow_flashinfer and \
             self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             # Prepare static weights for TRT-LLM kernel
+            # alternate: prepare_static_weight_layouts_for_trtllm_moe
             (gemm1_weights_fp4_shuffled, gemm1_scales_fp4_shuffled,
              gemm2_weights_fp4_shuffled, gemm2_scales_fp4_shuffled
-             ) = self.prepare_static_weight_layouts_for_trtllm_moe(
+             ) = self.prepare_static_weights_for_trtllm_fp4_moe(
                  layer.w13_weight,
                  layer.w2_weight,
                  layer.w13_weight_scale,
@@ -1320,6 +1360,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                  layer.w13_weight.size(-2) // 2,  # intermediate_size
                  layer.w13_weight.size(0),  # num_experts
              )
+            logger.debug_once("Finished shuffling weights for TRT-LLM MOE")
 
             layer.gemm1_weights_fp4_shuffled = Parameter(
                 gemm1_weights_fp4_shuffled, requires_grad=False)
@@ -1433,10 +1474,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
             if use_llama4_routing:
                 routing_method_type = flashinfer.RoutingMethodType.Llama4
+            routing_bias = e_score_correction_bias
+            if routing_bias is not None:
+                routing_bias = routing_bias.to(torch.bfloat16)
             out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
                 routing_logits=router_logits
                 if use_llama4_routing else router_logits.to(torch.float32),
-                routing_bias=e_score_correction_bias,
+                routing_bias=routing_bias,
                 hidden_states=hidden_states_fp4,
                 hidden_states_scale=hidden_states_scale_linear_fp4.view(
                     torch.float8_e4m3fn).flatten(),
@@ -1470,7 +1514,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )[0]
             return out
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,

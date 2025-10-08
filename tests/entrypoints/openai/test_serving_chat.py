@@ -7,7 +7,7 @@ import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -68,7 +68,7 @@ def default_server_args(with_tool_parser: bool):
 def gptoss_server(monkeypatch_module: pytest.MonkeyPatch,
                   default_server_args: list[str]):
     with monkeypatch_module.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
+        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
         with RemoteOpenAIServer(GPT_OSS_MODEL_NAME,
                                 default_server_args) as remote_server:
             yield remote_server
@@ -194,6 +194,7 @@ async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI,
     assert tc.function is not None and tc.function.name == "get_current_weather"
     args1 = tc.function.arguments
     assert args1 is not None and len(args1) > 0
+    assert not first_msg.content
 
     messages.append({"role": "assistant", "content": args1})
     messages.append({
@@ -229,6 +230,7 @@ class MockHFConfig:
 @dataclass
 class MockModelConfig:
     task = "generate"
+    runner_type = "generate"
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -239,12 +241,35 @@ class MockModelConfig:
     logits_processor_pattern = None
     diff_sampling_param: Optional[dict] = None
     allowed_local_media_path: str = ""
+    allowed_media_domains: Optional[list[str]] = None
     encoder_config = None
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    skip_tokenizer_init = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
+
+
+def _build_serving_chat(engine: AsyncLLM,
+                        model_config: MockModelConfig) -> OpenAIServingChat:
+    models = OpenAIServingModels(engine_client=engine,
+                                 base_model_paths=BASE_MODEL_PATHS,
+                                 model_config=model_config)
+    serving_chat = OpenAIServingChat(engine,
+                                     model_config,
+                                     models,
+                                     response_role="assistant",
+                                     chat_template=CHAT_TEMPLATE,
+                                     chat_template_content_format="auto",
+                                     request_logger=None)
+
+    async def _fake_process_inputs(request_id, engine_prompt, sampling_params,
+                                   *, lora_request, trace_headers, priority):
+        return dict(engine_prompt), {}
+
+    serving_chat._process_inputs = AsyncMock(side_effect=_fake_process_inputs)
+    return serving_chat
 
 
 @dataclass
@@ -280,16 +305,7 @@ async def test_serving_chat_returns_correct_model_name():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=MockModelConfig())
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     MockModelConfig(),
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    serving_chat = _build_serving_chat(mock_engine, MockModelConfig())
     messages = [{"role": "user", "content": "what is 1+1?"}]
 
     async def return_model_name(*args):
@@ -316,16 +332,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=MockModelConfig())
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     MockModelConfig(),
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    serving_chat = _build_serving_chat(mock_engine, MockModelConfig())
 
     req = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -359,16 +366,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.errored = False
 
     # Initialize the serving chat
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=mock_model_config)
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     mock_model_config,
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    serving_chat = _build_serving_chat(mock_engine, mock_model_config)
 
     # Test Case 1: No max_tokens specified in request
     req = ChatCompletionRequest(
@@ -413,16 +411,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.errored = False
 
     # Initialize the serving chat
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=mock_model_config)
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     mock_model_config,
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    serving_chat = _build_serving_chat(mock_engine, mock_model_config)
 
     # Test case 1: No max_tokens specified, defaults to context_window
     req = ChatCompletionRequest(
@@ -469,16 +458,7 @@ async def test_serving_chat_could_load_correct_generation_config():
     mock_engine.errored = False
 
     # Initialize the serving chat
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=mock_model_config)
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     mock_model_config,
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    serving_chat = _build_serving_chat(mock_engine, mock_model_config)
 
     req = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -523,17 +503,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
-    # Initialize the serving chat
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=mock_model_config)
-    serving_chat = OpenAIServingChat(mock_engine,
-                                     mock_model_config,
-                                     models,
-                                     response_role="assistant",
-                                     chat_template=CHAT_TEMPLATE,
-                                     chat_template_content_format="auto",
-                                     request_logger=None)
+    serving_chat = _build_serving_chat(mock_engine, mock_model_config)
 
     # Test cache_salt
     req = ChatCompletionRequest(
@@ -547,10 +517,12 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     # By default, cache_salt in the engine prompt is not set
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
-    assert "cache_salt" not in mock_engine.generate.call_args.args[0]
+    engine_prompt = serving_chat._process_inputs.await_args_list[0].args[1]
+    assert "cache_salt" not in engine_prompt
 
     # Test with certain cache_salt
     req.cache_salt = "test_salt"
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
-    assert mock_engine.generate.call_args.args[0]["cache_salt"] == "test_salt"
+    engine_prompt = serving_chat._process_inputs.await_args_list[1].args[1]
+    assert engine_prompt.get("cache_salt") == "test_salt"

@@ -223,17 +223,13 @@ if current_platform.is_rocm():
     direct_register_custom_op(
         op_name="rocm_aiter_asm_moe_tkw1",
         op_func=rocm_aiter_asm_moe_tkw1_impl,
-        mutates_args=[],
         fake_impl=rocm_aiter_asm_moe_tkw1_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
         op_name="rocm_aiter_fused_moe",
         op_func=rocm_aiter_fused_moe_impl,
-        mutates_args=[],
         fake_impl=rocm_aiter_fused_moe_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
@@ -241,7 +237,6 @@ if current_platform.is_rocm():
         op_func=rocm_aiter_topk_softmax_impl,
         mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
         fake_impl=rocm_aiter_topk_softmax_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
@@ -249,7 +244,6 @@ if current_platform.is_rocm():
         op_func=rocm_aiter_biased_grouped_topk_impl,
         mutates_args=["topk_weights", "topk_ids"],
         fake_impl=rocm_aiter_biased_grouped_topk_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
     direct_register_custom_op(
@@ -257,7 +251,6 @@ if current_platform.is_rocm():
         op_func=rocm_aiter_grouped_topk_impl,
         mutates_args=["topk_weights", "topk_ids"],
         fake_impl=rocm_aiter_grouped_topk_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
 
 

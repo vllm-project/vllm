@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Optional
 
 import pytest
 import torch
@@ -16,8 +17,6 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.layernorm import (RMSNorm,
                                                   dispatch_rocm_rmsnorm_func,
                                                   fused_add_rms_norm, rms_norm)
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    cutlass_scaled_mm, dispatch_w8a8_blockscale_func, w8a8_block_fp8_matmul)
 from vllm.platforms import current_platform
 
 RMS_NORM_SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
@@ -34,15 +33,15 @@ class Relu3(ReLUSquaredActivation):
     [
         # Default values based on compile level
         # - All by default (no Inductor compilation)
-        ("", 0, False, [True] * 4, True),
-        ("", 1, True, [True] * 4, True),
-        ("", 2, False, [True] * 4, True),
+        (None, 0, False, [True] * 4, True),
+        (None, 1, True, [True] * 4, True),
+        (None, 2, False, [True] * 4, True),
         # - None by default (with Inductor)
-        ("", 3, True, [False] * 4, False),
-        ("", 4, True, [False] * 4, False),
+        (None, 3, True, [False] * 4, False),
+        (None, 4, True, [False] * 4, False),
         # - All by default (without Inductor)
-        ("", 3, False, [True] * 4, True),
-        ("", 4, False, [True] * 4, True),
+        (None, 3, False, [True] * 4, True),
+        (None, 4, False, [True] * 4, True),
         # Explicitly enabling/disabling
         #
         # Default: all
@@ -54,7 +53,7 @@ class Relu3(ReLUSquaredActivation):
         # All but SiluAndMul
         ("all,-silu_and_mul", 2, True, [1, 0, 1, 1], True),
         # All but ReLU3 (even if ReLU2 is on)
-        ("-relu3,relu2", 3, False, [1, 1, 1, 0], True),
+        ("-relu3,+relu2", 3, False, [1, 1, 1, 0], True),
         # RMSNorm and SiluAndMul
         ("none,-relu3,+rms_norm,+silu_and_mul", 4, False, [1, 1, 0, 0], False),
         # All but RMSNorm
@@ -67,12 +66,13 @@ class Relu3(ReLUSquaredActivation):
         # All but RMSNorm
         ("all,-rms_norm", 4, True, [0, 1, 1, 1], True),
     ])
-def test_enabled_ops(env: str, torch_level: int, use_inductor: bool,
+def test_enabled_ops(env: Optional[str], torch_level: int, use_inductor: bool,
                      ops_enabled: list[int], default_on: bool):
+    custom_ops = env.split(',') if env else []
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(use_inductor=bool(use_inductor),
                                              level=torch_level,
-                                             custom_ops=env.split(",")))
+                                             custom_ops=custom_ops))
     with set_current_vllm_config(vllm_config):
         assert CustomOp.default_on() == default_on
 
@@ -107,34 +107,6 @@ def test_enabled_ops_invalid(env: str):
             custom_ops=env.split(",")))
         with set_current_vllm_config(vllm_config):
             RMSNorm(1024).enabled()
-
-
-@pytest.mark.skipif(
-    not current_platform.is_rocm() or not current_platform.is_fp8_fnuz(),
-    reason="AITER is a feature exclusive for ROCm and FP8_FNUZ")
-@pytest.mark.parametrize("use_cutlass", [True, False])
-@pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])
-@pytest.mark.parametrize("use_rocm_aiter_gemm_w8a8_blockscale", ["0", "1"])
-def test_w8a8_blockscale_dispatch(use_cutlass: bool, use_rocm_aiter: str,
-                                  use_rocm_aiter_gemm_w8a8_blockscale: str,
-                                  monkeypatch):
-
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR",
-                       use_rocm_aiter_gemm_w8a8_blockscale)
-
-    use_aiter_and_is_supported = (bool(int(use_rocm_aiter)) and bool(
-        int(use_rocm_aiter_gemm_w8a8_blockscale)))
-    block_scale_func = dispatch_w8a8_blockscale_func(
-        use_cutlass, use_aiter_and_is_supported=use_aiter_and_is_supported)
-    if use_cutlass:
-        assert block_scale_func == cutlass_scaled_mm
-    elif current_platform.is_rocm() and int(use_rocm_aiter) and int(
-            use_rocm_aiter_gemm_w8a8_blockscale):
-        assert block_scale_func == (
-            torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale)
-    else:
-        assert block_scale_func == w8a8_block_fp8_matmul
 
 
 @pytest.mark.parametrize("use_rocm_aiter", ["0", "1"])

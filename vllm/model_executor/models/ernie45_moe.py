@@ -49,7 +49,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -121,11 +120,12 @@ class Ernie4_5_MoeMoE(nn.Module):
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.moe_num_experts,
                                      bias=False,
+                                     params_dtype=torch.float32,
                                      quant_config=None,
                                      prefix=f"{prefix}.gate")
 
         self.gate.e_score_correction_bias = nn.Parameter(
-            torch.empty(config.moe_num_experts))
+            torch.empty(config.moe_num_experts, dtype=torch.float32))
 
         self.experts = FusedMoE(
             num_experts=config.moe_num_experts,
@@ -158,7 +158,7 @@ class Ernie4_5_MoeMoE(nn.Module):
         if self.has_shared_experts:
             shared_output = self.shared_experts(hidden_states)
 
-        router_logits, _ = self.gate(hidden_states)
+        router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
 
         final_hidden_states = self.experts(hidden_states=hidden_states,
                                            router_logits=router_logits)
@@ -591,10 +591,8 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

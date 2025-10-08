@@ -353,8 +353,8 @@ class layerwise_profile(profile):
 
         Args:
             num_running_seqs (Optional[int], optional): When given,
-            num_running_seqs will be passed to LayerProfileResults for metadata
-            update. Defaults to None.
+                num_running_seqs will be passed to LayerProfileResults
+                for metadata update. Defaults to None.
         """
         super().__init__(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],

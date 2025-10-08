@@ -11,7 +11,8 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.config import VllmConfig, current_platform, set_current_vllm_config
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.platforms import current_platform
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 

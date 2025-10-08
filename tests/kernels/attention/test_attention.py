@@ -18,7 +18,7 @@ if not current_platform.is_rocm():
     from xformers import ops as xops
     from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
-    from vllm.attention.backends.xformers import _make_alibi_bias
+    from tests.kernels.utils import make_alibi_bias
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
@@ -429,8 +429,8 @@ def test_multi_query_kv_attention(
     alibi_bias = None
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads, dtype=torch.float)
-        attn_bias = _make_alibi_bias(alibi_slopes, num_kv_heads, dtype,
-                                     seq_lens)
+        attn_bias = make_alibi_bias(alibi_slopes, num_kv_heads, dtype,
+                                    seq_lens)
         output = torch.empty_like(query)
         start = 0
         # Dynamic sequence length not supported with custom attn_bias.

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 
 import pytest
 import torch
@@ -82,7 +81,7 @@ def test_prm_models(
     check_transformers_version("Qwen/Qwen2.5-Math-PRM-7B",
                                max_transformers_version="4.53.2")
 
-    if current_platform.is_cpu() and os.environ.get("VLLM_USE_V1", "0") == "0":
+    if current_platform.is_cpu():
         pytest.skip("CPU only supports V1")
 
     if current_platform.is_rocm():

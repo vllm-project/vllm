@@ -122,9 +122,10 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
 
     def load_fused_expert_weights(self, name: str, params_dict: dict,
                                   loaded_weight: torch.Tensor, shard_id: str,
-                                  num_experts: int):
+                                  num_experts: int) -> bool:
         param = params_dict[name]
         weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
+        loaded_local_expert = False
         for expert_id in range(num_experts):
             curr_expert_weight = loaded_weight[expert_id]
             success = weight_loader(param,
@@ -133,9 +134,10 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                                     shard_id,
                                     expert_id,
                                     return_success=True)
-            if not success:
-                return False
-        return True
+            if success:
+                loaded_local_expert = True
+
+        return loaded_local_expert
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -210,6 +212,8 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                     # attempted to load as other weights later
                     is_expert_weight = True
                     name_mapped = name.replace(weight_name, param_name)
+                    if is_pp_missing_parameter(name_mapped, self):
+                        continue
                     if is_fused_expert:
                         loaded_weight = loaded_weight.transpose(-1,
                                                                 -2)  # no bias
@@ -228,8 +232,6 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                                 name_mapped, params_dict, loaded_weight,
                                 shard_id, num_experts)
                     else:
-                        if is_pp_missing_parameter(name_mapped, self):
-                            continue
                         # Skip loading extra parameters for GPTQ/modelopt models
                         if name_mapped.endswith(
                                 ignore_suffixes
@@ -294,7 +296,8 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
                                       prefix=maybe_prefix(prefix, "model"))
         self.lm_head = ParallelLMHead(self.config.vocab_size,
                                       self.config.hidden_size,
-                                      quant_config=self.quant_config)
+                                      quant_config=self.quant_config,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
@@ -317,13 +320,17 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
-        self.visual = Qwen3_VisionTransformer(
-            config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
-            prefix=maybe_prefix(prefix, "visual"),
-            use_data_parallel=self.use_data_parallel,
-        )
+        if not multimodal_config.get_limit_per_prompt("image") and \
+            not multimodal_config.get_limit_per_prompt("video"):
+            self.visual = None
+        else:
+            self.visual = Qwen3_VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+                use_data_parallel=self.use_data_parallel,
+            )
 
         self.language_model = Qwen3MoeLLMForCausalLM(vllm_config=vllm_config,
                                                      prefix=maybe_prefix(
@@ -339,10 +346,14 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
             config.vision_config.deepstack_visual_indexes
         ) if self.use_deepstack else 0
         # register buffer for deepstack
-        self.deepstack_input_embeds = [
-            torch.zeros(vllm_config.scheduler_config.max_num_batched_tokens,
-                        config.text_config.hidden_size)
-            for _ in range(self.deepstack_num_level)
-        ] if self.use_deepstack else None
+        if self.use_deepstack and self.visual is not None:
+            self.deepstack_input_embeds = [
+                torch.zeros(
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    config.text_config.hidden_size)
+                for _ in range(self.deepstack_num_level)
+            ]
+        else:
+            self.deepstack_input_embeds = None
         self.visual_dim = config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level

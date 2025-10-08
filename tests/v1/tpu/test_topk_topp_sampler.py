@@ -4,6 +4,7 @@ import math
 
 import pytest
 import torch
+import torch_xla
 
 from vllm.platforms import current_platform
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
@@ -63,7 +64,7 @@ def test_topp_result_sums_past_p():
         probs.masked_fill_(logits_masked.isinf(), 0)
         masked_prob_sum = probs.sum(dim=-1)
 
-        xm.mark_step()
+        torch_xla.sync()
 
     # Perform assertion on CPU.
     assert torch.all(torch.ge(masked_prob_sum.cpu() + TOLERANCE, p.cpu()))
@@ -82,7 +83,7 @@ def test_topp_basic():
                                        k=torch.tensor([3, 3]),
                                        p=torch.tensor([0.79, 0.79]))
 
-        xm.mark_step()
+        torch_xla.sync()
 
     # Expect the smallest elements to be dropped.
     expected_result = logits.clone().cpu()
@@ -104,7 +105,7 @@ def test_topp_select_all():
                                        k=torch.tensor([3, 3]),
                                        p=torch.tensor([1.0, 1.0]))
 
-        xm.mark_step()
+        torch_xla.sync()
 
     assert torch.allclose(logits.cpu(), result.cpu())
 
@@ -122,7 +123,7 @@ def test_topp_with_ties():
                                        k=torch.tensor([4]),
                                        p=torch.tensor([0.2]))
 
-        xm.mark_step()
+        torch_xla.sync()
 
     # All tie values are included in the top-p set. Tie breaking is left
     # to be done during final sampling (all tie tokens have equal
@@ -146,7 +147,7 @@ def test_both_topk_topp():
                                        k=torch.tensor([1, 3]),
                                        p=torch.tensor([0.79, 0.79]))
 
-        xm.mark_step()
+        torch_xla.sync()
 
     # Since for the first batch k=1, expect only the largest element gets
     # selected.

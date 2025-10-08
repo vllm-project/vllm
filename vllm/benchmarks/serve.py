@@ -52,21 +52,6 @@ TERM_PLOTLIB_AVAILABLE = ((importlib.util.find_spec("termplotlib") is not None)
                           and (shutil.which("gnuplot") is not None))
 
 
-# TODO: Remove this in v0.11.0
-class DeprecatedEndpointTypeAction(argparse.Action):
-    """Argparse action for the deprecated --endpoint-type flag.
-    """
-
-    def __call__(self, _, namespace, values, option_string=None):
-        warnings.warn(
-            "'--endpoint-type' is deprecated and will be removed in v0.11.0. "
-            "Please use '--backend' instead or remove this argument if you "
-            "have already set it.",
-            stacklevel=1,
-        )
-        setattr(namespace, self.dest, values)
-
-
 class TaskType(Enum):
     GENERATION = "generation"
     EMBEDDING = "embedding"
@@ -531,18 +516,22 @@ async def benchmark(
         extra_body=extra_body,
     )
 
-    test_output = await wait_for_endpoint(
-        request_func,
-        test_input,
-        session,
-        timeout_seconds=ready_check_timeout_sec,
-    )
-    if not test_output.success:
-        raise ValueError(
-            "Initial test run failed - Please make sure benchmark arguments "
-            f"are correctly specified. Error: {test_output.error}")
+    if ready_check_timeout_sec > 0:
+        test_output = await wait_for_endpoint(
+            request_func,
+            test_input,
+            session,
+            timeout_seconds=ready_check_timeout_sec,
+        )
+        if not test_output.success:
+            raise ValueError(
+                "Initial test run failed - Please make sure benchmark "
+                "arguments are correctly specified. "
+                f"Error: {test_output.error}")
+        else:
+            print("Initial test run completed. Starting main benchmark run...")
     else:
-        print("Initial test run completed. Starting main benchmark run...")
+        print("Skipping endpoint ready check.")
 
     if lora_modules:
         # For each input request, choose a LoRA module at random.
@@ -880,15 +869,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="The type of backend or endpoint to use for the benchmark."
     )
     parser.add_argument(
-        "--endpoint-type",
-        type=str,
-        default=None,
-        choices=list(ASYNC_REQUEST_FUNCS.keys()),
-        action=DeprecatedEndpointTypeAction,
-        help="'--endpoint-type' is deprecated and will be removed in v0.11.0. "
-        "Please use '--backend' instead.",
-    )
-    parser.add_argument(
         "--base-url",
         type=str,
         default=None,
@@ -1097,6 +1077,27 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "openai-compatible backends. If not specified, default to greedy "
         "decoding (i.e. temperature==0.0).",
     )
+    sampling_group.add_argument(
+        "--frequency-penalty",
+        type=float,
+        default=None,
+        help="Frequency penalty sampling parameter. Only has effect on "
+        "openai-compatible backends.",
+    )
+    sampling_group.add_argument(
+        "--presence-penalty",
+        type=float,
+        default=None,
+        help="Presence penalty sampling parameter. Only has effect on "
+        "openai-compatible backends.",
+    )
+    sampling_group.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=None,
+        help="Repetition penalty sampling parameter. Only has effect on "
+        "openai-compatible backends.",
+    )
 
     parser.add_argument(
         '--tokenizer-mode',
@@ -1151,7 +1152,8 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=int,
         default=600,
         help="Maximum time to wait for the endpoint to become ready "
-        "in seconds (default: 600 seconds / 10 minutes).",
+        "in seconds (default: 600 seconds / 10 minutes). If set to 0, "
+        "the ready check will be skipped."
     )
 
 
@@ -1230,6 +1232,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "top_k": args.top_k,
             "min_p": args.min_p,
             "temperature": args.temperature,
+            "frequency_penalty": args.frequency_penalty,
+            "presence_penalty": args.presence_penalty,
+            "repetition_penalty": args.repetition_penalty,
         }.items() if v is not None
     }
 
