@@ -304,7 +304,6 @@ class CudaPlatformBase(Platform):
                     dtype,
                     kv_cache_dtype,
                     block_size,
-                    use_v1,
                     use_mla,
                     has_sink,
                     use_sparse,

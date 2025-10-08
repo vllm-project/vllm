@@ -134,9 +134,9 @@ class FlashAttentionBackend(AttentionBackend):
         dtype: torch.dtype,
         kv_cache_dtype: Optional[str],
         block_size: int,
-        use_v1: bool,
         use_mla: bool,
         has_sink: bool,
+        use_sparse: bool,
         device_capability: int,
     ) -> Optional[str]:
         if has_sink and device_capability < 90:

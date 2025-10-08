@@ -77,9 +77,9 @@ class FlashAttnMLABackend(MLACommonBackend):
         dtype: torch.dtype,
         kv_cache_dtype: Optional[str],
         block_size: int,
-        use_v1: bool,
         use_mla: bool,
         has_sink: bool,
+        use_sparse: bool,
         device_capability: int,
     ) -> Optional[str]:
         if not flash_attn_supports_mla():
