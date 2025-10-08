@@ -253,7 +253,7 @@ def mistral_tokenizer(request) -> MistralTokenizer:
 
 @pytest.mark.parametrize(
     "mistral_tokenizer",
-    ["mistralai/Mistral-Large-Instruct-2407", "mistralai/Magistral-Small-2509"],
+    ["mistralai/Mistral-7B-Instruct-v0.3", "mistralai/Magistral-Small-2509"],
     indirect=True,
 )
 class TestMistralTokenizer:
@@ -303,13 +303,7 @@ class TestMistralTokenizer:
                     "[/AVAILABLE_TOOLS]",
                     "[TOOL_RESULTS]",
                     "[/TOOL_RESULTS]",
-                    "[IMG]",
-                    "[PREFIX]",
-                    "[MIDDLE]",
-                    "[SUFFIX]",
-                    "[IMG_BREAK]",
-                    "[IMG_END]",
-                ] + [f"[control_{i}]" for i in range(14, 749)]
+                ] + [f"[control_{i}]" for i in range(8, 769)]
 
     def get_vocab(self, mistral_tokenizer: MistralTokenizer):
         assert (
