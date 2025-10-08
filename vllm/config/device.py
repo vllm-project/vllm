@@ -3,10 +3,10 @@
 
 import hashlib
 from dataclasses import field
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal, Optional, Self, Union
 
 import torch
-from pydantic import ConfigDict, SkipValidation
+from pydantic import ConfigDict, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -26,8 +26,7 @@ class DeviceConfig:
     It will now be set automatically based
     on the current platform."""
     device_type: str = field(init=False)
-    """Device type from the current platform. This is set in
-    `__post_init__`."""
+    """Device type from the current platform. Set during validation."""
 
     def compute_hash(self) -> str:
         """
@@ -48,7 +47,8 @@ class DeviceConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __post_init__(self):
+    @model_validator(mode="after")
+    def _set_device_type(self: Self) -> Self:
         if self.device == "auto":
             # Automated device type detection
             from vllm.platforms import current_platform
@@ -73,3 +73,5 @@ class DeviceConfig:
         else:
             # Set device with device type
             self.device = torch.device(self.device_type)
+
+        return self
