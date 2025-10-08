@@ -135,12 +135,13 @@ class NemotronHMoE(nn.Module):
             config.hidden_size,
             config.n_routed_experts,
             bias=False,
+            params_dtype=torch.float32,
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
         self.gate.e_score_correction_bias = nn.Parameter(
-            torch.empty(config.n_routed_experts)
+            torch.empty(config.n_routed_experts, dtype=torch.float32)
         )
         # Load balancing settings.
         self.enable_eplb = parallel_config.enable_eplb
@@ -190,7 +191,7 @@ class NemotronHMoE(nn.Module):
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
+        router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
 
         if hidden_states.dtype != torch.float16:
             final_hidden_states = (
