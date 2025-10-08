@@ -228,7 +228,7 @@ def get_tokenizer(
             # suggest using the --trust-remote-code flag.
 
             # TODO(HelloWorldU): The IO operation could be very slow and
-            # we should find a better way to do this. 
+            # we should find a better way to do this.
             config_path = Path(tokenizer_name) / "tokenizer_config.json"
             if config_path.exists():
                 with open(config_path) as f:
@@ -237,13 +237,16 @@ def get_tokenizer(
                         tokenizer = TikTokenTokenizer(tokenizer_name, **kwargs)
             else:
                 if not trust_remote_code and (
-                        "does not exist or is not currently imported." in str(e)
-                        or "requires you to execute the tokenizer file" in str(e)):
-                    err_msg = ("Failed to load the tokenizer. If the tokenizer "
-                            "is a custom tokenizer not yet available in the "
-                            "HuggingFace transformers library, consider "
-                            "setting `trust_remote_code=True` in LLM or using "
-                            "the `--trust-remote-code` flag in the CLI.")
+                        "does not exist or is not currently imported."
+                        in str(e)
+                        or "requires you to execute the tokenizer file"
+                        in str(e)):
+                    err_msg = (
+                        "Failed to load the tokenizer. If the tokenizer "
+                        "is a custom tokenizer not yet available in the "
+                        "HuggingFace transformers library, consider "
+                        "setting `trust_remote_code=True` in LLM or using "
+                        "the `--trust-remote-code` flag in the CLI.")
                     raise RuntimeError(err_msg) from e
                 else:
                     raise e

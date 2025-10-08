@@ -1017,32 +1017,6 @@ class WhisperVQEncoder(WhisperPreTrainedModel):
 _resample_buffer: dict[int, torchaudio.transforms.Resample] = {}
 
 
-def get_num_audio_tokens(audio_path: str, model_config, hop_length=160) -> int:
-    import soundfile as sf
-    audio_info = sf.info(audio_path)
-    audio_length = int(audio_info.frames)
-
-    if model_config is None:
-        raise ValueError("model_config for WhisperVQEncoder is None")
-
-    pooling_kernel_size = model_config.pooling_kernel_size or 1
-    conv1_stride = model_config.conv1.stride[0]
-    conv2_stride = model_config.conv2.stride[0]
-    total_downsample = conv1_stride * conv2_stride * pooling_kernel_size
-
-    total_tokens = 0
-    stride = total_downsample * hop_length
-
-    for i in range(0, audio_length, 30 * 16000):
-        segment_length = min(30 * 16000, audio_length - i)
-        padded_length = ((segment_length + stride - 1) // stride) * stride
-        n_frames = padded_length // hop_length
-        n_tokens = n_frames // total_downsample
-        total_tokens += n_tokens
-
-    return total_tokens
-
-
 def extract_speech_token(model: WhisperVQEncoder,
                          feature_extractor: WhisperFeatureExtractor, utts):
     dtype = model.conv1.weight.dtype
