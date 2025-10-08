@@ -128,7 +128,7 @@ class NoOpEliminationPass(VllmInductorPass):
     # ---------------------- Shape comparison helpers ----------------------
     def dims_equivalent(
         self,
-        dim: Union[int, torch.fx.Node],
+        dim: Union[int, SymInt, torch.fx.Node],
         i_dim: Union[int, SymInt],
         infer_minus_one: bool = True,
     ) -> bool:
@@ -155,16 +155,15 @@ class NoOpEliminationPass(VllmInductorPass):
         if isinstance(i_dim, int) and isinstance(dim, int):
             return dim == i_dim or (infer_minus_one and dim == -1)
         # Case 3
-        return (
-            isinstance(dim, torch.fx.Node)
-            and isinstance(dim.meta["val"], SymInt)
-            and isinstance(i_dim, SymInt)
-            and dim.meta["val"] == i_dim
-        )
+        if isinstance(i_dim, SymInt) and isinstance(dim, SymInt):
+            return dim == i_dim
+        if isinstance(dim, torch.fx.Node) and isinstance(i_dim, SymInt):
+            return isinstance(dim.meta["val"], SymInt) and dim.meta["val"] == i_dim
+        return False
 
     def all_dims_equivalent(
         self,
-        dims: Iterable[Union[int, torch.fx.Node]],
+        dims: Iterable[Union[int, SymInt, torch.fx.Node]],
         i_dims: Iterable[Union[int, SymInt]],
         infer_minus_one: bool = True,
     ) -> bool:
