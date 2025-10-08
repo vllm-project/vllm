@@ -1374,7 +1374,7 @@ def scaled_fp4_quant(
     )
 
     # Two fp4 values will be packed into an uint8.
-    output = torch.zeros((m, n // 2), device=device, dtype=torch.uint8)
+    output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
 
     # We use the rounded values to store the swizzled values. Due to the
     # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
