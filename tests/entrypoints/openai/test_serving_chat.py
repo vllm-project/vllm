@@ -280,7 +280,7 @@ def _build_serving_chat(
 
 @dataclass
 class MockEngine:
-    model_config: MockModelConfig = MockModelConfig()
+    model_config: MockModelConfig = field(default_factory=MockModelConfig)
 
 
 async def _async_serving_chat_init():
