@@ -141,6 +141,9 @@ class Platform:
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
 
+    def is_unspecified(self) -> bool:
+        return self._enum == PlatformEnum.UNSPECIFIED
+
     def get_max_output_tokens(self, prompt_len: int) -> int:
         return sys.maxsize
 
