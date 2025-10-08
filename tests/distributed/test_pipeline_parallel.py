@@ -7,6 +7,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
  all workers in a node other than the head node, which can cause the test
  to fail.
 """
+
 import json
 import os
 from dataclasses import dataclass
@@ -55,26 +56,17 @@ class PPTestSettings:
     ):
         return PPTestSettings(
             parallel_setups=[
-                ParallelSetup(tp_size=tp_base,
-                              pp_size=pp_base,
-                              eager_mode=False),
-                ParallelSetup(tp_size=tp_base,
-                              pp_size=2 * pp_base,
-                              eager_mode=False),
-                ParallelSetup(tp_size=tp_base,
-                              pp_size=2 * pp_base,
-                              eager_mode=True),
-                ParallelSetup(tp_size=2 * tp_base,
-                              pp_size=pp_base,
-                              eager_mode=False),
-                ParallelSetup(tp_size=2 * tp_base,
-                              pp_size=pp_base,
-                              eager_mode=True),
+                ParallelSetup(tp_size=tp_base, pp_size=pp_base, eager_mode=False),
+                ParallelSetup(tp_size=tp_base, pp_size=2 * pp_base, eager_mode=False),
+                ParallelSetup(tp_size=tp_base, pp_size=2 * pp_base, eager_mode=True),
+                ParallelSetup(tp_size=2 * tp_base, pp_size=pp_base, eager_mode=False),
+                ParallelSetup(tp_size=2 * tp_base, pp_size=pp_base, eager_mode=True),
             ],
             distributed_backends=["mp", "ray"],
             runner=runner,
-            test_options=PPTestOptions(multi_node_only=multi_node_only,
-                                       load_format=load_format),
+            test_options=PPTestOptions(
+                multi_node_only=multi_node_only, load_format=load_format
+            ),
         )
 
     @staticmethod
@@ -86,17 +78,15 @@ class PPTestSettings:
         multi_node_only: bool = False,
         load_format: Optional[str] = None,
     ):
-
         return PPTestSettings(
             parallel_setups=[
-                ParallelSetup(tp_size=tp_base,
-                              pp_size=pp_base,
-                              eager_mode=True),
+                ParallelSetup(tp_size=tp_base, pp_size=pp_base, eager_mode=True),
             ],
             distributed_backends=["mp"],
             runner=runner,
-            test_options=PPTestOptions(multi_node_only=multi_node_only,
-                                       load_format=load_format),
+            test_options=PPTestOptions(
+                multi_node_only=multi_node_only, load_format=load_format
+            ),
         )
 
     def iter_params(self, model_id: str):
@@ -110,12 +100,11 @@ class PPTestSettings:
 # NOTE: You can adjust tp_base and/or pp_base locally to fit the model in GPU
 # The values displayed here are only a rough indicator of the size of the model
 
-# yapf: disable
 TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     # Uses Llama
     # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
-    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(load_format="dummy"),  # noqa: E501
+    "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(load_format="dummy"),
     "baichuan-inc/Baichuan-7B": PPTestSettings.fast(),
     "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(),
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
@@ -149,7 +138,7 @@ TEXT_GENERATION_MODELS = {
     # Uses Llama
     # "mistralai/Mistral-7B-Instruct-v0.1": PPTestSettings.fast(),
     "state-spaces/mamba-130m-hf": PPTestSettings.fast(),
-    "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(load_format="dummy"),  # noqa: E501
+    "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(load_format="dummy"),
     "mosaicml/mpt-7b": PPTestSettings.fast(),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
     "allenai/OLMo-1B-hf": PPTestSettings.fast(),
@@ -160,13 +149,15 @@ TEXT_GENERATION_MODELS = {
     "adept/persimmon-8b-chat": PPTestSettings.fast(),
     "microsoft/phi-2": PPTestSettings.fast(),
     "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(),
-    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(multi_node_only=True, load_format="dummy"),  # noqa: E501
+    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(
+        multi_node_only=True, load_format="dummy"
+    ),
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2.5-0.5B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
-    "upstage/solar-pro-preview-instruct": PPTestSettings.fast(load_format="dummy"),  # noqa: E501
+    "upstage/solar-pro-preview-instruct": PPTestSettings.fast(load_format="dummy"),
     # FIXME: Cannot load tokenizer in latest transformers version.
     # Need to use tokenizer from `meta-llama/Llama-2-7b-chat-hf`
     # "xverse/XVERSE-7B-Chat": PPTestSettings.fast(),
@@ -206,7 +197,6 @@ MULTIMODAL_MODELS = {
     "Qwen/Qwen2-VL-2B-Instruct": PPTestSettings.fast(),
     "fixie-ai/ultravox-v0_5-llama-3_2-1b": PPTestSettings.fast(),
 }
-# yapf: enable
 
 # NOTE: You can update this on your local machine to run specific tests
 TEST_MODELS = [
@@ -281,8 +271,10 @@ def _compare_tp(
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
     if VLLM_MULTI_NODE and distributed_backend == "mp":
-        pytest.skip("Skipping multi-node pipeline parallel test for "
-                    "multiprocessing distributed backend")
+        pytest.skip(
+            "Skipping multi-node pipeline parallel test for "
+            "multiprocessing distributed backend"
+        )
     if multi_node_only and not VLLM_MULTI_NODE:
         pytest.skip("Not in multi-node setting")
 
@@ -357,20 +349,16 @@ def _compare_tp(
         "mp",
     ]
 
-    compare_two_settings(model_id,
-                         pp_args,
-                         tp_args,
-                         pp_env,
-                         tp_env,
-                         method=method)
+    compare_two_settings(model_id, pp_args, tp_args, pp_env, tp_env, method=method)
 
 
 @pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "runner",
-     "test_options"),
+    ("model_id", "parallel_setup", "distributed_backend", "runner", "test_options"),
     [
-        params for model_id, settings in TEXT_GENERATION_MODELS.items()
-        for params in settings.iter_params(model_id) if model_id in TEST_MODELS
+        params
+        for model_id, settings in TEXT_GENERATION_MODELS.items()
+        for params in settings.iter_params(model_id)
+        if model_id in TEST_MODELS
     ],
 )
 @create_new_process_for_each_test()
@@ -382,22 +370,25 @@ def test_tp_language_generation(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    _compare_tp(model_id,
-                parallel_setup,
-                distributed_backend,
-                runner,
-                test_options,
-                num_gpus_available,
-                method="generate",
-                is_multimodal=False)
+    _compare_tp(
+        model_id,
+        parallel_setup,
+        distributed_backend,
+        runner,
+        test_options,
+        num_gpus_available,
+        method="generate",
+        is_multimodal=False,
+    )
 
 
 @pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "runner",
-     "test_options"),
+    ("model_id", "parallel_setup", "distributed_backend", "runner", "test_options"),
     [
-        params for model_id, settings in EMBEDDING_MODELS.items()
-        for params in settings.iter_params(model_id) if model_id in TEST_MODELS
+        params
+        for model_id, settings in EMBEDDING_MODELS.items()
+        for params in settings.iter_params(model_id)
+        if model_id in TEST_MODELS
     ],
 )
 @create_new_process_for_each_test()
@@ -409,22 +400,25 @@ def test_tp_language_embedding(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    _compare_tp(model_id,
-                parallel_setup,
-                distributed_backend,
-                runner,
-                test_options,
-                num_gpus_available,
-                method="encode",
-                is_multimodal=False)
+    _compare_tp(
+        model_id,
+        parallel_setup,
+        distributed_backend,
+        runner,
+        test_options,
+        num_gpus_available,
+        method="encode",
+        is_multimodal=False,
+    )
 
 
 @pytest.mark.parametrize(
-    ("model_id", "parallel_setup", "distributed_backend", "runner",
-     "test_options"),
+    ("model_id", "parallel_setup", "distributed_backend", "runner", "test_options"),
     [
-        params for model_id, settings in MULTIMODAL_MODELS.items()
-        for params in settings.iter_params(model_id) if model_id in TEST_MODELS
+        params
+        for model_id, settings in MULTIMODAL_MODELS.items()
+        for params in settings.iter_params(model_id)
+        if model_id in TEST_MODELS
     ],
 )
 @create_new_process_for_each_test()
@@ -436,11 +430,13 @@ def test_tp_multimodal_generation(
     test_options: PPTestOptions,
     num_gpus_available,
 ):
-    _compare_tp(model_id,
-                parallel_setup,
-                distributed_backend,
-                runner,
-                test_options,
-                num_gpus_available,
-                method="generate",
-                is_multimodal=True)
+    _compare_tp(
+        model_id,
+        parallel_setup,
+        distributed_backend,
+        runner,
+        test_options,
+        num_gpus_available,
+        method="generate",
+        is_multimodal=True,
+    )
