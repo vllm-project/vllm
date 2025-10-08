@@ -89,7 +89,7 @@ flashinfer_trtllm_fp8_per_tensor_scale_moe = _lazy_import_wrapper(
 flashinfer_cutlass_fused_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "cutlass_fused_moe"
 )
-fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
+flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer", "nvfp4_block_scale_interleave"
 )
@@ -220,6 +220,8 @@ def force_use_trtllm_attention() -> bool | None:
 
 def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:
     """Check if the current configuration supports TRTLLM attention."""
+    if force_use_trtllm_attention() is False:
+        return False
     has_trtllm = supports_trtllm_attention()
     return has_trtllm and (num_qo_heads % num_kv_heads == 0)
 
@@ -442,7 +444,7 @@ __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
-    "fp4_quantize",
+    "flashinfer_fp4_quantize",
     "nvfp4_block_scale_interleave",
     "trtllm_fp4_block_scale_moe",
     "autotune",

@@ -217,17 +217,17 @@ class VisualTokenizer(torch.nn.Module):
 class OvisImagePatchInputs(TensorSchema):
     """
     Dimensions:
-        - batch_patches: Batch size * number of patches
-        - patch_size: patch_size_x * patch_size_y * num_channels
+        - bnp: Batch size * number of images * number of patches
+        - h: Height of each patch
+        - w: Width of each patch
         - patch_indicators: Batch size * (number of patches + 1)
-        - patches_per_image: List of number of total patches for each image
-          in the batch.
+        - bn: Batch size * number of images
     """
 
     type: Literal["image_patches"]
-    flat_data: Annotated[torch.Tensor, TensorShape("batch_patches", "patch_size")]
+    flat_data: Annotated[torch.Tensor, TensorShape("bnp", 3, "h", "w")]
     indicator_tokens: Annotated[torch.Tensor, TensorShape("patch_indicators")]
-    patches_per_image: Annotated[list[int], TensorShape("num_patches_per_image")]
+    patches_per_image: Annotated[list[int], TensorShape("bn")]
     # This is used to restore the first two dimensions of `flat_data`.
 
 
@@ -366,7 +366,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
             self.image_indicators_to_visual_tokens(indicator)
             for indicator in image_indicators
         ]
-        processed_outputs["indicator_tokens"] = indicator_tokens
+        processed_outputs["indicator_tokens"] = torch.tensor(indicator_tokens)
         return processed_outputs
 
     def _apply_hf_processor_tokens_only(
@@ -414,6 +414,8 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
     dummy_inputs=OvisDummyInputsBuilder,
 )
 class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
+    merge_by_field_config = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
@@ -470,14 +472,11 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
                     f"Got type: {type(pixel_values)}"
                 )
 
-            flat_data = flatten_bn(pixel_values, concat=True)
-            if flat_data.ndim >= 3:
-                flat_data = flat_data.flatten(start_dim=1)
             return OvisImagePatchInputs(
                 type="image_patches",
-                flat_data=flat_data,
-                patches_per_image=[x.shape[0] for x in flatten_bn(pixel_values)],
-                indicator_tokens=flatten_bn(flatten_bn(indicator_tokens), concat=True),
+                flat_data=flatten_bn(pixel_values, concat=True),
+                patches_per_image=[x.shape[0] for x in pixel_values],
+                indicator_tokens=flatten_bn(indicator_tokens, concat=True),
             )
 
         raise AssertionError("This line should be unreachable.")

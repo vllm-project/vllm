@@ -3,7 +3,7 @@
 """Attention layer with XFormersAttention."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import torch
 
@@ -19,7 +19,6 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    reorder_batch_to_split_decodes_and_prefills,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -34,10 +33,6 @@ try:
     XFORMERS_AVAILABLE = True
 except ImportError:
     XFORMERS_AVAILABLE = False
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm import _custom_ops as ops
 
@@ -222,13 +217,6 @@ class XFormersAttentionMetadataBuilder(
         self.block_size = kv_cache_spec.block_size
         self._num_decodes = 0
         self._num_decode_tokens = 0
-
-    def reorder_batch(
-        self, input_batch: "InputBatch", scheduler_output: "SchedulerOutput"
-    ) -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(
-            input_batch, scheduler_output, decode_threshold=self.reorder_batch_threshold
-        )
 
     def build(
         self,

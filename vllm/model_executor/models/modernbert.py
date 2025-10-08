@@ -6,6 +6,7 @@ from typing import Optional, Union
 import torch
 from torch import nn
 from transformers import ModernBertConfig
+from transformers.activations import ACT2FN
 
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
@@ -29,7 +30,7 @@ from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding
 from .interfaces_base import default_pooling_type
-from .utils import WeightsMapper, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
 class ModernBertEmbeddings(nn.Module):
@@ -379,3 +380,73 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
             inputs_embeds=inputs_embeds,
             positions=positions,
         )
+
+
+class ModernBertPredictionHead(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.dense = nn.Linear(
+            config.hidden_size, config.hidden_size, bias=config.classifier_bias
+        )
+        self.act = ACT2FN[config.classifier_activation]
+        self.norm = nn.LayerNorm(
+            config.hidden_size,
+            eps=getattr(config, "norm_eps", 1e-5),
+            bias=getattr(config, "norm_bias", True),
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.norm(self.act(self.dense(hidden_states)))
+
+
+@default_pooling_type("ALL")
+class ModernBertForTokenClassification(nn.Module):
+    is_pooling_model = True
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        self.head_dtype = vllm_config.model_config.head_dtype
+        self.num_labels = config.num_labels
+        self.model = ModernBertModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "modernbert")
+        )
+        self.head = ModernBertPredictionHead(config)
+        self.classifier = nn.Linear(
+            config.hidden_size, config.num_labels, dtype=self.head_dtype
+        )
+
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler(
+            {
+                "encode": Pooler.for_encode(pooler_config),
+            }
+        )
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        loader = AutoWeightsLoader(self, skip_prefixes=["drop"])
+        loaded_params = loader.load_weights(weights)
+        return loaded_params
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor],
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        hidden_states = self.model(
+            input_ids=input_ids,
+            positions=positions,
+            inputs_embeds=inputs_embeds,
+            intermediate_tensors=intermediate_tensors,
+        )
+        hidden_states = self.head(hidden_states)
+        hidden_states = hidden_states.to(self.head_dtype)
+        return self.classifier(hidden_states)

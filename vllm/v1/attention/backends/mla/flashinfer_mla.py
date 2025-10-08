@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
+from typing import ClassVar, Optional, Union
 
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
@@ -12,11 +12,21 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
+    MLACommonMetadataBuilder,
 )
+from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 logger = init_logger(__name__)
 
 FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
+
+
+class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+    # enable spec-as-decode optimization
+    supports_uniform_spec_as_decode: ClassVar[bool] = True
+
+    # enable full CUDA Graph support for decode-only capture
+    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
 
 class FlashInferMLABackend(MLACommonBackend):
@@ -27,6 +37,10 @@ class FlashInferMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["FlashInferMLAImpl"]:
         return FlashInferMLAImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["FlashInferMLAMetadataBuilder"]:
+        return FlashInferMLAMetadataBuilder
 
 
 g_fi_workspace = torch.zeros(
@@ -100,7 +114,15 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             q = torch.cat([q_nope, q_pe], dim=-1)
 
         # trtllm API requires extra dimension q_len_per_request for MTP
-        q = q.unsqueeze(1)
+        if attn_metadata.num_decode_tokens % attn_metadata.num_decodes != 0:
+            logger.warning_once(
+                """FlashInferMLAImpl got a query of uneven length.
+                This usually indicates an issue in batch reordering
+                or incorrect setup in dummy_run."""
+            )
+            q = q.unsqueeze(1)
+        else:
+            q = q.view(attn_metadata.num_decodes, -1, q.shape[-2], q.shape[-1])
 
         if self.bmm1_scale is None:
             self.bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
@@ -120,6 +142,9 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
         )
+
+        # Flatten the output for consistent shape
+        o = o.view(-1, o.shape[-2], o.shape[-1])
 
         # TODO: Return LSE pending support from Flashinfer API:
         # https://github.com/flashinfer-ai/flashinfer/pull/1566

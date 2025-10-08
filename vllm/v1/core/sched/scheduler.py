@@ -223,7 +223,7 @@ class Scheduler(SchedulerInterface):
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
             num_new_tokens = min(
-                num_new_tokens, self.max_model_len - request.num_computed_tokens
+                num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens
             )
 
             # Schedule encoder inputs.

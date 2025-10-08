@@ -154,9 +154,10 @@ class LlamaModel(nn.Module):
                     str(layer_index), str(layer_index + start_layer_id)
                 )
 
-            quant_config.torchao_config.module_fqn_to_config = {
+            torchao_config = quant_config.torchao_config
+            torchao_config.module_fqn_to_config = {
                 pad_layer_name(layer): quantization
-                for layer, quantization in quant_config.torchao_config.module_fqn_to_config.items()
+                for layer, quantization in torchao_config.module_fqn_to_config.items()
             }
 
 

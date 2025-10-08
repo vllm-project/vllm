@@ -15,7 +15,15 @@ if not current_platform.is_device_capability(100):
         "This test only runs on Blackwell GPUs (SM100).", allow_module_level=True
     )
 
-os.environ["FLASHINFER_NVCC_THREADS"] = "16"
+
+@pytest.fixture(scope="module", autouse=True)
+def set_test_environment():
+    """Sets environment variables required for this test module."""
+    # Make sure TRTLLM attention is available
+    os.environ["VLLM_HAS_FLASHINFER_CUBIN"] = "1"
+    # Set compilation threads to 16 to speed up startup
+    os.environ["FLASHINFER_NVCC_THREADS"] = "16"
+
 
 # dummy_hf_overrides = {"num_layers": 4, "num_hidden_layers": 4,
 # "text_config": {"num_layers": 4, "num_hidden_layers": 4}}

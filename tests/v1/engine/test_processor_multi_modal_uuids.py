@@ -65,9 +65,7 @@ def _mk_processor(
         device_config=DeviceConfig(device="cpu"),
     )
 
-    # Pass tokenizer=None; InputPreprocessor handles None when
-    # skip_tokenizer_init is True.
-    return Processor(vllm_config, tokenizer=None)  # type: ignore[arg-type]
+    return Processor(vllm_config)
 
 
 def test_multi_modal_uuids_length_mismatch_raises(monkeypatch):
