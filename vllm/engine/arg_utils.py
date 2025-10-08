@@ -27,6 +27,7 @@ import huggingface_hub
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
+from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
@@ -211,6 +212,13 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Get the default value of the field
         if field.default is not MISSING:
             default = field.default
+            # Handle pydantic.Field defaults
+            if isinstance(default, FieldInfo):
+                default = (
+                    default.default
+                    if default.default_factory is None
+                    else default.default_factory()
+            )
         elif field.default_factory is not MISSING:
             default = field.default_factory()
 
@@ -389,9 +397,9 @@ class EngineArgs:
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
-    swap_space: float = CacheConfig.swap_space.default
-    cpu_offload_gb: float = CacheConfig.cpu_offload_gb.default
-    gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization.default
+    swap_space: float = CacheConfig.swap_space
+    cpu_offload_gb: float = CacheConfig.cpu_offload_gb
+    gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: Optional[int] = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: Optional[int] = SchedulerConfig.max_num_batched_tokens
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
