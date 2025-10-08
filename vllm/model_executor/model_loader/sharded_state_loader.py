@@ -106,18 +106,18 @@ class ShardedStateLoader(BaseModelLoader):
         self._prepare_weights(model_config.model, model_config.revision)
 
     def _get_ignored_parameters(
-            self, model_config: ModelConfig,
-            state_dict: dict[str, torch.Tensor]) -> set[str]:
+        self, model_config: ModelConfig, state_dict: dict[str, torch.Tensor]
+    ) -> set[str]:
         """
-        Get the set of parameters that can be safely ignored when checking for 
-        missing keys. Currently this includes MLA scaling parameters for 
-        DeepSeek models which are dynamically created during model 
+        Get the set of parameters that can be safely ignored when checking for
+        missing keys. Currently this includes MLA scaling parameters for
+        DeepSeek models which are dynamically created during model
         initialization and not loaded from checkpoints.
-        
+
         Args:
             state_dict: The state dictionary with missing keys
             model_config: The model configuration
-            
+
         Returns:
             Set of key names that correspond to ignored parameters
         """
@@ -126,19 +126,17 @@ class ShardedStateLoader(BaseModelLoader):
             # Filter out MLA scaling parameters for DeepSeek models - these
             # parameters are dynamically created during model initialization,
             # not loaded from checkpoints
-            mla_scale_suffixes = ('.q_scale', '.k_scale', '.v_scale',
-                                  '.prob_scale')
+            mla_scale_suffixes = (".q_scale", ".k_scale", ".v_scale", ".prob_scale")
             return {
                 k
-                for k in state_dict if any(
-                    k.endswith(suffix) for suffix in mla_scale_suffixes)
+                for k in state_dict
+                if any(k.endswith(suffix) for suffix in mla_scale_suffixes)
             }
 
         # For non-DeepSeek models, return an empty set
         return set()
 
-    def load_weights(self, model: nn.Module,
-                     model_config: ModelConfig) -> None:
+    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         from vllm.distributed import get_tensor_model_parallel_rank
 
         model_weights = model_config.model
@@ -187,8 +185,7 @@ class ShardedStateLoader(BaseModelLoader):
         # Filter out parameters that can be safely ignored (e.g., MLA scaling
         # parameters for DeepSeek models)
         if state_dict:
-            ignored_params = self._get_ignored_parameters(
-                model_config, state_dict)
+            ignored_params = self._get_ignored_parameters(model_config, state_dict)
             # Remove ignored parameters from state_dict
             for param_name in ignored_params:
                 state_dict.pop(param_name)
