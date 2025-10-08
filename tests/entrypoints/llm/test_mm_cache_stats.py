@@ -5,6 +5,7 @@ import pytest
 
 from vllm import LLM
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.v1.metrics.reader import Counter, Metric
 
 from ..openai.test_vision import TEST_IMAGE_ASSETS
 
@@ -23,38 +24,57 @@ def _make_messages(image_url: str) -> list[ChatCompletionMessageParam]:
     ]
 
 
-@pytest.mark.parametrize("image_urls", [TEST_IMAGE_ASSETS[:2]])
-def test_mm_cache_stats(image_urls):
+def _get_counter_value(metrics: list[Metric], name: str):
+    metric = next(m for m in metrics if m.name == name)
+    assert isinstance(metric, Counter)
+    return metric.value
+
+
+def _get_mm_cache_stats(metrics: list[Metric]):
+    mm_cache_queries = _get_counter_value(metrics, "vllm:mm_cache_queries")
+    mm_cache_hits = _get_counter_value(metrics, "vllm:mm_cache_hits")
+
+    return mm_cache_queries, mm_cache_hits
+
+
+@pytest.mark.parametrize("image_urls", [TEST_IMAGE_ASSETS[:2]], indirect=True)
+@pytest.mark.parametrize("mm_processor_cache_type", ["lru", "shm"])
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_mm_cache_stats(
+    num_gpus_available,
+    image_urls,
+    mm_processor_cache_type,
+    tp_size,
+):
+    if num_gpus_available < tp_size:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
+
     llm = LLM(
         model="HuggingFaceTB/SmolVLM-256M-Instruct",
         max_model_len=4096,
         max_num_seqs=5,
         enforce_eager=True,
+        tensor_parallel_size=tp_size,
+        mm_processor_cache_type=mm_processor_cache_type,
+        disable_log_stats=False,
         limit_mm_per_prompt={"image": 2},
     )
-    engine = llm.llm_engine
-
-    # In case the previous test failed, we still need to reset the cache
-    # (which is shared across tests)
-    engine.reset_mm_cache()
-    engine.processor.stat_cache()
 
     llm.chat(_make_messages(image_urls[0]))
-
-    cache_stats = engine.processor.stat_cache()
-    assert cache_stats and cache_stats.queries == 1
+    assert _get_mm_cache_stats(llm.get_metrics()) == (1, 0)
 
     llm.chat(_make_messages(image_urls[1]))
-
-    cache_stats = engine.processor.stat_cache()
-    assert cache_stats and cache_stats.queries == 2
+    assert _get_mm_cache_stats(llm.get_metrics()) == (2, 0)
 
     llm.chat(_make_messages(image_urls[0]))
+    assert _get_mm_cache_stats(llm.get_metrics()) == (3, 1)
 
-    cache_stats = engine.processor.stat_cache()
-    assert cache_stats and cache_stats.queries == 2
+    # NOTE: This only resets hit rate stats in CachingMetrics
+    # The raw queries and hits counts remain unaffected
+    llm.reset_mm_cache()
 
-    engine.reset_mm_cache()
+    llm.chat(_make_messages(image_urls[0]))
+    assert _get_mm_cache_stats(llm.get_metrics()) == (4, 1)
 
-    cache_stats = engine.processor.stat_cache()
-    assert cache_stats and cache_stats.queries == 0
+    llm.chat(_make_messages(image_urls[1]))
+    assert _get_mm_cache_stats(llm.get_metrics()) == (5, 1)

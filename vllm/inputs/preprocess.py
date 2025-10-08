@@ -19,7 +19,6 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
 from vllm.utils.jsontree import json_iter_leaves
-from vllm.v1.metrics.stats import MultiModalCacheStats
 
 from .data import (
     DecoderOnlyInputs,
@@ -697,12 +696,6 @@ class InputPreprocessor:
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
         )
-
-    def stat_cache(self) -> Optional[MultiModalCacheStats]:
-        if self.mm_processor_cache is not None:
-            self.mm_processor_cache.make_stats()
-
-        return None
 
     def clear_cache(self) -> None:
         if self.mm_processor_cache is not None:

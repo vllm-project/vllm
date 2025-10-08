@@ -14,7 +14,6 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import worker_receiver_cache_from_config
-from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (
     enable_trace_function_call_for_thread,
     resolve_obj_by_qualname,
@@ -23,7 +22,7 @@ from vllm.utils import (
     warn_for_unimplemented_methods,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec
-from vllm.v1.outputs import SamplerOutput
+from vllm.v1.metrics.stats import MultiModalCacheStats
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -120,9 +119,7 @@ class WorkerBase:
         """Load model onto target device."""
         raise NotImplementedError
 
-    def execute_model(
-        self, execute_model_req: ExecuteModelRequest | None = None
-    ) -> list[SamplerOutput] | None:
+    def execute_model(self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
         raise NotImplementedError
 
     def start_worker_execution_loop(self) -> None:
@@ -131,11 +128,7 @@ class WorkerBase:
         You can stop the loop by executing a driver worker with an empty output.
         See `stop_remote_worker_execution_loop` for more details.
         """
-        with self.current_platform.inference_mode():
-            while True:
-                output = self.execute_model(execute_model_req=None)
-                if output is None:
-                    return None
+        raise NotImplementedError("Dead V0 code")
 
     def determine_num_available_blocks(self) -> tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
@@ -317,6 +310,8 @@ class WorkerWrapperBase:
                 shared_worker_lock,
             )
 
+        self.mm_cache_stats = MultiModalCacheStats() if self.mm_receiver_cache else None
+
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
@@ -364,6 +359,12 @@ class WorkerWrapperBase:
                 req_data.mm_features
             )
 
+        if self.mm_cache_stats is not None:
+            delta = mm_cache.make_stats(delta=True)
+            self.mm_cache_stats.requests += 1
+            self.mm_cache_stats.queries += delta.total
+            self.mm_cache_stats.hits += delta.hits
+
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
@@ -372,9 +373,19 @@ class WorkerWrapperBase:
     ) -> ModelRunnerOutput:
         self._apply_mm_cache(scheduler_output)
 
-        return self.worker.execute_model(scheduler_output, *args, **kwargs)  # type: ignore
+        assert self.worker is not None
+        output = self.worker.execute_model(scheduler_output, *args, **kwargs)
+
+        if self.mm_cache_stats is not None:
+            output.mm_cache_stats = self.mm_cache_stats
+            self.mm_cache_stats = MultiModalCacheStats()
+
+        return output
 
     def reset_mm_cache(self) -> None:
         mm_receiver_cache = self.mm_receiver_cache
         if mm_receiver_cache is not None:
             mm_receiver_cache.clear_cache()
+
+        if self.mm_cache_stats is not None:
+            self.mm_cache_stats.reset = True

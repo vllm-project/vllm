@@ -275,6 +275,10 @@ class OpenAIServing:
 
         return self._processor
 
+    async def reset_mm_cache(self) -> None:
+        (await self._get_processor()).clear_cache()
+        await self.engine_client.reset_mm_cache()
+
     def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:
         """
         Get a Renderer instance with the provided tokenizer.

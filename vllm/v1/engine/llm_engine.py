@@ -309,8 +309,7 @@ class LLMEngine:
             self.logger_manager.record(
                 scheduler_stats=outputs.scheduler_stats,
                 iteration_stats=iteration_stats,
-                # FIXME: This doesn't work when the processor in LLMEngine is not used
-                mm_cache_stats=self.processor.stat_cache(),
+                mm_cache_stats=outputs.mm_cache_stats,
             )
             self.do_log_stats_with_interval()
 

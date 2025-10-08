@@ -370,6 +370,10 @@ class LLM:
 
         return self._processor
 
+    def reset_mm_cache(self) -> None:
+        self._get_processor().clear_cache()
+        self.llm_engine.reset_mm_cache()
+
     def get_default_sampling_params(self) -> SamplingParams:
         if self.default_sampling_params is None:
             self.default_sampling_params = (
