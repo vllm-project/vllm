@@ -201,7 +201,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 # but pre-commit in CI fails without it.
                 engine_prompt = cast(Union[EmbedsPrompt, TokensPrompt], engine_prompt)
                 if isinstance(sampling_params, BeamSearchParams):
-                    generator = self.engine_client.beam_search(
+                    generator = self.beam_search(
                         prompt=engine_prompt,
                         request_id=request_id,
                         params=sampling_params,

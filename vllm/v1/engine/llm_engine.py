@@ -23,7 +23,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tracing import init_tracer
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device
 from vllm.v1.engine import EngineCoreRequest
@@ -95,8 +95,10 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
-        # Processor (convert Inputs --> EngineCoreRequests)
-        self.processor = Processor(vllm_config, mm_registry=mm_registry)
+        if self.model_config.skip_tokenizer_init:
+            self.tokenizer = None
+        else:
+            self.tokenizer = init_tokenizer_from_configs(self.model_config)
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(
@@ -137,6 +139,14 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
+
+    # Lazy init to avoid conflicting with the one in LLM class
+    # We can remove this after deprecating Processor in LLMEngine
+    def _get_processor(self) -> Processor:
+        if not hasattr(self, "_processor"):
+            self._processor = Processor(self.vllm_config, self.tokenizer)
+
+        return self._processor
 
     @classmethod
     def from_vllm_config(
@@ -204,14 +214,6 @@ class LLMEngine:
     def validate_outputs(cls, outputs, output_type):
         return outputs
 
-    @property
-    def tokenizer(self) -> Optional[AnyTokenizer]:
-        return self.processor.tokenizer
-
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: Optional[AnyTokenizer]) -> None:
-        self.processor.tokenizer = tokenizer
-
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
 
@@ -246,7 +248,7 @@ class LLMEngine:
                 "Processor has been moved under LLM and will "
                 "be removed from LLMEngine in v0.13."
             )
-            request = self.processor.process_inputs(
+            request = self._get_processor().process_inputs(
                 request_id,
                 prompt,
                 params,
@@ -326,7 +328,7 @@ class LLMEngine:
         self.engine_core.profile(False)
 
     def reset_mm_cache(self):
-        self.processor.clear_cache()
+        self._get_processor().clear_cache()
         self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(self, device: Optional[Device] = None):

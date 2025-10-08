@@ -338,7 +338,7 @@ class OpenAIServingChat(OpenAIServing):
                 )
 
                 if isinstance(sampling_params, BeamSearchParams):
-                    generator = self.engine_client.beam_search(
+                    generator = self.beam_search(
                         prompt=engine_prompt,
                         request_id=request_id,
                         params=sampling_params,

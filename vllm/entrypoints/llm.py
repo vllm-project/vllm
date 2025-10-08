@@ -367,7 +367,8 @@ class LLM:
     def _get_processor(self) -> Processor:
         if not hasattr(self, "_processor"):
             vllm_config = self.llm_engine.vllm_config
-            self._processor = Processor(vllm_config)
+            tokenizer = self.llm_engine.get_tokenizer()
+            self._processor = Processor(vllm_config, tokenizer)
 
         return self._processor
 

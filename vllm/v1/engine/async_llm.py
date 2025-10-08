@@ -18,7 +18,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 from vllm.inputs import PromptType
-from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -28,7 +27,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, as_list, cancel_task_threadsafe, cdiv, deprecate_kwargs
 from vllm.v1.engine import EngineCoreRequest
@@ -104,8 +103,10 @@ class AsyncLLM(EngineClient):
                 "logger list; enabling logging without default stat loggers"
             )
 
-        # Processor (converts Inputs --> EngineCoreRequests).
-        self.processor = Processor(vllm_config, mm_registry=mm_registry)
+        if self.model_config.skip_tokenizer_init:
+            self.tokenizer = None
+        else:
+            self.tokenizer = init_tokenizer_from_configs(self.model_config)
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(
@@ -164,6 +165,14 @@ class AsyncLLM(EngineClient):
             )
         else:
             self.profiler = None
+
+    # Lazy init to avoid conflicting with the one in OpenAIServing class
+    # We can remove this after deprecating Processor in AsyncLLM
+    def _get_processor(self) -> Processor:
+        if not hasattr(self, "_processor"):
+            self._processor = Processor(self.vllm_config, self.tokenizer)
+
+        return self._processor
 
     @classmethod
     @deprecate_kwargs(
@@ -245,10 +254,6 @@ class AsyncLLM(EngineClient):
 
         cancel_task_threadsafe(getattr(self, "output_handler", None))
 
-    @property
-    def tokenizer(self) -> Optional[AnyTokenizer]:
-        return self.processor.tokenizer
-
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return await self.engine_core.get_supported_tasks_async()
 
@@ -284,7 +289,7 @@ class AsyncLLM(EngineClient):
                 "Processor has been moved under OpenAIServing and will "
                 "be removed from AsyncLLM in v0.13."
             )
-            request = self.processor.process_inputs(
+            request = self._get_processor().process_inputs(
                 request_id,
                 prompt,
                 params,
@@ -621,9 +626,6 @@ class AsyncLLM(EngineClient):
     async def get_model_config(self) -> ModelConfig:
         return self.model_config
 
-    async def get_input_preprocessor(self) -> InputPreprocessor:
-        return self.processor.input_preprocessor
-
     async def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
             raise ValueError(
@@ -657,7 +659,7 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
-        self.processor.clear_cache()
+        self._get_processor().clear_cache()
         await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
