@@ -190,8 +190,8 @@ class RejectionSampler(nn.Module):
 
         return logits
 
+    @staticmethod
     def apply_penalties(
-        self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         metadata: SpecDecodeMetadata,
@@ -218,8 +218,8 @@ class RejectionSampler(nn.Module):
         )
         return logits
 
+    @staticmethod
     def _combine_outputs_with_spec_tokens(
-        self,
         output_token_ids: list[list[int]],
         spec_token_ids: Optional[list[list[int]]] = None,
     ) -> list[list[int]]:

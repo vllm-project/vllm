@@ -120,8 +120,8 @@ class Sampler(nn.Module):
         )
         return sampler_output
 
+    @staticmethod
     def apply_temperature(
-        self,
         logits: torch.Tensor,
         temp: torch.Tensor,
         all_random: bool,
@@ -132,7 +132,8 @@ class Sampler(nn.Module):
             temp = torch.where(temp < _SAMPLING_EPS, 1.0, temp)
         return logits.div_(temp.unsqueeze(dim=1))
 
-    def greedy_sample(self, logits: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
         return logits.argmax(dim=-1).view(-1)
 
     def sample(
@@ -191,11 +192,12 @@ class Sampler(nn.Module):
         )
         return sampled, processed_logprobs
 
-    def compute_logprobs(self, logits: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def compute_logprobs(logits: torch.Tensor) -> torch.Tensor:
         return logits.log_softmax(dim=-1, dtype=torch.float32)
 
+    @staticmethod
     def gather_logprobs(
-        self,
         logprobs: torch.Tensor,
         num_logprobs: int,
         token_ids: torch.Tensor,
@@ -238,8 +240,8 @@ class Sampler(nn.Module):
 
         return LogprobsTensors(indices, logprobs, token_ranks)
 
+    @staticmethod
     def _combine_outputs_with_spec_tokens(
-        self,
         output_token_ids: list[list[int]],
         spec_token_ids: Optional[list[list[int]]] = None,
     ) -> list[list[int]]:
@@ -279,9 +281,7 @@ class Sampler(nn.Module):
             apply_bad_words(
                 logits,
                 sampling_metadata.bad_words_token_ids,
-                output_token_ids
-                if output_token_ids is not None
-                else sampling_metadata.output_token_ids,
+                output_token_ids,
             )
 
         # Apply logits processors which can impact greedy sampling.
@@ -292,22 +292,21 @@ class Sampler(nn.Module):
         logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
         return logits
 
+    @staticmethod
     def apply_penalties(
-        self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        output_token_ids: Optional[list[list[int]]] = None,
+        output_token_ids: list[list[int]],
     ) -> torch.Tensor:
-        if not sampling_metadata.no_penalties:
-            assert sampling_metadata.prompt_token_ids is not None
-            logits = apply_all_penalties(
-                logits,
-                sampling_metadata.prompt_token_ids,
-                sampling_metadata.presence_penalties,
-                sampling_metadata.frequency_penalties,
-                sampling_metadata.repetition_penalties,
-                output_token_ids
-                if output_token_ids is not None
-                else sampling_metadata.output_token_ids,
-            )
-        return logits
+        if sampling_metadata.no_penalties:
+            return logits
+
+        assert sampling_metadata.prompt_token_ids is not None
+        return apply_all_penalties(
+            logits,
+            sampling_metadata.prompt_token_ids,
+            sampling_metadata.presence_penalties,
+            sampling_metadata.frequency_penalties,
+            sampling_metadata.repetition_penalties,
+            output_token_ids,
+        )

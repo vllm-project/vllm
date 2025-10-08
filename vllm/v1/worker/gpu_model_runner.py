@@ -3739,7 +3739,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 decode_cudagraph_batch_sizes = [
                     x
                     for x in self.cudagraph_batch_sizes
-                    if x <= max_num_tokens and x >= self.uniform_decode_query_len
+                    if max_num_tokens >= x >= self.uniform_decode_query_len
                 ]
                 compilation_cases_decode = list(reversed(decode_cudagraph_batch_sizes))
                 self._capture_cudagraphs(
