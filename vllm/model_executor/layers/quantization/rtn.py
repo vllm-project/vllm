@@ -12,26 +12,23 @@ from torch.nn.parameter import Parameter
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
-    FusedMoEQuantConfig
+    FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,
-    FusedMoEMethodBase
-)
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
-    set_weight_attrs
+    set_weight_attrs,
 )
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, 
-    QuantizeMethodBase
+    QuantizationConfig,
+    QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    apply_rtn_marlin_linear, 
-    marlin_make_workspace_new
+    apply_rtn_marlin_linear,
+    marlin_make_workspace_new,
 )
 from vllm.scalar_type import scalar_types
 
