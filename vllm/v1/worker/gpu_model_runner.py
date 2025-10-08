@@ -2593,8 +2593,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     aux_hidden_states,
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
-                    cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    batch_descriptor=batch_descriptor,
                 )
 
         use_padded_batch = (
@@ -2694,8 +2692,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         aux_hidden_states: Optional[list[torch.Tensor]],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         common_attn_metadata: CommonAttentionMetadata,
-        cudagraph_runtime_mode: CUDAGraphMode,
-        batch_descriptor: BatchDescriptor,
     ) -> Union[list[list[int]], torch.Tensor]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
@@ -2819,6 +2815,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
             else:
                 mm_embed_inputs = None
+
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -2829,6 +2826,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
                 mm_embed_inputs=mm_embed_inputs,
             )
+
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:
@@ -2887,13 +2885,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
-                if self.speculative_config.use_eagle():
-                    assert isinstance(self.drafter, EagleProposer)
-                    self.drafter.load_model(self.model)
-                elif self.speculative_config.uses_draft_model():
-                    assert isinstance(self.drafter, DraftModelProposer)
-                    # Passed something to satisfy the type checker
-                    self.drafter.load_model(None)
+                self.drafter.load_model(self.model)
             if self.use_aux_hidden_state_outputs:
                 if not supports_eagle3(self.model):
                     raise RuntimeError(
