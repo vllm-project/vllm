@@ -83,6 +83,10 @@ from vllm.sampling_params import (
 )
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
+EMBED_DTYPE = Literal[
+    "float32", "half", "bfloat16", "float", "fp8", "fp8_e4m3", "fp8_e5m2", "int8"
+]
+
 logger = init_logger(__name__)
 
 _LONG_INFO = torch.iinfo(torch.long)
@@ -1519,8 +1523,17 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
-    normalize: Optional[bool] = None
-
+    normalize: Optional[bool] = Field(
+        default=None,
+        description=("Whether to normalize the embeddings outputs. Default is True."),
+    )
+    embed_dtype: str = Field(
+        default="float32",
+        description=(
+            "What dtype to use for base64 encoding. Default to using "
+            "float32 for base64 encoding to match the OpenAI python client behavior."
+        ),
+    )
     # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
@@ -1596,7 +1609,17 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
-    normalize: Optional[bool] = None
+    normalize: Optional[bool] = Field(
+        default=None,
+        description=("Whether to normalize the embeddings outputs. Default is True."),
+    )
+    embed_dtype: str = Field(
+        default="float32",
+        description=(
+            "What dtype to use for base64 encoding. Default to using "
+            "float32 for base64 encoding to match the OpenAI python client behavior."
+        ),
+    )
     # --8<-- [end:chat-embedding-extra-params]
 
     @model_validator(mode="before")

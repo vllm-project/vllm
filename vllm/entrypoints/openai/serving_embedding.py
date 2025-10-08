@@ -5,7 +5,6 @@ import base64
 from collections.abc import AsyncGenerator, Mapping
 from typing import Any, Final, Literal, Optional, Union, cast
 
-import numpy as np
 import torch
 from fastapi import Request
 from typing_extensions import assert_never, override
@@ -15,6 +14,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
+    EMBED_DTYPE,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
     EmbeddingRequest,
@@ -34,28 +34,34 @@ from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import (
-    EmbeddingOutput,
     EmbeddingRequestOutput,
     PoolingOutput,
     PoolingRequestOutput,
     RequestOutput,
 )
 from vllm.pooling_params import PoolingParams
-from vllm.utils import chunk_list
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, chunk_list
 
 logger = init_logger(__name__)
 
 
 def _get_embedding(
-    output: EmbeddingOutput,
+    output: PoolingRequestOutput,
     encoding_format: Literal["float", "base64"],
+    embed_dtype: EMBED_DTYPE,
 ) -> Union[list[float], str]:
     if encoding_format == "float":
-        return output.embedding
+        return output.outputs.data.tolist()
     elif encoding_format == "base64":
-        # Force to use float32 for base64 encoding
-        # to match the OpenAI python client behavior
-        embedding_bytes = np.array(output.embedding, dtype="float32").tobytes()
+        torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[embed_dtype]
+        embedding_bytes = (
+            output.outputs.data.to(torch_dtype)
+            .flatten()
+            .contiguous()
+            .view(torch.uint8)
+            .numpy()
+            .tobytes()
+        )
         return base64.b64encode(embedding_bytes).decode("utf-8")
 
     assert_never(encoding_format)
@@ -138,12 +144,10 @@ class EmbeddingMixin(OpenAIServing):
         final_res_batch_checked = cast(list[PoolingRequestOutput], ctx.final_res_batch)
 
         for idx, final_res in enumerate(final_res_batch_checked):
-            embedding_res = EmbeddingRequestOutput.from_base(final_res)
-
             item = EmbeddingResponseData(
                 index=idx,
                 embedding=_get_embedding(
-                    embedding_res.outputs, ctx.request.encoding_format
+                    final_res, ctx.request.encoding_format, ctx.request.embed_dtype
                 ),
             )
             prompt_token_ids = final_res.prompt_token_ids
