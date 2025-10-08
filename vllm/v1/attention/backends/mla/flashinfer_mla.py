@@ -42,6 +42,26 @@ class FlashInferMLABackend(MLACommonBackend):
     def get_builder_cls() -> type["FlashInferMLAMetadataBuilder"]:
         return FlashInferMLAMetadataBuilder
 
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "fp16", "bf16", "fp8", "fp8_e4m3"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return [32, 64]
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return 100
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return 109
+
 
 g_fi_workspace = torch.zeros(
     FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE,

@@ -44,6 +44,26 @@ class FlashMLABackend(MLACommonBackend):
     def get_impl_cls() -> type["FlashMLAImpl"]:
         return FlashMLAImpl
 
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "fp16", "bf16", "fp8", "fp8_e4m3"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return [64]
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return 90
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return 109
+
 
 @dataclass
 class FlashMLADecodeMetadata(MLACommonDecodeMetadata):

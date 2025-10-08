@@ -69,6 +69,30 @@ class FlashMLASparseBackend(AttentionBackend):
     def get_impl_cls() -> type["FlashMLASparseImpl"]:
         return FlashMLASparseImpl
 
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "bf16", "fp8_ds_mla"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[int]:
+        return [32, 64]
+
+    @classmethod
+    def is_sparse(cls) -> bool:
+        return True
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[int]:
+        return 100
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[int]:
+        return 109
+
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
@@ -83,14 +107,6 @@ class FlashMLASparseBackend(AttentionBackend):
             return (num_blocks, block_size, 656)
         else:
             return (num_blocks, block_size, head_size)
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.bfloat16]
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [576]
 
 
 @dataclass
