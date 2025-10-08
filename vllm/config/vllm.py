@@ -372,6 +372,9 @@ class VllmConfig:
             if self.model_config is not None and self.model_config.enforce_eager:
                 logger.info("Cudagraph is disabled under eager mode")
                 self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+                # override related settings when enforce eager
+                self.compilation_config.max_cudagraph_capture_size = 0
+                self.compilation_config.cudagraph_capture_sizes = []
             elif envs.VLLM_USE_V1:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
@@ -663,7 +666,11 @@ class VllmConfig:
 
         # calculate the default `batch_size_capture_list`
         batch_size_capture_list = []
-        if self.model_config is not None and not self.model_config.enforce_eager:
+        if (
+            self.model_config is not None
+            and not self.model_config.enforce_eager
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
             max_cudagraph_capture_size = (
                 self.compilation_config.max_cudagraph_capture_size
             )
@@ -672,7 +679,8 @@ class VllmConfig:
                     self.scheduler_config.max_num_seqs * 2, 512
                 )
             assert max_cudagraph_capture_size >= 1, (
-                "Maximum cudagraph size should be greater than or equal to 1."
+                "Maximum cudagraph size should be greater than or equal to 1 "
+                "when using cuda graph."
             )
             batch_size_capture_list = [
                 i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
