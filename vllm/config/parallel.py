@@ -234,7 +234,7 @@ class ParallelConfig:
         return data_parallel_backend
 
     @model_validator(mode="after")
-    def _configure_parallel(self) -> Self:
+    def _validate_parallel_config(self) -> Self:
         if self._api_process_rank >= self._api_process_count:
             raise ValueError(
                 "Invalid value of `_api_process_rank`. "
