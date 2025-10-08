@@ -90,32 +90,32 @@ def layer_norm_fwd_kernel(
     # Map the program id to the starting row of X and Y it should compute.
     row_start = tl.program_id(0) * ROWS_PER_BLOCK
     group = tl.program_id(1)
-    
+
     # Create 2D tile: [ROWS_PER_BLOCK, BLOCK_N]
     rows = row_start + tl.arange(0, ROWS_PER_BLOCK)
     cols = tl.arange(0, BLOCK_N)
-    
+
     # Compute offsets for 2D tile
     row_offsets = rows[:, None] * stride_x_row
     col_offsets = cols[None, :] + group * N
-    
+
     # Base pointers
     X_base = X + row_offsets + col_offsets
     Y_base = Y + rows[:, None] * stride_y_row + col_offsets
-    
+
     # Create mask for valid rows and columns
     row_mask = rows[:, None] < M
     col_mask = cols[None, :] < N
     mask = row_mask & col_mask
-    
+
     # Load input data with 2D tile
-    x = tl.load(X_base, mask=mask, other=0.).to(tl.float32)
-    
+    x = tl.load(X_base, mask=mask, other=0.0).to(tl.float32)
+
     if HAS_Z and not NORM_BEFORE_GATE:
         Z_base = Z + rows[:, None] * stride_z_row + col_offsets
-        z = tl.load(Z_base, mask=mask, other=0.).to(tl.float32)
+        z = tl.load(Z_base, mask=mask, other=0.0).to(tl.float32)
         x *= z * tl.sigmoid(z)
-    
+
     # Compute mean and variance per row (reduce along axis 1)
     if not IS_RMS_NORM:
         mean = tl.sum(x, axis=1) / N  # Shape: [ROWS_PER_BLOCK]
@@ -124,41 +124,41 @@ def layer_norm_fwd_kernel(
         mean_mask = rows < M
         tl.store(Mean + mean_offsets, mean, mask=mean_mask)
         # Broadcast mean back to 2D for subtraction
-        xbar = tl.where(mask, x - mean[:, None], 0.)
+        xbar = tl.where(mask, x - mean[:, None], 0.0)
         var = tl.sum(xbar * xbar, axis=1) / N  # Shape: [ROWS_PER_BLOCK]
     else:
-        xbar = tl.where(mask, x, 0.)
+        xbar = tl.where(mask, x, 0.0)
         var = tl.sum(xbar * xbar, axis=1) / N  # Shape: [ROWS_PER_BLOCK]
-        mean = 0.  # Placeholder for RMS norm
-    
+        mean = 0.0  # Placeholder for RMS norm
+
     rstd = tl.rsqrt(var + eps)  # Shape: [ROWS_PER_BLOCK]
-    
+
     # Store rstd for each row
     rstd_offsets = group * M + rows
     rstd_mask = rows < M
     tl.store(Rstd + rstd_offsets, rstd, mask=rstd_mask)
-    
+
     # Load weights and biases (broadcast across rows)
     w_offsets = cols + group * N
     w_mask = cols < N
-    w = tl.load(W + w_offsets, mask=w_mask, other=0.).to(tl.float32)
-    
+    w = tl.load(W + w_offsets, mask=w_mask, other=0.0).to(tl.float32)
+
     if HAS_BIAS:
-        b = tl.load(B + w_offsets, mask=w_mask, other=0.).to(tl.float32)
-    
+        b = tl.load(B + w_offsets, mask=w_mask, other=0.0).to(tl.float32)
+
     # Normalize and apply linear transformation
     if not IS_RMS_NORM:
         x_hat = (x - mean[:, None]) * rstd[:, None]
     else:
         x_hat = x * rstd[:, None]
-    
+
     y = x_hat * w[None, :] + b[None, :] if HAS_BIAS else x_hat * w[None, :]
-    
+
     if HAS_Z and NORM_BEFORE_GATE:
         Z_base = Z + rows[:, None] * stride_z_row + col_offsets
-        z = tl.load(Z_base, mask=mask, other=0.).to(tl.float32)
+        z = tl.load(Z_base, mask=mask, other=0.0).to(tl.float32)
         y *= z * tl.sigmoid(z)
-    
+
     # Write output
     tl.store(Y_base, y, mask=mask)
 
@@ -225,24 +225,26 @@ def layer_norm_fwd(
     rows_per_block = calc_rows_per_block(M, x.device)
     # Update grid to use rows_per_block
     grid = (cdiv(M, rows_per_block), ngroups)
-    layer_norm_fwd_kernel[grid](x,
-                                out,
-                                weight,
-                                bias,
-                                z,
-                                mean,
-                                rstd,
-                                x.stride(0),
-                                out.stride(0),
-                                z.stride(0) if z is not None else 0,
-                                M,
-                                group_size,
-                                eps,
-                                BLOCK_N=BLOCK_N,
-                                ROWS_PER_BLOCK=rows_per_block,
-                                NORM_BEFORE_GATE=norm_before_gate,
-                                IS_RMS_NORM=is_rms_norm,
-                                num_warps=num_warps)
+    layer_norm_fwd_kernel[grid](
+        x,
+        out,
+        weight,
+        bias,
+        z,
+        mean,
+        rstd,
+        x.stride(0),
+        out.stride(0),
+        z.stride(0) if z is not None else 0,
+        M,
+        group_size,
+        eps,
+        BLOCK_N=BLOCK_N,
+        ROWS_PER_BLOCK=rows_per_block,
+        NORM_BEFORE_GATE=norm_before_gate,
+        IS_RMS_NORM=is_rms_norm,
+        num_warps=num_warps,
+    )
     return out, mean, rstd
 
 
