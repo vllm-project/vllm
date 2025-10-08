@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from transformers import LlamaConfig
 
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear
@@ -28,17 +28,14 @@ logger = init_logger(__name__)
 
 class LlamaDecoderLayer(LlamaDecoderLayer):
 
-    def __init__(
-        self,
-        config: LlamaConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(config,
-                         cache_config=cache_config,
-                         quant_config=quant_config,
-                         prefix=prefix)
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 config: Optional[LlamaConfig] = None) -> None:
+        super().__init__(vllm_config, prefix=prefix, config=config)
+
+        config = config or vllm_config.model_config.hf_config
+        quant_config = self.get_quant_config(vllm_config)
 
         # override qkv
         self.self_attn.qkv_proj = QKVParallelLinear(
@@ -57,6 +54,16 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
             self._residual_norm = self._norm_before_residual
         else:
             self._residual_norm = self._norm_after_residual
+
+    def get_quant_config(
+            self, vllm_config: VllmConfig) -> Optional[QuantizationConfig]:
+        """Use drafter's quantization config instead of verifier's."""
+        draft_model_config = vllm_config.speculative_config.draft_model_config
+        draft_load_config = vllm_config.load_config
+
+        return VllmConfig.get_quantization_config(
+            draft_model_config,
+            draft_load_config) if draft_model_config else None
 
     def _norm_before_residual(
             self,
@@ -125,9 +132,9 @@ class LlamaModel(nn.Module):
 
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
-                config=self.config,
-                cache_config=current_vllm_config.cache_config,
+                current_vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
+                config=self.config,
             )
         ])
         if hasattr(self.config, "target_hidden_size"):

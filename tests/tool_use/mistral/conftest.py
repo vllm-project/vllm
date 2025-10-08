@@ -12,7 +12,7 @@ from .utils import ARGS, CONFIGS, ServerConfig
 
 
 # for each server config, download the model and return the config
-@pytest.fixture(scope="session", params=CONFIGS.keys())
+@pytest.fixture(scope="package", params=CONFIGS.keys())
 def server_config(request):
     config = CONFIGS[request.param]
 
@@ -26,7 +26,7 @@ def server_config(request):
 
 
 # run this for each server config
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="package")
 def server(request, server_config: ServerConfig):
     model = server_config["model"]
     args_for_model = server_config["arguments"]

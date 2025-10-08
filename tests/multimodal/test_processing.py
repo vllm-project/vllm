@@ -25,6 +25,8 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .utils import random_image
 
+pytestmark = pytest.mark.cpu_test
+
 
 # yapf: disable
 @pytest.mark.parametrize(

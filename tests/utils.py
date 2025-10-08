@@ -1143,6 +1143,8 @@ def get_attn_backend_list_based_on_platform() -> list[str]:
             print("Skip FLASH_ATTN on ROCm as aiter is not installed")
 
         return attn_backend_list
+    elif current_platform.is_xpu():
+        return ["FLASH_ATTN", "TRITON_ATTN"]
     else:
         raise ValueError("Unsupported platform")
 

@@ -82,6 +82,7 @@ class AttentionBackend(ABC):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
+        cache_dtype_str: str = "auto",
     ) -> Tuple[int, ...]:
         raise NotImplementedError
 

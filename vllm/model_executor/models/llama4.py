@@ -28,7 +28,8 @@ from vllm.attention import Attention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -39,6 +40,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
@@ -59,13 +61,16 @@ class Llama4MoE(nn.Module):
         router_scores = torch.sigmoid(router_scores.float())
         return (router_scores, router_indices.to(torch.int32))
 
-    def __init__(self,
-                 config: Llama4TextConfig,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        parallel_config = vllm_config.parallel_config
+        quant_config = vllm_config.quant_config
+
         self.tp_size = get_tensor_model_parallel_world_size()
         self.top_k = config.num_experts_per_tok
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
         intermediate_size_moe = config.intermediate_size
         self.router = ReplicatedLinear(config.hidden_size,
@@ -82,6 +87,7 @@ class Llama4MoE(nn.Module):
             bias=False,
             prefix=f"{prefix}.shared_expert",
             reduce_results=False,
+            disable_tp=self.is_sequence_parallel,
         )
 
         self.experts = SharedFusedMoE(
@@ -96,9 +102,14 @@ class Llama4MoE(nn.Module):
             renormalize=False,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
+            is_sequence_parallel=self.is_sequence_parallel,
         )
 
     def forward(self, hidden_states):
+        num_tokens = hidden_states.shape[0]
+        if self.is_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+
         router_logits, _ = self.router(hidden_states)
 
         shared_out, routed_out = self.experts(
@@ -107,7 +118,10 @@ class Llama4MoE(nn.Module):
         )
         experts_out = routed_out + shared_out
 
-        if self.tp_size > 1:
+        if self.is_sequence_parallel:
+            experts_out = tensor_model_parallel_all_gather(experts_out, 0)
+            experts_out = experts_out[:num_tokens]
+        elif self.tp_size > 1:
             experts_out = self.experts.maybe_all_reduce_tensor_model_parallel(
                 experts_out)
 
@@ -257,14 +271,15 @@ class Llama4Attention(nn.Module):
 
 class Llama4DecoderLayer(nn.Module):
 
-    def __init__(
-        self,
-        config: Llama4TextConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 config: Optional[Llama4TextConfig] = None) -> None:
         super().__init__()
+
+        config = config or vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
 
         self.layer_idx = extract_layer_index(prefix)
         self.global_layer = config.no_rope_layers[self.layer_idx] == 0
@@ -291,8 +306,7 @@ class Llama4DecoderLayer(nn.Module):
             self.layer_idx + 1) % config.interleave_moe_layer_step == 0
         if is_moe_layer:
             self.feed_forward = Llama4MoE(
-                config=config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.feed_forward",
             )
         else:

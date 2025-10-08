@@ -6,10 +6,10 @@ from unittest import mock
 import pytest
 import torch
 
-from tests.v1.attention.utils import (BatchSpec, _Backend,
-                                      create_common_attn_metadata,
+from tests.v1.attention.utils import (BatchSpec, create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
                                       get_attention_backend)
+from vllm.attention.backends.registry import _Backend
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VllmConfig)
@@ -63,7 +63,13 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers,
 
     target_attn_layers = {"target_attn_1": mock.MagicMock()}
     all_attn_layers = {**target_attn_layers, "draft_attn_1": mock.MagicMock()}
-    mock_get_layers.side_effect = [target_attn_layers, all_attn_layers]
+    target_indexer_layers: dict = {}
+    all_indexer_layers: dict = {}
+
+    mock_get_layers.side_effect = [
+        target_attn_layers, target_indexer_layers, all_attn_layers,
+        all_indexer_layers
+    ]
 
     mock_pp_group = mock.MagicMock()
     mock_pp_group.world_size = 1

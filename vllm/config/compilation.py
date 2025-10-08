@@ -5,6 +5,7 @@ import enum
 import hashlib
 from collections import Counter
 from dataclasses import asdict, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
 
 from pydantic import TypeAdapter, field_validator
@@ -71,6 +72,9 @@ class CUDAGraphMode(enum.Enum):
         return self in [
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         ]
+
+    def __str__(self) -> str:
+        return self.name
 
 
 @config
@@ -169,7 +173,7 @@ class CompilationConfig:
     - 1: dynamo as is.
     - 2: dynamo once.
     - 3: piecewise compilation."""
-    debug_dump_path: str = ""
+    debug_dump_path: Optional[Path] = None
     """The path to dump the debug information."""
     cache_dir: str = ""
     """The directory to store the compiled graph, to accelerate Inductor
@@ -370,6 +374,7 @@ class CompilationConfig:
         "vllm.linear_attention",
         "vllm.plamo2_mamba_mixer",
         "vllm.gdn_attention",
+        "vllm.sparse_attn_indexer",
     ]
 
     def compute_hash(self) -> str:
@@ -416,10 +421,11 @@ class CompilationConfig:
         if pass_config_exclude:
             exclude["pass_config"] = pass_config_exclude
 
-        return TypeAdapter(CompilationConfig).dump_json(
-            self,
-            exclude=exclude,  # type: ignore[arg-type]
-            exclude_unset=True).decode()
+        config = TypeAdapter(CompilationConfig).dump_python(self,
+                                                            exclude=exclude,
+                                                            exclude_unset=True)
+
+        return str(config)
 
     __str__ = __repr__
 
