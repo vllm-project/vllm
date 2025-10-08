@@ -1240,7 +1240,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         max_num_scheduled_tokens: int,
         ubatch_slices: Optional[UBatchSlices],
         padded_num_tokens: int,
-        padded_num_reqs: int,
+        padded_num_reqs: Optional[int] = None,
         scheduled_encoder_inputs: Optional[dict[str, list[int]]] = None,
         logits_indices: Optional[torch.Tensor] = None,
         spec_decode_metadata: Optional[SpecDecodeMetadata] = None,
