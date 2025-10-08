@@ -49,7 +49,7 @@ class DeviceConfig:
         return hash_str
 
     @model_validator(mode="after")
-    def _set_device_type(self: Self) -> Self:
+    def _validate_device_type(self) -> Self:
         if self.device == "auto":
             # Automated device type detection
             from vllm.platforms import current_platform

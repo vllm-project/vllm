@@ -14,6 +14,7 @@ from vllm.config.utils import config
 KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
 KVRole = Literal[KVProducer, KVConsumer]
+KVBufferDevice = Literal["cuda", "cpu"]
 
 
 @config
@@ -28,7 +29,7 @@ class KVTransferConfig:
     engine_id: Optional[str] = None
     """The engine id for KV transfers."""
 
-    kv_buffer_device: Optional[str] = Field(default="cuda")
+    kv_buffer_device: Optional[KVBufferDevice] = Field(default="cuda")
     """The device used by kv connector to buffer the KV cache. Choices are 
     'cuda' and 'cpu'."""
 
@@ -86,31 +87,6 @@ class KVTransferConfig:
         if engine_id is None:
             return str(uuid.uuid4())
         return engine_id
-
-    @field_validator("kv_role", mode="after")
-    @classmethod
-    def _validate_kv_role(cls, kv_role: Optional[KVRole]) -> Optional[KVRole]:
-        if kv_role is not None and kv_role not in get_args(KVRole):
-            raise ValueError(
-                f"Unsupported kv_role: {kv_role}. "
-                f"Supported roles are {get_args(KVRole)}"
-            )
-
-        return kv_role
-
-    @field_validator("kv_buffer_device")
-    @classmethod
-    def _validate_buffer_device(cls, value: Optional[str]) -> Optional[str]:
-        if value is None:
-            return value
-
-        allowed_devices = {"cuda", "cpu"}
-        if value not in allowed_devices:
-            raise ValueError(
-                "Unsupported kv_buffer_device: "
-                f"{value}. Supported devices are {allowed_devices}"
-            )
-        return value
 
     @model_validator(mode="after")
     def _validate_kv_role_is_set_if_kv_connector_is_set(self: Self) -> Self:
