@@ -12,8 +12,7 @@ from vllm.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
-current_platform.import_core_kernels()
-supports_moe_ops = current_platform.try_import_moe_kernels()
+current_platform.import_kernels()
 
 if TYPE_CHECKING:
 
@@ -1921,7 +1920,7 @@ def moe_wna16_marlin_gemm(
     )
 
 
-if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
+if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
 
     @register_fake("_moe_C::marlin_gemm_moe")
     def marlin_gemm_moe_fake(
@@ -2105,6 +2104,18 @@ def indexer_k_quant_and_cache(
 ) -> None:
     torch.ops._C_cache_ops.indexer_k_quant_and_cache(
         k, kv_cache, slot_mapping, quant_block_size, kv_cache_dtype
+    )
+
+
+def cp_gather_indexer_k_quant_cache(
+    kv_cache: torch.Tensor,
+    dst_k: torch.Tensor,
+    dst_scale: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+) -> None:
+    torch.ops._C_cache_ops.cp_gather_indexer_k_quant_cache(
+        kv_cache, dst_k, dst_scale, block_table, cu_seq_lens
     )
 
 

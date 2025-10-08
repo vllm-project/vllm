@@ -9,7 +9,7 @@ import torch
 from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     create_vllm_config,
-    get_attention_backend,
+    try_get_attention_backend,
 )
 from vllm.attention.backends.registry import _Backend
 from vllm.config import ParallelConfig, SpeculativeConfig
@@ -63,7 +63,7 @@ def forward_attention(
 
     # Build common metadata.
     model_name = "meta-llama/Meta-Llama-3-8B"
-    builder_cls, impl_cls = get_attention_backend(backend)
+    builder_cls, impl_cls = try_get_attention_backend(backend)
     vllm_config = create_vllm_config(model_name=model_name, max_model_len=max(seq_lens))
     if spec_token_tree is not None:
         # Create speculative config if token tree is specified.

@@ -8,7 +8,7 @@ This guide will help you quickly get started with vLLM to perform:
 ## Prerequisites
 
 - OS: Linux
-- Python: 3.9 -- 3.13
+- Python: 3.10 -- 3.13
 
 ## Installation
 

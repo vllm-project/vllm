@@ -337,7 +337,10 @@ class scalar_types:
     float16_e5m10 = ScalarType.float_IEEE754(5, 10)
 
     # fp6, https://github.com/usyd-fsalab/fp6_llm/tree/main
+    # and https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
     float6_e3m2f = ScalarType.float_(3, 2, True, NanRepr.NONE)
+
+    float6_e2m3f = ScalarType.float_(2, 3, True, NanRepr.NONE)
 
     # fp4, https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
     float4_e2m1f = ScalarType.float_(2, 1, True, NanRepr.NONE)
