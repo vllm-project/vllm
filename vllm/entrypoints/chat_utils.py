@@ -17,9 +17,6 @@ import jinja2.nodes
 import jinja2.parser
 import jinja2.sandbox
 import transformers.utils.chat_template_utils as hf_chat_utils
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartImageParam,
@@ -40,8 +37,6 @@ from openai.types.responses import ResponseInputImageParam
 from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
-
-# yapf: enable
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin
 
 # pydantic needs the TypedDict from typing_extensions
@@ -52,11 +47,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import MediaConnector
-
-# yapf: disable
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
-
-# yapf: enable
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import random_uuid, supports_kw
@@ -317,11 +308,7 @@ def _is_var_or_elems_access(
     ):
         return _is_var_or_elems_access(node.node, varname, key)
 
-    # yapf: disable
-    return (
-        _is_attr_access(node, varname, key) if key
-        else _is_var_access(node, varname)
-    ) # yapf: enable
+    return _is_attr_access(node, varname, key) if key else _is_var_access(node, varname)
 
 
 def _iter_nodes_assign_var_or_elems(root: jinja2.nodes.Node, varname: str):
@@ -511,14 +498,14 @@ def resolve_hf_chat_template(
         tokenizer_name_or_path=model_config.tokenizer,
     )
     if path is not None:
-        logger.info(
+        logger.info_once(
             "Loading chat template fallback for %s as there isn't one "
             "defined on HF Hub.",
             tokenizer.name_or_path,
         )
         chat_template = load_chat_template(path)
     else:
-        logger.debug(
+        logger.debug_once(
             "There is no chat template fallback for %s", tokenizer.name_or_path
         )
 
@@ -1323,10 +1310,7 @@ def _parse_chat_message_content_part(
 
     modality = None
     if part_type == "image_pil":
-        if content is not None:
-            image_content = cast(Image.Image, content)
-        else:
-            image_content = None
+        image_content = cast(Image.Image, content) if content is not None else None
         mm_parser.parse_image_pil(image_content, uuid)
         modality = "image"
     elif part_type in ("image_url", "input_image"):

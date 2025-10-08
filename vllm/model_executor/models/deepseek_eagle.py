@@ -55,6 +55,7 @@ class DeepseekV2Model(nn.Module):
                 DeepseekV2DecoderLayer(
                     vllm_config,
                     prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                    config=self.config,
                 )
                 for i in range(self.config.num_hidden_layers)
             ]

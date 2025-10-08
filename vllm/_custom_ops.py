@@ -2108,6 +2108,18 @@ def indexer_k_quant_and_cache(
     )
 
 
+def cp_gather_indexer_k_quant_cache(
+    kv_cache: torch.Tensor,
+    dst_k: torch.Tensor,
+    dst_scale: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+) -> None:
+    torch.ops._C_cache_ops.cp_gather_indexer_k_quant_cache(
+        kv_cache, dst_k, dst_scale, block_table, cu_seq_lens
+    )
+
+
 def get_device_attribute(attribute: int, device: int) -> int:
     return torch.ops._C_cuda_utils.get_device_attribute(attribute, device)
 
@@ -2370,10 +2382,7 @@ class CPUDNNLGEMMHandler:
             torch.ops._C.release_dnnl_matmul_handler(self.handler)
 
 
-if hasattr(torch.ops._C, "create_onednn_mm_handler"):
-    _supports_onednn = True
-else:
-    _supports_onednn = False
+_supports_onednn = bool(hasattr(torch.ops._C, "create_onednn_mm_handler"))
 
 
 def is_onednn_acl_supported():

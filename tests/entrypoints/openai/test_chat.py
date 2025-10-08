@@ -21,18 +21,7 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
 @pytest.fixture(scope="module")
-def monkeypatch_module():
-    from _pytest.monkeypatch import MonkeyPatch
-
-    mpatch = MonkeyPatch()
-    yield mpatch
-    mpatch.undo()
-
-
-@pytest.fixture(scope="module")
-def server(monkeypatch_module, zephyr_lora_files):  # noqa: F811
-    monkeypatch_module.setenv("VLLM_USE_V1", "1")
-
+def server(zephyr_lora_files):  # noqa: F811
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -835,17 +824,18 @@ async def test_extra_fields_allowed(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_complex_message_content(client: openai.AsyncOpenAI):
+    content = [
+        {
+            "type": "text",
+            "text": "what is 1+1? please provide the result without any other text.",
+        }
+    ]
     resp = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "what is 1+1? please provide the result without any other text.",
-                    }
-                ],
+                "content": content,
             }
         ],
         temperature=0,
