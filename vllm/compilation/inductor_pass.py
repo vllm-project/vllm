@@ -19,7 +19,7 @@ if is_torch_equal_or_newer("2.6"):
     from torch._inductor.custom_graph_pass import CustomGraphPass
 else:
     # CustomGraphPass is not present in 2.5 or lower, import our version
-    from .torch25_custom_graph_pass import (  # noqa: E501
+    from .torch25_custom_graph_pass import (
         Torch25CustomGraphPass as CustomGraphPass,
     )
 
