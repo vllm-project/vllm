@@ -13,7 +13,7 @@ from datetime import datetime
 from enum import Enum
 from http import HTTPStatus
 from statistics import mean
-from typing import NamedTuple, Optional, Union
+from typing import NamedTuple, Union
 
 import aiohttp  # type: ignore
 import numpy as np  # type: ignore
@@ -46,9 +46,9 @@ class ConversationSampling(str, Enum):
 
 class ClientArgs(NamedTuple):
     seed: int
-    max_num_requests: Optional[int]
+    max_num_requests: int | None
     skip_first_turn: bool
-    max_turns: Optional[int]
+    max_turns: int | None
     max_active_conversations: int
     verbose: bool
     print_content: bool
@@ -109,9 +109,9 @@ class RequestStats(NamedTuple):
 
 class MetricStats:
     def __init__(self) -> None:
-        self.min: Optional[float] = None
-        self.max: Optional[float] = None
-        self.avg: Optional[float] = None
+        self.min: float | None = None
+        self.max: float | None = None
+        self.avg: float | None = None
         self.sum = 0.0
         self.count = 0
 
@@ -143,7 +143,7 @@ class MovingAverage:
         self.index = 0
         self.sum = 0.0
         self.count = 0
-        self.avg: Optional[float] = None
+        self.avg: float | None = None
 
     def update(self, new_value: float) -> None:
         if self.count < self.window_size:
@@ -198,14 +198,6 @@ class DebugStats:
         self.logger.info("-" * 50)
 
 
-# Must support Python 3.8, we can't use str.removeprefix(prefix)
-# introduced in Python 3.9
-def remove_prefix(text: str, prefix: str) -> str:
-    if text.startswith(prefix):
-        return text[len(prefix) :]
-    return text
-
-
 def nanosec_to_millisec(value: float) -> float:
     return value / 1000000.0
 
@@ -220,8 +212,8 @@ async def send_request(
     chat_url: str,
     model: str,
     stream: bool = True,
-    min_tokens: Optional[int] = None,
-    max_tokens: Optional[int] = None,
+    min_tokens: int | None = None,
+    max_tokens: int | None = None,
 ) -> ServerResponse:
     payload = {
         "model": model,
@@ -250,9 +242,9 @@ async def send_request(
     timeout = aiohttp.ClientTimeout(total=timeout_sec)
 
     valid_response = True
-    ttft: Optional[float] = None
+    ttft: float | None = None
     chunk_delay: list[int] = []
-    latency: Optional[float] = None
+    latency: float | None = None
     first_chunk = ""
     generated_text = ""
 
@@ -269,7 +261,7 @@ async def send_request(
                 if not chunk_bytes:
                     continue
 
-                chunk = remove_prefix(chunk_bytes.decode("utf-8"), "data: ")
+                chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
                 if chunk == "[DONE]":
                     # End of stream
                     latency = time.perf_counter_ns() - start_time
@@ -364,7 +356,7 @@ async def send_turn(
     req_args: RequestArgs,
     verbose: bool,
     verify_output: bool,
-) -> Optional[RequestStats]:
+) -> RequestStats | None:
     assert messages_to_use > 0
     assert messages_to_use <= len(conversation_messages)
 
@@ -769,7 +761,7 @@ def get_client_config(
             "Number of conversations must be equal or larger than the number of clients"
         )
 
-    max_req_per_client: Optional[int] = None
+    max_req_per_client: int | None = None
     if args.max_num_requests is not None:
         # Max number of requests per client
         req_per_client = args.max_num_requests // args.num_clients
@@ -1032,7 +1024,7 @@ def process_statistics(
     warmup_percentages: list[float],
     test_params: dict,
     verbose: bool,
-    gen_conv_args: Optional[GenConvArgs] = None,
+    gen_conv_args: GenConvArgs | None = None,
     excel_output: bool = False,
 ) -> None:
     if len(client_metrics) == 0:
