@@ -2,43 +2,42 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Summarize a single vLLM lite-profiler log in tabular form.
 
-The script consumes the JSONL records emitted by the script `vllm.lite_profiler`
-It expects log lines containing JSON payloads with a ``metrics`` dictionary
-whose values are ``{"ns": int}``.
+The script consumes the pipe-separated records emitted by `vllm.lite_profiler`
+It expects log lines in the format: "<scope_name>|<elapsed_microseconds>"
 """
 
 from __future__ import annotations
 
-import json
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from typing import TextIO
 
 
-def _extract_event_ns(filenames: Sequence[str]) -> dict[str, list[int]]:
+def _extract_event_ns(filename: str) -> dict[str, list[int]]:
     """Collect the nanosecond timings for every scope in ``filenames``."""
 
     all_event_ns: dict[str, list[int]] = defaultdict(list)
-    for filename in filenames:
-        try:
-            with open(filename, encoding="utf-8") as f:
-                for raw_line in f:
-                    line = raw_line.strip()
-                    if not line:
-                        continue
+    try:
+        with open(filename, encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+
+                # Parse the new format: "scope_name|elapsed_microseconds"
+                if "|" in line:
                     try:
-                        payload = json.loads(line)
-                    except json.JSONDecodeError:
+                        scope_name, elapsed_us_str = line.split("|", 1)
+                        elapsed_us = int(elapsed_us_str)
+                        # Convert microseconds to nanoseconds for compatibility
+                        elapsed_ns = elapsed_us * 1000
+                        all_event_ns[scope_name].append(elapsed_ns)
+                    except (ValueError, IndexError):
+                        # Skip malformed lines
                         continue
-                    metrics = payload.get("metrics")
-                    if not isinstance(metrics, dict):
-                        continue
-                    for event, meta in metrics.items():
-                        if isinstance(meta, dict) and "ns" in meta:
-                            all_event_ns[event].append(int(meta["ns"]))
-        except FileNotFoundError:
-            raise FileNotFoundError(
-                f"Lite-profiler log not found: {filename}") from None
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Lite-profiler log not found: {filename}") from None
     return all_event_ns
 
 
@@ -47,7 +46,7 @@ def _sum_events(event_ns: dict[str, list[int]]) -> dict[str, int]:
 
 
 def _format_duration_ns(value_ns: int, total_ns: int) -> str:
-    seconds = value_ns / 1_000_000_000 if value_ns else 0.0
+    seconds = value_ns / 1e9 if value_ns else 0.0
     percent = (value_ns * 100.0 / total_ns) if total_ns else 0.0
     return f"{seconds:.2f}s ({percent:.2f}%)"
 
@@ -87,6 +86,7 @@ MODEL_EVENTS = [
     "Model:Sample",
     "Model:Bookkeep",
     "Model:EPLB",
+    "Model:Draft",
 ]
 
 
@@ -116,6 +116,6 @@ def _print_breakdown_tables(event_ns_sum: dict[str, int], *,
 
 
 def summarize_log(log_path: str, *, stream: TextIO) -> None:
-    event_ns = _extract_event_ns([log_path])
+    event_ns = _extract_event_ns(log_path)
     event_ns_sum = _sum_events(event_ns)
     _print_breakdown_tables(event_ns_sum, stream=stream)
