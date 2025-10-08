@@ -79,7 +79,7 @@ class XFormersAttentionBackend(AttentionBackend):
         ]
 
     @staticmethod
-    def get_supported_block_size() -> list[Union[int, MultipleOf]]:
+    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
         return [MultipleOf(16)]
 
     @classmethod

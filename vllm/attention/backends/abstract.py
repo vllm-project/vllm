@@ -63,8 +63,8 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @classmethod
-    def get_supported_block_size(cls) -> list[Union[int, MultipleOf]]:
-        return cls.get_impl_cls().get_supported_block_size()
+    def get_supported_kernel_block_size(cls) -> list[Union[int, MultipleOf]]:
+        return cls.get_impl_cls().get_supported_kernel_block_size()
 
     @classmethod
     def make_metadata(cls, *args, **kwargs) -> "AttentionMetadata":
@@ -167,7 +167,7 @@ class AttentionImpl(ABC, Generic[T]):
         raise NotImplementedError
 
     @staticmethod
-    def get_supported_block_size() -> list[Union[int, MultipleOf]]:
+    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
         # TODO: implement this function for all backends.
         return [MultipleOf(1)]
 

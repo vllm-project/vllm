@@ -41,7 +41,7 @@ class CutlassMLABackend(MLACommonBackend):
         return CutlassMLAMetadataBuilder
 
     @staticmethod
-    def get_supported_block_size() -> list[Union[int, MultipleOf]]:
+    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
         return [128]
 
 
