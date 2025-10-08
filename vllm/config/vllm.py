@@ -318,6 +318,25 @@ class VllmConfig:
                 # NB: Passing both --enforce-eager and a compilation level
                 # in V0 means the compilation level wins out.
                 self.compilation_config.level = CompilationLevel.NO_COMPILATION
+        else:
+            assert self.compilation_config.level >= CompilationLevel.NO_COMPILATION
+            assert self.compilation_config.level <= CompilationLevel.PIECEWISE
+            assert self.compilation_config.level <= 3
+
+        # If user does not set custom ops via none or all set it here based on
+        # compilation level and backend.
+        if (
+            self.compilation_config.custom_ops.count("none")
+            + self.compilation_config.custom_ops.count("all")
+            == 0
+        ):
+            if (
+                self.compilation_config.level > 0
+                and self.compilation_config.backend != "eager"
+            ):
+                self.compilation_config.custom_ops.append("none")
+            else:
+                self.compilation_config.custom_ops.append("all")
 
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
@@ -472,7 +491,7 @@ class VllmConfig:
                 self.compilation_config.cudagraph_mode.has_full_cudagraphs()
                 and self.model_config is not None
                 and not self.model_config.disable_cascade_attn
-                and not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+                and not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()  # noqa: E501
             ):
                 logger.warning_once(
                     "No piecewise cudagraph for executing cascade attention."
@@ -578,7 +597,7 @@ class VllmConfig:
         # https://github.com/vllm-project/vllm/issues/25094
         if has_blocked_weights():
             custom_ops = self.compilation_config.custom_ops
-            if "none" not in custom_ops and "-quant_fp8" not in custom_ops:
+            if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
