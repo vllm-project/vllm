@@ -764,14 +764,7 @@ class CompilationConfig:
         use_fx_graph_piecewise_compilation = (
             self.mode == CompilationMode.VLLM_COMPILE
             and self.splitting_ops_contain_attention()
-        )
-
-        inductor_used = (
-            self.mode == CompilationMode.VLLM_COMPILE and self.backend == "inductor"
-        ) or (
-            self.mode >= CompilationMode.STOCK_TORCH_COMPILE
-            and self.backend == "inductor"
-        )
+inductor_used = self.backend == "inductor"
         use_inductor_piecewise_compilation = (
             inductor_used
             and self.use_inductor_graph_partition
