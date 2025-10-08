@@ -899,6 +899,8 @@ class EagleProposer:
                     "Quantization is not supported for draft model, "
                     "disabling quantization for draft model"
                 )
+            else:
+                target_model_quant_config = None
             self.model = get_model(
                 vllm_config=self.vllm_config, model_config=draft_model_config
             )
