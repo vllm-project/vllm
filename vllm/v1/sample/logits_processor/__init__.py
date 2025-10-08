@@ -55,12 +55,7 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
 def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
     """Load all installed logit processor plugins"""
 
-    import sys
-
-    if sys.version_info < (3, 10):
-        from importlib_metadata import entry_points
-    else:
-        from importlib.metadata import entry_points
+    from importlib.metadata import entry_points
 
     installed_logitsprocs_plugins = entry_points(group=LOGITSPROCS_GROUP)
     if len(installed_logitsprocs_plugins) == 0:
