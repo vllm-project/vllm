@@ -42,7 +42,7 @@ class AttentionBackend(ABC):
     supports_quant_query_input: bool = False
 
     # Does attention's forward() include kv cache update?
-    include_kv_cache: bool = True
+    forward_includes_kv_cache: bool = True
 
     @staticmethod
     @abstractmethod

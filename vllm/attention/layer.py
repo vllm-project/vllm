@@ -363,13 +363,13 @@ class Attention(nn.Module, AttentionLayerBase):
                 if value is not None:
                     value = value.view(-1, self.num_kv_heads, self.head_size)
             if self.use_direct_call:
-                if not self.attn_backend.include_kv_cache:
+                if not self.attn_backend.forward_includes_kv_cache:
                     unified_kv_cache_update(key, value, output, self.layer_name)
                 unified_attention_with_output(
                     query, key, value, output, self.layer_name
                 )
             else:
-                if not self.attn_backend.include_kv_cache:
+                if not self.attn_backend.forward_includes_kv_cache:
                     torch.ops.vllm.unified_kv_cache_update(
                         key, value, output, self.layer_name
                     )
@@ -378,7 +378,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 )
             return output.view(-1, hidden_size)
         else:
-            assert self.attn_backend.include_kv_cache, (
+            assert self.attn_backend.forward_includes_kv_cache, (
                 "Attention backend does not support kv cache"
             )  # noqa: E501
             if self.use_direct_call:
@@ -646,10 +646,8 @@ def unified_attention(
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict) and layer_name in attn_metadata:
-        attn_metadata = attn_metadata[layer_name]
-    else:
-        attn_metadata = None
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata.get(layer_name)
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     output = self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
@@ -696,7 +694,6 @@ def unified_kv_cache_update(
         attn_metadata,
     )
 
-    # TODO keep one of these two
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
 
@@ -715,7 +712,7 @@ direct_register_custom_op(
     op_name="unified_kv_cache_update",
     op_func=unified_kv_cache_update,
     fake_impl=unified_kv_cache_update_fake,
-    mutates_args=["output"],  # fake dependency hack for piecewise cudagraphs
+    mutates_args=["output"],  # fake dependency to make sure op is not optimized out
     tags=tag_cudagraph_unsafe,
 )
 
@@ -731,13 +728,11 @@ def unified_attention_with_output(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict) and layer_name in attn_metadata:
-        attn_metadata = attn_metadata[layer_name]
-    else:
-        attn_metadata = None
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata.get(layer_name)
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    if self.attn_backend.include_kv_cache:
+    if self.attn_backend.forward_includes_kv_cache:
         wait_for_kv_layer_from_connector(layer_name)
     self.impl.forward(
         self,
@@ -751,7 +746,7 @@ def unified_attention_with_output(
         output_block_scale=output_block_scale,
     )
 
-    if self.attn_backend.include_kv_cache:
+    if self.attn_backend.forward_includes_kv_cache:
         maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
 

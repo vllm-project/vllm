@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
 import gc
 import itertools
 import time
@@ -8,7 +9,6 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
-from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union, cast
 
 import numpy as np
@@ -208,10 +208,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         return output
 
 
-class ForceAttention(Enum):
-    ALL = auto()
-    SEPARATE_KV_UPDATE_ONLY = auto()
-    NONE = auto()
+class ForceAttention(enum.Enum):
+    ALL = enum.auto()
+    SEPARATE_KV_UPDATE_ONLY = enum.auto()
+    NONE = enum.auto()
 
 
 class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
@@ -3394,7 +3394,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     if (
                         force_attention == ForceAttention.SEPARATE_KV_UPDATE_ONLY
                         and cudagraph_runtime_mode != CUDAGraphMode.FULL
-                        and attn_group.backend.include_kv_cache
+                        and attn_group.backend.forward_includes_kv_cache
                     ):
                         continue
                     if ubatch_slices is not None:
@@ -3897,16 +3897,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # op doesn't include KV cache update. This is required
             # for KV cache update to be captured correctly in cases where
             # the KV cache update and attention are two separate custom ops.
-            #
-            # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
-            # But be careful, warm up with `NONE` is orthogonal to
-            # if we want to warm up attention or not. This is
-            # different from the case where `FULL` implies capture all
-            # attention while `PIECEWISE` implies no attention for backends
-            # that don't split KV Cache update and attention op.
-            has_separate_kv_update = True  # not all(\
-            # all(g.backend.include_kv_cache for g in gs)\
-            # for gs in self.attn_groups)
+            # Keep in mind that when we use `FULL` cudagraph mode, we capture
+            # all attention regardless of the `force_attention_*` variables.
+            has_separate_kv_update = not all(
+                all(g.backend.forward_includes_kv_cache for g in gs)
+                for gs in self.attn_groups
+            )
             force_attention_dummy = (
                 ForceAttention.SEPARATE_KV_UPDATE_ONLY
                 if has_separate_kv_update
@@ -3927,6 +3923,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
                 # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
+                # This is independent from how we want to warm up the attention.
                 self._dummy_run(
                     num_tokens,
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
