@@ -108,12 +108,36 @@ def triton_kernel_moe_forward(
     )
 
 
-def get_padding_alignment():
-    return (
-        256
-        if triton.runtime.driver.active.get_current_target().arch in ("gfx950")
-        else 128
-    )
+def get_padding_alignment() -> int:
+    """
+    Get the padding alignment value based on the current AMD GPU architecture.
+
+    This function determines the optimal padding alignment for memory operations
+    on AMD GPUs to maximize performance and avoid masked loads.
+
+    Architecture-specific alignment:
+    - MI300 (gfx942): 128-byte alignment
+      -Aligns to BLOCK_SIZE_K to avoid masked loads
+      * Sufficient for standard operations
+
+    - MI350 (gfx950): 256-byte alignment
+      * Uses scale preshuffling on MI350 which requires 256-byte alignment
+      * Padding to 256 enables correct preshuffle arrangement
+
+    The padding alignment is set to the larger of BLOCK_SIZE_K or preshuffling
+    size requirements for the architecture.
+
+    Returns:
+        int: Padding alignment in bytes (128 or 256)
+    """
+    current_arch = triton.runtime.driver.active.get_current_target().arch
+
+    # MI350 (gfx950) requires 256-byte alignment for scale preshuffling
+    if current_arch in ("gfx950",):
+        return 256
+
+    # MI300 (gfx942) and other architectures use 128-byte alignment
+    return 128
 
 
 # This is a triton implementation of the fused_experts function
