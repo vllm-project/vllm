@@ -18,6 +18,7 @@ import triton
 import triton.language as tl
 from torch.library import wrap_triton
 
+
 @triton.jit
 def triton_scale_swizzle(
     scale_ptr,
@@ -144,7 +145,9 @@ def ceil_div(a, b):
     return (a + b - 1) // b
 
 
-def to_blocked(input_matrix, backend: Literal["torch", "triton"] = "triton") -> torch.Tensor:
+def to_blocked(
+    input_matrix, backend: Literal["torch", "triton"] = "triton"
+) -> torch.Tensor:
     """
     Rearrange a large matrix by breaking it into blocks and applying
     the rearrangement pattern.
@@ -177,6 +180,6 @@ def to_blocked(input_matrix, backend: Literal["torch", "triton"] = "triton") -> 
 
     # Rearrange the blocks
     blocks = padded.view(n_row_blocks, 128, n_col_blocks, 4).permute(0, 2, 1, 3)
-    rearranged = blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16)  # noqa: E501
+    rearranged = blocks.reshape(-1, 4, 32, 4).transpose(1, 2).reshape(-1, 32, 16)
 
     return rearranged.flatten()
