@@ -540,7 +540,7 @@ def apply_rtn_marlin_linear(
     output_size_per_partition: int,
     input_size_per_partition: int,
     bias: Optional[torch.Tensor] = None,
-    use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT
+    use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
 ) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
@@ -550,7 +550,7 @@ def apply_rtn_marlin_linear(
         n=output_size_per_partition,
         k=reshaped_x.size(1),
         device=input.device,
-        dtype=input.dtype
+        dtype=input.dtype,
     )
 
     output = ops.gptq_marlin_gemm(

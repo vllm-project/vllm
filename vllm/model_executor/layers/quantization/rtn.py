@@ -228,7 +228,7 @@ class RTNLinearMethod(LinearMethodBase):
         layer.output_size_per_partition = output_size_per_partition
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """ Repack weights and scales for Marlin kernels."""
+        """Repack weights and scales for Marlin kernels."""
         weight_bits = self.quant_config.weight_bits
 
         weight, scale = repack_weights(layer.weight, layer.scale, weight_bits)
@@ -242,7 +242,7 @@ class RTNLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return apply_rtn_marlin_linear(
             input=x,
@@ -330,7 +330,7 @@ class RTNMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """ Repack weights and scales for Marlin kernels."""
+        """Repack weights and scales for Marlin kernels."""
         weight_bits = self.quant_config.weight_bits
 
         w13_weight, w13_scale = repack_weights(
@@ -530,7 +530,7 @@ def _get_perms():
                 2 * (i % 4),
                 2 * (i % 4) + 1,
                 2 * (i % 4 + 4),
-                2 * (i % 4 + 4) + 1
+                2 * (i % 4 + 4) + 1,
             ]:
                 perm1.append(16 * row + col + 8 * block)
         for j in range(4):
@@ -627,7 +627,7 @@ def repack_weights(qweight, scale, weight_bits):
         )
         for i in range(2):
             qweight_unpacked[:, :, i::2] = ((qweight << 4 * (1 - i)) >> 4).reshape(
-                    qweight.shape[0], qweight.shape[1] * 2, qweight.shape[2] // 2
+                qweight.shape[0], qweight.shape[1] * 2, qweight.shape[2] // 2
             )
     else:
         qweight_unpacked = qweight
