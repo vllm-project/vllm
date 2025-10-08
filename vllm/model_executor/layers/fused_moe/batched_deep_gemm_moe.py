@@ -13,8 +13,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
-from vllm.utils.deep_gemm import (fp8_m_grouped_gemm_nt_masked,
-                                  is_deep_gemm_e8m0_used)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import fp8_m_grouped_gemm_nt_masked, is_deep_gemm_e8m0_used
@@ -44,8 +42,7 @@ def silu_v1(
     assert group_size == 128, "H must be divisible by 8"
     assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
 
-    tokens_per_expert = tokens_per_expert.to(device=y.device,
-                                             dtype=torch.int32)
+    tokens_per_expert = tokens_per_expert.to(device=y.device, dtype=torch.int32)
 
     fp8_dtype = torch.float8_e4m3fn
     y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
@@ -53,10 +50,12 @@ def silu_v1(
     stride_ys_e = T * G
     stride_ys_t = 1
     stride_ys_g = T
-    y_s = torch.empty_strided((E, T, G),
-                              (stride_ys_e, stride_ys_t, stride_ys_g),
-                              dtype=torch.float32,
-                              device=y.device)
+    y_s = torch.empty_strided(
+        (E, T, G),
+        (stride_ys_e, stride_ys_t, stride_ys_g),
+        dtype=torch.float32,
+        device=y.device,
+    )
 
     use_ue8m0 = is_deep_gemm_e8m0_used()
 
@@ -70,12 +69,12 @@ def silu_v1(
     # We never want to launch more than Tx number of threads
     # This computes the clip.
     num_parallel_tokens = max(
-        1,
-        min(max_empirical_parallelism, 2**int(log2(min(num_parallel_tokens,
-                                                       T)))))
+        1, min(max_empirical_parallelism, 2 ** int(log2(min(num_parallel_tokens, T))))
+    )
 
-    torch.ops._C.silu_v1_cuda(y, tokens_per_expert, y_q, y_s, group_size,
-                              use_ue8m0, num_parallel_tokens)
+    torch.ops._C.silu_v1_cuda(
+        y, tokens_per_expert, y_q, y_s, group_size, use_ue8m0, num_parallel_tokens
+    )
 
     return y_q, y_s
 
@@ -154,7 +153,6 @@ def _silu_mul_fp8_quant_deep_gemm(
         tl.store(y_s_ptr + base_ys_offset + t * stride_ys_t, y_s)
 
 
-
 def silu_mul_fp8_quant_deep_gemm_cuda(
     y: torch.Tensor,  # (E, T, 2*H)
     tokens_per_expert: torch.Tensor,  # (E,) number of valid tokens per expert
@@ -212,7 +210,7 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
 
     if cuda_arch >= 80:
         torch.ops._C.silu_mul_fp8_quant_deep_gemm_cuda(
-            y, tokens_per_expert, y_q, y_s, group_size, use_ue8m0, num_parallel_tokens
+            y, tokens_per_expert, y_q, y_s, use_ue8m0
         )
     else:
         # Default to triton if not on cuda or if arch is too old
