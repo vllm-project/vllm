@@ -357,9 +357,9 @@ class CompilationConfig:
     """The maximum cudagraph capture size.
     
     If cudagraph_capture_sizes is specified, this will be set to the largest 
-    size in that list (will override max_cudagraph_capture_size if also specified). 
-    If cudagraph_capture_sizes is not specified, the list of sizes is 
-    generated automatically following the pattern:
+    size in that list (or checked for consistency if specified). If
+    cudagraph_capture_sizes is not specified, the list of sizes is generated
+    automatically following the pattern:
 
         [1, 2, 4] + list(range(8, 256, 8)) + list(
         range(256, max_cudagraph_capture_size + 1, 16))
@@ -654,19 +654,14 @@ class CompilationConfig:
         max_cudagraph_capture_size = (
             self.cudagraph_capture_sizes[-1] if self.cudagraph_capture_sizes else 0
         )
-        if (
-            self.max_cudagraph_capture_size is not None
-            and self.max_cudagraph_capture_size != max_cudagraph_capture_size
-        ):
-            logger.warning(
-                "max_cudagraph_capture_size: %s is not consistent with the max value"
-                " of cudagraph_capture_sizes: %s. Overriding max_cudagraph_capture"
-                "_size to %s.",
-                self.max_cudagraph_capture_size,
-                max_cudagraph_capture_size,
-                max_cudagraph_capture_size,
+        if self.max_cudagraph_capture_size is not None:
+            assert self.max_cudagraph_capture_size == max_cudagraph_capture_size, (
+                f"max_cudagraph_capture_size:{self.max_cudagraph_capture_size}"
+                " should be consistent with the max value of "
+                f"cudagraph_capture_sizes:{max_cudagraph_capture_size}"
             )
-        self.max_cudagraph_capture_size = max_cudagraph_capture_size
+        else:
+            self.max_cudagraph_capture_size = max_cudagraph_capture_size
 
         # pre-compute the mapping from batch size to padded graph size
         self.bs_to_padded_graph_size = [

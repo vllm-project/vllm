@@ -707,6 +707,20 @@ class VllmConfig:
             batch_size_capture_list = [
                 size for size in batch_size_capture_list if size <= max_num_tokens
             ]
+            # adjust user specificed max_cudagraph_capture_size if they should
+            if (
+                self.compilation_config.max_cudagraph_capture_size
+                and batch_size_capture_list
+                and batch_size_capture_list[-1]
+                != self.compilation_config.max_cudagraph_capture_size
+            ):
+                logger.warning(
+                    "max_cudagraph_capture_size is adjusted to %d",
+                    batch_size_capture_list[-1],
+                )
+                self.compilation_config.max_cudagraph_capture_size = (
+                    batch_size_capture_list[-1]
+                )
 
         self.compilation_config.init_with_cudagraph_sizes(batch_size_capture_list)
 
