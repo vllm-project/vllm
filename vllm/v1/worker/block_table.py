@@ -74,11 +74,10 @@ class BlockTable:
                                               dtype=torch.int64)
 
         if self.use_hybrid_blocks:
-            self._bias_array = np.arange(0,
-                                         self.blocks_per_phys_block).reshape(
-                                             1, -1)
+            self._kernel_block_arange = np.arange(
+                0, self.blocks_per_phys_block).reshape(1, -1)
         else:
-            self._bias_array = None
+            self._kernel_block_arange = None
 
         try:
             self.dcp_world_size = get_dcp_group().world_size
@@ -189,7 +188,7 @@ class BlockTable:
             return kv_manager_block_ids
 
         kernel_block_ids = kv_manager_block_ids.reshape(
-            -1, 1) * self.blocks_per_phys_block + self._bias_array
+            -1, 1) * self.blocks_per_phys_block + self._kernel_block_arange
 
         return kernel_block_ids.reshape(-1)
 
