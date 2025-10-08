@@ -68,6 +68,14 @@ class ApertusToolParser(ToolParser):
             re.DOTALL,
         )
 
+    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        if request.tools and request.tool_choice != "none":
+            # do not skip special tokens because the tool_call tokens are
+            # marked "special" in some models. Since they are skipped
+            # prior to the call to the tool parser, it breaks tool calling.
+            request.skip_special_tokens = False
+        return request
+
     def _reset_streaming_state(self):
         """Reset streaming state for a new request."""
         self._initialize_tool_state(-1)
