@@ -822,21 +822,21 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
         assert attn_shape[0] % num_blocks == 0
         block_split_ratio = attn_shape[0] // num_blocks
 
-        # Use small blocks for testing to avoid memory issues
+        # use small blocks for testing to avoid memory issues
         test_block_size = min(2, len(blocks0), len(blocks1))
 
-        # Use non-overlapping blocks to avoid data contamination
-        # Split physical blocks: first half for attention, second half for mamba
+        # use non-overlapping blocks to avoid data contamination
+        # Split kernel blocks: first half for attention, second half for mamba
         mid_point = num_blocks // 2
 
-        # Attention uses physical blocks from first half (mapped to logical blocks)
+        # attention uses kernel blocks from first half (mapped to logical blocks)
         kv_blocks_for_attention = np.array([0, 1])[:test_block_size]
 
-        # Mamba uses physical blocks from second half
+        # mamba uses kernel blocks from second half
         kv_blocks_for_mamba = np.array([mid_point, mid_point + 1])[:test_block_size]
 
-        # Create small constant tensors for testing with corrected shapes
-        # Attention: [block_size, ...] starting from dimension 2
+        # create small constant tensors for testing with corrected shapes
+        # attention: [block_size, ...] starting from dimension 2
         attn_constant_shape = attn_shape[2:]
         conv_constant_shape = conv_shape[1:]
         ssm_constant_shape = ssm_shape[1:]
@@ -859,14 +859,14 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
             for i, kernel_block in enumerate(kernel_blocks_for_attention):
                 vllm_ctx[layer].kv_cache[0][kernel_block, :] = attn_blocks_constant[i]
 
-        # Fill mamba blocks with constants using physical block indices
+        # fill mamba blocks with constants using kernel block indices
         for layer in [layer_2, layer_3, layer_4, layer_5]:
-            # mamba: kv_cache[0][component][physical_block_idx, ...]
+            # mamba: kv_cache[0][component][kernel_block_idx, ...]
             for i, kv_block in enumerate(kv_blocks_for_mamba):
                 vllm_ctx[layer].kv_cache[0][0][kv_block, :] = conv_blocks_constant[i]
                 vllm_ctx[layer].kv_cache[0][1][kv_block, :] = ssm_blocks_constant[i]
 
-        # Verify attention and mamba contents are correct
+        # verify attention and mamba contents are correct
         for layer in [layer_0, layer_1]:
             for i, kernel_block in enumerate(kernel_blocks_for_attention):
                 actual_kv = vllm_ctx[layer].kv_cache[0][kernel_block, :]
