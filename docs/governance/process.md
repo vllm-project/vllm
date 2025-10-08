@@ -105,7 +105,7 @@ In case where CI didn't pass due to the failure is not related to the PR, the PR
 
 Contributors are encouraged to join #pr-reviews and #contributors channels.
 
-There are #sig- and #feat- channels for discussion and coordination around specific topics.
+There are `#sig-` and `#feat-` channels for discussion and coordination around specific topics.
 
 The project maintainer group also uses a private channel for high-bandwidth collaboration.
 
