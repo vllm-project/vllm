@@ -15,7 +15,7 @@ from typing import Literal, NamedTuple, Optional
 
 import pytest
 
-from vllm.config import RunnerOption
+from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
 
 from ..models.registry import HF_EXAMPLE_MODELS
