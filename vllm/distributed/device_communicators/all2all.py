@@ -63,9 +63,12 @@ class NaiveAll2AllManager(All2AllManagerBase):
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        sp_size = self.tp_group.world_size if is_sequence_parallel else 1
         dp_metadata = get_forward_context().dp_metadata
-        cu_tokens_across_sp_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
+        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+        assert sizes is not None, f"sizes is None, {sizes}"
+        cu_tokens_across_sp_cpu = torch.as_tensor(
+            sizes, device="cpu", dtype=torch.int64
+        ).cumsum(dim=0)
 
         hidden_states = self.naive_multicast(
             hidden_states, cu_tokens_across_sp_cpu, is_sequence_parallel
@@ -81,8 +84,11 @@ class NaiveAll2AllManager(All2AllManagerBase):
         ep_rank = self.rank if is_sequence_parallel else self.dp_rank
 
         dp_metadata = get_forward_context().dp_metadata
-        sp_size = self.tp_group.world_size if is_sequence_parallel else 1
-        cu_tokens_across_sp_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
+        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+        assert sizes is not None, f"sizes is None, {sizes}"
+        cu_tokens_across_sp_cpu = torch.as_tensor(
+            sizes, device="cpu", dtype=torch.int64
+        ).cumsum(dim=0)
 
         start = 0 if ep_rank == 0 else cu_tokens_across_sp_cpu[ep_rank - 1]
         end = cu_tokens_across_sp_cpu[ep_rank]
