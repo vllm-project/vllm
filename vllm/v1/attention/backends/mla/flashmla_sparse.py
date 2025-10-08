@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Optional
 
@@ -51,12 +50,6 @@ structured as:
 """
 
 
-def _lse2_to_lse(lse_base2: torch.Tensor) -> torch.Tensor:
-    # Convert base-2 LSE to natural-log LSE
-    # Keep FP32 for numerical stability during the merge.
-    return lse_base2.to(torch.float32) * math.log(2.0)
-
-
 class FlashMLASparseBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -98,36 +91,6 @@ class FlashMLASparseBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [576]
-
-
-@dataclass
-class MLASparsePrefillMetadata:
-    # NOTE(Chen): not call it "FlashMLASparsePrefillMetadata" because
-    # the kernel is not from flashmla
-    block_table: torch.Tensor
-    has_context: bool = False
-    context_lens: Optional[torch.Tensor] = None
-
-
-@dataclass
-class FlashMLASparseDecodeAndContextMetadata:
-    scheduler_metadata: torch.Tensor = None
-    num_splits: torch.Tensor = None
-    cache_lens: torch.Tensor = None
-    prefill_context_lengths: Optional[torch.Tensor] = None
-    prefill_new_k_start_locs: Optional[torch.Tensor] = None
-    dummy_block_table: torch.Tensor = None
-
-    def filter_prefill_indices(
-        self, indices: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self.prefill_context_lengths is not None
-        prefill_context_lengths = self.prefill_context_lengths.unsqueeze(-1)
-        context_indices = torch.where(indices < prefill_context_lengths, indices, -1)
-        new_token_indices = torch.where(
-            indices >= prefill_context_lengths, indices - prefill_context_lengths, -1
-        )
-        return context_indices, new_token_indices
 
 
 @dataclass
