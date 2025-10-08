@@ -8,13 +8,13 @@ from typing import (
     ClassVar,
     Literal,
     Optional,
-    Self,
     Union,
 )
 
 import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
+from typing_extensions import Self
 
 import vllm.envs as envs
 from vllm.config.utils import config
