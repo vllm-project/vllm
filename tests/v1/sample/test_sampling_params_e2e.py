@@ -63,9 +63,9 @@ def test_stop(llm):
     # Output should not contain the stop word.
     assert len(new_split_text) == STOP_IDX
 
-    params = SamplingParams(temperature=0,
-                            stop=split_text[STOP_IDX],
-                            include_stop_str_in_output=True)
+    params = SamplingParams(
+        temperature=0, stop=split_text[STOP_IDX], include_stop_str_in_output=True
+    )
     output = llm.generate(PROMPT, params)
     new_split_text = output[0].outputs[0].text.split()
 
@@ -100,8 +100,8 @@ def test_detokenize_false(llm):
     assert len(output[0].outputs[0].text) == 0
 
     output = llm.generate(
-        PROMPT, SamplingParams(detokenize=False, logprobs=3,
-                               prompt_logprobs=3))
+        PROMPT, SamplingParams(detokenize=False, logprobs=3, prompt_logprobs=3)
+    )
     assert len(output[0].outputs[0].token_ids) > 0
     assert len(output[0].outputs[0].text) == 0
 
@@ -128,8 +128,7 @@ def test_bad_words(llm):
     assert bad_words_1 not in new_text
 
     bad_words_2 = new_text.split()[-1]
-    params = SamplingParams(temperature=0,
-                            bad_words=[bad_words_1, bad_words_2])
+    params = SamplingParams(temperature=0, bad_words=[bad_words_1, bad_words_2])
     output = llm.generate(PROMPT, params)
     new_text = output[0].outputs[0].text
     assert bad_words_1 not in new_text
@@ -155,8 +154,7 @@ def test_allowed_token_ids(llm):
 
     TOKEN_ID = 10
     allowed_token_ids = [TOKEN_ID]
-    output = llm.generate(PROMPT,
-                          SamplingParams(allowed_token_ids=allowed_token_ids))
+    output = llm.generate(PROMPT, SamplingParams(allowed_token_ids=allowed_token_ids))
     assert output[0].outputs[0].token_ids[-1] == TOKEN_ID
 
     # Reject empty allowed_token_ids.

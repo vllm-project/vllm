@@ -17,7 +17,7 @@ MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 @pytest.mark.asyncio
 async def test_shutdown_on_engine_failure():
     """Verify that API returns connection error when server process is killed.
-    
+
     Starts a vLLM server, kills it to simulate a crash, then verifies that
     subsequent API calls fail appropriately.
     """
@@ -48,28 +48,32 @@ async def test_shutdown_on_engine_failure():
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN))
+        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),
+    )
 
     # Wait for server startup
     start_time = time.time()
-    client = openai.AsyncOpenAI(base_url=f"http://localhost:{port}/v1",
-                                api_key="dummy",
-                                max_retries=0,
-                                timeout=10)
+    client = openai.AsyncOpenAI(
+        base_url=f"http://localhost:{port}/v1",
+        api_key="dummy",
+        max_retries=0,
+        timeout=10,
+    )
 
     # Poll until server is ready
     while time.time() - start_time < 30:
         try:
-            await client.completions.create(model=MODEL_NAME,
-                                            prompt="Hello",
-                                            max_tokens=1)
+            await client.completions.create(
+                model=MODEL_NAME, prompt="Hello", max_tokens=1
+            )
             break
         except Exception:
             time.sleep(0.5)
             if proc.poll() is not None:
                 stdout, stderr = proc.communicate(timeout=1)
-                pytest.fail(f"Server died during startup. "
-                            f"stdout: {stdout}, stderr: {stderr}")
+                pytest.fail(
+                    f"Server died during startup. stdout: {stdout}, stderr: {stderr}"
+                )
     else:
         proc.terminate()
         proc.wait(timeout=5)
@@ -81,9 +85,9 @@ async def test_shutdown_on_engine_failure():
 
     # Verify API calls now fail
     with pytest.raises((openai.APIConnectionError, openai.APIStatusError)):
-        await client.completions.create(model=MODEL_NAME,
-                                        prompt="This should fail",
-                                        max_tokens=1)
+        await client.completions.create(
+            model=MODEL_NAME, prompt="This should fail", max_tokens=1
+        )
 
     return_code = proc.wait(timeout=5)
     assert return_code is not None
