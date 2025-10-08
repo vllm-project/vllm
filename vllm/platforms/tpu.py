@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 from typing import TYPE_CHECKING, Optional, Union, cast
 
 import torch
@@ -15,7 +16,8 @@ from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
-    from vllm.config import BlockSize, ModelConfig, VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config.cache import BlockSize
     from vllm.pooling_params import PoolingParams
 else:
     BlockSize = None
@@ -26,7 +28,7 @@ else:
 
 logger = init_logger(__name__)
 
-USE_TPU_COMMONS = False
+USE_TPU_INFERENCE = False
 
 
 class TpuPlatform(Platform):
@@ -44,8 +46,10 @@ class TpuPlatform(Platform):
     additional_env_vars: list[str] = ["TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"]
 
     @classmethod
-    def import_core_kernels(cls) -> None:
-        pass
+    def import_kernels(cls) -> None:
+        # Do not import vllm._C
+        with contextlib.suppress(ImportError):
+            import vllm._moe_C  # noqa: F401
 
     @classmethod
     def get_attn_backend_cls(
@@ -254,10 +258,10 @@ class TpuPlatform(Platform):
 
 
 try:
-    from tpu_commons.platforms import TpuPlatform as TpuCommonsPlatform
+    from tpu_inference.platforms import TpuPlatform as TpuInferencePlatform
 
-    TpuPlatform = TpuCommonsPlatform  # type: ignore
-    USE_TPU_COMMONS = True
+    TpuPlatform = TpuInferencePlatform  # type: ignore
+    USE_TPU_INFERENCE = True
 except ImportError:
-    logger.info("tpu_commons not found, using vLLM's TpuPlatform")
+    logger.info("tpu_inference not found, using vLLM's TpuPlatform")
     pass

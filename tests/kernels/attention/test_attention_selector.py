@@ -34,7 +34,7 @@ DEVICE_MLA_BACKENDS = {
 
 DEVICE_REGULAR_ATTN_BACKENDS = {
     "cuda": ["XFORMERS", "FLASHINFER", "FLASH_ATTN"],
-    "hip": ["ROCM_FLASH"],
+    "hip": ["ROCM_ATTN"],
     "cpu": ["TORCH_SDPA"],
 }
 
@@ -122,7 +122,7 @@ def test_env(
                     backend = get_attn_backend(
                         16, torch.float16, None, block_size, use_mla=use_mla
                     )
-                    expected = "TRITON_ATTN"
+                    expected = "ROCM_ATTN"
                     assert backend.get_name() == expected
 
         elif device == "cuda":
@@ -165,10 +165,10 @@ def test_env(
                             pytest.skip("FlashMLA only supports block_size 64")
                         else:
                             from vllm.v1.attention.backends.mla.flashmla import (
-                                is_flashmla_supported,
+                                is_flashmla_dense_supported,
                             )
 
-                            is_supported, _ = is_flashmla_supported()
+                            is_supported, _ = is_flashmla_dense_supported()
                             if not is_supported:
                                 pytest.skip("FlashMLA not supported on this platform")
                             else:
