@@ -183,8 +183,20 @@ class MistralTokenizer(TokenizerBase):
         if not (self.is_tekken or self.is_spm):
             raise TypeError(f"Unsupported tokenizer: {type(raw_tokenizer)}")
 
-        self._vocab = self.transformers_tokenizer.get_vocab()
-        self._vocab_dict = {token: idx for idx, token in enumerate(self._vocab)}
+        # Reverse order to ensure that the lowest token id is kept.
+        self._vocab_dict = {
+            self.convert_ids_to_tokens([i], skip_special_tokens=False)[0]: i
+            for i in range(self.vocab_size - 1, -1, -1)
+        }
+
+        # Vocab sorted by token id.
+        self._vocab = [
+            token
+            for token, _ in sorted(
+                self._vocab_dict.items(),
+                key=lambda x: x[1],
+            )
+        ]
         self.tokenizer = raw_tokenizer
         self._max_token_id = self.vocab_size - 1
 
@@ -305,8 +317,12 @@ class MistralTokenizer(TokenizerBase):
             max_length=max_length,
         )
 
+    @property
+    def vocab(self) -> list[str]:
+        return self._vocab
+
     def get_vocab(self) -> dict[str, int]:
-        return self.transformers_tokenizer.get_vocab()
+        return self._vocab_dict
 
     def get_added_vocab(self) -> dict[str, int]:
         # Mistral tokenizers have no added vocabulary
