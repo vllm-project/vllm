@@ -165,13 +165,7 @@ class CudaPlatformBase(Platform):
             backend_enum = _Backend[envs.VLLM_ATTENTION_BACKEND]
             backend_class = backend_to_class(backend_enum)
             if not backend_class.supports_block_size(cache_config.block_size):
-                from typing import cast
-
-                from vllm.config.cache import BlockSize
-
-                cache_config.block_size = cast(
-                    BlockSize, backend_class.get_supported_block_sizes()[0]
-                )
+                cache_config.block_size = backend_class.get_supported_block_sizes()[0]
                 logger.info(
                     "Forcing kv cache block size to %s for %s backend.",
                     cache_config.block_size,

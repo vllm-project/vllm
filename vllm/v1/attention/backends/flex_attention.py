@@ -25,6 +25,7 @@ from vllm.attention.backends.abstract import (
     is_quantized_kv_cache,
 )
 from vllm.config import VllmConfig
+from vllm.config.cache import BlockSize
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_kernel_override_batch_invariant,
@@ -115,7 +116,7 @@ class FlexAttentionBackend(AttentionBackend):
         return ["auto", "fp16", "bf16"]
 
     @classmethod
-    def get_supported_block_sizes(cls) -> list[int]:
+    def get_supported_block_sizes(cls) -> list[BlockSize]:
         return []
 
     @classmethod

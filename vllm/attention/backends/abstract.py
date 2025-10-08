@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Generic, Optional, Protocol, TypeVar
+from typing import Generic, Optional, Protocol, TypeVar, cast
 
 import torch
 
+from vllm.config.cache import BlockSize
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
@@ -114,13 +115,19 @@ class AttentionBackend(ABC):
         )
 
     @classmethod
-    def get_supported_block_sizes(cls) -> list[int]:
+    def get_supported_block_sizes(cls) -> list[BlockSize]:
         return []
 
     @classmethod
     def supports_block_size(cls, block_size: int) -> bool:
+        try:
+            block_size_literal = cast(BlockSize, block_size)
+        except ValueError:
+            return False
         supported_block_sizes = cls.get_supported_block_sizes()
-        return (not supported_block_sizes) or block_size in supported_block_sizes
+        return (
+            not supported_block_sizes
+        ) or block_size_literal in supported_block_sizes
 
     @classmethod
     def is_mla(cls) -> bool:

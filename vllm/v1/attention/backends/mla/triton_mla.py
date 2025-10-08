@@ -13,6 +13,7 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.attention.ops.triton_flash_attention import triton_attention
+from vllm.config.cache import BlockSize
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
@@ -43,7 +44,7 @@ class TritonMLABackend(MLACommonBackend):
         return ["auto", "fp16", "bf16"]
 
     @classmethod
-    def get_supported_block_sizes(cls) -> list[int]:
+    def get_supported_block_sizes(cls) -> list[BlockSize]:
         return []
 
     @classmethod

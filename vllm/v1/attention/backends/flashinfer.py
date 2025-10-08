@@ -25,6 +25,7 @@ from vllm.attention.backends.abstract import (
     AttentionType,
 )
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config.cache import BlockSize
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -218,7 +219,7 @@ class FlashInferBackend(AttentionBackend):
         return ["auto", "fp16", "bf16", "fp8", "fp8_e4m3", "fp8_e5m2"]
 
     @classmethod
-    def get_supported_block_sizes(cls) -> list[int]:
+    def get_supported_block_sizes(cls) -> list[BlockSize]:
         return []
 
     @classmethod

@@ -17,6 +17,7 @@ from vllm.attention.utils.fa_utils import (
     get_flash_attn_version,
 )
 from vllm.config import VllmConfig
+from vllm.config.cache import BlockSize
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (
@@ -59,7 +60,7 @@ class FlashAttnMLABackend(MLACommonBackend):
         return ["auto", "fp16", "bf16"]
 
     @classmethod
-    def get_supported_block_sizes(cls) -> list[int]:
+    def get_supported_block_sizes(cls) -> list[BlockSize]:
         return []
 
     @classmethod

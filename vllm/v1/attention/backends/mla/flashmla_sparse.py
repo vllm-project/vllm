@@ -19,6 +19,7 @@ from vllm.attention.ops.flashmla import (
     get_mla_metadata,
 )
 from vllm.config import VllmConfig
+from vllm.config.cache import BlockSize
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -78,7 +79,7 @@ class FlashMLASparseBackend(AttentionBackend):
         return ["auto", "bf16", "fp8_ds_mla"]
 
     @classmethod
-    def get_supported_block_sizes(cls) -> list[int]:
+    def get_supported_block_sizes(cls) -> list[BlockSize]:
         return [64]
 
     @classmethod

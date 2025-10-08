@@ -12,6 +12,7 @@ from vllm.attention.backends.abstract import (
     AttentionType,
     is_quantized_kv_cache,
 )
+from vllm.config.cache import BlockSize
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
@@ -53,7 +54,7 @@ class CutlassMLABackend(MLACommonBackend):
         return ["auto", "fp16", "bf16", "e4m3fn"]
 
     @classmethod
-    def get_supported_block_sizes(cls) -> list[int]:
+    def get_supported_block_sizes(cls) -> list[BlockSize]:
         return [128]
 
     @classmethod
