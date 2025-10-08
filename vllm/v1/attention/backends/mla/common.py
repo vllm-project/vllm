@@ -457,6 +457,7 @@ def use_flashinfer_prefill() -> bool:
         not envs.VLLM_DISABLE_FLASHINFER_PREFILL
         and flashinfer_available
         and not envs.VLLM_USE_CUDNN_PREFILL
+        and not envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
         and current_platform.is_device_capability(100)
     )
 
