@@ -192,18 +192,6 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
 
     use_ue8m0 = is_deep_gemm_e8m0_used()
 
-    if E <= 16:
-        max_empirical_parallelism = 64
-    elif E <= 32:
-        max_empirical_parallelism = 16
-    else:
-        max_empirical_parallelism = 4
-
-    # We never want to launch more than Tx number of threads
-    # This computes the clip.
-    num_parallel_tokens = max(
-        1, min(max_empirical_parallelism, 2 ** int(log2(min(num_parallel_tokens, T))))
-    )
     cuda_arch = current_platform.get_device_capability(
         device_id=y.device.index
     ).to_int()
@@ -213,9 +201,6 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
             y, tokens_per_expert, y_q, y_s, use_ue8m0
         )
     else:
-        # Default to triton if not on cuda or if arch is too old
-        y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
-
         stride_cnt_e = tokens_per_expert.stride()[0]
 
         # Static grid over experts and H-groups.
@@ -225,16 +210,6 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
         stride_i_e, stride_i_t, stride_i_h = y.stride()
         stride_yq_e, stride_yq_t, stride_yq_h = y_q.stride()
 
-        # desired scale strides (elements): (T*G, 1, T)
-        stride_ys_e = T * G
-        stride_ys_t = 1
-        stride_ys_g = T
-        y_s = torch.empty_strided(
-            (E, T, G),
-            (stride_ys_e, stride_ys_t, stride_ys_g),
-            dtype=torch.float32,
-            device=y.device,
-        )
         f_info = torch.finfo(fp8_dtype)
         fp8_max = f_info.max
         fp8_min = f_info.min
