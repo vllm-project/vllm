@@ -10,7 +10,7 @@ from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
     create_standard_kv_cache_spec,
-    get_attention_backend,
+    try_get_attention_backend,
 )
 from vllm.attention.backends.registry import _Backend
 from vllm.config import (
@@ -177,7 +177,7 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
     sampling_metadata = mock.MagicMock()
 
     # Setup attention metadata
-    attn_metadata_builder_cls, _ = get_attention_backend(_Backend.FLASH_ATTN)
+    attn_metadata_builder_cls, _ = try_get_attention_backend(_Backend.FLASH_ATTN)
 
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
