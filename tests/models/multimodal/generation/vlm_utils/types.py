@@ -12,7 +12,7 @@ from pytest import MarkDecorator
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-from vllm.config import RunnerOption
+from vllm.config.model import RunnerOption
 from vllm.logprobs import SampleLogprobs
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
