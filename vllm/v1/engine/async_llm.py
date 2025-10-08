@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.utils import _validate_truncation_size
@@ -619,12 +619,6 @@ class AsyncLLM(EngineClient):
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
-
-    async def get_vllm_config(self) -> VllmConfig:
-        return self.vllm_config
-
-    async def get_model_config(self) -> ModelConfig:
-        return self.model_config
 
     async def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:

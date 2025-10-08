@@ -280,18 +280,15 @@ def _build_serving_chat(
 
 @dataclass
 class MockEngine:
-    async def get_model_config(self):
-        return MockModelConfig()
+    model_config: MockModelConfig = MockModelConfig()
 
 
 async def _async_serving_chat_init():
     engine = MockEngine()
-    model_config = await engine.get_model_config()
 
-    models = OpenAIServingModels(engine, model_config, BASE_MODEL_PATHS)
+    models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
     serving_completion = OpenAIServingChat(
         engine,
-        model_config,
         models,
         response_role="assistant",
         chat_template=CHAT_TEMPLATE,

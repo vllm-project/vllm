@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any, Optional, Union
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -22,6 +22,9 @@ logger = init_logger(__name__)
 
 class EngineClient(ABC):
     """Protocol class for Clients to Engine"""
+
+    vllm_config: VllmConfig
+    tokenizer: Optional[AnyTokenizer]
 
     @property
     @abstractmethod
@@ -78,16 +81,6 @@ class EngineClient(ABC):
             request_id: The unique id of the request,
                         or an iterable of such ids.
         """
-        ...
-
-    @abstractmethod
-    async def get_vllm_config(self) -> VllmConfig:
-        """Get the vllm configuration of the vLLM engine."""
-        ...
-
-    @abstractmethod
-    async def get_model_config(self) -> ModelConfig:
-        """Get the model configuration of the vLLM engine."""
         ...
 
     @abstractmethod

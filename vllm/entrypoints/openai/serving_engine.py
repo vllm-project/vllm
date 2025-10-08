@@ -23,7 +23,6 @@ else:
 
 import vllm.envs as envs
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -99,7 +98,6 @@ from vllm.utils import (
     random_uuid,
 )
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.processor import Processor
 
 logger = init_logger(__name__)
 
@@ -246,8 +244,6 @@ class OpenAIServing:
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
-        processor: Processor,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -258,9 +254,6 @@ class OpenAIServing:
         super().__init__()
 
         self.engine_client = engine_client
-        self.model_config = model_config
-        self.max_model_len = model_config.max_model_len
-        self.processor = processor
 
         self.models = models
 
@@ -275,6 +268,12 @@ class OpenAIServing:
 
         self._async_tokenizer_pool: dict[AnyTokenizer, AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
+
+        self.vllm_config = self.models.vllm_config
+        self.tokenizer = self.models.tokenizer
+        self.processor = self.models.processor
+        self.model_config = self.models.model_config
+        self.max_model_len = self.model_config.max_model_len
 
     async def beam_search(
         self,

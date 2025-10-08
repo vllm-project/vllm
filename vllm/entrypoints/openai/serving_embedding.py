@@ -10,7 +10,6 @@ import torch
 from fastapi import Request
 from typing_extensions import assert_never, override
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
@@ -42,7 +41,6 @@ from vllm.outputs import (
 )
 from vllm.pooling_params import PoolingParams
 from vllm.utils import chunk_list
-from vllm.v1.engine.processor import Processor
 
 logger = init_logger(__name__)
 
@@ -598,8 +596,6 @@ class OpenAIServingEmbedding(EmbeddingMixin):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
-        processor: Processor,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -610,8 +606,6 @@ class OpenAIServingEmbedding(EmbeddingMixin):
     ) -> None:
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
-            processor=processor,
             models=models,
             request_logger=request_logger,
             log_error_stack=log_error_stack,

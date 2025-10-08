@@ -7,7 +7,6 @@ from typing import Any, Optional, Union
 
 from fastapi import Request
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
@@ -39,7 +38,6 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import make_async, merge_async_iterators
-from vllm.v1.engine.processor import Processor
 
 logger = init_logger(__name__)
 
@@ -48,8 +46,6 @@ class ServingScores(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
-        processor: Processor,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -57,8 +53,6 @@ class ServingScores(OpenAIServing):
     ) -> None:
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
-            processor=processor,
             models=models,
             request_logger=request_logger,
             log_error_stack=log_error_stack,
