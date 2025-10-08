@@ -50,7 +50,7 @@ def _create_vllm_config(
 
 class TestCudagraphDispatcher:
     @pytest.mark.parametrize(
-        "case_id,cudagraph_mode_str,compilation_level",
+        "case_id,cudagraph_mode_str,compilation_mode",
         [
             # Test case 0: Full CG for mixed batches, no separate routine
             (0, "FULL", CompilationMode.NO_COMPILATION),
@@ -62,11 +62,11 @@ class TestCudagraphDispatcher:
             (3, "PIECEWISE", CompilationMode.VLLM_COMPILE),
         ],
     )
-    def test_dispatcher(self, cudagraph_mode_str, compilation_level):
+    def test_dispatcher(self, cudagraph_mode_str, compilation_mode):
         # Setup dispatcher
         comp_config = CompilationConfig(
             cudagraph_mode=cudagraph_mode_str,
-            level=compilation_level,
+            mode=compilation_mode,
             cudagraph_capture_sizes=[1, 8],
         )
 
@@ -242,7 +242,7 @@ class TestCudagraphIntegration:
     def setup_method(self):
         # only FULL mode for non-uniform batches
         self.comp_config = CompilationConfig(
-            level=CompilationMode.VLLM_COMPILE,
+            mode=CompilationMode.VLLM_COMPILE,
             cudagraph_mode="FULL",
             cudagraph_capture_sizes=[10, 20],
         )

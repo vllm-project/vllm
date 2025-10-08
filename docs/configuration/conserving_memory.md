@@ -63,7 +63,7 @@ You can adjust `compilation_config` to achieve a better balance between inferenc
     llm = LLM(
         model="meta-llama/Llama-3.1-8B-Instruct",
         compilation_config=CompilationConfig(
-            level=CompilationMode.VLLM_COMPILE,
+            mode=CompilationMode.VLLM_COMPILE,
             # By default, it goes up to max_num_seqs
             cudagraph_capture_sizes=[1, 2, 4, 8, 16],
         ),

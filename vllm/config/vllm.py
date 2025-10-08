@@ -85,16 +85,16 @@ class VllmConfig:
     """`torch.compile` and cudagraph capture configuration for the model.
 
     As a shorthand, `-O<n>` can be used to directly specify the compilation
-    level `n`: `-O3` is equivalent to `-O.level=3` (same as `-O='{"level":3}'`).
+    mode `n`: `-O3` is equivalent to `-O.mode=3` (same as `-O='{"mode":3}'`).
     Currently, -O <n> and -O=<n> are supported as well but this will likely be
     removed in favor of clearer -O<n> syntax in the future.
 
-    NOTE: level 0 is the default level without any optimization. level 1 and 2
-    are for internal testing only. level 3 is the recommended level for
+    NOTE: mode 0 is the default mode without any optimization. mode 1 and 2
+    are for internal testing only. mode 3 is the recommended mode for
     production, also default in V1.
 
     You can specify the full compilation config like so:
-    `{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
+    `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
@@ -305,8 +305,8 @@ class VllmConfig:
                 "precision for chunked prefill triton kernels."
             )
 
-        # If the user does not explicitly set a compilation level, then
-        # we use the default level. The default level depends on other
+        # If the user does not explicitly set a compilation mode, then
+        # we use the default mode. The default mode depends on other
         # settings (see the below code).
         if self.compilation_config.mode is None:
             if envs.VLLM_USE_V1:
@@ -319,8 +319,8 @@ class VllmConfig:
                     self.compilation_config.mode = CompilationMode.NO_COMPILATION
 
             else:
-                # NB: Passing both --enforce-eager and a compilation level
-                # in V0 means the compilation level wins out.
+                # NB: Passing both --enforce-eager and a compilation mode
+                # in V0 means the compilation mode wins out.
                 self.compilation_config.mode = CompilationMode.NO_COMPILATION
         else:
             assert self.compilation_config.mode >= CompilationMode.NO_COMPILATION
@@ -509,7 +509,7 @@ class VllmConfig:
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
                 assert self.compilation_config.mode == CompilationMode.VLLM_COMPILE, (
-                    "Compilation level should be CompilationMode.VLLM_COMPILE "
+                    "Compilation mode should be CompilationMode.VLLM_COMPILE "
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )

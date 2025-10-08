@@ -202,7 +202,7 @@ def test_multi_graph_piecewise_compile(use_inductor_graph_partition: bool):
     # vllmcompile compile
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationMode.VLLM_COMPILE,
+            mode=CompilationMode.VLLM_COMPILE,
             use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
@@ -251,7 +251,7 @@ def test_multi_graph_piecewise_compile(use_inductor_graph_partition: bool):
     # no compile or cudagraph
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationMode.NO_COMPILATION,
+            mode=CompilationMode.NO_COMPILATION,
         )
     )
     cudagraph_runtime_mode = CUDAGraphMode.NONE
@@ -280,7 +280,7 @@ def test_multi_graph_piecewise_compile(use_inductor_graph_partition: bool):
     # piecewise compile without CUDA graph
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationMode.VLLM_COMPILE,
+            mode=CompilationMode.VLLM_COMPILE,
             use_cudagraph=False,
             splitting_ops=["silly::attention"],
             use_inductor_graph_partition=use_inductor_graph_partition,

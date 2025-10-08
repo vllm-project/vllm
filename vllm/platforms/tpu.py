@@ -122,10 +122,10 @@ class TpuPlatform(Platform):
             cache_config.block_size = cast(BlockSize, 16)
         compilation_config = vllm_config.compilation_config
 
-        # TPU only supports DYNAMO_TRACE_ONCE compilation level
+        # TPU only supports DYNAMO_TRACE_ONCE compilation mode
         if compilation_config.mode != CompilationMode.DYNAMO_TRACE_ONCE:
             logger.info(
-                "[TPU] Forcing DYNAMO_TRACE_ONCE compilation level, and\
+                "[TPU] Forcing DYNAMO_TRACE_ONCE compilation mode, and\
                 disabling cudagraph."
             )
             compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE

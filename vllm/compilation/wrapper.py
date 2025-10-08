@@ -32,7 +32,7 @@ class TorchCompileWrapperWithCustomDispatcher:
     """
 
     def __init__(
-        self, compiled_callable: Callable | None = None, compilation_level: int = 0
+        self, compiled_callable: Callable | None = None, compilation_mode: int = 0
     ):
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
@@ -73,7 +73,7 @@ class TorchCompileWrapperWithCustomDispatcher:
         # subclasses can use this to switch between the custom dispatcher
         # and the default Dynamo guard mechanism.
         self.use_custom_dispatcher: bool = (
-            compilation_level >= CompilationMode.DYNAMO_TRACE_ONCE
+            compilation_mode >= CompilationMode.DYNAMO_TRACE_ONCE
         )
 
     def aot_compile(self, *args, **kwargs):
@@ -86,7 +86,7 @@ class TorchCompileWrapperWithCustomDispatcher:
         return self.compiled_callable.aot_compile((args, kwargs))
 
     def __call__(self, *args, **kwargs):
-        """Implement the dispatch logic here, beyond the torch.compile level.
+        """Implement the dispatch logic here, beyond the torch.compile mode.
         NOTE: this function can have additional arguments beyond the forward
          method, for directly dispatching to the compiled code.
         """

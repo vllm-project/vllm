@@ -20,7 +20,7 @@ class MyWrapper(TorchCompileWrapperWithCustomDispatcher):
         self.model = model
         compiled_callable = torch.compile(self.forward, backend="eager")
         super().__init__(
-            compiled_callable, compilation_level=CompilationMode.DYNAMO_TRACE_ONCE
+            compiled_callable, compilation_mode=CompilationMode.DYNAMO_TRACE_ONCE
         )
 
     def forward(self, x: torch.Tensor, cache: torch.Tensor | None = None):

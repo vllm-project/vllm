@@ -21,7 +21,7 @@ class TestSetting:
 
 
 # we cannot afford testing the full Cartesian product
-# of all models and all levels
+# of all models and all modes
 @pytest.mark.parametrize(
     "test_setting",
     [
@@ -142,7 +142,7 @@ def test_compile_correctness(
             all_envs.clear()
             all_args.clear()
 
-        for level in [
+        for mode in [
             CompilationMode.NO_COMPILATION,
             CompilationMode.STOCK_TORCH_COMPILE,
             CompilationMode.DYNAMO_TRACE_ONCE,

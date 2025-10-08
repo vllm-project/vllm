@@ -99,7 +99,7 @@ def test_stock_torch_compile(vllm_runner, monkeypatch):
         # loading the model causes compilation (if enabled) to happen
         vllm_runner(
             "facebook/opt-125m",
-            compilation_config={"level": 1},
+            compilation_config={"mode": 1},
             gpu_memory_utilization=0.4,
         ) as _,
     ):
@@ -116,7 +116,7 @@ def test_no_compilation(vllm_runner, monkeypatch):
         # loading the model causes compilation (if enabled) to happen
         vllm_runner(
             "facebook/opt-125m",
-            compilation_config={"level": 0},
+            compilation_config={"mode": 0},
             gpu_memory_utilization=0.4,
         ) as _,
     ):

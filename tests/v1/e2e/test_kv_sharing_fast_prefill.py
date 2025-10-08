@@ -75,7 +75,7 @@ def test_kv_sharing_fast_prefill(
         # This allows vLLM compilation backend to handle allocating and
         # managing buffers for cudagraph
         cudagraph_copy_inputs=True,
-        level=CompilationMode.VLLM_COMPILE
+        mode=CompilationMode.VLLM_COMPILE
         if not enforce_eager
         else CompilationMode.NO_COMPILATION,
     )
