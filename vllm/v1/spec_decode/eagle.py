@@ -1195,14 +1195,3 @@ def compute_probs_and_sample_next_token(
             next_token_ids,
         )
     return next_token_ids, probs
-
-
-def update_batch_descriptor(cudagraph_args: CudaGraphArgs, new_num_tokens: int) -> None:
-    """The cudagraph padding can change the num_tokens, so the batch descriptor
-    should be updated. The cudagraph_args is modified in place."""
-    old: Optional[BatchDescriptor] = cudagraph_args["batch_descriptor"]
-    if old is not None:
-        new = BatchDescriptor(
-            num_tokens=new_num_tokens, uniform_decode=old.uniform_decode
-        )
-        cudagraph_args["batch_descriptor"] = new
