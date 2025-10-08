@@ -1252,10 +1252,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))
     ),
     # Controls whether to use TRT-LLM ragged DeepSeek prefill
-    "VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL":
-    lambda: bool(int(
-        os.getenv("VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL", "0"))),
-
+    "VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL": lambda: bool(
+        int(os.getenv("VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL", "0"))
+    ),
     # If set to 1/True, use the TRTLLM attention backend in flashinfer.
     # If set to 0/False, use the default attention backend in flashinfer.
     # If not set, auto-detect the attention backend in flashinfer.
