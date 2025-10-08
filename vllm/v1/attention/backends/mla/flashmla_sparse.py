@@ -55,7 +55,7 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHMLA_SPARSE_VLLM_V1"
+        return "FLASHMLA_SPARSE"
 
     @staticmethod
     def get_metadata_cls() -> type[AttentionMetadata]:
