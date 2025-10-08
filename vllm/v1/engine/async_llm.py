@@ -507,6 +507,8 @@ class AsyncLLM(EngineClient):
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
+                            # FIXME: This doesn't work when the processor in AsyncLLM
+                            # is not used
                             mm_cache_stats=self.processor.stat_cache(),
                         )
             except Exception as e:
