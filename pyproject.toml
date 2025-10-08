@@ -89,6 +89,7 @@ ignore = [
     "UP027",
     "UP035",
     "UP038",
+    "UP045",
 ]
 
 [tool.ruff.format]
