@@ -61,7 +61,7 @@ class TpuPlatform(Platform):
         has_sink,
         use_sparse,
     ) -> str:
-        from vllm.attention.backends.registry import _Backend
+        from vllm.attention.backends.registry import _Backend, backend_to_class_str
 
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on TPU.")
@@ -71,7 +71,7 @@ class TpuPlatform(Platform):
         if not use_v1:
             raise ValueError("TPU backend only supports V1.")
         logger.info("Using Pallas V1 backend.")
-        return "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
+        return backend_to_class_str(_Backend.PALLAS)
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
