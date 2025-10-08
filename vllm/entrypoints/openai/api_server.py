@@ -119,6 +119,7 @@ from vllm.utils import (
     set_ulimit,
 )
 from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.processor import Processor
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -1625,8 +1626,7 @@ async def init_app_state(
     model_config = vllm_config.model_config
 
     supported_tasks = await engine_client.get_supported_tasks()
-
-    logger.info("Supported_tasks: %s", supported_tasks)
+    logger.info("Supported tasks: %s", supported_tasks)
 
     resolved_chat_template = load_chat_template(args.chat_template)
     if resolved_chat_template is not None:
@@ -1686,6 +1686,10 @@ async def init_app_state(
         else:
             lora_modules += default_mm_lora_paths
 
+    vllm_config = await engine_client.get_vllm_config()
+    tokenizer = await engine_client.get_tokenizer()
+    processor = Processor(vllm_config, tokenizer)
+
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
         model_config=model_config,
@@ -1696,7 +1700,8 @@ async def init_app_state(
     state.openai_serving_responses = (
         OpenAIServingResponses(
             engine_client,
-            model_config,
+            vllm_config,
+            processor,
             state.openai_serving_models,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
@@ -1717,7 +1722,8 @@ async def init_app_state(
     state.openai_serving_chat = (
         OpenAIServingChat(
             engine_client,
-            model_config,
+            vllm_config,
+            processor,
             state.openai_serving_models,
             args.response_role,
             request_logger=request_logger,
@@ -1740,7 +1746,8 @@ async def init_app_state(
     state.openai_serving_completion = (
         OpenAIServingCompletion(
             engine_client,
-            model_config,
+            vllm_config,
+            processor,
             state.openai_serving_models,
             request_logger=request_logger,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
@@ -1755,6 +1762,7 @@ async def init_app_state(
         OpenAIServingPooling(
             engine_client,
             vllm_config,
+            processor,
             state.openai_serving_models,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
@@ -1768,7 +1776,8 @@ async def init_app_state(
     state.openai_serving_embedding = (
         OpenAIServingEmbedding(
             engine_client,
-            model_config,
+            vllm_config,
+            processor,
             state.openai_serving_models,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
@@ -1782,7 +1791,8 @@ async def init_app_state(
     state.openai_serving_classification = (
         ServingClassification(
             engine_client,
-            model_config,
+            vllm_config,
+            processor,
             state.openai_serving_models,
             request_logger=request_logger,
             log_error_stack=args.log_error_stack,
@@ -1793,7 +1803,8 @@ async def init_app_state(
     state.openai_serving_scores = (
         ServingScores(
             engine_client,
-            model_config,
+            vllm_config,
+            processor,
             state.openai_serving_models,
             request_logger=request_logger,
             log_error_stack=args.log_error_stack,
@@ -1803,7 +1814,8 @@ async def init_app_state(
     )
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
-        model_config,
+        vllm_config,
+        processor,
         state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
@@ -1814,7 +1826,8 @@ async def init_app_state(
     state.openai_serving_transcription = (
         OpenAIServingTranscription(
             engine_client,
-            model_config,
+            vllm_config,
+            processor,
             state.openai_serving_models,
             request_logger=request_logger,
             log_error_stack=args.log_error_stack,
@@ -1825,7 +1838,8 @@ async def init_app_state(
     state.openai_serving_translation = (
         OpenAIServingTranslation(
             engine_client,
-            model_config,
+            vllm_config,
+            processor,
             state.openai_serving_models,
             request_logger=request_logger,
             log_error_stack=args.log_error_stack,

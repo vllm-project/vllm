@@ -73,6 +73,7 @@ from vllm.transformers_utils.tokenizers import (
     validate_request_params,
 )
 from vllm.utils import as_list
+from vllm.v1.engine.processor import Processor
 
 logger = init_logger(__name__)
 
@@ -82,6 +83,7 @@ class OpenAIServingChat(OpenAIServing):
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
+        processor: Processor,
         models: OpenAIServingModels,
         response_role: str,
         *,
@@ -102,6 +104,7 @@ class OpenAIServingChat(OpenAIServing):
         super().__init__(
             engine_client=engine_client,
             model_config=model_config,
+            processor=processor,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,

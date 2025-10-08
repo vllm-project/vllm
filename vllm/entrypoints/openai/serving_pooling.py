@@ -36,6 +36,7 @@ from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.utils import merge_async_iterators
+from vllm.v1.engine.processor import Processor
 
 logger = init_logger(__name__)
 
@@ -61,6 +62,7 @@ class OpenAIServingPooling(OpenAIServing):
         self,
         engine_client: EngineClient,
         vllm_config: VllmConfig,
+        processor: Processor,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -72,6 +74,7 @@ class OpenAIServingPooling(OpenAIServing):
         super().__init__(
             engine_client=engine_client,
             model_config=vllm_config.model_config,
+            processor=processor,
             models=models,
             request_logger=request_logger,
             log_error_stack=log_error_stack,

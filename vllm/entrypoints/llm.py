@@ -335,11 +335,11 @@ class LLM:
         self.request_counter = Counter()
         self.default_sampling_params: Union[dict[str, Any], None] = None
 
-        supported_tasks = self.llm_engine.get_supported_tasks()  # type: ignore
-
-        logger.info("Supported_tasks: %s", supported_tasks)
+        supported_tasks = self.llm_engine.get_supported_tasks()
+        logger.info("Supported tasks: %s", supported_tasks)
 
         self.supported_tasks = supported_tasks
+        self.processor = self._init_processor()
 
         # Load the Input/Output processor plugin if any
         io_processor_plugin = self.llm_engine.model_config.io_processor_plugin
@@ -364,13 +364,10 @@ class LLM:
         else:
             self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
-    def _get_processor(self) -> Processor:
-        if not hasattr(self, "_processor"):
-            vllm_config = self.llm_engine.vllm_config
-            tokenizer = self.llm_engine.get_tokenizer()
-            self._processor = Processor(vllm_config, tokenizer)
-
-        return self._processor
+    def _init_processor(self) -> Processor:
+        vllm_config = self.llm_engine.vllm_config
+        tokenizer = self.llm_engine.get_tokenizer()
+        return Processor(vllm_config, tokenizer)
 
     def get_default_sampling_params(self) -> SamplingParams:
         if self.default_sampling_params is None:
@@ -1659,8 +1656,7 @@ class LLM:
             tokenization_kwargs,
         )
 
-        processor = self._get_processor()
-        engine_request = processor.process_inputs(
+        engine_request = self.processor.process_inputs(
             request_id,
             engine_prompt,
             params,

@@ -34,6 +34,7 @@ from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingM
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser, random_uuid
+from vllm.v1.engine.processor import Processor
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -350,6 +351,10 @@ async def run_batch(
     supported_tasks = await engine_client.get_supported_tasks()
     logger.info("Supported_tasks: %s", supported_tasks)
 
+    vllm_config = await engine_client.get_vllm_config()
+    tokenizer = await engine_client.get_tokenizer()
+    processor = Processor(vllm_config, tokenizer)
+
     # Create the openai serving objects.
     openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
@@ -361,6 +366,7 @@ async def run_batch(
         OpenAIServingChat(
             engine_client,
             model_config,
+            processor,
             openai_serving_models,
             args.response_role,
             request_logger=request_logger,
@@ -375,6 +381,7 @@ async def run_batch(
         OpenAIServingEmbedding(
             engine_client,
             model_config,
+            processor,
             openai_serving_models,
             request_logger=request_logger,
             chat_template=None,
@@ -393,6 +400,7 @@ async def run_batch(
         ServingScores(
             engine_client,
             model_config,
+            processor,
             openai_serving_models,
             request_logger=request_logger,
         )

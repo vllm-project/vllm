@@ -24,6 +24,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.speech_to_text import OpenAISpeechToText
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.v1.engine.processor import Processor
 
 logger = init_logger(__name__)
 
@@ -35,6 +36,7 @@ class OpenAIServingTranscription(OpenAISpeechToText):
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
+        processor: Processor,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -44,6 +46,7 @@ class OpenAIServingTranscription(OpenAISpeechToText):
         super().__init__(
             engine_client=engine_client,
             model_config=model_config,
+            processor=processor,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
@@ -96,6 +99,7 @@ class OpenAIServingTranslation(OpenAISpeechToText):
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
+        processor: Processor,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -105,6 +109,7 @@ class OpenAIServingTranslation(OpenAISpeechToText):
         super().__init__(
             engine_client=engine_client,
             model_config=model_config,
+            processor=processor,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,

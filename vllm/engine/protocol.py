@@ -10,7 +10,6 @@ from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
-from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
@@ -95,9 +94,6 @@ class EngineClient(ABC):
     async def get_tokenizer(self) -> AnyTokenizer:
         """Get the tokenizer"""
         ...
-
-    async def get_io_processor(self) -> IOProcessor:
-        raise NotImplementedError
 
     @abstractmethod
     async def is_tracing_enabled(self) -> bool: ...

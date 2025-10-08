@@ -247,6 +247,7 @@ class OpenAIServing:
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
+        processor: Processor,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -259,6 +260,7 @@ class OpenAIServing:
         self.engine_client = engine_client
         self.model_config = model_config
         self.max_model_len = model_config.max_model_len
+        self.processor = processor
 
         self.models = models
 
@@ -274,14 +276,6 @@ class OpenAIServing:
         self._async_tokenizer_pool: dict[AnyTokenizer, AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
 
-    async def _get_processor(self) -> Processor:
-        if not hasattr(self, "_processor"):
-            vllm_config = await self.engine_client.get_vllm_config()
-            tokenizer = await self.engine_client.get_tokenizer()
-            self._processor = Processor(vllm_config, tokenizer)
-
-        return self._processor
-
     async def beam_search(
         self,
         prompt: PromptType,
@@ -296,8 +290,8 @@ class OpenAIServing:
         length_penalty = params.length_penalty
         include_stop_str_in_output = params.include_stop_str_in_output
 
-        processor = await self._get_processor()
-        tokenizer = processor.tokenizer()
+        processor = self.processor
+        tokenizer = processor.tokenizer
         eos_token_id = tokenizer.eos_token_id
 
         if is_explicit_encoder_decoder_prompt(prompt):
@@ -456,7 +450,7 @@ class OpenAIServing:
         )
 
     async def reset_mm_cache(self) -> None:
-        (await self._get_processor()).clear_cache()
+        self.processor.clear_cache()
         await self.engine_client.reset_mm_cache()
 
     def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:
@@ -1122,8 +1116,7 @@ class OpenAIServing:
             self.max_model_len, params.truncate_prompt_tokens, tokenization_kwargs
         )
 
-        processor = await self._get_processor()
-        engine_request = processor.process_inputs(
+        engine_request = self.processor.process_inputs(
             request_id,
             engine_prompt,
             params,

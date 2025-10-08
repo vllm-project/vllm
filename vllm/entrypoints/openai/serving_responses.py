@@ -101,6 +101,7 @@ from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
+from vllm.v1.engine.processor import Processor
 
 logger = init_logger(__name__)
 
@@ -110,6 +111,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
+        processor: Processor,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -128,6 +130,7 @@ class OpenAIServingResponses(OpenAIServing):
         super().__init__(
             engine_client=engine_client,
             model_config=model_config,
+            processor=processor,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
