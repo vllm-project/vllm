@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+PIDS=()
+
 ###############################################################################
 # Configuration -- override via env before running
 ###############################################################################
@@ -17,7 +19,7 @@ GPU_E="${GPU_E:-2}"
 GPU_P="${GPU_P:-2}"
 GPU_D="${GPU_D:-3}"
 
-EC_SHARED_STORAGE_PATH="${SHARED_STORAGE_PATH:-/tmp/}"
+EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/tmp/}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
 
 NUM_PROMPTS="${NUM_PROMPTS:100}"    # number of prompts to send in benchmark
@@ -165,8 +167,7 @@ python benchmark_serving.py \
   --seed              0 \
   --endpoint          /v1/chat/completions \
   --num-prompts       $NUM_PROMPTS \
-  --port              $PROXY_PORT \
-  --port $PROXY_PORT
+  --port              $PROXY_PORT
 ###############################################################################
 
 # cleanup
