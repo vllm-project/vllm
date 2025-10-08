@@ -184,6 +184,7 @@ ba = "ba"
 
 [tool.typos.type.py.extend-words]
 ba = "ba"
+nd = "nd"
 
 [tool.typos.type.cpp]
 extend-glob = ["*.cu"]
