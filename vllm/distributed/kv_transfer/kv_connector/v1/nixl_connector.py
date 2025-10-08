@@ -822,19 +822,19 @@ class NixlConnectorWorker:
             fut.add_done_callback(done_callback)
 
         # check handshake success before proceeding with request
-        def request_ready(_f: Future[Any], entry=(req_id, meta)):
+        def request_ready(f: Future[Any], entry=(req_id, meta)):
             try:
                 # check if handshake succeeded
-                _f.result()
+                f.result()
                 self._ready_requests.put(entry)
             except Exception:
                 # handshake failed - mark blocks as invalid
-                logger.error(
+                logger.exception(
                     "Handshake failed for request %s, marking blocks as invalid", req_id
                 )
-                req_meta = self._recving_metadata.get(req_id)
-                if req_meta:
+                if req_meta := self._recving_metadata.get(req_id):
                     self._invalid_block_ids.update(req_meta.local_block_ids)
+                self._recving_transfers[req_id] = []
 
         fut.add_done_callback(request_ready)
 
@@ -1341,8 +1341,7 @@ class NixlConnectorWorker:
                         xfer_state,
                     )
                     # mark all blocks for this request as invalid
-                    meta = self._recving_metadata.get(req_id)
-                    if meta:
+                    if meta := self._recving_metadata.pop(req_id, None):
                         self._invalid_block_ids.update(meta.local_block_ids)
                     self._recving_metadata.pop(req_id, None)
                     self.nixl_wrapper.release_xfer_handle(handle)
@@ -1446,17 +1445,16 @@ class NixlConnectorWorker:
             agent_name = self._remote_agents[dst_engine_id][remote_rank]
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
-            except nixlExceptions as e:
-                logger.warning(
-                    "NIXL send_notif failed for request %s: %s. "
+            except nixlExceptions:
+                logger.exception(
+                    "NIXL send_notif failed for request %s: "
                     "P worker blocks will be freed after timeout. "
                     "This may indicate network issues.",
                     request_id,
-                    e,
                 )
-                # TODO(weaton): We may consider further action here,
-                # but requests should eventually timeout on P side.
                 self.xfer_stats.record_failed_notification()
+            if request_id not in self._recving_transfers:
+                self._recving_transfers[request_id] = []
             return
 
         # Partial prefix cache hit: just read uncomputed blocks.
@@ -1534,21 +1532,20 @@ class NixlConnectorWorker:
 
             # Use handle to check completion in future step().
             self._recving_transfers[request_id].append((handle, time.perf_counter()))
-        except nixlExceptions as e:
-            logger.error(
-                "NIXL transfer setup/initiation failed for request %s: %s. "
+        except nixlExceptions:
+            logger.exception(
+                "NIXL transfer setup/initiation failed for request %s. "
                 "Marking blocks as invalid.",
                 request_id,
-                e,
             )
             # mark all blocks for this request as invalid
-            meta = self._recving_metadata.get(request_id)
-            if meta:
+            if meta := self._recving_metadata.get(request_id):
                 self._invalid_block_ids.update(meta.local_block_ids)
             self.xfer_stats.record_failed_transfer()
-            # release handle if it was created before failure
             if handle is not None:
                 self.nixl_wrapper.release_xfer_handle(handle)
+            if request_id not in self._recving_transfers:
+                self._recving_transfers[request_id] = []
 
     def _get_block_descs_ids(
         self, engine_id: str, block_ids: list[int], layer_idx: int | None = None
@@ -1613,8 +1610,8 @@ class NixlConnectorWorker:
         This is called by the scheduler to identify blocks that need
         to be retried after a NIXL transfer failure.
         """
-        invalid_blocks = self._invalid_block_ids.copy()
-        self._invalid_block_ids.clear()
+        invalid_blocks = self._invalid_block_ids
+        self._invalid_block_ids = set()
         return invalid_blocks
 
     def shutdown(self):
