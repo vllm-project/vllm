@@ -41,7 +41,6 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionResponse,
     ClassificationRequest,
     ClassificationResponse,
-    CompletionOutput,
     CompletionRequest,
     CompletionResponse,
     DetokenizeRequest,
@@ -82,7 +81,7 @@ from vllm.multimodal import (  # noqa: F401 - Required to resolve Pydantic error
     MultiModalDataDict,
     MultiModalUUIDDict,
 )
-from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tracing import (
