@@ -1086,7 +1086,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
-##### H200 test #####
+##### H100 test #####
 - label: Distrubted Tests PoC (H100) # optional
   gpu: h100
   optional: true
