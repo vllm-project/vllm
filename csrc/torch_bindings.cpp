@@ -188,6 +188,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("apply_repetition_penalties_", torch::kCUDA,
            &apply_repetition_penalties_);
 
+  // Optimized top-k per row operation
+  ops.def(
+      "top_k_per_row(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
+      "Tensor! indices, Tensor! values, int numRows, int stride0, "
+      "int stride1) -> ()");
+  ops.impl("top_k_per_row", torch::kCUDA, &top_k_per_row);
+
   // Layernorm-quant
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
@@ -397,7 +404,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       " Tensor a_blockscale, Tensor b_blockscales, Tensor alphas,"
       " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()",
       {stride_tag});
-  ops.impl("cutlass_fp4_group_mm", torch::kCUDA, &cutlass_fp4_group_mm);
+  // conditionally compiled so impl registration is in source file
 
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization, as well as bias
@@ -720,6 +727,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "int quant_block_size, str kv_cache_dtype) -> ()");
   cache_ops.impl("indexer_k_quant_and_cache", torch::kCUDA,
                  &indexer_k_quant_and_cache);
+
+  cache_ops.def(
+      "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, Tensor! "
+      "dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
+  cache_ops.impl("cp_gather_indexer_k_quant_cache", torch::kCUDA,
+                 &cp_gather_indexer_k_quant_cache);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
