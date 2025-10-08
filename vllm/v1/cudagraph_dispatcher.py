@@ -49,7 +49,7 @@ class CudagraphDispatcher:
             "and attention should be in splitting_ops or "
             "inductor splitting should be used. "
             f"cudagraph_mode={self.cudagraph_mode}, "
-            f"compilation_level={self.compilation_config.level}, "
+            f"compilation_level={self.compilation_config.mode}, "
             f"splitting_ops={self.compilation_config.splitting_ops}"
         )
 

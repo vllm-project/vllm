@@ -82,8 +82,7 @@ class EagleProposer:
 
         self.use_cuda_graph = (
             not current_platform.is_xpu()
-            and self.vllm_config.compilation_config.level
-            == CompilationMode.VLLM_COMPILE
+            and self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and not self.vllm_config.model_config.enforce_eager
             and not self.speculative_config.enforce_eager
         )

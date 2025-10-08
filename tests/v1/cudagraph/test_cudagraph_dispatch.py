@@ -42,7 +42,7 @@ def _create_vllm_config(
     mock_config.parallel_config = ParallelConfig()
 
     # Mimic the behavior of VllmConfig.__post_init__()
-    if compilation_config.level == CompilationMode.VLLM_COMPILE:
+    if compilation_config.mode == CompilationMode.VLLM_COMPILE:
         compilation_config.set_splitting_ops_for_v1()
 
     return mock_config
