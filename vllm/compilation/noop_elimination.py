@@ -151,16 +151,16 @@ class NoOpEliminationPass(VllmInductorPass):
         and its value is a SymInt. That value is equal to the
         input dimension.
         """
-        # Cannot compare SymInt and int directly
-        # Doing SymInt == int evaluates to an expression like torch.SymBool(Eq(s0, 42))
-        # which might unwantedly evaluate to True (we don't want to specialize on s0)
-        if type(dim) is not type(i_dim):
-            return False
         # Case 1 and 2
-        if dim == i_dim or (infer_minus_one and dim == -1):
-            return True
+        if isinstance(i_dim, int) and isinstance(dim, int):
+            return dim == i_dim or (infer_minus_one and dim == -1)
         # Case 3
-        return isinstance(dim, torch.fx.Node) and dim.meta["val"] == i_dim
+        return (
+            isinstance(dim, torch.fx.Node)
+            and isinstance(dim.meta["val"], SymInt)
+            and isinstance(i_dim, SymInt)
+            and dim.meta["val"] == i_dim
+        )
 
     def all_dims_equivalent(
         self,
