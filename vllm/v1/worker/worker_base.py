@@ -296,11 +296,26 @@ class WorkerWrapperBase:
                     extended_calls,
                 )
 
-        self.mm_receiver_cache = worker_receiver_cache_from_config(
-            self.vllm_config,
-            MULTIMODAL_REGISTRY,
-            kwargs.pop("shared_worker_lock"),
-        )
+        shared_worker_lock = kwargs.pop("shared_worker_lock", None)
+        if shared_worker_lock is None:
+            msg = (
+                "Missing `shared_worker_lock` argument from executor. "
+                "This argument is needed for mm_processor_cache_type='shm'."
+            )
+
+            mm_config = self.vllm_config.model_config.multimodal_config
+            if mm_config and mm_config.mm_processor_cache_type == "shm":
+                raise ValueError(msg)
+            else:
+                logger.warning_once(msg)
+
+            self.mm_receiver_cache = None
+        else:
+            self.mm_receiver_cache = worker_receiver_cache_from_config(
+                self.vllm_config,
+                MULTIMODAL_REGISTRY,
+                shared_worker_lock,
+            )
 
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
