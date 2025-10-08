@@ -228,6 +228,8 @@ def video_to_pixel_values(
     max_num_tiles: int = 1,
     use_thumbnail: bool,
 ) -> torch.Tensor:
+    assert max_num_tiles == 1, "Video modality always uses one tile"
+
     # Convert each frame to a single resized tile tensor consistent
     # with image path
     frames_tensors: list[torch.Tensor] = []
@@ -530,7 +532,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         text, video_inputs = self._preprocess_video(
             text=text,
             videos=videos,
-            max_num_tiles=max_num_tiles,
+            max_num_tiles=1,
             dynamic_image_size=dynamic_image_size,
         )
 
