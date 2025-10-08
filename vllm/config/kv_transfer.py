@@ -29,7 +29,7 @@ class KVTransferConfig:
     engine_id: Optional[str] = None
     """The engine id for KV transfers."""
 
-    kv_buffer_device: Optional[KVBufferDevice] = Field(default="cuda")
+    kv_buffer_device: Optional[KVBufferDevice] = "cuda"
     """The device used by kv connector to buffer the KV cache. Choices are 
     'cuda' and 'cpu'."""
 
@@ -89,7 +89,7 @@ class KVTransferConfig:
         return engine_id
 
     @model_validator(mode="after")
-    def _validate_kv_role_is_set_if_kv_connector_is_set(self: Self) -> Self:
+    def _validate_kv_transfer_config(self) -> Self:
         if self.kv_connector is not None and self.kv_role is None:
             raise ValueError(
                 "Please specify kv_role when kv_connector "
