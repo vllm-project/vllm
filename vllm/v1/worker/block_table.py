@@ -14,7 +14,6 @@ logger = init_logger(__name__)
 
 
 class BlockTable:
-
     def __init__(
         self,
         block_size: int,
@@ -56,26 +55,30 @@ class BlockTable:
             if block_size % kernel_block_size != 0:
                 raise ValueError(
                     f"kernel_block_size {kernel_block_size} must divide "
-                    f"kv_manager_block_size size {block_size} evenly")
+                    f"kv_manager_block_size size {block_size} evenly"
+                )
 
             self.block_size = kernel_block_size
-            self.blocks_per_phys_block = (block_size // kernel_block_size)
+            self.blocks_per_phys_block = block_size // kernel_block_size
             self.use_hybrid_blocks = True
 
-        self.max_num_blocks_per_req = max_num_blocks_per_req * \
-                                        self.blocks_per_phys_block
+        self.max_num_blocks_per_req = (
+            max_num_blocks_per_req * self.blocks_per_phys_block
+        )
 
-        self.block_table = self._make_buffer(self.max_num_reqs,
-                                             self.max_num_blocks_per_req,
-                                             dtype=torch.int32)
+        self.block_table = self._make_buffer(
+            self.max_num_reqs, self.max_num_blocks_per_req, dtype=torch.int32
+        )
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
 
-        self.slot_mapping = self._make_buffer(self.max_num_batched_tokens,
-                                              dtype=torch.int64)
+        self.slot_mapping = self._make_buffer(
+            self.max_num_batched_tokens, dtype=torch.int64
+        )
 
         if self.use_hybrid_blocks:
             self._kernel_block_arange = np.arange(
-                0, self.blocks_per_phys_block).reshape(1, -1)
+                0, self.blocks_per_phys_block
+            ).reshape(1, -1)
         else:
             self._kernel_block_arange = None
 
@@ -101,7 +104,7 @@ class BlockTable:
         num_blocks = len(block_ids)
         start = self.num_blocks_per_row[row_idx]
         self.num_blocks_per_row[row_idx] += num_blocks
-        self.block_table.np[row_idx, start:start + num_blocks] = block_ids
+        self.block_table.np[row_idx, start : start + num_blocks] = block_ids
 
     def add_row(self, block_ids: list[int], row_idx: int) -> None:
         self.num_blocks_per_row[row_idx] = 0
@@ -118,8 +121,9 @@ class BlockTable:
         self.num_blocks_per_row[src_tgt] = self.num_blocks_per_row[tgt_src]
         self.block_table.np[src_tgt] = self.block_table.np[tgt_src]
 
-    def compute_slot_mapping(self, req_indices: np.ndarray,
-                             positions: np.ndarray) -> None:
+    def compute_slot_mapping(
+        self, req_indices: np.ndarray, positions: np.ndarray
+    ) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
         # where K is the max_num_blocks_per_req and the block size is 2.
@@ -134,8 +138,10 @@ class BlockTable:
             # Use a "virtual block" which equals to world_size * block_size
             # for block_table_indices calculation.
             virtual_block_size = self.block_size * self.dcp_world_size
-            block_table_indices = (req_indices * self.max_num_blocks_per_req +
-                                   positions // virtual_block_size)
+            block_table_indices = (
+                req_indices * self.max_num_blocks_per_req
+                + positions // virtual_block_size
+            )
 
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             # Use virtual_block_size for mask calculation, which marks local
@@ -147,17 +153,21 @@ class BlockTable:
             # Calculate slot_mapping
             slot_mapping = block_numbers * self.block_size + block_offsets
             # Write final slots, use -1 for not-local
-            self.slot_mapping.np[:req_indices.shape[0]] = np.where(
-                mask, slot_mapping, -1)
+            self.slot_mapping.np[: req_indices.shape[0]] = np.where(
+                mask, slot_mapping, -1
+            )
         else:
-            block_table_indices = (req_indices * self.max_num_blocks_per_req +
-                                   positions // self.block_size)
+            block_table_indices = (
+                req_indices * self.max_num_blocks_per_req + positions // self.block_size
+            )
 
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             block_offsets = positions % self.block_size
-            np.add(block_numbers * self.block_size,
-                   block_offsets,
-                   out=self.slot_mapping.np[:req_indices.shape[0]])
+            np.add(
+                block_numbers * self.block_size,
+                block_offsets,
+                out=self.slot_mapping.np[: req_indices.shape[0]],
+            )
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
@@ -169,8 +179,7 @@ class BlockTable:
         self.block_table.gpu.fill_(0)
         self.block_table.cpu.fill_(0)
 
-    def _map_to_kernel_blocks(self,
-                              kv_manager_block_ids: np.ndarray) -> np.ndarray:
+    def _map_to_kernel_blocks(self, kv_manager_block_ids: np.ndarray) -> np.ndarray:
         """Convert kv_manager_block_id IDs to kernel block IDs.
 
         Example:
@@ -188,8 +197,10 @@ class BlockTable:
         if not self.use_hybrid_blocks:
             return kv_manager_block_ids
 
-        kernel_block_ids = kv_manager_block_ids.reshape(
-            -1, 1) * self.blocks_per_phys_block + self._kernel_block_arange
+        kernel_block_ids = (
+            kv_manager_block_ids.reshape(-1, 1) * self.blocks_per_phys_block
+            + self._kernel_block_arange
+        )
 
         return kernel_block_ids.reshape(-1)
 
@@ -205,26 +216,28 @@ class BlockTable:
         """Returns the numpy array of the block table."""
         return self.block_table.np
 
-    def _make_buffer(self, *size: Union[int, torch.SymInt],
-                     dtype: torch.dtype) -> CpuGpuBuffer:
-        return CpuGpuBuffer(*size,
-                            dtype=dtype,
-                            device=self.device,
-                            pin_memory=self.pin_memory)
+    def _make_buffer(
+        self, *size: Union[int, torch.SymInt], dtype: torch.dtype
+    ) -> CpuGpuBuffer:
+        return CpuGpuBuffer(
+            *size, dtype=dtype, device=self.device, pin_memory=self.pin_memory
+        )
 
 
 class MultiGroupBlockTable:
     """The BlockTables for each KV cache group."""
 
-    def __init__(self,
-                 max_num_reqs: int,
-                 max_model_len: int,
-                 max_num_batched_tokens: int,
-                 pin_memory: bool,
-                 device: torch.device,
-                 block_sizes: list[int],
-                 kernel_block_sizes: list[int],
-                 num_speculative_tokens: int = 0) -> None:
+    def __init__(
+        self,
+        max_num_reqs: int,
+        max_model_len: int,
+        max_num_batched_tokens: int,
+        pin_memory: bool,
+        device: torch.device,
+        block_sizes: list[int],
+        kernel_block_sizes: list[int],
+        num_speculative_tokens: int = 0,
+    ) -> None:
         # Note(hc): each dcp rank only store
         # (max_model_len//dcp_world_size) tokens in kvcache,
         # so the block_size which used for calc max_num_blocks_per_req
@@ -238,19 +251,26 @@ class MultiGroupBlockTable:
         if len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
                 f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
-                f"must match block_sizes length ({len(block_sizes)})")
+                f"must match block_sizes length ({len(block_sizes)})"
+            )
 
         self.block_tables = [
             BlockTable(
-                block_size, max_num_reqs,
-                max(cdiv(max_model_len, block_size * dcp_world_size),
-                    1 + num_speculative_tokens), max_num_batched_tokens,
-                pin_memory, device, kernel_block_size) for block_size,
-            kernel_block_size in zip(block_sizes, kernel_block_sizes)
+                block_size,
+                max_num_reqs,
+                max(
+                    cdiv(max_model_len, block_size * dcp_world_size),
+                    1 + num_speculative_tokens,
+                ),
+                max_num_batched_tokens,
+                pin_memory,
+                device,
+                kernel_block_size,
+            )
+            for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes)
         ]
 
-    def append_row(self, block_ids: tuple[list[int], ...],
-                   row_idx: int) -> None:
+    def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
         for i, block_table in enumerate(self.block_tables):
             block_table.append_row(block_ids[i], row_idx)
 
@@ -266,8 +286,9 @@ class MultiGroupBlockTable:
         for block_table in self.block_tables:
             block_table.swap_row(src, tgt)
 
-    def compute_slot_mapping(self, req_indices: np.ndarray,
-                             positions: np.ndarray) -> None:
+    def compute_slot_mapping(
+        self, req_indices: np.ndarray, positions: np.ndarray
+    ) -> None:
         for block_table in self.block_tables:
             block_table.compute_slot_mapping(req_indices, positions)
 

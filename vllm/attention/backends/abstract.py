@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import (Generic, List, Optional, Protocol, Tuple, Type, TypeVar,
-                    Union)
+from typing import Generic, List, Optional, Protocol, Tuple, Type, TypeVar, Union
 
 import torch
 
@@ -15,6 +14,7 @@ class AttentionType:
     Attention type.
     Use string to be compatible with `torch.compile`.
     """
+
     DECODER = "decoder"
     """Decoder attention between previous layer Q/K/V."""
     ENCODER = "encoder"
@@ -34,6 +34,7 @@ class MultipleOf:
 
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
+
     # For some attention backends, we allocate an output tensor before
     # calling the custom op. When piecewise cudagraph is enabled, this
     # makes sure the output tensor is allocated inside the cudagraph.
@@ -103,7 +104,6 @@ T = TypeVar("T", bound=AttentionMetadata)
 
 
 class AttentionLayer(Protocol):
-
     _q_scale: torch.Tensor
     _k_scale: torch.Tensor
     _v_scale: torch.Tensor
@@ -119,12 +119,10 @@ class AttentionLayer(Protocol):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
-        ...
+    ) -> torch.Tensor: ...
 
 
 class AttentionImpl(ABC, Generic[T]):
-
     # Whether the attention impl can return the softmax lse for decode.
     # Some features like decode context parallelism require the softmax lse.
     can_return_lse_for_decode: bool = False
@@ -141,14 +139,16 @@ class AttentionImpl(ABC, Generic[T]):
         self = super().__new__(cls)
         try:
             from vllm.distributed.parallel_state import get_dcp_group
+
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-        self.need_to_return_lse_for_decode = self.dcp_world_size > 1 \
-            and self.can_return_lse_for_decode
+        self.need_to_return_lse_for_decode = (
+            self.dcp_world_size > 1 and self.can_return_lse_for_decode
+        )
         return self
 
     @abstractmethod
@@ -200,7 +200,6 @@ class AttentionImpl(ABC, Generic[T]):
 
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
-
     @abstractmethod
     def forward(
         self,
