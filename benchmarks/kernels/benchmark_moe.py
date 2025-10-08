@@ -575,6 +575,7 @@ def main(args: argparse.Namespace):
     if args.model_prefix:
         config = getattr(config, args.model_prefix)
 
+    text_config = None
     if config.architectures[0] == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
@@ -600,6 +601,11 @@ def main(args: argparse.Namespace):
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
+    elif config.architectures[0] == "Qwen3VLMoeForConditionalGeneration":
+        text_config = config.get_text_config()
+        E = text_config.num_experts
+        topk = text_config.num_experts_per_tok
+        intermediate_size = text_config.moe_intermediate_size
     elif config.architectures[0] in ("HunYuanMoEV1ForCausalLM"):
         E = config.num_experts
         topk = config.moe_topk[0]
@@ -619,7 +625,7 @@ def main(args: argparse.Namespace):
     else:
         ensure_divisibility(intermediate_size, args.tp_size, "intermediate_size")
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-    hidden_size = config.hidden_size
+    hidden_size = text_config.hidden_size if text_config else config.hidden_size
     dtype = torch.float16 if current_platform.is_rocm() else config.torch_dtype
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
     use_int8_w8a16 = args.dtype == "int8_w8a16"
