@@ -4007,14 +4007,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logger.warning(msg)
 
         # Check that we can support the requested cudagraph mode
-        if cudagraph_mode.has_full_cudagraphs() \
-            and min_cg_support == AttentionCGSupport.NEVER:
+        if (
+            cudagraph_mode.has_full_cudagraphs()
+            and min_cg_support == AttentionCGSupport.NEVER
+        ):
             raise ValueError(
                 f"CUDAGraphMode.{cudagraph_mode.name} is not "
                 f"supported with {min_cg_builder_name} backend ("
                 f"support: {min_cg_support}). "
                 f"Please use a compatible attention backend or set "
-                f"cudagraph_mode=NONE.")
+                f"cudagraph_mode=NONE."
+            )
 
         # Trigger cudagraph dispatching keys initialization here (after
         # initializing attn backends).
