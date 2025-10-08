@@ -1453,8 +1453,7 @@ class NixlConnectorWorker:
                     request_id,
                 )
                 self.xfer_stats.record_failed_notification()
-            if request_id not in self._recving_transfers:
-                self._recving_transfers[request_id] = []
+            self._recving_transfers[request_id] = []
             return
 
         # Partial prefix cache hit: just read uncomputed blocks.
@@ -1544,8 +1543,7 @@ class NixlConnectorWorker:
             self.xfer_stats.record_failed_transfer()
             if handle is not None:
                 self.nixl_wrapper.release_xfer_handle(handle)
-            if request_id not in self._recving_transfers:
-                self._recving_transfers[request_id] = []
+            self._recving_transfers[request_id] = []
 
     def _get_block_descs_ids(
         self, engine_id: str, block_ids: list[int], layer_idx: int | None = None
