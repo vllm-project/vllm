@@ -19,18 +19,18 @@ from vllm.beam_search import (
 )
 from vllm.config import (
     CompilationConfig,
-    ModelDType,
+    PoolerConfig,
     StructuredOutputsConfig,
-    TokenizerMode,
     is_init_field,
 )
-from vllm.engine.arg_utils import (
+from vllm.config.model import (
     ConvertOption,
-    EngineArgs,
     HfOverrides,
-    PoolerConfig,
+    ModelDType,
     RunnerOption,
+    TokenizerMode,
 )
+from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
