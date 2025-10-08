@@ -128,11 +128,10 @@ if is_rocm_aiter_linear_enabled():
         fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
-    BLOCK_LINEAR_OP = torch.ops.vllm.apply_w8a8_block_fp8_linear.default
+    AITER_BLOCK_QUANT_OP = torch.ops.vllm.rocm_aiter_per1x128_quant.default
     FUSED_SILU_MUL_QUANT_OP = (
         torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
     )
-    AITER_BLOCK_LINEAR_OP = torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale.default
 
     class AiterSiluMulFp8BlockQuantPattern(ActivationQuantPattern):
         def __init__(self):
@@ -142,47 +141,23 @@ if is_rocm_aiter_linear_enabled():
             def pattern(
                 input: torch.Tensor,
                 result_silu_mul: torch.Tensor,
-                linear_weight: torch.Tensor,
-                linear_weight_scale: torch.Tensor,
             ):
                 at1 = auto_functionalized(
                     SILU_MUL_OP, result=result_silu_mul, input=input
                 )
-                at2 = BLOCK_LINEAR_OP(
-                    input=at1[1],
-                    weight=linear_weight,
-                    block_size=[128, 128],
-                    weight_scale=linear_weight_scale,
-                    input_scale=None,
-                    bias=None,
-                    cutlass_block_fp8_supported=False,
-                    use_aiter_and_is_supported=True,
-                )
-                return at2
+                at2 = AITER_BLOCK_QUANT_OP(x=at1[1])
+                return at2[0], at2[1]
 
             def replacement(
                 input: torch.Tensor,
                 result_silu_mul: torch.Tensor,
-                linear_weight: torch.Tensor,
-                linear_weight_scale: torch.Tensor,
             ):
-                at1 = FUSED_SILU_MUL_QUANT_OP(x=input)
-                at2 = AITER_BLOCK_LINEAR_OP(
-                    A=at1[0],
-                    B=linear_weight,
-                    As=at1[1],
-                    Bs=linear_weight_scale,
-                    block_size=[128, 128],
-                    output_dtype=input.dtype,
-                )
-                return at2
+                at = FUSED_SILU_MUL_QUANT_OP(x=input)
+                return at[0], at[1]
 
             inputs = [
                 empty_bf16(5, 4),  # input
                 empty_bf16(5, 4),  # result_silu_mul
-                # linear_weight
-                torch.empty((2, 5), device="cuda", dtype=FP8_DTYPE),
-                empty_fp32(1, 1),  # linear_weight_scale
             ]
 
             register_replacement(pattern, replacement, inputs, fwd_only, pm_pass)

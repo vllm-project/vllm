@@ -110,6 +110,27 @@ if current_platform.is_rocm():
 
         aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
 
+        def aiter_per1x128_quant_impl(
+            x: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            return aiter_per1x128_quant(x, quant_dtype=rocm_aiter.dtypes.fp8)
+
+        def aiter_per1x128_quant_fake(
+            x: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            shape, device = x.shape, x.device
+            y = torch.empty(shape, dtype=rocm_aiter.dtypes.fp8, device=device)
+            scale = torch.empty(
+                (*shape[:-1], shape[-1] // 128), dtype=torch.float32, device=device
+            )
+            return y, scale
+
+        direct_register_custom_op(
+            op_name="rocm_aiter_per1x128_quant",
+            op_func=aiter_per1x128_quant_impl,
+            fake_impl=aiter_per1x128_quant_fake,
+        )
+
 
 # TODO we should be able to change the type of block_size to GroupShape
 # after we resolve GroupShape compilation issue
@@ -351,8 +372,8 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
         assert self.act_quant_group_shape == GroupShape(1, 128)
-        q_input, input_scale = aiter_per1x128_quant(
-            input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8
+        q_input, input_scale = torch.ops.vllm.rocm_aiter_per1x128_quant(
+            input_2d.contiguous()
         )
         return torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale(
             q_input,
