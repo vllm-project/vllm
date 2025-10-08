@@ -99,20 +99,20 @@ def batched_moe_align_block_size(
     moe_align_batch_size for the batched case.
 
     Parameters:
-        - max_tokens_per_batch (int): Number of tokens in each batch (both
-            valid and invalid).
-        - block_size (int): block_size to align the data to.
-        - expert_num_tokens (torch.Tensor): expert_num_tokens[i], indicates
-            the number of valid tokens in batch i.
+    - max_tokens_per_batch (int): Number of tokens in each batch (both
+        valid and invalid).
+    - block_size (int): block_size to align the data to.
+    - expert_num_tokens (torch.Tensor): expert_num_tokens[i], indicates
+        the number of valid tokens in batch i.
 
     Returns:
-        - sorted_token_ids (torch.Tensor): Torch tensor of size
+    - sorted_token_ids (torch.Tensor): Torch tensor of size
         (num_batches * max_tokens_per_batch) indicating the token indices for
         that block.
-        - expert_ids (torch.Tensor): Torch tensor of size
+    - expert_ids (torch.Tensor): Torch tensor of size
         ceil((num_batches * max_tokens_per_batch) / block_size) indicating
         what expert to use for each block.
-        - num_tokens_post_pad (torch.Tensor): Torch tensor of size 1
+    - num_tokens_post_pad (torch.Tensor): Torch tensor of size 1
         indicating the number of valid blocks with actual data to
         process. This is represented in terms of num tokens.
     Example:
