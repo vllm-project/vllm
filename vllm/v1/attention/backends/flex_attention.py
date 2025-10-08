@@ -693,7 +693,12 @@ class FlexAttentionImpl(AttentionImpl):
         self.num_kv_heads = num_kv_heads
         self.attn_type = attn_type
 
-        if attn_type not in (AttentionType.ENCODER_ONLY, AttentionType.DECODER):
+        if attn_type not in (
+            AttentionType.ENCODER_ONLY,
+            AttentionType.DECODER,
+            AttentionType.ENCODER,
+            AttentionType.ENCODER_DECODER,
+        ):
             raise NotImplementedError(
                 f"FlexAttention does not support {attn_type} attention"
             )
@@ -789,9 +794,7 @@ class FlexAttentionImpl(AttentionImpl):
             else:
                 attn_metadata.block_mask = attn_metadata.build_block_mask()
 
-        if not attn_metadata.causal:
-            assert self.attn_type == AttentionType.ENCODER_ONLY
-
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             query, key_tensor, value_tensor = map(
                 lambda x: self.view_as_4d(x).permute(0, 2, 1, 3),
                 (query, key, value),
@@ -808,7 +811,10 @@ class FlexAttentionImpl(AttentionImpl):
                 value_tensor = value_tensor[:, :, :num_actual_tokens, :]
 
         else:
-            assert self.attn_type == AttentionType.DECODER
+            assert self.attn_type in (
+                AttentionType.DECODER,
+                AttentionType.ENCODER_DECODER,
+            )
             key_cache, value_cache = kv_cache.unbind(0)
 
             torch.ops._C_cache_ops.reshape_and_cache_flash(
