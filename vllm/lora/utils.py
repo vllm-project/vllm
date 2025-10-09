@@ -216,9 +216,6 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
         if isinstance(module, (FusedMoE,)):
             supported_lora_modules.add(name.split(".")[-1])
 
-        if isinstance(module, (FusedMoE,)):
-            supported_lora_modules.add(name.split(".")[-1])
-
     return list(supported_lora_modules)
 
 
