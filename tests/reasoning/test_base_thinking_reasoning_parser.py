@@ -181,8 +181,8 @@ class TestBaseThinkingReasoningParserExtraction:
         model_output = "This is just content"
         reasoning, content = parser.extract_reasoning_content(model_output, request)
 
-        assert reasoning == "This is just content"
-        assert content is None
+        assert reasoning is None
+        assert content == "This is just content"
 
     def test_extract_reasoning_content_empty_output(self, test_tokenizer):
         """Test extraction with empty output."""
@@ -192,8 +192,8 @@ class TestBaseThinkingReasoningParserExtraction:
         model_output = ""
         reasoning, content = parser.extract_reasoning_content(model_output, request)
 
-        assert reasoning == ""
-        assert content is None
+        assert content == ""
+        assert reasoning is None
 
     def test_extract_reasoning_content_only_tokens(self, test_tokenizer):
         """Test extraction with only tokens and no content."""
@@ -372,5 +372,5 @@ class TestBaseThinkingReasoningParserEdgeCases:
         reasoning, content = run_reasoning_extraction(parser, [model_output])
 
         # Should treat as regular content since tokens don't match exactly
-        assert reasoning == ("<test:thinking>Not a real token</test:thinking>Content")
-        assert content is None
+        assert content == ("<test:thinking>Not a real token</test:thinking>Content")
+        assert reasoning is None
