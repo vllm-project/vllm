@@ -370,6 +370,7 @@ class CudnnPrefillMetadata(MLACommonPrefillMetadata):
 class MLACommonDecodeMetadata:
     block_table: torch.Tensor
     seq_lens: torch.Tensor
+    dcp_tot_seq_lens: Optional[torch.Tensor]
 
 
 D = TypeVar("D", bound=MLACommonDecodeMetadata)
@@ -682,10 +683,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        dcp_tot_seq_lens_device: Optional[torch.Tensor],
     ) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
+            dcp_tot_seq_lens=dcp_tot_seq_lens_device,
         )
 
     def build_for_cudagraph_capture(
@@ -727,6 +730,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -742,7 +746,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         # Note(hc): update seq_lens of decode reqs under DCP.
         if self.dcp_world_size > 1:
-            seq_lens[:num_decodes] = seq_lens[:num_decodes] // self.dcp_world_size + (
+            assert dcp_local_seq_lens is not None
+            dcp_local_seq_lens[:num_decodes] = seq_lens[
+                :num_decodes
+            ] // self.dcp_world_size + (
                 self.dcp_rank <= (seq_lens[:num_decodes] - 1) % self.dcp_world_size
             )
 
@@ -899,10 +906,15 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
                 seq_lens_cpu=seq_lens_cpu[:num_decodes],
-                seq_lens_device=seq_lens[:num_decodes],
+                seq_lens_device=dcp_local_seq_lens[:num_decodes]
+                if self.dcp_world_size > 1 and dcp_local_seq_lens is not None
+                else seq_lens[:num_decodes],
                 query_start_loc_cpu=query_start_loc_cpu[: num_decodes + 1],
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
+                dcp_tot_seq_lens_device=seq_lens[:num_decodes]
+                if self.dcp_world_size > 1
+                else None,
             )
 
         attn_metadata = self.metadata_cls(
