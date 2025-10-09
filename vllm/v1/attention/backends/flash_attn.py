@@ -220,6 +220,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         try:
             from vllm.distributed.parallel_state import get_dcp_group
+
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
         except AssertionError:
@@ -340,28 +341,32 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         prefix_scheduler_metadata = None
 
         if self.dcp_world_size > 1:
-            query_kv_lens_cpu = common_attn_metadata.query_start_loc_cpu[1:] \
+            query_kv_lens_cpu = (
+                common_attn_metadata.query_start_loc_cpu[1:]
                 - common_attn_metadata.query_start_loc_cpu[:-1]
+            )
             dcp_context_kv_lens_cpu = seq_lens_cpu - query_kv_lens_cpu
-            dcp_context_kv_lens_cpu = dcp_context_kv_lens_cpu \
-                // self.dcp_world_size + (self.dcp_rank \
-                <= (dcp_context_kv_lens_cpu-1) % self.dcp_world_size)
+            dcp_context_kv_lens_cpu = dcp_context_kv_lens_cpu // self.dcp_world_size + (
+                self.dcp_rank <= (dcp_context_kv_lens_cpu - 1) % self.dcp_world_size
+            )
             dcp_context_kv_lens = dcp_context_kv_lens_cpu.to(self.device)
             max_dcp_context_kv_len = dcp_context_kv_lens.max().item()
 
-            scheduler_metadata = schedule(batch_size=num_reqs,
-                                          cu_query_lens=query_start_loc,
-                                          max_query_len=max_query_len,
-                                          seqlens=dcp_context_kv_lens,
-                                          max_seq_len=max_dcp_context_kv_len,
-                                          causal=False)
+            scheduler_metadata = schedule(
+                batch_size=num_reqs,
+                cu_query_lens=query_start_loc,
+                max_query_len=max_query_len,
+                seqlens=dcp_context_kv_lens,
+                max_seq_len=max_dcp_context_kv_len,
+                causal=False,
+            )
         elif use_cascade:
-            cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
-                                                dtype=torch.int32,
-                                                device=self.device)
-            prefix_kv_lens = torch.tensor([common_prefix_len],
-                                          dtype=torch.int32,
-                                          device=self.device)
+            cu_prefix_query_lens = torch.tensor(
+                [0, num_actual_tokens], dtype=torch.int32, device=self.device
+            )
+            prefix_kv_lens = torch.tensor(
+                [common_prefix_len], dtype=torch.int32, device=self.device
+            )
             suffix_kv_lens = (seq_lens_cpu[:num_reqs] - common_prefix_len).to(
                 self.device, non_blocking=True
             )
@@ -683,60 +688,57 @@ class FlashAttentionImpl(AttentionImpl):
 
         query = query.contiguous()
         query_across_dcp = get_dcp_group().all_gather(query, dim=1)
-        context_attn_out, context_lse = \
-            flash_attn_varlen_func(
-                q=query_across_dcp,
-                k=key_cache,
-                v=value_cache,
-                out=None,
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=attn_metadata.dcp_context_kv_lens,
-                max_seqlen_k=attn_metadata.max_dcp_context_kv_len,
-                softmax_scale=self.scale,
-                causal=False,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=block_table,
-                softcap=self.logits_soft_cap,
-                return_softmax_lse=True,
-                scheduler_metadata=attn_metadata.scheduler_metadata,
-                fa_version=self.vllm_flash_attn_version,
-                q_descale=q_descale,
-                k_descale=k_descale,
-                v_descale=v_descale,
-            )
+        context_attn_out, context_lse = flash_attn_varlen_func(
+            q=query_across_dcp,
+            k=key_cache,
+            v=value_cache,
+            out=None,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=attn_metadata.dcp_context_kv_lens,
+            max_seqlen_k=attn_metadata.max_dcp_context_kv_len,
+            softmax_scale=self.scale,
+            causal=False,
+            alibi_slopes=self.alibi_slopes,
+            window_size=self.sliding_window,
+            block_table=block_table,
+            softcap=self.logits_soft_cap,
+            return_softmax_lse=True,
+            scheduler_metadata=attn_metadata.scheduler_metadata,
+            fa_version=self.vllm_flash_attn_version,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+        )
         # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
-        context_attn_out_cor, context_lse_cor = \
-            cp_lse_ag_out_rs(
-                context_attn_out,
-                context_lse.transpose(0, 1),
-                get_dcp_group(),
-                return_lse=True
-            )
+        context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
+            context_attn_out,
+            context_lse.transpose(0, 1),
+            get_dcp_group(),
+            return_lse=True,
+        )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
-        query_attn_out, query_lse = \
-            flash_attn_varlen_func(
-                q=query,
-                k=key,
-                v=value,
-                out=None,
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                cu_seqlens_k=cu_seqlens_q,
-                max_seqlen_k=max_seqlen_q,
-                softmax_scale=self.scale,
-                causal=attn_metadata.causal,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                softcap=self.logits_soft_cap,
-                return_softmax_lse=True,
-                fa_version=self.vllm_flash_attn_version,
-                q_descale=q_descale,
-                k_descale=k_descale,
-                v_descale=v_descale,
-            )
+        query_attn_out, query_lse = flash_attn_varlen_func(
+            q=query,
+            k=key,
+            v=value,
+            out=None,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            cu_seqlens_k=cu_seqlens_q,
+            max_seqlen_k=max_seqlen_q,
+            softmax_scale=self.scale,
+            causal=attn_metadata.causal,
+            alibi_slopes=self.alibi_slopes,
+            window_size=self.sliding_window,
+            softcap=self.logits_soft_cap,
+            return_softmax_lse=True,
+            fa_version=self.vllm_flash_attn_version,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+        )
         assert context_attn_out_cor.shape == query_attn_out.shape
         assert context_lse_cor.shape == query_lse.shape
         merge_attn_states(
