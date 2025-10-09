@@ -13,7 +13,7 @@ protobuf # Required by LlamaTokenizer.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
 aiohttp
 openai >= 1.99.1  # For Responses API with reasoning content
-pydantic >= 2.11.7
+pydantic >= 2.12.0
 prometheus_client >= 0.18.0
 pillow  # Required for image processing
 prometheus-fastapi-instrumentator >= 7.0.0
