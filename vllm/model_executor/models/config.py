@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from copy import deepcopy
+from math import lcm
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
@@ -398,11 +399,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # TODO(tdoublep): this constraint can be relaxed fairly
             # easily by changing the way we layout chunks in the
             # mamba2 kernels.
-
-            from math import gcd
-
-            def lcm(a, b):
-                return a * b // gcd(a, b)
 
             base_chunk_size = model_config.get_mamba_chunk_size()
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
