@@ -349,15 +349,28 @@ class OpenAIServingResponses(OpenAIServing):
                     else await self._get_trace_headers(raw_request.headers)
                 )
 
+                mcp_tools = {
+                    tool.server_label: tool
+                    for tool in request.tools
+                    if tool.type == "mcp"
+                }
                 context: ConversationContext
                 if self.use_harmony:
                     if request.stream:
                         context = StreamingHarmonyContext(
-                            messages, available_tools, self.tool_server
+                            messages,
+                            available_tools,
+                            self.tool_server,
+                            request.request_id,
+                            mcp_tools,
                         )
                     else:
                         context = HarmonyContext(
-                            messages, available_tools, self.tool_server
+                            messages,
+                            available_tools,
+                            self.tool_server,
+                            request.request_id,
+                            mcp_tools,
                         )
                 else:
                     context = SimpleContext()

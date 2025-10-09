@@ -95,16 +95,6 @@ class ConversationContext(ABC):
         pass
 
     @abstractmethod
-    async def init_tool_sessions(
-        self,
-        tool_server: ToolServer | None,
-        exit_stack: AsyncExitStack,
-        request_id: str,
-        mcp_tools: dict[str, Mcp],
-    ) -> None:
-        pass
-
-    @abstractmethod
     async def __aenter__(self):
         pass
 
@@ -145,15 +135,6 @@ class SimpleContext(ConversationContext):
     def render_for_completion(self) -> list[int]:
         raise NotImplementedError("Should not be called.")
 
-    async def init_tool_sessions(
-        self,
-        tool_server: ToolServer | None,
-        exit_stack: AsyncExitStack,
-        request_id: str,
-        mcp_tools: dict[str, Mcp],
-    ) -> None:
-        pass
-
     async def __aenter__(self):
         return self
 
@@ -170,6 +151,8 @@ class HarmonyContext(ConversationContext):
         messages: list,
         available_tools: list[str],
         tool_server: Optional[ToolServer],
+        request_id: str,
+        mcp_tools: dict[str, Mcp],
     ):
         self._messages = messages
         self.finish_reason: str | None = None
@@ -177,6 +160,8 @@ class HarmonyContext(ConversationContext):
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
         self._tool_server = tool_server
+        self.request_id = request_id
+        self.mcp_tools = mcp_tools
         self._async_exit_stack: Optional[AsyncExitStack] = None
         self._reference_count = 0
         self._reference_count_lock = asyncio.Lock()
@@ -328,18 +313,6 @@ class HarmonyContext(ConversationContext):
             or recipient.startswith("container.")
         )
 
-    async def _get_tool_session(self, tool_name: str) -> Union["ClientSession", Tool]:
-        if tool_name not in self._tool_sessions and self._tool_server is not None:
-            assert self._async_exit_stack is not None, (
-                "Async exit stack not set. Please report this issue."
-            )
-            self._tool_sessions[
-                tool_name
-            ] = await self._async_exit_stack.enter_async_context(
-                self._tool_server.new_session(tool_name)
-            )
-        return self._tool_sessions[tool_name]
-
     async def call_tool(self) -> list[Message]:
         if not self.messages:
             return []
@@ -362,6 +335,24 @@ class HarmonyContext(ConversationContext):
 
     def render_for_completion(self) -> list[int]:
         return render_for_completion(self.messages)
+
+    async def _get_tool_session(self, tool_name: str) -> Union["ClientSession", Tool]:
+        if tool_name not in self._tool_sessions and self._tool_server is not None:
+            assert self._async_exit_stack is not None, (
+                "Async exit stack not set. Please report this issue."
+            )
+            tool_type = _map_tool_name_to_tool_type(tool_name)
+            headers = (
+                self.mcp_tools[tool_type].headers
+                if tool_type in self.mcp_tools
+                else None
+            )
+            self._tool_sessions[
+                tool_name
+            ] = await self._async_exit_stack.enter_async_context(
+                self._tool_server.new_session(tool_name, self.request_id, headers)
+            )
+        return self._tool_sessions[tool_name]
 
     async def call_search_tool(
         self, tool_session: Union["ClientSession", Tool], last_msg: Message
@@ -407,26 +398,6 @@ class HarmonyContext(ConversationContext):
                 recipient=Role.ASSISTANT,
             )
         ]
-
-    async def init_tool_sessions(
-        self,
-        tool_server: ToolServer | None,
-        exit_stack: AsyncExitStack,
-        request_id: str,
-        mcp_tools: dict[str, Mcp],
-    ):
-        if tool_server:
-            for tool_name in self.available_tools:
-                if tool_name not in self._tool_sessions:
-                    tool_type = _map_tool_name_to_tool_type(tool_name)
-                    headers = (
-                        mcp_tools[tool_type].headers if tool_type in mcp_tools else None
-                    )
-                    tool_session = await exit_stack.enter_async_context(
-                        tool_server.new_session(tool_name, request_id, headers)
-                    )
-                    self._tool_sessions[tool_name] = tool_session
-                    exit_stack.push_async_exit(self.cleanup_session)
 
     async def call_container_tool(
         self, tool_session: Union["ClientSession", Tool], last_msg: Message
@@ -489,10 +460,11 @@ class HarmonyContext(ConversationContext):
             if self._async_exit_stack is None:
                 assert self._reference_count == 1, (
                     "Reference count of exit stack should be "
+                    "1 when initializing exit stack."
                 )
-                "1 when initializing exit stack."
                 self._async_exit_stack = AsyncExitStack()
                 await self._async_exit_stack.__aenter__()
+                self._async_exit_stack.push_async_callback(self.cleanup_session)
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
