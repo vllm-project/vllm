@@ -1304,7 +1304,7 @@ class Qwen3VLForConditionalGeneration(
                     f"Got ndim: {mm_input.ndim} "
                     f"(shape={mm_input.shape})"
                 )
-            return torch.concat(list(mm_input))
+            return mm_input.reshape(-1, mm_input.shape[-1])
         else:
             return torch.concat(mm_input)
 
