@@ -8,13 +8,13 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.logger import init_logger
-from vllm.reasoning import BaseThinkingReasoningParser, ReasoningParserManager
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 logger = init_logger(__name__)
 
 
 @ReasoningParserManager.register_module("glm45")
-class Glm4MoeModelReasoningParser(BaseThinkingReasoningParser):
+class Glm4MoeModelReasoningParser(ReasoningParser):
     """
     Reasoning parser for the Glm4MoeModel model.
 
@@ -25,15 +25,6 @@ class Glm4MoeModelReasoningParser(BaseThinkingReasoningParser):
     from the model's output.
     """
 
-    @property
-    def start_token(self) -> str:
-        """The token that starts reasoning content."""
-        return "<think>"
-
-    @property
-    def end_token(self) -> str:
-        """The token that ends reasoning content."""
-        return "</think>"
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
