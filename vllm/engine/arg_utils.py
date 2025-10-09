@@ -27,47 +27,46 @@ import huggingface_hub
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
+from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm.config import (
-    BlockSize,
     CacheConfig,
-    CacheDType,
     CompilationConfig,
     ConfigType,
-    ConvertOption,
-    DetailedTraceModules,
-    Device,
     DeviceConfig,
-    DistributedExecutorBackend,
     EPLBConfig,
-    HfOverrides,
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
-    LogprobsMode,
     LoRAConfig,
-    MambaDType,
-    MMEncoderTPMode,
     ModelConfig,
-    ModelDType,
+    MultiModalConfig,
     ObservabilityConfig,
     ParallelConfig,
     PoolerConfig,
-    PrefixCachingHashAlgo,
-    RunnerOption,
     SchedulerConfig,
-    SchedulerPolicy,
     SpeculativeConfig,
     StructuredOutputsConfig,
-    TaskOption,
-    TokenizerMode,
     VllmConfig,
     get_attr_docs,
 )
-from vllm.config.multimodal import MMCacheType, MultiModalConfig
-from vllm.config.parallel import ExpertPlacementStrategy
+from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
+from vllm.config.device import Device
+from vllm.config.model import (
+    ConvertOption,
+    HfOverrides,
+    LogprobsMode,
+    ModelDType,
+    RunnerOption,
+    TaskOption,
+    TokenizerMode,
+)
+from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
+from vllm.config.observability import DetailedTraceModules
+from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
+from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -211,6 +210,13 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Get the default value of the field
         if field.default is not MISSING:
             default = field.default
+            # Handle pydantic.Field defaults
+            if isinstance(default, FieldInfo):
+                default = (
+                    default.default
+                    if default.default_factory is None
+                    else default.default_factory()
+                )
         elif field.default_factory is not MISSING:
             default = field.default_factory()
 
@@ -1321,7 +1327,13 @@ class EngineArgs:
             import ray
 
             ray_runtime_env = ray.get_runtime_context().runtime_env
-            logger.info("Using ray runtime env: %s", ray_runtime_env)
+            # Avoid logging sensitive environment variables
+            sanitized_env = ray_runtime_env.to_dict() if ray_runtime_env else {}
+            if "env_vars" in sanitized_env:
+                sanitized_env["env_vars"] = {
+                    k: "***" for k in sanitized_env["env_vars"]
+                }
+            logger.info("Using ray runtime env (env vars redacted): %s", sanitized_env)
 
         # Get the current placement group if Ray is initialized and
         # we are in a Ray actor. If so, then the placement group will be
