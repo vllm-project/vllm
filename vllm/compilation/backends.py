@@ -34,7 +34,7 @@ logger = init_logger(__name__)
 
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
-    if compilation_config.backend == "inductor":
+    if compilation_config.use_inductor:
         # Use standalone compile only if requested, version is new enough,
         # and the symbol actually exists in this PyTorch build.
         if (
@@ -48,10 +48,6 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
             logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
     else:
-        assert compilation_config.backend == "eager", (
-            "Custom backends not supported with CompilationLevel.PIECEWISE"
-        )
-
         logger.debug("Using EagerAdaptor")
         return EagerAdaptor()
 
