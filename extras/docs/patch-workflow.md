@@ -63,20 +63,24 @@ and keeps the Windows-mounted repository free of unexpected modifications.
 
 1. Make sure your Windows host has the latest NVIDIA driver with WSL2 support and that `wsl --update`
    has run recently.
-2. Initialize your Podman machine with the Fedora 42 image (`podman machine init --image-path fedora-42`)
+1. Initialize your Podman machine with the Fedora 42 image (`podman machine init --image-path fedora-42`)
    if you have not done so already.
-3. From the repository root, run the helper script:
+1. From the repository root, run the helper script:
 
   ```powershell
   pwsh extras/tools/enable-podman-wsl-gpu.ps1
   ```
 
    Add `-MachineName <name>` if you use a non-default Podman machine or `-SkipReboot` when you prefer
-   to restart it manually later.
+  to restart it manually later. Add `-Reset` to wipe and reinitialize the Podman machine (equivalent to
+  `podman machine reset --force`) when you want to start from a clean slate.
 
-4. After the script restarts the machine, launch `extras/podman/run.ps1 -GPUCheck` (or `run.sh --gpu-check`)
+1. After the script restarts the machine, launch `extras/podman/run.ps1 -GPUCheck` (or `run.sh --gpu-check`)
    to confirm that `/dev/dxg` and the CUDA libraries are visible from inside the dev container.
 
 If the helper still reports missing `/dev/dxg`, open Podman Desktop, ensure GPU sharing is enabled for
-the selected machine, and rerun the script. When running on other distributions, replicate the script’s
-steps manually: install `nvidia-container-toolkit`, generate a CDI spec via `nvidia-ctk cdi generate`.
+the selected machine, and rerun the script. Consider switching the machine to rootful mode
+(`podman machine set --rootful --now <name>`) so CDI-generated devices can be mounted. When running on
+other distributions, replicate the script’s steps manually: install `nvidia-container-toolkit`, run
+`nvidia-ctk runtime configure --runtime=/usr/bin/crun --set-as-default`, and generate a CDI spec via
+`nvidia-ctk cdi generate`.

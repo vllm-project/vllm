@@ -25,7 +25,8 @@
 [CmdletBinding()]
 param(
     [string]$MachineName = "podman-machine-default",
-    [switch]$SkipReboot
+    [switch]$SkipReboot,
+    [switch]$Reset
 )
 
 Set-StrictMode -Version Latest
@@ -59,6 +60,17 @@ function Start-MachineIfNeeded {
     if ($state.Trim() -ne 'Running') {
         Write-Host "🟢 Starting Podman machine '$MachineName'..." -ForegroundColor Green
         Invoke-Podman @('machine','start',$MachineName) | Out-Null
+function Reset-PodmanMachine {
+    if (-not $Reset.IsPresent) {
+        return
+    }
+    Write-Host "♻️ Resetting Podman machine '$MachineName'..." -ForegroundColor Yellow
+    try {
+        Invoke-Podman @('machine','stop',$MachineName) | Out-Null
+    } catch {}
+    Invoke-Podman @('machine','reset',$MachineName,'--force') | Out-Null
+}
+
     }
 }
 
@@ -100,6 +112,7 @@ if command -v nvidia-ctk >/dev/null 2>&1; then
     sudo mkdir -p /etc/cdi /var/cdi
     sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml --mode=wsl || true
     sudo cp -f /etc/cdi/nvidia.yaml /var/cdi/nvidia.yaml || true
+    sudo nvidia-ctk runtime configure --runtime=/usr/bin/crun --set-as-default || true
 fi
 
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -136,6 +149,7 @@ function Test-PodmanGpu {
 
 Confirm-PodmanCli
 Confirm-PodmanMachine
+Reset-PodmanMachine
 Start-MachineIfNeeded
 $osInfo = Get-OsRelease
 $machineId = if ($osInfo.ContainsKey('ID') -and $osInfo['ID']) { $osInfo['ID'] } elseif ($osInfo.ContainsKey('ID_LIKE') -and $osInfo['ID_LIKE']) { $osInfo['ID_LIKE'] } elseif ($osInfo.ContainsKey('PRETTY_NAME') -and $osInfo['PRETTY_NAME']) { $osInfo['PRETTY_NAME'] } else { 'unknown' }
