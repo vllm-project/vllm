@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import json
 from collections.abc import Sequence
 from typing import Optional, Union
 
@@ -132,7 +132,6 @@ class GptOssReasoningParser(ReasoningParser):
     # This function prepares the structural tag to format reasoning output
     def prepare_structured_tag(self, original_tag: Optional[str],
                                tool_server: Optional[ToolServer]) -> str:
-        import json
 
         if original_tag is None:
             if tool_server is None:
