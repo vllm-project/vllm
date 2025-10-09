@@ -950,11 +950,11 @@ class FlexAttentionImpl(AttentionImpl):
             else:
                 attn_metadata.block_mask = attn_metadata.build_block_mask()
 
-        if self.attn_type == AttentionType.ENCODER and attn_metadata.causal:
+        if self.attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_DECODER, AttentionType.ENCODER_ONLY) and attn_metadata.causal:
             attn_metadata.causal = False
             attn_metadata.mask_mod = attn_metadata.get_mask_mod()
         elif (
-            self.attn_type in (AttentionType.ENCODER_DECODER, AttentionType.DECODER)
+            self.attn_type == AttentionType.DECODER
             and not attn_metadata.causal
         ):
             attn_metadata.causal = True
@@ -982,7 +982,6 @@ class FlexAttentionImpl(AttentionImpl):
                 AttentionType.DECODER,
                 AttentionType.ENCODER_DECODER,
             )
-            assert attn_metadata.causal
             key_cache, value_cache = kv_cache.unbind(0)
 
             if key is not None and value is not None:
@@ -1008,6 +1007,12 @@ class FlexAttentionImpl(AttentionImpl):
 
             query = query[:, :, :num_actual_tokens, :]
 
+            if self.attn_type == AttentionType.ENCODER_DECODER and (key_tensor.size(-2) > num_actual_tokens) or (
+                value_tensor.size(-2) > num_actual_tokens
+            ):
+                key_tensor = key_tensor[:, :, :128, :]
+                value_tensor = value_tensor[:, :, :128, :]
+
         # Doesn't work for now -> constraint violation
         # torch._dynamo.try_mark_dynamic(query, 2)
 
@@ -1029,12 +1034,9 @@ class FlexAttentionImpl(AttentionImpl):
         actual_q_len = query.size(-2)
         actual_kv_len = key_tensor.size(-2)
 
-        if self.attn_type in AttentionType.ENCODER_DECODER:
-            block_mask = attn_metadata.build_block_mask()
-        else:
-            block_mask = attn_metadata.ensure_block_mask_capacity(
-                actual_q_len, actual_kv_len
-            )
+        block_mask = attn_metadata.ensure_block_mask_capacity(
+            actual_q_len, actual_kv_len
+        )
 
         if block_mask.seq_lengths != (actual_q_len, actual_kv_len):
             block_mask = block_mask._adjust(actual_q_len, actual_kv_len)
@@ -1048,6 +1050,7 @@ class FlexAttentionImpl(AttentionImpl):
         )
 
         # Use flex_attention directly (no compilation for CUDA graph compat)
+        print(query.size(-2), key_tensor.size(-2), attn_metadata.block_mask.shape[-2], attn_metadata.block_mask.shape[-1])
         out = flex_attention_compiled(
             query,
             key_tensor,
