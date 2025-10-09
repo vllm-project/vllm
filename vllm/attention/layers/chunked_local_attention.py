@@ -22,7 +22,7 @@ from ..layer import Attention
 
 @functools.lru_cache
 def create_chunked_local_attention_backend(
-    underlying_attn_backend: AttentionBackend,
+    underlying_attn_backend: type[AttentionBackend],
     attention_chunk_size: int,
     block_size: int,
 ) -> type[AttentionBackend]:

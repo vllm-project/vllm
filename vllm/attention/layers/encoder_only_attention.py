@@ -23,7 +23,7 @@ from vllm.v1.attention.backends.utils import (
 
 @functools.lru_cache
 def create_encoder_only_attention_backend(
-    underlying_attn_backend: AttentionBackend,
+    underlying_attn_backend: type[AttentionBackend],
 ) -> type[AttentionBackend]:
     prefix = "EncoderOnlyAttention_"
     underlying_builder = underlying_attn_backend.get_builder_cls()

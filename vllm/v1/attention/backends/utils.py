@@ -713,7 +713,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
 
 def subclass_attention_backend(
     name_prefix: str,
-    attention_backend_cls: AttentionBackend,
+    attention_backend_cls: type[AttentionBackend],
     builder_cls: type[AttentionMetadataBuilder[M]],
 ) -> type[AttentionBackend]:
     """
