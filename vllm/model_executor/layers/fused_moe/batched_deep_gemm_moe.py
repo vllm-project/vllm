@@ -29,6 +29,35 @@ def silu_v1(
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
     y has shape (E, T, 2*H). The first half of the last dimension is
     silu-activated, multiplied by the second half, then quantized into FP8.
+
+    Launches (E * P * H) / (GROUP_SIZE * NUM_WARPS) thread blocks, where
+    P1 is the parallelization factor over all tokens in a single expert.
+    For example, if (E, T, H) = (9, 1024, 7168), P = 64 works well, empirically.
+
+    The first warp in the first block in the first expert will process the
+    128 elements, followed by the first 128 elements in the second token, etc.
+    In total, this warp will process (T / P1) x 128 elements.
+
+    A thread block consisting of NUM_WARPS = 4 warps will process 4 groups in parallel.
+    These warps pipeline loads via cp.async where the next item from memory is fetched
+    from the next token.
+
+
+    Shared memory layout:
+    The SiLU V1 shared memory block, consisting of 4 warps and 2 stages, has the
+    following layout:
+
+             stage0                  stage1                stage0        stage1
+    ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬───┬───┬───┬───┬───┬───┬───┬───┐
+    │gate0│gate1│gate2│gate3│gate0│gate1│gate2│gate3│up0│up1│up2│up3│up0│up1│up2│up3│
+    └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴───┴───┴───┴───┴───┴───┴───┴───┘
+
+    where every gate_i and up_i, (0 <= i < 4) consists of 128 BF16 values.
+
+    This is achieved by the first half of the threads conducting coalesced global
+    loads into the gate buffer in parallel with the 2nd half of all threads in a block
+    conducting global loads into the up buffer.
+
     Returns `(y_q, y_s)` where
     * `y_q`: FP8 tensor, shape (E, T, H), same layout as y[..., :H]
     * `y_s`: FP32 tensor, shape (E, T, H // group_size), strides (T*G, 1, T)
@@ -162,9 +191,41 @@ def persistent_masked_m_silu_mul_quant(
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
     y has shape (E, T, 2*H). The first half of the last dimension is
     silu-activated, multiplied by the second half, then quantized into FP8.
+    We launch a fixed grid of threads to accommodate CUDA graphs. Let `P2`
+    be a parallelization factor for persistent_masked_m_silu_mul_quant over the
+    hidden dimension.
+
+    Let `expert_offsets = [0] + [num_tokens.cumsum()]` and
+    `total_tokens = expert_offsets[-1]`.
+    persistent_masked_m_silu_mul_quant launches `total_tokens x P2` number of
+    thread blocks. Each thread block contains `NUM_WARPS` warps.
+
+    Every thread block needs to find it's corresponding expert by warp-parallel scanning
+    over the `expert_offsets` array.
+
+    The i-th warp in the first thread block processes
+    `[i * warp_chunk_size, (i + 1) * warp_chunk_size]` groups
+    sequentially, where `warp_chunk_size = ((H / GROUP_SIZE) / P2) / NUM_WARPS`,
+    pipelining loads and computes.
+
+    The shared memory layout for 4 warps with a 2-stage pipeline for SiLU V2
+    can is visualized like so:
+
+                         stage0                              stage1
+    ┌─────┬───┬─────┬───┬─────┬───┬─────┬───┬─────┬───┬─────┬───┬─────┬───┬─────┬───┐
+    │gate0│up0│gate1│up1│gate2│up2│gate3│up3│gate0│up0│gate1│up1│gate2│up2│gate3│up3│
+    └─────┴───┴─────┴───┴─────┴───┴─────┴───┴─────┴───┴─────┴───┴─────┴───┴─────┴───┘
+
+    with the main difference between V1 and V2 being the global load
+    stride between warps, and between half-warps. Regarding the latter stride,
+    we assign the first half warp of every warp for `gate` loads and the second
+    half-warp to `up` loads.
+
     Returns `(y_q, y_s)` where
     * `y_q`: FP8 tensor, shape (E, T, H), same layout as y[..., :H]
     * `y_s`: FP32 tensor, shape (E, T, H // group_size), strides (T*G, 1, T)
+    Let NUM_WARPS be the number of warps in a single thread block and
+    `GROUP_SIZE = 128` be the size of the quantization group.
     """
     assert y.ndim == 3, "y must be (E, T, 2*H)"
     E, T, H2 = y.shape
