@@ -106,7 +106,7 @@ class DefaultEplb(EplbPolicy):
         num_physical_experts: int,
         num_groups: int,
         num_nodes: int,
-        num_gpus: int,
+        num_ranks: int,
     ):
         """
         Parameters:
@@ -115,7 +115,7 @@ class DefaultEplb(EplbPolicy):
             num_groups: number of expert groups
             num_nodes: number of server nodes, where the intra-node network
             (e.g, NVLink) is faster
-            num_gpus: number of GPUs, must be a multiple of `num_nodes`
+            num_ranks: number of ranks, must be a multiple of `num_nodes`
 
         Returns:
             physical_to_logical_map: [num_moe_layers, num_physical_experts]
@@ -127,9 +127,9 @@ class DefaultEplb(EplbPolicy):
         group_size = num_logical_experts // num_groups
         assert num_groups % num_nodes == 0
         groups_per_node = num_groups // num_nodes
-        assert num_gpus % num_nodes == 0
-        assert num_physical_experts % num_gpus == 0
-        phy_experts_per_gpu = num_physical_experts // num_gpus
+        assert num_ranks % num_nodes == 0
+        assert num_physical_experts % num_ranks == 0
+        phy_experts_per_gpu = num_physical_experts // num_ranks
 
         def inverse(perm: torch.Tensor) -> torch.Tensor:
             inv = torch.empty_like(perm)
@@ -165,7 +165,7 @@ class DefaultEplb(EplbPolicy):
         # [num_layers * num_nodes, num_physical_experts // num_nodes]
         tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
         pack_index, rank_in_pack = self.balanced_packing(
-            tokens_per_phy, num_gpus // num_nodes)
+            tokens_per_phy, num_ranks // num_nodes)
         phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
         pphy2phy = inverse(phy2pphy)
 
