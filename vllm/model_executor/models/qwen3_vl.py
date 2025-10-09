@@ -539,7 +539,7 @@ class Qwen3_VisionTransformer(nn.Module):
             dim=0,
             dtype=grid_thw_tensor.dtype if torch.jit.is_tracing() else torch.int32,
         )
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
 
         hidden_states = hidden_states.unsqueeze(1)
         rotary_pos_emb = rotary_pos_emb.to(hidden_states.device)
