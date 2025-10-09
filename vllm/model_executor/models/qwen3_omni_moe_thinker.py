@@ -618,6 +618,10 @@ class Qwen3OmniMoeThinkerProcessingInfo(
     ):
         hf_processor = self.get_hf_processor(sampling_rate=sampling_rate)
         feature_extractor = hf_processor.feature_extractor  # type: ignore
+        # support for max 20min audio input for vllm serve
+        feature_extractor.chunk_length = 1200
+        feature_extractor.n_samples = 1200 * 16000
+        feature_extractor.nb_max_frames = 1200 * 100
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
