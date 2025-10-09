@@ -654,7 +654,9 @@ class MoriAll2AllManager(All2AllManagerBase):
         """Clean up mori resources"""
         try:
             # Clear operation handle cache
-            self._op_handles.clear()
+            with self.handle_cache._lock:
+                for _, handle in self.handle_cache._cache.items():
+                    handle.destroy()
 
             # finalize mori shared memory if it was initialized
             if self._shmem_initialized:
