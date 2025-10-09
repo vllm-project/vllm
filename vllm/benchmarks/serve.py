@@ -18,6 +18,7 @@ On the client side, run:
 
 import argparse
 import asyncio
+import contextlib
 import gc
 import importlib.util
 import json
@@ -605,17 +606,13 @@ async def benchmark(
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
-    # This can be used once the minimum Python version is 3.10 or higher,
-    # and it will simplify the code in limited_request_func.
-    #    semaphore = (asyncio.Semaphore(max_concurrency)
-    #                 if max_concurrency else contextlib.nullcontext())
-    semaphore = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    semaphore = (
+        asyncio.Semaphore(max_concurrency)
+        if max_concurrency
+        else contextlib.nullcontext()
+    )
 
     async def limited_request_func(request_func_input, session, pbar):
-        if semaphore is None:
-            return await request_func(
-                request_func_input=request_func_input, session=session, pbar=pbar
-            )
         async with semaphore:
             return await request_func(
                 request_func_input=request_func_input, session=session, pbar=pbar
