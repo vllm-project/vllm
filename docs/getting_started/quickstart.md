@@ -43,13 +43,13 @@ This guide will help you quickly get started with vLLM to perform:
 
 === "AMD ROCm"
 
-    Use pre-build docker image from [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev). 
-    vLLM with all its dependences have been installed.
+    Use a pre-built docker image from [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev), which has vLLM and all its dependencies installed.
+    
+    The `-v` flag in the `docker run` command below mounts a local directory into the container. Replace `<path/to/your/models>` with the path on your host machine to the directory containing your models. The models will then be accessible inside the container at `/app/models`.
     
     ```bash
     docker pull rocm/vllm-dev:nightly # to get the latest image
-
-    docker run -it \
+    docker run -it --rm \
     --network=host \
     --group-add=video \
     --ipc=host \
@@ -57,7 +57,8 @@ This guide will help you quickly get started with vLLM to perform:
     --security-opt seccomp=unconfined \
     --device /dev/kfd \
     --device /dev/dri \
-    -v <path/to/model>:/app/model \
+    -v <path/to/your/models>:/app/models \
+    -e HF_HOME="/app/models" \
     rocm/vllm-dev:nightly
     ```
 
