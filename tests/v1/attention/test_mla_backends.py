@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for v1 MLA backends without GPUModelRunner dependency."""
+"""Tests for v1 MLA backends without GPUModelRunner dependency.
+
+Known Issues:
+- FLASH_ATTN_MLA backend produces NaN values in test_backend_correctness[mixed_small]
+  when run after test_backend_correctness[small_prefill], but passes when run alone.
+"""
 
 from typing import Optional, Union
 
@@ -339,13 +344,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
        simulated paged KV cache.
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
     """
-    # Reset random seeds to ensure deterministic behavior across test runs
-    torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
-
-    # Clear CUDA cache to avoid reusing stale memory from previous tests
-    torch.cuda.empty_cache()
-
     batch_spec = BATCH_SPECS[batch_spec_name]
     block_size = 16
     required_blocks = sum(
