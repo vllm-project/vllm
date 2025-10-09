@@ -4,8 +4,9 @@
 import hashlib
 import os
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+
 from enum import Enum
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import torch
 from pydantic import model_validator
@@ -34,8 +35,10 @@ logger = init_logger(__name__)
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 
+
 class EPLBPolicyType(Enum):
     DEFAULT_EPLB = 0
+
 
 @config
 @dataclass
@@ -63,6 +66,7 @@ class EPLBConfig:
 
     eplb_policy_type: EPLBPolicyType = EPLBPolicyType.DEFAULT_EPLB
     """The policy type for expert parallel load balancing (EPLB)."""
+
 
 @config
 @dataclass
