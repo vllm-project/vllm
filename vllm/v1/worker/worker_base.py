@@ -107,6 +107,11 @@ class WorkerBase:
         """Initialize the KV cache with the given size in blocks."""
         raise NotImplementedError
 
+    def reset_mm_cache(self) -> None:
+        reset_fn = getattr(self.model_runner, "reset_mm_cache", None)
+        if callable(reset_fn):
+            reset_fn()
+
     def get_model(self) -> nn.Module:
         raise NotImplementedError
 
@@ -371,3 +376,6 @@ class WorkerWrapperBase:
         mm_receiver_cache = self.mm_receiver_cache
         if mm_receiver_cache is not None:
             mm_receiver_cache.clear_cache()
+
+        assert self.worker is not None
+        self.worker.reset_mm_cache()
