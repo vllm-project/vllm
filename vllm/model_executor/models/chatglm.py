@@ -3,6 +3,7 @@
 # Adapted from
 # https://github.com/zai-org/ChatGLM2-6B
 """Inference-only ChatGLM model compatible with THUDM weights."""
+
 import json
 from collections.abc import Iterable
 from itertools import islice
@@ -18,27 +19,34 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
 
 from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
-from .utils import (AutoWeightsLoader, WeightsMapper, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+)
 
 
 class GLMAttention(nn.Module):
-
     def __init__(
         self,
         config: ChatGLMConfig,
@@ -53,9 +61,11 @@ class GLMAttention(nn.Module):
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.multi_query_attention = config.multi_query_attention
-        self.total_num_kv_heads = (config.multi_query_group_num
-                                   if config.multi_query_attention else
-                                   config.num_attention_heads)
+        self.total_num_kv_heads = (
+            config.multi_query_group_num
+            if config.multi_query_attention
+            else config.num_attention_heads
+        )
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
@@ -100,13 +110,15 @@ class GLMAttention(nn.Module):
             base=10000 * rope_ratio,
             is_neox_style=is_neox_style,
         )
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn")
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
@@ -184,25 +196,27 @@ class GLMBlock(nn.Module):
     ):
         super().__init__()
         self.apply_residual_connection_post_layernorm = (
-            config.apply_residual_connection_post_layernorm)
+            config.apply_residual_connection_post_layernorm
+        )
 
         self.fp32_residual_connection = config.fp32_residual_connection
 
         layer_norm_func = RMSNorm if config.rmsnorm else LayerNorm
         # Layernorm on the input data.
-        self.input_layernorm = layer_norm_func(config.hidden_size,
-                                               eps=config.layernorm_epsilon)
+        self.input_layernorm = layer_norm_func(
+            config.hidden_size, eps=config.layernorm_epsilon
+        )
 
         # Self attention.
-        self.self_attention = GLMAttention(config,
-                                           cache_config,
-                                           quant_config,
-                                           prefix=f"{prefix}.self_attention")
+        self.self_attention = GLMAttention(
+            config, cache_config, quant_config, prefix=f"{prefix}.self_attention"
+        )
         self.hidden_dropout = config.hidden_dropout
 
         # Layernorm on the attention output
         self.post_attention_layernorm = layer_norm_func(
-            config.hidden_size, eps=config.layernorm_epsilon)
+            config.hidden_size, eps=config.layernorm_epsilon
+        )
 
         # MLP
         self.mlp = GLMMLP(config, quant_config, prefix=f"{prefix}.mlp")
@@ -262,8 +276,7 @@ class GLMTransformer(nn.Module):
         # Transformer layers.
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.num_layers,
-            lambda prefix: GLMBlock(
-                config, cache_config, quant_config, prefix=prefix),
+            lambda prefix: GLMBlock(config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -271,11 +284,12 @@ class GLMTransformer(nn.Module):
             layer_norm_func = RMSNorm if config.rmsnorm else LayerNorm
             # Final layer norm before output.
             self.final_layernorm = layer_norm_func(
-                config.hidden_size, eps=config.layernorm_epsilon)
+                config.hidden_size, eps=config.layernorm_epsilon
+            )
 
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(["hidden_states"],
-                                                    config.hidden_size))
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size
+        )
 
     def forward(
         self,
@@ -283,8 +297,9 @@ class GLMTransformer(nn.Module):
         position_ids: torch.Tensor,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states = layer(hidden_states=hidden_states,
-                                  position_ids=position_ids)
+            hidden_states = layer(
+                hidden_states=hidden_states, position_ids=position_ids
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -299,8 +314,10 @@ class GLMTransformer(nn.Module):
 @support_torch_compile
 class ChatGLMModel(nn.Module, SupportsQuant):
     packed_modules_mapping = {
-        "linear_proj.merged_proj":
-        ["linear_proj.gate_proj", "linear_proj.dense_h_to_4h"]
+        "linear_proj.merged_proj": [
+            "linear_proj.gate_proj",
+            "linear_proj.dense_h_to_4h",
+        ]
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -312,26 +329,30 @@ class ChatGLMModel(nn.Module, SupportsQuant):
 
         self.config = config
 
-        self.embedding = VocabParallelEmbedding(config.padded_vocab_size,
-                                                config.hidden_size,
-                                                quant_config=quant_config,
-                                                prefix=f"{prefix}.embedding")
+        self.embedding = VocabParallelEmbedding(
+            config.padded_vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embedding",
+        )
 
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
         self.kv_channels = config.kv_channels
-        self.encoder = GLMTransformer(config,
-                                      cache_config,
-                                      quant_config,
-                                      prefix=f"{prefix}.encoder")
+        self.encoder = GLMTransformer(
+            config, cache_config, quant_config, prefix=f"{prefix}.encoder"
+        )
 
-        self.output_layer = ParallelLMHead(config.padded_vocab_size,
-                                           config.hidden_size,
-                                           quant_config=quant_config,
-                                           prefix=f"{prefix}.output_layer")
+        self.output_layer = ParallelLMHead(
+            config.padded_vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.output_layer",
+        )
 
         self.make_empty_intermediate_tensors = (
-            self.encoder.make_empty_intermediate_tensors)
+            self.encoder.make_empty_intermediate_tensors
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embedding(input_ids)
@@ -361,8 +382,7 @@ class ChatGLMModel(nn.Module, SupportsQuant):
 
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("linear_proj.merged_proj", "linear_proj.gate_proj", 0),
@@ -372,7 +392,7 @@ class ChatGLMModel(nn.Module, SupportsQuant):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -393,8 +413,7 @@ class ChatGLMModel(nn.Module, SupportsQuant):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -402,7 +421,8 @@ class ChatGLMModel(nn.Module, SupportsQuant):
 
 class ChatGLMBaseModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={".word_embeddings": ""}, )
+        orig_to_new_substr={".word_embeddings": ""},
+    )
 
     def __init__(
         self,
@@ -421,26 +441,26 @@ class ChatGLMBaseModel(nn.Module):
         self.multimodal_config = multimodal_config
 
         self.quant_config = quant_config
-        self.max_position_embeddings = getattr(config, "max_sequence_length",
-                                               8192)
-        self.transformer = transformer_type(vllm_config=vllm_config,
-                                            prefix=maybe_prefix(
-                                                prefix, "transformer"))
+        self.max_position_embeddings = getattr(config, "max_sequence_length", 8192)
+        self.transformer = transformer_type(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "transformer")
+        )
         if self.config.tie_word_embeddings:
-            self.transformer.output_layer.weight = (
-                self.transformer.embedding.weight)
+            self.transformer.output_layer.weight = self.transformer.embedding.weight
         self.lm_head = self.transformer.output_layer
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
         self.make_empty_intermediate_tensors = (
-            self.transformer.make_empty_intermediate_tensors)
+            self.transformer.make_empty_intermediate_tensors
+        )
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.get_input_embeddings(input_ids)
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
@@ -448,11 +468,10 @@ class ChatGLMBaseModel(nn.Module):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
-                         SupportsQuant):
+class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP, SupportsQuant):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
-        "dense_h_to_4h": ["dense_h_to_4h"]
+        "dense_h_to_4h": ["dense_h_to_4h"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -463,7 +482,8 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
                 "The configuration of this model indicates that it supports "
                 "vision inputs, but you instantiated the text-only version "
                 "of this model. Please use the vision model by setting "
-                f"`--hf-overrides '{json.dumps(hf_overrides)}'`")
+                f"`--hf-overrides '{json.dumps(hf_overrides)}'`"
+            )
 
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -474,6 +494,7 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.transformer(input_ids, positions,
-                                         intermediate_tensors, inputs_embeds)
+        hidden_states = self.transformer(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
         return hidden_states

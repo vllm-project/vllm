@@ -6,47 +6,81 @@
 import json
 import time
 from http import HTTPStatus
-from typing import (Annotated, Any, ClassVar, Generic, Literal, Optional,
-                    TypeVar, Union)
+from typing import Annotated, Any, ClassVar, Generic, Literal, Optional, TypeVar, Union
 
 import regex as re
 import torch
 from fastapi import HTTPException, UploadFile
-# yapf: disable
 from openai.types.chat.chat_completion_audio import (
-    ChatCompletionAudio as OpenAIChatCompletionAudio)
-from openai.types.chat.chat_completion_message import (
-    Annotation as OpenAIAnnotation)
-# yapf: enable
-from openai.types.responses import (ResponseFunctionToolCall,
-                                    ResponseInputItemParam, ResponseOutputItem,
-                                    ResponsePrompt, ResponseReasoningItem,
-                                    ResponseStatus)
+    ChatCompletionAudio as OpenAIChatCompletionAudio,
+)
+from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
+from openai.types.responses import (
+    ResponseCodeInterpreterCallCodeDeltaEvent,
+    ResponseCodeInterpreterCallCodeDoneEvent,
+    ResponseCodeInterpreterCallCompletedEvent,
+    ResponseCodeInterpreterCallInProgressEvent,
+    ResponseCodeInterpreterCallInterpretingEvent,
+    ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent,
+    ResponseFunctionToolCall,
+    ResponseInputItemParam,
+    ResponseOutputItem,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+    ResponsePrompt,
+    ResponseReasoningItem,
+    ResponseReasoningTextDeltaEvent,
+    ResponseReasoningTextDoneEvent,
+    ResponseStatus,
+    ResponseWebSearchCallCompletedEvent,
+    ResponseWebSearchCallInProgressEvent,
+    ResponseWebSearchCallSearchingEvent,
+)
+from openai.types.responses import (
+    ResponseCompletedEvent as OpenAIResponseCompletedEvent,
+)
+from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreatedEvent
+from openai.types.responses import (
+    ResponseInProgressEvent as OpenAIResponseInProgressEvent,
+)
+from openai.types.responses.response_reasoning_item import (
+    Content as ResponseReasoningTextContent,
+)
 
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
     from openai.types.responses import ResponseTextConfig
 except ImportError:  # For newer openai versions (>= 1.100.0)
-    from openai.types.responses import (ResponseFormatTextConfig as
-                                        ResponseTextConfig)
+    from openai.types.responses import ResponseFormatTextConfig as ResponseTextConfig
 
-from openai.types.responses.response import ToolChoice
+from openai.types.responses.response import IncompleteDetails, ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
-from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
-                      ValidationInfo, field_validator, model_validator)
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationInfo,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 from typing_extensions import TypeAlias
 
 from vllm import envs
-from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
-                                         make_tool_call_id)
-from vllm.entrypoints.score_utils import (ScoreContentPartParam,
-                                          ScoreMultiModalParam)
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam, make_tool_call_id
+from vllm.entrypoints.score_utils import ScoreContentPartParam, ScoreMultiModalParam
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
-                                  RequestOutputKind, SamplingParams)
+from vllm.sampling_params import (
+    BeamSearchParams,
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
@@ -80,8 +114,7 @@ class OpenAIBaseModel(BaseModel):
         # Compare against both field names and aliases
         if any(k not in field_names for k in data):
             logger.warning(
-                "The following fields were present in the request "
-                "but ignored: %s",
+                "The following fields were present in the request but ignored: %s",
                 data.keys() - field_names,
             )
         return result
@@ -150,7 +183,7 @@ class JsonSchemaResponseFormat(OpenAIBaseModel):
     description: Optional[str] = None
     # schema is the field in openai but that causes conflicts with pydantic so
     # instead use json_schema with an alias
-    json_schema: Optional[dict[str, Any]] = Field(default=None, alias='schema')
+    json_schema: Optional[dict[str, Any]] = Field(default=None, alias="schema")
     strict: Optional[bool] = None
 
 
@@ -158,8 +191,9 @@ class StructuralTag(OpenAIBaseModel):
     begin: str
     # schema is the field, but that causes conflicts with pydantic so
     # instead use structural_tag_schema with an alias
-    structural_tag_schema: Optional[dict[str, Any]] = Field(default=None,
-                                                            alias="schema")
+    structural_tag_schema: Optional[dict[str, Any]] = Field(
+        default=None, alias="schema"
+    )
     end: str
 
 
@@ -216,18 +250,19 @@ class LogitsProcessorConstructor(BaseModel):
 LogitsProcessors = list[Union[str, LogitsProcessorConstructor]]
 
 
-def get_logits_processors(processors: Optional[LogitsProcessors],
-                          pattern: Optional[str]) -> Optional[list[Any]]:
+def get_logits_processors(
+    processors: Optional[LogitsProcessors], pattern: Optional[str]
+) -> Optional[list[Any]]:
     if processors and pattern:
         logits_processors = []
         for processor in processors:
-            qualname = processor if isinstance(processor,
-                                               str) else processor.qualname
+            qualname = processor if isinstance(processor, str) else processor.qualname
             if not re.match(pattern, qualname):
                 raise ValueError(
                     f"Logits processor '{qualname}' is not allowed by this "
                     "server. See --logits-processor-pattern engine argument "
-                    "for more information.")
+                    "for more information."
+                )
             try:
                 logits_processor = resolve_obj_by_qualname(qualname)
             except Exception as e:
@@ -235,37 +270,41 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
                     f"Logits processor '{qualname}' could not be resolved: {e}"
                 ) from e
             if isinstance(processor, LogitsProcessorConstructor):
-                logits_processor = logits_processor(*processor.args or [],
-                                                    **processor.kwargs or {})
+                logits_processor = logits_processor(
+                    *processor.args or [], **processor.kwargs or {}
+                )
             logits_processors.append(logits_processor)
         return logits_processors
     elif processors:
         raise ValueError(
             "The `logits_processors` argument is not supported by this "
-            "server. See --logits-processor-pattern engine argugment "
-            "for more information.")
+            "server. See --logits-processor-pattern engine argument "
+            "for more information."
+        )
     return None
 
 
-ResponseInputOutputItem: TypeAlias = Union[ResponseInputItemParam,
-                                           ResponseReasoningItem,
-                                           ResponseFunctionToolCall]
+ResponseInputOutputItem: TypeAlias = Union[
+    ResponseInputItemParam, ResponseReasoningItem, ResponseFunctionToolCall
+]
 
 
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
     background: Optional[bool] = False
-    include: Optional[list[
-        Literal[
-            "code_interpreter_call.outputs",
-            "computer_call_output.output.image_url",
-            "file_search_call.results",
-            "message.input_image.image_url",
-            "message.output_text.logprobs",
-            "reasoning.encrypted_content",
-        ],
-    ]] = None
+    include: Optional[
+        list[
+            Literal[
+                "code_interpreter_call.outputs",
+                "computer_call_output.output.image_url",
+                "file_search_call.results",
+                "message.input_image.image_url",
+                "message.output_text.logprobs",
+                "reasoning.encrypted_content",
+            ],
+        ]
+    ] = None
     input: Union[str, list[ResponseInputOutputItem]]
     instructions: Optional[str] = None
     max_output_tokens: Optional[int] = None
@@ -276,8 +315,7 @@ class ResponsesRequest(OpenAIBaseModel):
     previous_response_id: Optional[str] = None
     prompt: Optional[ResponsePrompt] = None
     reasoning: Optional[Reasoning] = None
-    service_tier: Literal["auto", "default", "flex", "scale",
-                          "priority"] = "auto"
+    service_tier: Literal["auto", "default", "flex", "scale", "priority"] = "auto"
     store: Optional[bool] = True
     stream: Optional[bool] = False
     temperature: Optional[float] = None
@@ -295,7 +333,8 @@ class ResponsesRequest(OpenAIBaseModel):
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
-            "through out the inference process and return in response."),
+            "through out the inference process and return in response."
+        ),
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
@@ -306,7 +345,8 @@ class ResponsesRequest(OpenAIBaseModel):
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."),
+            "if the served model does not use priority scheduling."
+        ),
     )
     cache_salt: Optional[str] = Field(
         default=None,
@@ -316,7 +356,18 @@ class ResponsesRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."))
+            "to 256 bit). Not supported by vLLM engine V0."
+        ),
+    )
+
+    enable_response_messages: bool = Field(
+        default=False,
+        description=(
+            "Dictates whether or not to return messages as part of the "
+            "response object. Currently only supported for non-streaming "
+            "non-background and gpt-oss only. "
+        ),
+    )
     # --8<-- [end:responses-extra-params]
 
     _DEFAULT_SAMPLING_PARAMS = {
@@ -337,19 +388,25 @@ class ResponsesRequest(OpenAIBaseModel):
         default_sampling_params = default_sampling_params or {}
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
-                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
+                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
+            )
         if (top_p := self.top_p) is None:
             top_p = default_sampling_params.get(
-                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
+                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"]
+            )
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
-        guided_decoding = None
+        structured_outputs = None
         if self.text is not None and self.text.format is not None:
             response_format = self.text.format
-            if response_format.type == "json_schema":
-                guided_decoding = GuidedDecodingParams.from_optional(
-                    json=response_format.schema_)
+            if (
+                response_format.type == "json_schema"
+                and response_format.schema_ is not None
+            ):
+                structured_outputs = StructuredOutputsParams(
+                    json=response_format.schema_
+                )
             elif response_format.type == "json_object":
                 raise NotImplementedError("json_object is not supported")
 
@@ -358,29 +415,29 @@ class ResponsesRequest(OpenAIBaseModel):
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
-            logprobs=self.top_logprobs
-            if self.is_include_output_logprobs() else None,
+            logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop_token_ids=stop_token_ids,
-            output_kind=(RequestOutputKind.DELTA
-                         if self.stream else RequestOutputKind.FINAL_ONLY),
-            guided_decoding=guided_decoding,
+            output_kind=(
+                RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
+            ),
+            structured_outputs=structured_outputs,
         )
 
     def is_include_output_logprobs(self) -> bool:
         """Check if the request includes output logprobs."""
         if self.include is None:
             return False
-        return isinstance(
-            self.include,
-            list) and "message.output_text.logprobs" in self.include
+        return (
+            isinstance(self.include, list)
+            and "message.output_text.logprobs" in self.include
+        )
 
     @model_validator(mode="before")
     def validate_background(cls, data):
         if not data.get("background"):
             return data
         if not data.get("store", True):
-            raise ValueError(
-                "background can only be used when `store` is true")
+            raise ValueError("background can only be used when `store` is true")
         return data
 
     @model_validator(mode="before")
@@ -395,11 +452,12 @@ class ResponsesRequest(OpenAIBaseModel):
             if not envs.VLLM_USE_V1:
                 raise ValueError(
                     "Parameter 'cache_salt' is not supported with "
-                    "this instance of vLLM, which uses engine V0.")
-            if not isinstance(data["cache_salt"],
-                              str) or not data["cache_salt"]:
-                raise ValueError("Parameter 'cache_salt' must be a "
-                                 "non-empty string if provided.")
+                    "this instance of vLLM, which uses engine V0."
+                )
+            if not isinstance(data["cache_salt"], str) or not data["cache_salt"]:
+                raise ValueError(
+                    "Parameter 'cache_salt' must be a non-empty string if provided."
+                )
         return data
 
 
@@ -414,8 +472,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     top_logprobs: Optional[int] = 0
     max_tokens: Optional[int] = Field(
         default=None,
-        deprecated=
-        'max_tokens is deprecated in favor of the max_completion_tokens field')
+        deprecated="max_tokens is deprecated in favor of "
+        "the max_completion_tokens field",
+    )
     max_completion_tokens: Optional[int] = None
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
@@ -427,12 +486,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     tools: Optional[list[ChatCompletionToolsParam]] = None
-    tool_choice: Optional[Union[
-        Literal["none"],
-        Literal["auto"],
-        Literal["required"],
-        ChatCompletionNamedToolChoiceParam,
-    ]] = "none"
+    tool_choice: Optional[
+        Union[
+            Literal["none"],
+            Literal["auto"],
+            Literal["required"],
+            ChatCompletionNamedToolChoiceParam,
+        ]
+    ] = "none"
     reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
     include_reasoning: bool = True
 
@@ -464,23 +525,26 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=False,
         description=(
             "If true, the new message will be prepended with the last message "
-            "if they belong to the same role."),
+            "if they belong to the same role."
+        ),
     )
     add_generation_prompt: bool = Field(
         default=True,
-        description=
-        ("If true, the generation prompt will be added to the chat template. "
-         "This is a parameter used by chat template in tokenizer config of the "
-         "model."),
+        description=(
+            "If true, the generation prompt will be added to the chat template. "
+            "This is a parameter used by chat template in tokenizer config of the "
+            "model."
+        ),
     )
     continue_final_message: bool = Field(
         default=False,
-        description=
-        ("If this is set, the chat will be formatted so that the final "
-         "message in the chat is open-ended, without any EOS tokens. The "
-         "model will continue this message rather than starting a new one. "
-         "This allows you to \"prefill\" part of the model's response for it. "
-         "Cannot be used at the same time as `add_generation_prompt`."),
+        description=(
+            "If this is set, the chat will be formatted so that the final "
+            "message in the chat is open-ended, without any EOS tokens. The "
+            "model will continue this message rather than starting a new one. "
+            'This allows you to "prefill" part of the model\'s response for it. '
+            "Cannot be used at the same time as `add_generation_prompt`."
+        ),
     )
     add_special_tokens: bool = Field(
         default=False,
@@ -489,16 +553,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "on top of what is added by the chat template. "
             "For most models, the chat template takes care of adding the "
             "special tokens so this should be set to false (as is the "
-            "default)."),
+            "default)."
+        ),
     )
     documents: Optional[list[dict[str, str]]] = Field(
         default=None,
-        description=
-        ("A list of dicts representing documents that will be accessible to "
-         "the model if it is performing RAG (retrieval-augmented generation)."
-         " If the template does not support RAG, this argument will have no "
-         "effect. We recommend that each document should be a dict containing "
-         "\"title\" and \"text\" keys."),
+        description=(
+            "A list of dicts representing documents that will be accessible to "
+            "the model if it is performing RAG (retrieval-augmented generation)."
+            " If the template does not support RAG, this argument will have no "
+            "effect. We recommend that each document should be a dict containing "
+            '"title" and "text" keys.'
+        ),
     )
     chat_template: Optional[str] = Field(
         default=None,
@@ -506,68 +572,95 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "A Jinja template to use for this conversion. "
             "As of transformers v4.44, default chat template is no longer "
             "allowed, so you must provide a chat template if the tokenizer "
-            "does not define one."),
+            "does not define one."
+        ),
     )
     chat_template_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
         description=(
             "Additional keyword args to pass to the template renderer. "
-            "Will be accessible by the chat template."),
+            "Will be accessible by the chat template."
+        ),
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
+    structured_outputs: Optional[StructuredOutputsParams] = Field(
+        default=None,
+        description="Additional kwargs for structured outputs",
+    )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
-        description=("If specified, the output will follow the JSON schema."),
+        description=(
+            "`guided_json` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `json` to `structured_outputs` instead."
+        ),
     )
     guided_regex: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, the output will follow the regex pattern."),
+            "`guided_regex` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `regex` to `structured_outputs` instead."
+        ),
     )
     guided_choice: Optional[list[str]] = Field(
         default=None,
         description=(
-            "If specified, the output will be exactly one of the choices."),
+            "`guided_choice` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `choice` to `structured_outputs` instead."
+        ),
     )
     guided_grammar: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, the output will follow the context free grammar."),
+            "`guided_grammar` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `grammar` to `structured_outputs` instead."
+        ),
     )
     structural_tag: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, the output will follow the structural tag schema."),
+            "`structural_tag` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `structural_tag` to `structured_outputs` instead."
+        ),
     )
     guided_decoding_backend: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be either "
-            "'outlines' / 'lm-format-enforcer'"),
+            "`guided_decoding_backend` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please remove it from your request."
+        ),
     )
     guided_whitespace_pattern: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, will override the default whitespace pattern "
-            "for guided json decoding."),
+            "`guided_whitespace_pattern` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `whitespace_pattern` to `structured_outputs` instead."
+        ),
     )
     priority: int = Field(
         default=0,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."),
+            "if the served model does not use priority scheduling."
+        ),
     )
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
-            "through out the inference process and return in response."),
+            "through out the inference process and return in response."
+        ),
     )
     logits_processors: Optional[LogitsProcessors] = Field(
         default=None,
@@ -579,13 +672,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "'args' and 'kwargs' fields containing positional and keyword "
             "arguments. For example: {'qualname': "
             "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
-            "{'param': 'value'}}."))
+            "{'param': 'value'}}."
+        ),
+    )
     return_tokens_as_token_ids: Optional[bool] = Field(
         default=None,
         description=(
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
-            "that are not JSON-encodable can be identified."))
+            "that are not JSON-encodable can be identified."
+        ),
+    )
     return_token_ids: Optional[bool] = Field(
         default=None,
         description=(
@@ -593,7 +690,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "generated text. In streaming mode, prompt_token_ids is included "
             "only in the first chunk, and token_ids contains the delta tokens "
             "for each chunk. This is useful for debugging or when you "
-            "need to map generated text back to input tokens."))
+            "need to map generated text back to input tokens."
+        ),
+    )
     cache_salt: Optional[str] = Field(
         default=None,
         description=(
@@ -602,15 +701,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."))
+            "to 256 bit). Not supported by vLLM engine V0."
+        ),
+    )
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None,
-        description="KVTransfer parameters used for disaggregated serving.")
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
 
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
-        description=("Additional request parameters with string or "
-                     "numeric values, used by custom extensions."),
+        description=(
+            "Additional request parameters with string or "
+            "numeric values, used by custom extensions."
+        ),
     )
 
     # --8<-- [end:chat-completion-extra-params]
@@ -625,13 +729,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
     }
 
     def to_beam_search_params(
-            self, max_tokens: int,
-            default_sampling_params: dict) -> BeamSearchParams:
-
+        self, max_tokens: int, default_sampling_params: dict
+    ) -> BeamSearchParams:
         n = self.n if self.n is not None else 1
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
-                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
+                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
+            )
 
         return BeamSearchParams(
             beam_width=n,
@@ -648,7 +752,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         logits_processor_pattern: Optional[str],
         default_sampling_params: dict,
     ) -> SamplingParams:
-
         # Default parameters
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get(
@@ -657,46 +760,66 @@ class ChatCompletionRequest(OpenAIBaseModel):
             )
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
-                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
+                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
+            )
         if (top_p := self.top_p) is None:
             top_p = default_sampling_params.get(
-                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
+                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"]
+            )
         if (top_k := self.top_k) is None:
             top_k = default_sampling_params.get(
-                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"])
+                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
+            )
         if (min_p := self.min_p) is None:
             min_p = default_sampling_params.get(
-                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"])
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
+            )
 
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        guided_json_object = None
-        if self.response_format is not None:
-            if self.response_format.type == "json_object":
-                guided_json_object = True
-            elif self.response_format.type == "json_schema":
-                json_schema = self.response_format.json_schema
-                assert json_schema is not None
-                self.guided_json = json_schema.json_schema
-            elif self.response_format.type == "structural_tag":
-                structural_tag = self.response_format
-                assert structural_tag is not None and isinstance(
-                    structural_tag, StructuralTagResponseFormat)
-                s_tag_obj = structural_tag.model_dump(by_alias=True)
-                self.structural_tag = json.dumps(s_tag_obj)
+        # Forward deprecated guided_* parameters to structured_outputs
+        if self.structured_outputs is None:
+            kwargs = dict[str, Any](
+                json=self.guided_json,
+                regex=self.guided_regex,
+                choice=self.guided_choice,
+                grammar=self.guided_grammar,
+                whitespace_pattern=self.guided_whitespace_pattern,
+                structural_tag=self.structural_tag,
+            )
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            if len(kwargs) > 0:
+                self.structured_outputs = StructuredOutputsParams(**kwargs)
 
-        guided_decoding = GuidedDecodingParams.from_optional(
-            json=self._get_guided_json_from_tool() or self.guided_json,
-            regex=self.guided_regex,
-            choice=self.guided_choice,
-            grammar=self.guided_grammar,
-            json_object=guided_json_object,
-            backend=self.guided_decoding_backend,
-            whitespace_pattern=self.guided_whitespace_pattern,
-            structural_tag=self.structural_tag,
-        )
+        response_format = self.response_format
+        json_schema_from_tool = self._get_json_schema_from_tool()
+        if response_format is not None or json_schema_from_tool is not None:
+            # If structured outputs wasn't already enabled,
+            # we must enable it for these features to work
+            if self.structured_outputs is None:
+                self.structured_outputs = StructuredOutputsParams()
+
+            # Set structured output params for response format
+            if response_format is not None:
+                if response_format.type == "json_object":
+                    self.structured_outputs.json_object = True
+                elif response_format.type == "json_schema":
+                    json_schema = response_format.json_schema
+                    assert json_schema is not None
+                    self.structured_outputs.json = json_schema.json_schema
+                elif response_format.type == "structural_tag":
+                    structural_tag = response_format
+                    assert structural_tag is not None and isinstance(
+                        structural_tag, StructuralTagResponseFormat
+                    )
+                    s_tag_obj = structural_tag.model_dump(by_alias=True)
+                    self.structured_outputs.structural_tag = json.dumps(s_tag_obj)
+
+            # Set structured output params for tool calling
+            if json_schema_from_tool is not None:
+                self.structured_outputs.json = json_schema_from_tool
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -722,21 +845,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
             min_tokens=self.min_tokens,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
-            logits_processors=get_logits_processors(self.logits_processors,
-                                                    logits_processor_pattern),
+            logits_processors=get_logits_processors(
+                self.logits_processors, logits_processor_pattern
+            ),
             include_stop_str_in_output=self.include_stop_str_in_output,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            output_kind=RequestOutputKind.DELTA if self.stream \
-                else RequestOutputKind.FINAL_ONLY,
-            guided_decoding=guided_decoding,
+            output_kind=RequestOutputKind.DELTA
+            if self.stream
+            else RequestOutputKind.FINAL_ONLY,
+            structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
-            bad_words= self.bad_words,
+            bad_words=self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
         )
 
-    def _get_guided_json_from_tool(
-            self) -> Optional[Union[str, dict, BaseModel]]:
+    def _get_json_schema_from_tool(self) -> Optional[Union[str, dict]]:
         # user has chosen to not use any tool
         if self.tool_choice == "none" or self.tools is None:
             return None
@@ -746,8 +870,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             tool_name = self.tool_choice.function.name
             tools = {tool.function.name: tool.function for tool in self.tools}
             if tool_name not in tools:
-                raise ValueError(
-                    f"Tool '{tool_name}' has not been passed in `tools`.")
+                raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
             tool = tools[tool_name]
             return tool.parameters
 
@@ -759,37 +882,31 @@ class ChatCompletionRequest(OpenAIBaseModel):
             def get_tool_schema(tool: ChatCompletionToolsParam) -> dict:
                 return {
                     "properties": {
-                        "name": {
-                            "type": "string",
-                            "enum": [tool.function.name]
-                        },
+                        "name": {"type": "string", "enum": [tool.function.name]},
                         # parameters are always generated as '{}' in the final
                         # output if they are missing from the request
                         # (i.e. are None or '{}') so the schema is
                         # updated to produce an empty object in that case
                         "parameters": tool.function.parameters
-                        if tool.function.parameters else {
-                            "type": "object",
-                            "properties": {}
-                        }
+                        if tool.function.parameters
+                        else {"type": "object", "properties": {}},
                     },
-                    "required": ["name", "parameters"]
+                    "required": ["name", "parameters"],
                 }
 
-            def get_tool_schema_defs(
-                    tools: list[ChatCompletionToolsParam]) -> dict:
+            def get_tool_schema_defs(tools: list[ChatCompletionToolsParam]) -> dict:
                 all_defs = dict[str, dict[str, Any]]()
                 for tool in tools:
                     if tool.function.parameters is None:
                         continue
                     defs = tool.function.parameters.pop("$defs", {})
                     for def_name, def_schema in defs.items():
-                        if def_name in all_defs and all_defs[
-                                def_name] != def_schema:
+                        if def_name in all_defs and all_defs[def_name] != def_schema:
                             raise ValueError(
                                 f"Tool definition '{def_name}' has "
                                 "multiple schemas, which is not "
-                                "supported.")
+                                "supported."
+                            )
                         else:
                             all_defs[def_name] = def_schema
                 return all_defs
@@ -799,8 +916,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "minItems": 1,
                 "items": {
                     "type": "object",
-                    "anyOf": [get_tool_schema(tool) for tool in self.tools]
-                }
+                    "anyOf": [get_tool_schema(tool) for tool in self.tools],
+                },
             }
             json_schema_defs = get_tool_schema_defs(self.tools)
             if json_schema_defs:
@@ -813,8 +930,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def validate_stream_options(cls, data):
         if data.get("stream_options") and not data.get("stream"):
-            raise ValueError(
-                "Stream options can only be defined when `stream=True`.")
+            raise ValueError("Stream options can only be defined when `stream=True`.")
 
         return data
 
@@ -822,18 +938,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_logprobs(cls, data):
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
-            if data.get("stream") and prompt_logprobs > 0:
+            if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
                 raise ValueError(
-                    "`prompt_logprobs` are not available when `stream=True`.")
+                    "`prompt_logprobs` are not available when `stream=True`."
+                )
 
-            if prompt_logprobs < 0:
-                raise ValueError("`prompt_logprobs` must be a positive value.")
-
+            if prompt_logprobs < 0 and prompt_logprobs != -1:
+                raise ValueError("`prompt_logprobs` must be a positive value or -1.")
+            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
+                raise ValueError(
+                    "`prompt_logprobs=-1` is only supported with vLLM engine V1."
+                )
         if (top_logprobs := data.get("top_logprobs")) is not None:
-            if top_logprobs < 0:
-                raise ValueError("`top_logprobs` must be a positive value.")
+            if top_logprobs < 0 and top_logprobs != -1:
+                raise ValueError("`top_logprobs` must be a positive value or -1.")
 
-            if top_logprobs > 0 and not data.get("logprobs"):
+            if (top_logprobs == -1 or top_logprobs > 0) and not data.get("logprobs"):
                 raise ValueError(
                     "when using `top_logprobs`, `logprobs` must be set to true."
                 )
@@ -842,34 +962,39 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def check_guided_decoding_count(cls, data):
+    def check_structured_outputs_count(cls, data):
         if isinstance(data, ValueError):
             raise data
 
-        guide_count = sum([
-            "guided_json" in data and data["guided_json"] is not None,
-            "guided_regex" in data and data["guided_regex"] is not None,
-            "guided_choice" in data and data["guided_choice"] is not None
-        ])
-        # you can only use one kind of guided decoding
-        if guide_count > 1:
+        if data.get("structured_outputs", None) is None:
+            return data
+
+        structured_outputs_kwargs = data["structured_outputs"]
+        count = sum(
+            structured_outputs_kwargs.get(k) is not None
+            for k in ("json", "regex", "choice")
+        )
+        # you can only use one kind of constraints for structured outputs
+        if count > 1:
             raise ValueError(
-                "You can only use one kind of guided decoding "
-                "('guided_json', 'guided_regex' or 'guided_choice').")
-        # you can only either use guided decoding or tools, not both
-        if guide_count > 1 and data.get("tool_choice", "none") not in (
-                "none",
-                "auto",
-                "required",
+                "You can only use one kind of constraints for structured "
+                "outputs ('json', 'regex' or 'choice')."
+            )
+        # you can only either use structured outputs or tools, not both
+        if count > 1 and data.get("tool_choice", "none") not in (
+            "none",
+            "auto",
+            "required",
         ):
             raise ValueError(
-                "You can only either use guided decoding or tools, not both.")
+                "You can only either use constraints for structured outputs "
+                "or tools, not both."
+            )
         return data
 
     @model_validator(mode="before")
     @classmethod
     def check_tool_usage(cls, data):
-
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice
         if "tool_choice" not in data and data.get("tools"):
@@ -881,52 +1006,58 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         # if "tool_choice" is specified -- validation
         if "tool_choice" in data and data["tool_choice"] is not None:
-
             # ensure that if "tool choice" is specified, tools are present
             if "tools" not in data or data["tools"] is None:
-                raise ValueError(
-                    "When using `tool_choice`, `tools` must be set.")
+                raise ValueError("When using `tool_choice`, `tools` must be set.")
 
             # make sure that tool choice is either a named tool
             # OR that it's set to "auto" or "required"
-            if data["tool_choice"] not in [
-                    "auto", "required"
-            ] and not isinstance(data["tool_choice"], dict):
+            if data["tool_choice"] not in ["auto", "required"] and not isinstance(
+                data["tool_choice"], dict
+            ):
                 raise ValueError(
-                    f'Invalid value for `tool_choice`: {data["tool_choice"]}! '\
-                    'Only named tools, "none", "auto" or "required" '\
-                    'are supported.'
+                    f"Invalid value for `tool_choice`: {data['tool_choice']}! "
+                    'Only named tools, "none", "auto" or "required" '
+                    "are supported."
                 )
 
             # if tool_choice is "required" but the "tools" list is empty,
             # override the data to behave like "none" to align with
             # OpenAI’s behavior.
-            if data["tool_choice"] == "required" and isinstance(
-                    data["tools"], list) and len(data["tools"]) == 0:
+            if (
+                data["tool_choice"] == "required"
+                and isinstance(data["tools"], list)
+                and len(data["tools"]) == 0
+            ):
                 data["tool_choice"] = "none"
                 del data["tools"]
                 return data
 
             # ensure that if "tool_choice" is specified as an object,
             # it matches a valid tool
-            correct_usage_message = 'Correct usage: `{"type": "function",' \
+            correct_usage_message = (
+                'Correct usage: `{"type": "function",'
                 ' "function": {"name": "my_function"}}`'
+            )
             if isinstance(data["tool_choice"], dict):
                 valid_tool = False
                 function = data["tool_choice"].get("function")
                 if not isinstance(function, dict):
                     raise ValueError(
                         f"Invalid value for `function`: `{function}` in "
-                        f"`tool_choice`! {correct_usage_message}")
+                        f"`tool_choice`! {correct_usage_message}"
+                    )
                 if "name" not in function:
-                    raise ValueError(f"Expected field `name` in `function` in "
-                                     f"`tool_choice`! {correct_usage_message}")
+                    raise ValueError(
+                        f"Expected field `name` in `function` in "
+                        f"`tool_choice`! {correct_usage_message}"
+                    )
                 function_name = function["name"]
-                if not isinstance(function_name,
-                                  str) or len(function_name) == 0:
+                if not isinstance(function_name, str) or len(function_name) == 0:
                     raise ValueError(
                         f"Invalid `name` in `function`: `{function_name}`"
-                        f" in `tool_choice`! {correct_usage_message}")
+                        f" in `tool_choice`! {correct_usage_message}"
+                    )
                 for tool in data["tools"]:
                     if tool["function"]["name"] == function_name:
                         valid_tool = True
@@ -934,16 +1065,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 if not valid_tool:
                     raise ValueError(
                         "The tool specified in `tool_choice` does not match any"
-                        " of the specified `tools`")
+                        " of the specified `tools`"
+                    )
         return data
 
     @model_validator(mode="before")
     @classmethod
     def check_generation_prompt(cls, data):
-        if data.get("continue_final_message") and data.get(
-                "add_generation_prompt"):
-            raise ValueError("Cannot set both `continue_final_message` and "
-                             "`add_generation_prompt` to True.")
+        if data.get("continue_final_message") and data.get("add_generation_prompt"):
+            raise ValueError(
+                "Cannot set both `continue_final_message` and "
+                "`add_generation_prompt` to True."
+            )
         return data
 
     @model_validator(mode="before")
@@ -953,11 +1086,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
             if not envs.VLLM_USE_V1:
                 raise ValueError(
                     "Parameter 'cache_salt' is not supported with "
-                    "this instance of vLLM, which uses engine V0.")
-            if not isinstance(data["cache_salt"],
-                              str) or not data["cache_salt"]:
-                raise ValueError("Parameter 'cache_salt' must be a "
-                                 "non-empty string if provided.")
+                    "this instance of vLLM, which uses engine V0."
+                )
+            if not isinstance(data["cache_salt"], str) or not data["cache_salt"]:
+                raise ValueError(
+                    "Parameter 'cache_salt' must be a non-empty string if provided."
+                )
         return data
 
 
@@ -966,7 +1100,6 @@ class CompletionRequest(OpenAIBaseModel):
     # https://platform.openai.com/docs/api-reference/completions/create
     model: Optional[str] = None
     prompt: Optional[Union[list[int], list[list[int]], str, list[str]]] = None
-    prompt_embeds: Optional[Union[bytes, list[bytes]]] = None
     best_of: Optional[int] = None
     echo: Optional[bool] = False
     frequency_penalty: Optional[float] = 0.0
@@ -1002,11 +1135,13 @@ class CompletionRequest(OpenAIBaseModel):
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
+    prompt_embeds: Optional[Union[bytes, list[bytes]]] = None
     add_special_tokens: bool = Field(
         default=True,
         description=(
             "If true (the default), special tokens (e.g. BOS) will be added to "
-            "the prompt."),
+            "the prompt."
+        ),
     )
     response_format: Optional[AnyResponseFormat] = Field(
         default=None,
@@ -1016,51 +1151,73 @@ class CompletionRequest(OpenAIBaseModel):
             ", {'type': 'structural_tag'}, or {'type': 'text' } is supported."
         ),
     )
+    structured_outputs: Optional[StructuredOutputsParams] = Field(
+        default=None,
+        description="Additional kwargs for structured outputs",
+    )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
-        description="If specified, the output will follow the JSON schema.",
+        description=(
+            "`guided_json` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `json` to `structured_outputs` instead."
+        ),
     )
     guided_regex: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, the output will follow the regex pattern."),
+            "`guided_regex` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `regex` to `structured_outputs` instead."
+        ),
     )
     guided_choice: Optional[list[str]] = Field(
         default=None,
         description=(
-            "If specified, the output will be exactly one of the choices."),
+            "`guided_choice` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `choice` to `structured_outputs` instead."
+        ),
     )
     guided_grammar: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, the output will follow the context free grammar."),
+            "`guided_grammar` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `grammar` to `structured_outputs` instead."
+        ),
     )
     guided_decoding_backend: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be one of "
-            "'outlines' / 'lm-format-enforcer'"),
+            "`guided_decoding_backend` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please remove it from your request."
+        ),
     )
     guided_whitespace_pattern: Optional[str] = Field(
         default=None,
         description=(
-            "If specified, will override the default whitespace pattern "
-            "for guided json decoding."),
+            "`guided_whitespace_pattern` is deprecated. "
+            "This will be removed in v0.12.0 or v1.0.0, whichever is soonest. "
+            "Please pass `whitespace_pattern` to `structured_outputs` instead."
+        ),
     )
     priority: int = Field(
         default=0,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."),
+            "if the served model does not use priority scheduling."
+        ),
     )
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
-            "through out the inference process and return in response."),
+            "through out the inference process and return in response."
+        ),
     )
     logits_processors: Optional[LogitsProcessors] = Field(
         default=None,
@@ -1072,14 +1229,18 @@ class CompletionRequest(OpenAIBaseModel):
             "'args' and 'kwargs' fields containing positional and keyword "
             "arguments. For example: {'qualname': "
             "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
-            "{'param': 'value'}}."))
+            "{'param': 'value'}}."
+        ),
+    )
 
     return_tokens_as_token_ids: Optional[bool] = Field(
         default=None,
         description=(
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
-            "that are not JSON-encodable can be identified."))
+            "that are not JSON-encodable can be identified."
+        ),
+    )
     return_token_ids: Optional[bool] = Field(
         default=None,
         description=(
@@ -1087,7 +1248,9 @@ class CompletionRequest(OpenAIBaseModel):
             "generated text. In streaming mode, prompt_token_ids is included "
             "only in the first chunk, and token_ids contains the delta tokens "
             "for each chunk. This is useful for debugging or when you "
-            "need to map generated text back to input tokens."))
+            "need to map generated text back to input tokens."
+        ),
+    )
 
     cache_salt: Optional[str] = Field(
         default=None,
@@ -1097,16 +1260,21 @@ class CompletionRequest(OpenAIBaseModel):
             "environments. The salt should be random, protected from "
             "access by 3rd parties, and long enough to be "
             "unpredictable (e.g., 43 characters base64-encoded, corresponding "
-            "to 256 bit). Not supported by vLLM engine V0."))
+            "to 256 bit). Not supported by vLLM engine V0."
+        ),
+    )
 
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None,
-        description="KVTransfer parameters used for disaggregated serving.")
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
 
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
-        description=("Additional request parameters with string or "
-                     "numeric values, used by custom extensions."),
+        description=(
+            "Additional request parameters with string or "
+            "numeric values, used by custom extensions."
+        ),
     )
 
     # --8<-- [end:completion-extra-params]
@@ -1125,7 +1293,6 @@ class CompletionRequest(OpenAIBaseModel):
         max_tokens: int,
         default_sampling_params: Optional[dict] = None,
     ) -> BeamSearchParams:
-
         if default_sampling_params is None:
             default_sampling_params = {}
         n = self.n if self.n is not None else 1
@@ -1148,7 +1315,6 @@ class CompletionRequest(OpenAIBaseModel):
         logits_processor_pattern: Optional[str],
         default_sampling_params: Optional[dict] = None,
     ) -> SamplingParams:
-
         if default_sampling_params is None:
             default_sampling_params = {}
 
@@ -1160,16 +1326,20 @@ class CompletionRequest(OpenAIBaseModel):
             )
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
-                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
+                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
+            )
         if (top_p := self.top_p) is None:
             top_p = default_sampling_params.get(
-                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
+                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"]
+            )
         if (top_k := self.top_k) is None:
             top_k = default_sampling_params.get(
-                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"])
+                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
+            )
         if (min_p := self.min_p) is None:
             min_p = default_sampling_params.get(
-                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"])
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
+            )
 
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
@@ -1177,20 +1347,25 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
-        guided_json_object = None
-        if (self.response_format is not None
-                and self.response_format.type == "json_object"):
-            guided_json_object = True
+        # Forward deprecated guided_* parameters to structured_outputs
+        if self.structured_outputs is None:
+            kwargs = dict[str, Any](
+                json=self.guided_json,
+                regex=self.guided_regex,
+                choice=self.guided_choice,
+                grammar=self.guided_grammar,
+                whitespace_pattern=self.guided_whitespace_pattern,
+            )
+            kwargs = {k: v for k, v in kwargs.items() if v is not None}
+            if len(kwargs) > 0:
+                self.structured_outputs = StructuredOutputsParams(**kwargs)
 
-        guided_decoding = GuidedDecodingParams.from_optional(
-            json=self.guided_json,
-            regex=self.guided_regex,
-            choice=self.guided_choice,
-            grammar=self.guided_grammar,
-            json_object=guided_json_object,
-            backend=self.guided_decoding_backend,
-            whitespace_pattern=self.guided_whitespace_pattern,
-        )
+        if (
+            self.structured_outputs is not None
+            and self.response_format is not None
+            and self.response_format.type == "json_object"
+        ):
+            self.structured_outputs.json_object = True
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -1217,42 +1392,52 @@ class CompletionRequest(OpenAIBaseModel):
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            logits_processors=get_logits_processors(self.logits_processors,
-                                                    logits_processor_pattern),
+            logits_processors=get_logits_processors(
+                self.logits_processors, logits_processor_pattern
+            ),
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            output_kind=RequestOutputKind.DELTA if self.stream \
-                else RequestOutputKind.FINAL_ONLY,
-            guided_decoding=guided_decoding,
+            output_kind=RequestOutputKind.DELTA
+            if self.stream
+            else RequestOutputKind.FINAL_ONLY,
+            structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
-            )
+        )
 
     @model_validator(mode="before")
     @classmethod
-    def check_guided_decoding_count(cls, data):
-        guide_count = sum([
-            "guided_json" in data and data["guided_json"] is not None,
-            "guided_regex" in data and data["guided_regex"] is not None,
-            "guided_choice" in data and data["guided_choice"] is not None
-        ])
-        if guide_count > 1:
+    def check_structured_outputs_count(cls, data):
+        if data.get("structured_outputs", None) is None:
+            return data
+
+        structured_outputs_kwargs = data["structured_outputs"]
+        count = sum(
+            structured_outputs_kwargs.get(k) is not None
+            for k in ("json", "regex", "choice")
+        )
+        if count > 1:
             raise ValueError(
-                "You can only use one kind of guided decoding "
-                "('guided_json', 'guided_regex' or 'guided_choice').")
+                "You can only use one kind of constraints for structured "
+                "outputs ('json', 'regex' or 'choice')."
+            )
         return data
 
     @model_validator(mode="before")
     @classmethod
     def check_logprobs(cls, data):
         if (prompt_logprobs := data.get("prompt_logprobs")) is not None:
-            if data.get("stream") and prompt_logprobs > 0:
+            if data.get("stream") and (prompt_logprobs > 0 or prompt_logprobs == -1):
                 raise ValueError(
-                    "`prompt_logprobs` are not available when `stream=True`.")
+                    "`prompt_logprobs` are not available when `stream=True`."
+                )
 
-            if prompt_logprobs < 0:
-                raise ValueError("`prompt_logprobs` must be a positive value.")
-
+            if prompt_logprobs < 0 and prompt_logprobs != -1:
+                raise ValueError("`prompt_logprobs` must be a positive value or -1.")
+            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
+                raise ValueError(
+                    "`prompt_logprobs=-1` is only supported with vLLM engine V1."
+                )
         if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
             raise ValueError("`logprobs` must be a positive value.")
 
@@ -1262,8 +1447,7 @@ class CompletionRequest(OpenAIBaseModel):
     @classmethod
     def validate_stream_options(cls, data):
         if data.get("stream_options") and not data.get("stream"):
-            raise ValueError(
-                "Stream options can only be defined when `stream=True`.")
+            raise ValueError("Stream options can only be defined when `stream=True`.")
 
         return data
 
@@ -1273,11 +1457,10 @@ class CompletionRequest(OpenAIBaseModel):
         prompt = data.get("prompt")
         prompt_embeds = data.get("prompt_embeds")
 
-        prompt_is_empty = (prompt is None
-                           or (isinstance(prompt, str) and prompt == ""))
-        embeds_is_empty = (prompt_embeds is None
-                           or (isinstance(prompt_embeds, list)
-                               and len(prompt_embeds) == 0))
+        prompt_is_empty = prompt is None or (isinstance(prompt, str) and prompt == "")
+        embeds_is_empty = prompt_embeds is None or (
+            isinstance(prompt_embeds, list) and len(prompt_embeds) == 0
+        )
 
         if prompt_is_empty and embeds_is_empty:
             raise ValueError(
@@ -1293,11 +1476,12 @@ class CompletionRequest(OpenAIBaseModel):
             if not envs.VLLM_USE_V1:
                 raise ValueError(
                     "Parameter 'cache_salt' is not supported with "
-                    "this instance of vLLM, which uses engine V0.")
-            if not isinstance(data["cache_salt"],
-                              str) or not data["cache_salt"]:
-                raise ValueError("Parameter 'cache_salt' must be a "
-                                 "non-empty string if provided.")
+                    "this instance of vLLM, which uses engine V0."
+                )
+            if not isinstance(data["cache_salt"], str) or not data["cache_salt"]:
+                raise ValueError(
+                    "Parameter 'cache_salt' must be a non-empty string if provided."
+                )
         return data
 
 
@@ -1316,21 +1500,24 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
         default=True,
         description=(
             "If true (the default), special tokens (e.g. BOS) will be added to "
-            "the prompt."),
+            "the prompt."
+        ),
     )
     priority: int = Field(
         default=0,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."),
+            "if the served model does not use priority scheduling."
+        ),
     )
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
-            "through out the inference process and return in response."),
+            "through out the inference process and return in response."
+        ),
     )
     normalize: Optional[bool] = None
 
@@ -1340,7 +1527,8 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
-            normalize=self.normalize)
+            normalize=self.normalize,
+        )
 
 
 class EmbeddingChatRequest(OpenAIBaseModel):
@@ -1355,10 +1543,11 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     # --8<-- [start:chat-embedding-extra-params]
     add_generation_prompt: bool = Field(
         default=False,
-        description=
-        ("If true, the generation prompt will be added to the chat template. "
-         "This is a parameter used by chat template in tokenizer config of the "
-         "model."),
+        description=(
+            "If true, the generation prompt will be added to the chat template. "
+            "This is a parameter used by chat template in tokenizer config of the "
+            "model."
+        ),
     )
 
     add_special_tokens: bool = Field(
@@ -1368,7 +1557,8 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "on top of what is added by the chat template. "
             "For most models, the chat template takes care of adding the "
             "special tokens so this should be set to false (as is the "
-            "default)."),
+            "default)."
+        ),
     )
     chat_template: Optional[str] = Field(
         default=None,
@@ -1376,13 +1566,15 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "A Jinja template to use for this conversion. "
             "As of transformers v4.44, default chat template is no longer "
             "allowed, so you must provide a chat template if the tokenizer "
-            "does not define one."),
+            "does not define one."
+        ),
     )
     chat_template_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
         description=(
             "Additional keyword args to pass to the template renderer. "
-            "Will be accessible by the chat template."),
+            "Will be accessible by the chat template."
+        ),
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
@@ -1393,14 +1585,16 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."),
+            "if the served model does not use priority scheduling."
+        ),
     )
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
-            "through out the inference process and return in response."),
+            "through out the inference process and return in response."
+        ),
     )
     normalize: Optional[bool] = None
     # --8<-- [end:chat-embedding-extra-params]
@@ -1408,17 +1602,19 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_generation_prompt(cls, data):
-        if data.get("continue_final_message") and data.get(
-                "add_generation_prompt"):
-            raise ValueError("Cannot set both `continue_final_message` and "
-                             "`add_generation_prompt` to True.")
+        if data.get("continue_final_message") and data.get("add_generation_prompt"):
+            raise ValueError(
+                "Cannot set both `continue_final_message` and "
+                "`add_generation_prompt` to True."
+            )
         return data
 
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
-            normalize=self.normalize)
+            normalize=self.normalize,
+        )
 
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
@@ -1450,7 +1646,6 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
-
     request_id: Optional[str] = None
     """
     The request_id associated with this response
@@ -1464,8 +1659,7 @@ class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
     """
 
 
-PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest,
-                       IOProcessorRequest]
+PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest, IOProcessorRequest]
 
 
 class ScoreRequest(OpenAIBaseModel):
@@ -1486,7 +1680,8 @@ class ScoreRequest(OpenAIBaseModel):
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."),
+            "if the served model does not use priority scheduling."
+        ),
     )
 
     activation: Optional[bool] = None
@@ -1496,7 +1691,8 @@ class ScoreRequest(OpenAIBaseModel):
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            activation=self.activation)
+            activation=self.activation,
+        )
 
 
 class RerankRequest(OpenAIBaseModel):
@@ -1518,7 +1714,8 @@ class RerankRequest(OpenAIBaseModel):
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."),
+            "if the served model does not use priority scheduling."
+        ),
     )
 
     activation: Optional[bool] = None
@@ -1528,7 +1725,8 @@ class RerankRequest(OpenAIBaseModel):
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            activation=self.activation)
+            activation=self.activation,
+        )
 
 
 class RerankDocument(BaseModel):
@@ -1557,8 +1755,7 @@ class CompletionLogProbs(OpenAIBaseModel):
     text_offset: list[int] = Field(default_factory=list)
     token_logprobs: list[Optional[float]] = Field(default_factory=list)
     tokens: list[str] = Field(default_factory=list)
-    top_logprobs: list[Optional[dict[str,
-                                     float]]] = Field(default_factory=list)
+    top_logprobs: list[Optional[dict[str, float]]] = Field(default_factory=list)
 
 
 class CompletionResponseChoice(OpenAIBaseModel):
@@ -1571,7 +1768,8 @@ class CompletionResponseChoice(OpenAIBaseModel):
         description=(
             "The stop string or token id that caused the completion "
             "to stop, None if the completion finished for some other reason "
-            "including encountering the EOS token"),
+            "including encountering the EOS token"
+        ),
     )
     token_ids: Optional[list[int]] = None  # For response
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
@@ -1584,14 +1782,16 @@ class CompletionResponse(OpenAIBaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: list[CompletionResponseChoice]
-    service_tier: Optional[Literal["auto", "default", "flex", "scale",
-                                   "priority"]] = None
+    service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = (
+        None
+    )
     system_fingerprint: Optional[str] = None
     usage: UsageInfo
 
     # vLLM-specific fields that are not in OpenAI spec
     kv_transfer_params: Optional[dict[str, Any]] = Field(
-        default=None, description="KVTransfer parameters.")
+        default=None, description="KVTransfer parameters."
+    )
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
@@ -1604,7 +1804,8 @@ class CompletionResponseStreamChoice(OpenAIBaseModel):
         description=(
             "The stop string or token id that caused the completion "
             "to stop, None if the completion finished for some other reason "
-            "including encountering the EOS token"),
+            "including encountering the EOS token"
+        ),
     )
     # not part of the OpenAI spec but for tracing the tokens
     # prompt tokens is put into choice to align with CompletionResponseChoice
@@ -1678,7 +1879,8 @@ class ClassificationRequest(OpenAIBaseModel):
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."),
+            "if the served model does not use priority scheduling."
+        ),
     )
 
     activation: Optional[bool] = None
@@ -1688,7 +1890,8 @@ class ClassificationRequest(OpenAIBaseModel):
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            activation=self.activation)
+            activation=self.activation,
+        )
 
 
 class ClassificationData(OpenAIBaseModel):
@@ -1792,8 +1995,9 @@ class ChatCompletionResponse(OpenAIBaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: list[ChatCompletionResponseChoice]
-    service_tier: Optional[Literal["auto", "default", "flex", "scale",
-                                   "priority"]] = None
+    service_tier: Optional[Literal["auto", "default", "flex", "scale", "priority"]] = (
+        None
+    )
     system_fingerprint: Optional[str] = None
     usage: UsageInfo
 
@@ -1801,7 +2005,8 @@ class ChatCompletionResponse(OpenAIBaseModel):
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
     prompt_token_ids: Optional[list[int]] = None
     kv_transfer_params: Optional[dict[str, Any]] = Field(
-        default=None, description="KVTransfer parameters.")
+        default=None, description="KVTransfer parameters."
+    )
 
 
 class DeltaMessage(OpenAIBaseModel):
@@ -1868,7 +2073,7 @@ class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
     # error: Optional[ResponseError] = None
-    # incomplete_details: Optional[IncompleteDetails] = None
+    incomplete_details: Optional[IncompleteDetails] = None
     instructions: Optional[str] = None
     metadata: Optional[Metadata] = None
     model: str
@@ -1893,6 +2098,49 @@ class ResponsesResponse(OpenAIBaseModel):
     usage: Optional[ResponseUsage] = None
     user: Optional[str] = None
 
+    # --8<-- [start:responses-extra-params]
+    # These are populated when enable_response_messages is set to True
+    # NOTE: custom serialization is needed
+    # see serialize_input_messages and serialize_output_messages
+    input_messages: Optional[list[ChatCompletionMessageParam]] = None
+    output_messages: Optional[list[ChatCompletionMessageParam]] = None
+    # --8<-- [end:responses-extra-params]
+
+    # NOTE: openAI harmony doesn't serialize TextContent properly,
+    # TODO: this fixes for TextContent, but need to verify for tools etc
+    # https://github.com/openai/harmony/issues/78
+    @field_serializer("output_messages", when_used="json")
+    def serialize_output_messages(self, msgs, _info):
+        if msgs:
+            serialized = []
+            for m in msgs:
+                if isinstance(m, dict):
+                    serialized.append(m)
+                elif hasattr(m, "__dict__"):
+                    serialized.append(m.to_dict())
+                else:
+                    # fallback to pyandic dump
+                    serialized.append(m.model_dump_json())
+            return serialized
+        return None
+
+    # NOTE: openAI harmony doesn't serialize TextContent properly, this fixes it
+    # https://github.com/openai/harmony/issues/78
+    @field_serializer("input_messages", when_used="json")
+    def serialize_input_messages(self, msgs, _info):
+        if msgs:
+            serialized = []
+            for m in msgs:
+                if isinstance(m, dict):
+                    serialized.append(m)
+                elif hasattr(m, "__dict__"):
+                    serialized.append(m.to_dict())
+                else:
+                    # fallback to pyandic dump
+                    serialized.append(m.model_dump_json())
+            return serialized
+        return None
+
     @classmethod
     def from_request(
         cls,
@@ -1903,14 +2151,25 @@ class ResponsesResponse(OpenAIBaseModel):
         output: list[ResponseOutputItem],
         status: ResponseStatus,
         usage: Optional[ResponseUsage] = None,
+        input_messages: Optional[list[ChatCompletionMessageParam]] = None,
+        output_messages: Optional[list[ChatCompletionMessageParam]] = None,
     ) -> "ResponsesResponse":
+        incomplete_details: Optional[IncompleteDetails] = None
+        if status == "incomplete":
+            incomplete_details = IncompleteDetails(reason="max_output_tokens")
+        # TODO: implement the other reason for incomplete_details,
+        # which is content_filter
+        # incomplete_details = IncompleteDetails(reason='content_filter')
         return cls(
             id=request.request_id,
             created_at=created_time,
+            incomplete_details=incomplete_details,
             instructions=request.instructions,
             metadata=request.metadata,
             model=model_name,
             output=output,
+            input_messages=input_messages,
+            output_messages=output_messages,
             parallel_tool_calls=request.parallel_tool_calls,
             temperature=sampling_params.temperature,
             tool_choice=request.tool_choice,
@@ -1932,8 +2191,89 @@ class ResponsesResponse(OpenAIBaseModel):
         )
 
 
-BatchRequestInputBody = Union[ChatCompletionRequest, EmbeddingRequest,
-                              ScoreRequest, RerankRequest]
+# TODO: this code can be removed once
+# https://github.com/openai/openai-python/issues/2634 has been resolved
+class ResponseReasoningPartDoneEvent(OpenAIBaseModel):
+    content_index: int
+    """The index of the content part that is done."""
+
+    item_id: str
+    """The ID of the output item that the content part was added to."""
+
+    output_index: int
+    """The index of the output item that the content part was added to."""
+
+    part: ResponseReasoningTextContent
+    """The content part that is done."""
+
+    sequence_number: int
+    """The sequence number of this event."""
+
+    type: Literal["response.reasoning_part.done"]
+    """The type of the event. Always `response.reasoning_part.done`."""
+
+
+# TODO: this code can be removed once
+# https://github.com/openai/openai-python/issues/2634 has been resolved
+class ResponseReasoningPartAddedEvent(OpenAIBaseModel):
+    content_index: int
+    """The index of the content part that is done."""
+
+    item_id: str
+    """The ID of the output item that the content part was added to."""
+
+    output_index: int
+    """The index of the output item that the content part was added to."""
+
+    part: ResponseReasoningTextContent
+    """The content part that is done."""
+
+    sequence_number: int
+    """The sequence number of this event."""
+
+    type: Literal["response.reasoning_part.added"]
+    """The type of the event. Always `response.reasoning_part.added`."""
+
+
+# vLLM Streaming Events
+# Note: we override the response type with the vLLM ResponsesResponse type
+class ResponseCompletedEvent(OpenAIResponseCompletedEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+class ResponseCreatedEvent(OpenAIResponseCreatedEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+class ResponseInProgressEvent(OpenAIResponseInProgressEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
+StreamingResponsesResponse: TypeAlias = Union[
+    "ResponseCreatedEvent",
+    "ResponseInProgressEvent",
+    "ResponseCompletedEvent",
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+    ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent,
+    ResponseReasoningTextDeltaEvent,
+    ResponseReasoningTextDoneEvent,
+    ResponseReasoningPartAddedEvent,
+    ResponseReasoningPartDoneEvent,
+    ResponseCodeInterpreterCallInProgressEvent,
+    ResponseCodeInterpreterCallCodeDeltaEvent,
+    ResponseWebSearchCallInProgressEvent,
+    ResponseWebSearchCallSearchingEvent,
+    ResponseWebSearchCallCompletedEvent,
+    ResponseCodeInterpreterCallCodeDoneEvent,
+    ResponseCodeInterpreterCallInterpretingEvent,
+    ResponseCodeInterpreterCallCompletedEvent,
+]
+
+BatchRequestInputBody = Union[
+    ChatCompletionRequest, EmbeddingRequest, ScoreRequest, RerankRequest
+]
 
 
 class BatchRequestInput(OpenAIBaseModel):
@@ -1958,7 +2298,7 @@ class BatchRequestInput(OpenAIBaseModel):
     # The parameters of the request.
     body: BatchRequestInputBody
 
-    @field_validator('body', mode='plain')
+    @field_validator("body", mode="plain")
     @classmethod
     def check_type_for_url(cls, value: Any, info: ValidationInfo):
         # Use url to disambiguate models
@@ -1982,8 +2322,9 @@ class BatchResponseData(OpenAIBaseModel):
     request_id: str
 
     # The body of the response.
-    body: Optional[Union[ChatCompletionResponse, EmbeddingResponse,
-                         ScoreResponse, RerankResponse]] = None
+    body: Optional[
+        Union[ChatCompletionResponse, EmbeddingResponse, ScoreResponse, RerankResponse]
+    ] = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
@@ -2012,12 +2353,14 @@ class TokenizeCompletionRequest(OpenAIBaseModel):
         default=True,
         description=(
             "If true (the default), special tokens (e.g. BOS) will be added to "
-            "the prompt."),
+            "the prompt."
+        ),
     )
     return_token_strs: Optional[bool] = Field(
         default=False,
-        description=("If true, also return the token strings "
-                     "corresponding to the token ids."),
+        description=(
+            "If true, also return the token strings corresponding to the token ids."
+        ),
     )
 
 
@@ -2027,24 +2370,27 @@ class TokenizeChatRequest(OpenAIBaseModel):
 
     add_generation_prompt: bool = Field(
         default=True,
-        description=
-        ("If true, the generation prompt will be added to the chat template. "
-         "This is a parameter used by chat template in tokenizer config of the "
-         "model."),
+        description=(
+            "If true, the generation prompt will be added to the chat template. "
+            "This is a parameter used by chat template in tokenizer config of the "
+            "model."
+        ),
     )
     return_token_strs: Optional[bool] = Field(
         default=False,
-        description=("If true, also return the token strings "
-                     "corresponding to the token ids."),
+        description=(
+            "If true, also return the token strings corresponding to the token ids."
+        ),
     )
     continue_final_message: bool = Field(
         default=False,
-        description=
-        ("If this is set, the chat will be formatted so that the final "
-         "message in the chat is open-ended, without any EOS tokens. The "
-         "model will continue this message rather than starting a new one. "
-         "This allows you to \"prefill\" part of the model's response for it. "
-         "Cannot be used at the same time as `add_generation_prompt`."),
+        description=(
+            "If this is set, the chat will be formatted so that the final "
+            "message in the chat is open-ended, without any EOS tokens. The "
+            "model will continue this message rather than starting a new one. "
+            'This allows you to "prefill" part of the model\'s response for it. '
+            "Cannot be used at the same time as `add_generation_prompt`."
+        ),
     )
     add_special_tokens: bool = Field(
         default=False,
@@ -2053,7 +2399,8 @@ class TokenizeChatRequest(OpenAIBaseModel):
             "on top of what is added by the chat template. "
             "For most models, the chat template takes care of adding the "
             "special tokens so this should be set to false (as is the "
-            "default)."),
+            "default)."
+        ),
     )
     chat_template: Optional[str] = Field(
         default=None,
@@ -2061,13 +2408,15 @@ class TokenizeChatRequest(OpenAIBaseModel):
             "A Jinja template to use for this conversion. "
             "As of transformers v4.44, default chat template is no longer "
             "allowed, so you must provide a chat template if the tokenizer "
-            "does not define one."),
+            "does not define one."
+        ),
     )
     chat_template_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
         description=(
             "Additional keyword args to pass to the template renderer. "
-            "Will be accessible by the chat template."),
+            "Will be accessible by the chat template."
+        ),
     )
     mm_processor_kwargs: Optional[dict[str, Any]] = Field(
         default=None,
@@ -2081,10 +2430,11 @@ class TokenizeChatRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_generation_prompt(cls, data):
-        if data.get("continue_final_message") and data.get(
-                "add_generation_prompt"):
-            raise ValueError("Cannot set both `continue_final_message` and "
-                             "`add_generation_prompt` to True.")
+        if data.get("continue_final_message") and data.get("add_generation_prompt"):
+            raise ValueError(
+                "Cannot set both `continue_final_message` and "
+                "`add_generation_prompt` to True."
+            )
         return data
 
 
@@ -2109,7 +2459,7 @@ class DetokenizeResponse(OpenAIBaseModel):
 
 class TokenizerInfoResponse(OpenAIBaseModel):
     """
-    Response containing tokenizer configuration 
+    Response containing tokenizer configuration
     equivalent to tokenizer_config.json
     """
 
@@ -2128,8 +2478,7 @@ class UnloadLoRAAdapterRequest(BaseModel):
 
 
 ## Protocols for Audio
-AudioResponseFormat: TypeAlias = Literal["json", "text", "srt", "verbose_json",
-                                         "vtt"]
+AudioResponseFormat: TypeAlias = Literal["json", "text", "srt", "verbose_json", "vtt"]
 
 
 class TranscriptionRequest(OpenAIBaseModel):
@@ -2171,7 +2520,8 @@ class TranscriptionRequest(OpenAIBaseModel):
     ## TODO (varun) : Support if set to 0, certain thresholds are met !!
 
     timestamp_granularities: list[Literal["word", "segment"]] = Field(
-        alias="timestamp_granularities[]", default=[])
+        alias="timestamp_granularities[]", default=[]
+    )
     """The timestamp granularities to populate for this transcription.
 
     `response_format` must be set `verbose_json` to use timestamp granularities.
@@ -2191,15 +2541,17 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
-        description=("Additional request parameters with string or "
-                     "numeric values, used by custom extensions."),
+        description=(
+            "Additional request parameters with string or "
+            "numeric values, used by custom extensions."
+        ),
     )
     # --8<-- [end:transcription-extra-params]
 
     to_language: Optional[str] = None
     """The language of the output audio we transcribe to.
 
-    Please note that this is not currently used by supported models at this 
+    Please note that this is not currently used by supported models at this
     time, but it is a placeholder for future use, matching translation api.
     """
 
@@ -2249,10 +2601,8 @@ class TranscriptionRequest(OpenAIBaseModel):
     }
 
     def to_sampling_params(
-            self,
-            default_max_tokens: int,
-            default_sampling_params: Optional[dict] = None) -> SamplingParams:
-
+        self, default_max_tokens: int, default_sampling_params: Optional[dict] = None
+    ) -> SamplingParams:
         max_tokens = default_max_tokens
 
         if default_sampling_params is None:
@@ -2261,35 +2611,42 @@ class TranscriptionRequest(OpenAIBaseModel):
         # Default parameters
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
-                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
+                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
+            )
         if (top_p := self.top_p) is None:
             top_p = default_sampling_params.get(
-                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
+                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"]
+            )
         if (top_k := self.top_k) is None:
             top_k = default_sampling_params.get(
-                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"])
+                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
+            )
         if (min_p := self.min_p) is None:
             min_p = default_sampling_params.get(
-                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"])
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
+            )
 
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get(
                 "repetition_penalty",
-                self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"])
+                self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"],
+            )
 
-        return SamplingParams.from_optional(temperature=temperature,
-                                            max_tokens=max_tokens,
-                                            seed=self.seed,
-                                            top_p=top_p,
-                                            top_k=top_k,
-                                            min_p=min_p,
-                                            frequency_penalty=self.frequency_penalty,
-                                            repetition_penalty=repetition_penalty,
-                                            presence_penalty=self.presence_penalty,
-                                            output_kind=RequestOutputKind.DELTA
-                                            if self.stream \
-                                            else RequestOutputKind.FINAL_ONLY,
-                                            extra_args=self.vllm_xargs)
+        return SamplingParams.from_optional(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            seed=self.seed,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            frequency_penalty=self.frequency_penalty,
+            repetition_penalty=repetition_penalty,
+            presence_penalty=self.presence_penalty,
+            output_kind=RequestOutputKind.DELTA
+            if self.stream
+            else RequestOutputKind.FINAL_ONLY,
+            extra_args=self.vllm_xargs,
+        )
 
     @model_validator(mode="before")
     @classmethod
@@ -2303,8 +2660,7 @@ class TranscriptionRequest(OpenAIBaseModel):
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
         stream = data.get("stream", False)
         if any(bool(data.get(so, False)) for so in stream_opts) and not stream:
-            raise ValueError(
-                "Stream options can only be defined when `stream=True`.")
+            raise ValueError("Stream options can only be defined when `stream=True`.")
 
         return data
 
@@ -2482,10 +2838,8 @@ class TranslationRequest(OpenAIBaseModel):
     }
 
     def to_sampling_params(
-            self,
-            default_max_tokens: int,
-            default_sampling_params: Optional[dict] = None) -> SamplingParams:
-
+        self, default_max_tokens: int, default_sampling_params: Optional[dict] = None
+    ) -> SamplingParams:
         max_tokens = default_max_tokens
 
         if default_sampling_params is None:
@@ -2493,14 +2847,17 @@ class TranslationRequest(OpenAIBaseModel):
         # Default parameters
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
-                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"])
+                "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
+            )
 
-        return SamplingParams.from_optional(temperature=temperature,
-                                            max_tokens=max_tokens,
-                                            seed=self.seed,
-                                            output_kind=RequestOutputKind.DELTA
-                                            if self.stream \
-                                            else RequestOutputKind.FINAL_ONLY)
+        return SamplingParams.from_optional(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            seed=self.seed,
+            output_kind=RequestOutputKind.DELTA
+            if self.stream
+            else RequestOutputKind.FINAL_ONLY,
+        )
 
     @model_validator(mode="before")
     @classmethod
@@ -2508,8 +2865,7 @@ class TranslationRequest(OpenAIBaseModel):
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
         stream = data.get("stream", False)
         if any(bool(data.get(so, False)) for so in stream_opts) and not stream:
-            raise ValueError(
-                "Stream options can only be defined when `stream=True`.")
+            raise ValueError("Stream options can only be defined when `stream=True`.")
 
         return data
 

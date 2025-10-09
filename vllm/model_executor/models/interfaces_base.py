@@ -1,7 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import (TYPE_CHECKING, Any, ClassVar, Literal, Optional, Protocol,
-                    Union, overload, runtime_checkable)
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    Optional,
+    Protocol,
+    Union,
+    overload,
+    runtime_checkable,
+)
 
 import torch
 import torch.nn as nn
@@ -13,11 +22,9 @@ from vllm.utils import supports_kw
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.pooler import Pooler
-    from vllm.model_executor.sampling_metadata import SamplingMetadata
 else:
     VllmConfig = Any
     Pooler = Any
-    SamplingMetadata = Any
 
 logger = init_logger(__name__)
 
@@ -40,20 +47,37 @@ class VllmModel(Protocol[T_co]):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
-    ) -> None:
+    ) -> None: ...
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply token embeddings to `input_ids`."""
         ...
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-    ) -> T_co:
-        ...
+    ) -> T_co: ...
 
 
 def _check_vllm_model_init(model: Union[type[object], object]) -> bool:
     model_init = model.__init__
     return supports_kw(model_init, "vllm_config")
+
+
+def _check_vllm_model_get_input_embeddings(model: Union[type[object], object]) -> bool:
+    model_get_input_embeddings = getattr(model, "get_input_embeddings", None)
+    if not callable(model_get_input_embeddings):
+        logger.warning(
+            "The model (%s) is missing the `get_input_embeddings` method.",
+            model,
+        )
+        return False
+
+    return True
 
 
 def _check_vllm_model_forward(model: Union[type[object], object]) -> bool:
@@ -62,11 +86,9 @@ def _check_vllm_model_forward(model: Union[type[object], object]) -> bool:
         return False
 
     vllm_kws = ("input_ids", "positions")
-    missing_kws = tuple(kw for kw in vllm_kws
-                        if not supports_kw(model_forward, kw))
+    missing_kws = tuple(kw for kw in vllm_kws if not supports_kw(model_forward, kw))
 
-    if missing_kws and (isinstance(model, type)
-                        and issubclass(model, nn.Module)):
+    if missing_kws and (isinstance(model, type) and issubclass(model, nn.Module)):
         logger.warning(
             "The model (%s) is missing "
             "vLLM-specific keywords from its `forward` method: %s",
@@ -78,19 +100,21 @@ def _check_vllm_model_forward(model: Union[type[object], object]) -> bool:
 
 
 @overload
-def is_vllm_model(model: type[object]) -> TypeIs[type[VllmModel]]:
-    ...
+def is_vllm_model(model: type[object]) -> TypeIs[type[VllmModel]]: ...
 
 
 @overload
-def is_vllm_model(model: object) -> TypeIs[VllmModel]:
-    ...
+def is_vllm_model(model: object) -> TypeIs[VllmModel]: ...
 
 
 def is_vllm_model(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[VllmModel]], TypeIs[VllmModel]]:
-    return _check_vllm_model_init(model) and _check_vllm_model_forward(model)
+    return (
+        _check_vllm_model_init(model)
+        and _check_vllm_model_get_input_embeddings(model)
+        and _check_vllm_model_forward(model)
+    )
 
 
 @runtime_checkable
@@ -100,7 +124,6 @@ class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
     def compute_logits(
         self,
         hidden_states: T,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[T]:
         """Return `None` if TP rank > 0."""
         ...
@@ -108,20 +131,19 @@ class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
 
 @overload
 def is_text_generation_model(
-        model: type[object]) -> TypeIs[type[VllmModelForTextGeneration]]:
-    ...
+    model: type[object],
+) -> TypeIs[type[VllmModelForTextGeneration]]: ...
 
 
 @overload
-def is_text_generation_model(
-        model: object) -> TypeIs[VllmModelForTextGeneration]:
-    ...
+def is_text_generation_model(model: object) -> TypeIs[VllmModelForTextGeneration]: ...
 
 
 def is_text_generation_model(
     model: Union[type[object], object],
-) -> Union[TypeIs[type[VllmModelForTextGeneration]],
-           TypeIs[VllmModelForTextGeneration]]:
+) -> Union[
+    TypeIs[type[VllmModelForTextGeneration]], TypeIs[VllmModelForTextGeneration]
+]:
     if not is_vllm_model(model):
         return False
 
@@ -160,13 +182,11 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
 
 
 @overload
-def is_pooling_model(model: type[object]) -> TypeIs[type[VllmModelForPooling]]:
-    ...
+def is_pooling_model(model: type[object]) -> TypeIs[type[VllmModelForPooling]]: ...
 
 
 @overload
-def is_pooling_model(model: object) -> TypeIs[VllmModelForPooling]:
-    ...
+def is_pooling_model(model: object) -> TypeIs[VllmModelForPooling]: ...
 
 
 def is_pooling_model(

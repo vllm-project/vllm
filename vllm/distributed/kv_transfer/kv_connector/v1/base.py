@@ -7,7 +7,7 @@ communication in vLLM v1
 The class provides the following primitives:
     Scheduler-side: runs in the scheduler, binds metadata, which
     is used by the worker-side to load/save KV cache.
-        get_num_new_matched_tokens() - get number of new tokens 
+        get_num_new_matched_tokens() - get number of new tokens
             that exist in the remote KV cache. Might be called multiple
             times for a given request and should be side-effect free.
         update_state_after_alloc() - update KVConnector state after
@@ -49,15 +49,22 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
-CopyBlocksOp = Callable[[
-    dict[str, torch.Tensor], dict[
-        str, torch.Tensor], list[int], list[int], Literal["h2d", "d2h"]
-], None]
+CopyBlocksOp = Callable[
+    [
+        dict[str, torch.Tensor],
+        dict[str, torch.Tensor],
+        list[int],
+        list[int],
+        Literal["h2d", "d2h"],
+    ],
+    None,
+]
 
 logger = init_logger(__name__)
 
@@ -75,15 +82,16 @@ class KVConnectorMetadata(ABC):  # noqa: B024
     Abstract Metadata used to communicate between the
     Scheduler KVConnector and Worker KVConnector.
     """
+
     pass
 
 
 class KVConnectorBase_V1(ABC):
-
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
-            "subject to change in the future as we iterate the design.")
+            "subject to change in the future as we iterate the design."
+        )
         self._connector_metadata: Optional[KVConnectorMetadata] = None
         self._vllm_config = vllm_config
         self._role = role
@@ -96,11 +104,10 @@ class KVConnectorBase_V1(ABC):
     # Worker-side methods
     # ==============================
 
-    def bind_connector_metadata(
-            self, connector_metadata: KVConnectorMetadata) -> None:
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         """Set the connector metadata from the scheduler.
 
-        This function should be called by the model runner every time 
+        This function should be called by the model runner every time
         before the model execution. The metadata will be used for runtime
         KV cache loading and saving.
 
@@ -112,7 +119,7 @@ class KVConnectorBase_V1(ABC):
     def clear_connector_metadata(self) -> None:
         """Clear the connector metadata.
 
-        This function should be called by the model runner every time 
+        This function should be called by the model runner every time
         after the model execution.
         """
         self._connector_metadata = None
@@ -135,7 +142,7 @@ class KVConnectorBase_V1(ABC):
         Initialize with the KV caches. Useful for pre-registering the
         KV Caches in the KVConnector (e.g. for NIXL).
 
-        Args: 
+        Args:
             kv_caches: dictionary of layer names, kv cache
         """
         return
@@ -148,8 +155,7 @@ class KVConnectorBase_V1(ABC):
         return
 
     @abstractmethod
-    def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
         KV buffer. This is called from the forward context before the
@@ -160,9 +166,9 @@ class KVConnectorBase_V1(ABC):
             **kwargs: additional arguments for the load operation
 
         Note:
-            The number of elements in kv_caches and layer_names should be 
+            The number of elements in kv_caches and layer_names should be
             the same.
-            
+
         """
         pass
 
@@ -172,7 +178,7 @@ class KVConnectorBase_V1(ABC):
         Block until the KV for a specific layer is loaded into vLLM's
         paged buffer. This is called from within attention layer to ensure
         async copying from start_load_kv is complete.
-        
+
         This interface will be useful for layer-by-layer pipelining.
 
         Args:
@@ -181,16 +187,21 @@ class KVConnectorBase_V1(ABC):
         pass
 
     @abstractmethod
-    def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata", **kwargs) -> None:
+    def save_kv_layer(
+        self,
+        layer_name: str,
+        kv_layer: torch.Tensor,
+        attn_metadata: "AttentionMetadata",
+        **kwargs: Any,
+    ) -> None:
         """
-        Start saving a layer of KV cache from vLLM's paged buffer 
+        Start saving a layer of KV cache from vLLM's paged buffer
         to the connector. This is called from within attention layer to
         enable async copying during execution.
 
         Args:
             layer_name (str): the name of the layer.
-            kv_layer (torch.Tensor): the paged KV buffer of the current 
+            kv_layer (torch.Tensor): the paged KV buffer of the current
                 layer in vLLM.
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
@@ -226,11 +237,37 @@ class KVConnectorBase_V1(ABC):
         """
         return None, None
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """
+        Get the set of block IDs that failed to load.
+
+        Returns:
+            Set of block IDs that encountered load errors.
+            Empty set if no load errors occurred.
+
+        Notes:
+            - Applies to both sync- and async-loading requests.
+            - Async loading: failed blocks may be reported in any forward pass
+              up to and including the pass where the request ID is returned by
+              `get_finished()`. Even if failures occur, the request must still
+              be reported via `get_finished()`, and the failed block IDs must
+              appear here no later than that same pass.
+            - Sync loading: failed blocks should be reported in the forward
+              pass in which they are detected.
+        """
+        return set()
+
     def shutdown(self):
         """
         Shutdown the connector. This is called when the worker process
         is shutting down to ensure that all the async operations are
         completed and the connector is cleaned up properly.
+        """
+        return None
+
+    def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
+        """
+        Get the KV connector stats collected during the last interval.
         """
         return None
 
@@ -247,7 +284,7 @@ class KVConnectorBase_V1(ABC):
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
-        
+
         Args:
             request (Request): the request object.
             num_computed_tokens (int): the number of locally
@@ -255,21 +292,28 @@ class KVConnectorBase_V1(ABC):
 
         Returns:
             A tuple with the following elements:
-                - An optional number of tokens that can be loaded from the 
-                  external KV cache beyond what is already computed. 
+                - An optional number of tokens that can be loaded from the
+                  external KV cache beyond what is already computed.
                   If None, it means that the connector needs more time to
                   determine the number of matched tokens, and the scheduler
                   should query for this request again later.
                 - `True` if external KV cache tokens will be loaded
                   asynchronously (between scheduler steps). Must be
                   'False' if the first element is 0.
+
+        Notes:
+            The connector should only consider the largest prefix of prompt-
+            tokens for which KV cache is actually available at the time of the
+            call. If the cache cannot be loaded for some tokens (e.g., due to
+            connectivity issues or eviction), those tokens must not be taken
+            into account.
         """
         pass
 
     @abstractmethod
-    def update_state_after_alloc(self, request: "Request",
-                                 blocks: "KVCacheBlocks",
-                                 num_external_tokens: int):
+    def update_state_after_alloc(
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+    ):
         """
         Update KVConnector state after block allocation.
 
@@ -289,7 +333,8 @@ class KVConnectorBase_V1(ABC):
 
     @abstractmethod
     def build_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
         """
         Build the connector metadata for this step.
 
@@ -338,8 +383,7 @@ class KVConnectorBase_V1(ABC):
         return ()
 
     @classmethod
-    def get_required_kvcache_layout(
-            cls, vllm_config: "VllmConfig") -> Optional[str]:
+    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> Optional[str]:
         """
         Get the required KV cache layout for this connector.
         Args:
@@ -351,6 +395,30 @@ class KVConnectorBase_V1(ABC):
         """
 
         if cls is KVConnectorBase_V1:
-            raise TypeError("get_required_kvcache_layout should not be called "
-                            "on the abstract base class")
+            raise TypeError(
+                "get_required_kvcache_layout should not be called "
+                "on the abstract base class"
+            )
+        return None
+
+    def get_finished_count(self) -> Optional[int]:
+        """
+        Get the count of requests expected to complete send/receive operations
+        via this connector.
+
+        Returns:
+            int: expected sending or receiving completion count.
+        """
+
+        return None
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: Optional[dict[str, Any]] = None
+    ) -> Optional["KVConnectorStats"]:
+        """
+        KVConnectorStats resolution method. This method allows dynamically
+        registered connectors to return their own KVConnectorStats object,
+        which can implement custom aggregation logic on the data dict.
+        """
         return None

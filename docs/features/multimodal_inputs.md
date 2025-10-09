@@ -6,6 +6,13 @@ This page teaches you how to pass multi-modal inputs to [multi-modal models][sup
     We are actively iterating on multi-modal support. See [this RFC](gh-issue:4194) for upcoming changes,
     and [open an issue on GitHub](https://github.com/vllm-project/vllm/issues/new/choose) if you have any feedback or feature requests.
 
+!!! tip
+    When serving multi-modal models, consider setting `--allowed-media-domains` to restrict domain that vLLM can access to prevent it from accessing arbitrary endpoints that can potentially be vulnerable to Server-Side Request Forgery (SSRF) attacks. You can provide a list of domains for this arg. For example: `--allowed-media-domains upload.wikimedia.org github.com www.bogotobogo.com`
+
+    Also, consider setting `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to prevent HTTP redirects from being followed to bypass domain restrictions.
+
+    This restriction is especially important if you run vLLM in a containerized environment where the vLLM pods may have unrestricted access to internal networks.
+
 ## Offline Inference
 
 To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
@@ -38,6 +45,32 @@ When using multi-modal inputs, vLLM normally hashes each media item by content t
         #  - Include every modality present in multi_modal_data.
         #  - For lists, provide the same number of entries.
         #  - Use None to fall back to content hashing for that item.
+        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
+    })
+
+    for o in outputs:
+        print(o.outputs[0].text)
+    ```
+
+Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache.
+
+??? code
+
+    ```python
+    from vllm import LLM
+    from PIL import Image
+
+    # Qwen2.5-VL example with two images
+    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct")
+
+    prompt = "USER: <image><image>\nDescribe the differences.\nASSISTANT:"
+    img_b = Image.open("/path/to/b.jpg")
+
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"image": [None, img_b]},
+        # Since img_a is expected to be cached, we can skip sending the actual
+        # image entirely.
         "multi_modal_uuids": {"image": ["sku-1234-a", None]},
     })
 
@@ -398,7 +431,7 @@ Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions 
     If no fallback is available, an error is raised and you have to provide the chat template manually via the `--chat-template` argument.
 
     For certain models, we provide alternative chat templates inside <gh-dir:examples>.
-    For example, VLM2Vec uses <gh-file:examples/template_vlm2vec.jinja> which is different from the default one for Phi-3-Vision.
+    For example, VLM2Vec uses <gh-file:examples/template_vlm2vec_phi3v.jinja> which is different from the default one for Phi-3-Vision.
 
 ### Image Inputs
 
@@ -753,6 +786,39 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
     ],
         model=model,
     )
+    ```
+
+For Online Serving, you can also skip sending media if you expect cache hits with provided UUIDs. You can do so by sending media like this:
+
+    ```python
+        # Image/video/audio URL:
+        {
+            "type": "image_url",
+            "image_url": None,
+            "uuid": image_uuid,
+        },
+
+        # image_embeds
+        {
+            "type": "image_embeds",
+            "image_embeds": None,
+            "uuid": image_uuid
+        },
+
+        # input_audio:
+        {
+            "type": "input_audio",
+            "input_audio": None,
+            "uuid": audio_uuid
+        },
+
+        # PIL Image:
+        {
+            "type": "image_pil",
+            "image_pil": None
+            "uuid": image_uuid
+        }
+
     ```
 
 !!! note

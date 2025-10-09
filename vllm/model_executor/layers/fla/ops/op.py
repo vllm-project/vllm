@@ -11,7 +11,7 @@ import os
 
 from vllm.triton_utils import tl, tldevice, triton
 
-if os.environ.get('FLA_USE_FAST_OPS', '0') == '1':
+if os.environ.get("FLA_USE_FAST_OPS", "0") == "1":
     div = tldevice.fast_dividef
     exp = tldevice.fast_expf
     log = tldevice.fast_logf
@@ -28,12 +28,7 @@ else:
     log2 = tl.log2
 
 
-@triton.jit
-def safe_exp(x):
-    return exp(tl.where(x <= 0, x, float('-inf')))
-
-
-if not hasattr(tl, 'gather'):
+if not hasattr(tl, "gather"):
 
     @triton.jit
     def gather(src, index, axis, _builder=None):

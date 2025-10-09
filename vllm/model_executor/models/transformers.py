@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Wrapper around `transformers` models"""
+
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -22,42 +23,59 @@ from typing import Literal, Optional, Union
 
 import regex as re
 import torch
+import transformers
+from packaging.version import Version
 from torch import nn
-from transformers import (AutoModel, BatchFeature, PretrainedConfig,
-                          PreTrainedModel)
+from transformers import AutoModel, BatchFeature, PretrainedConfig, PreTrainedModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.attention import Attention
+from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, VllmConfig)
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+)
+from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.utils import getattr_iter
+from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, MultiModalUUIDDict,
-                                    PlaceholderRange)
+from vllm.multimodal.inputs import (
+    MultiModalDataDict,
+    MultiModalFieldConfig,
+    MultiModalInputs,
+    MultiModalUUIDDict,
+    PlaceholderRange,
+)
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
-from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo)
+from vllm.multimodal.processing import BaseMultiModalProcessor, BaseProcessingInfo
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_list_of
 
-from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
-                         SupportsQuant)
-from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
-                    flatten_bn, make_empty_intermediate_tensors_factory,
-                    maybe_prefix)
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP, SupportsQuant
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    WeightsMapper,
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -78,17 +96,18 @@ def get_feature_request_tip(
 
 
 def vllm_flash_attention_forward(
-        # Transformers args
-        module: torch.nn.Module,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attention_mask: torch.Tensor,
-        # Transformers kwargs
-        scaling: Optional[float] = None,
-        # vLLM kwargs
-        attention_instances: Optional[dict[Attention]] = None,
-        **kwargs):
+    # Transformers args
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor,
+    # Transformers kwargs
+    scaling: Optional[float] = None,
+    # vLLM kwargs
+    attention_instances: Optional[dict[Attention]] = None,
+    **kwargs,
+):
     self_attn = attention_instances[module.layer_idx]
     if scaling is not None:
         self_attn.impl.scale = float(scaling)
@@ -122,10 +141,13 @@ def can_enable_torch_compile(vllm_config: VllmConfig) -> bool:
     return enable
 
 
+Style = Literal["colwise", "colwise_rep", "rowwise", "rowwise_rep", "replicate"]
+
+
 def replace_linear_class(
     linear: nn.Linear,
-    style: Literal["colwise", "rowwise"],
-    quant_config: QuantizationConfig,
+    style: Style = "replicate",
+    quant_config: Optional[QuantizationConfig] = None,
     *,
     prefix: str = "",
 ) -> Union[ColumnParallelLinear, RowParallelLinear, ReplicatedLinear]:
@@ -133,26 +155,21 @@ def replace_linear_class(
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
 
     Args:
-        linear (nn.Linear): `nn.Linear` to be replaced.
-        style (str): Tensor parallel style of the new linear, e.g. "colwise".
-        quant_config (QuantConfig): Quantization config for the new linear.
+        linear: `nn.Linear` to be replaced.
+        style: Tensor parallel style of the new linear, e.g. "colwise".
+        quant_config: Quantization config for the new linear.
     Returns:
-        Union[ColumnParallelLinear, RowParallelLinear]: The new linear.
+        The new linear.
     """
 
     if not isinstance(style, str):
-        raise ValueError(
-            f"Unsupported parallel style type {type(style)}, expected str")
+        raise ValueError(f"Unsupported parallel style type {type(style)}, expected str")
 
     vllm_linear_cls, vllm_linear_kwargs = {
         "colwise": (ColumnParallelLinear, {}),
-        "colwise_rep": (ColumnParallelLinear, {
-            "gather_output": True
-        }),
+        "colwise_rep": (ColumnParallelLinear, {"gather_output": True}),
         "rowwise": (RowParallelLinear, {}),
-        "rowwise_rep": (RowParallelLinear, {
-            "input_is_parallel": False
-        }),
+        "rowwise_rep": (RowParallelLinear, {"input_is_parallel": False}),
         "replicate": (ReplicatedLinear, {}),
     }.get(style, (ReplicatedLinear, {}))
 
@@ -165,6 +182,31 @@ def replace_linear_class(
         return_bias=False,
         **vllm_linear_kwargs,
     )
+
+
+def replace_rms_norm_class(rms_norm: nn.Module, hidden_size: int) -> RMSNorm:
+    """Replace a Transformers RMSNorm with vLLM's RMSNorm.
+
+    This method assumes:
+    - Weight is stored as `weight`.
+    - Epsilon is stored as `eps` or `variance_epsilon`.
+    - `with_scale` indicates whether the layer has a weight (Gemma3n only).
+    - `var_hidden_size` is only ever used for Intern vision encoder in vLLM
+    and Transformers doesn't appear to have the same concept.
+    """
+    kwargs = {
+        "hidden_size": hidden_size,
+        "eps": getattr_iter(rms_norm, ("eps", "variance_epsilon"), 1e-6),
+        "has_weight": getattr(rms_norm, "with_scale", True),
+    }
+    if (weight := getattr(rms_norm, "weight", None)) is not None:
+        # If weight is a Parameter, get its data tensor
+        weight = getattr(weight, "data", weight)
+        kwargs["dtype"] = weight.dtype
+    else:
+        # No weight, fall back to weightless RMSNorm
+        kwargs["has_weight"] = False
+    return RMSNorm(**kwargs)
 
 
 # Copied from `accelerate`
@@ -189,12 +231,12 @@ def init_on_device_without_buffers(device: torch.device):
             kwargs = module._parameters[name].__dict__
             kwargs["requires_grad"] = param.requires_grad
             module._parameters[name] = param_cls(
-                module._parameters[name].to(device), **kwargs)
+                module._parameters[name].to(device), **kwargs
+            )
 
     tensor_constructors_to_patch = {}
 
     def patch_tensor_constructor(fn):
-
         def wrapper(*args, **kwargs):
             kwargs["device"] = device
             return fn(*args, **kwargs)
@@ -205,21 +247,21 @@ def init_on_device_without_buffers(device: torch.device):
         nn.Module.register_parameter = register_empty_parameter
         for torch_function_name in tensor_constructors_to_patch:
             setattr(
-                torch, torch_function_name,
-                patch_tensor_constructor(getattr(torch, torch_function_name)))
+                torch,
+                torch_function_name,
+                patch_tensor_constructor(getattr(torch, torch_function_name)),
+            )
         yield
     finally:
         nn.Module.register_parameter = old_register_parameter
-        for torch_function_name, old_torch_function in (
-                tensor_constructors_to_patch.items()):
+        for (
+            torch_function_name,
+            old_torch_function,
+        ) in tensor_constructors_to_patch.items():
             setattr(torch, torch_function_name, old_torch_function)
 
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
-
-    def get_hf_config(self):
-        return self.ctx.model_config.hf_config
-
     def get_supported_mm_limits(self):
         return {"image": None}
 
@@ -229,9 +271,11 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
     def get_max_image_tokens(self) -> int:
         width, height = self.get_max_image_size()
         processor = self.get_hf_processor()
-        mm_processor_kwargs = self.ctx.model_config.mm_processor_kwargs or {}
+        multimodal_config = self.ctx.model_config.multimodal_config
+        mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
         mm_tokens = processor._get_num_multimodal_tokens(
-            image_sizes=([height, width], ), **mm_processor_kwargs)
+            image_sizes=([height, width],), **mm_processor_kwargs
+        )
         image_tokens = mm_tokens["num_image_tokens"][0]
         return image_tokens
 
@@ -239,9 +283,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return 10_000, 10_000  # hardcode for arbitrary very large size
 
 
-class MultiModalDummyInputsBuilder(
-        BaseDummyInputsBuilder[MultiModalProcessingInfo]):
-
+class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
@@ -256,21 +298,25 @@ class MultiModalDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_max_image_size()
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images),
+            "image": self._get_dummy_images(
+                width=target_width,
+                height=target_height,
+                num_images=num_images,
+                overrides=image_overrides,
+            ),
         }
 
 
 class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -294,53 +340,37 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
     def _get_mm_fields_config(
         self,
-        hf_inputs,
-        hf_processor_mm_kwargs,
-        num_image_patches: torch.Tensor = None,
-    ):
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
         # HF Processors always return a mask but vLLM doesn't need it
         hf_inputs.pop("attention_mask", None)
+        num_image_patches = hf_inputs.get("num_image_patches")
         mm_fields = {
-            key: MultiModalFieldConfig.flat_from_sizes("image",
-                                                       num_image_patches)
+            key: MultiModalFieldConfig.flat_from_sizes("image", num_image_patches)
             for key in hf_inputs
         }
         mm_fields["image_embeds"] = MultiModalFieldConfig.flat_from_sizes(
-            "image", num_image_patches)
+            "image", num_image_patches
+        )
+
+        # Keep these as batched, as they always have batch size as first dim
+        mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched("image")
+        mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched("image")
         mm_fields["num_image_patches"] = MultiModalFieldConfig.batched("image")
         return mm_fields
 
-    def _apply_hf_processor_text_mm(
+    def _get_hf_mm_data(
         self,
-        prompt_text: str,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> tuple[list[int], BatchFeature, bool]:
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
         """
-        Apply the HF processor on the prompt text and multi-modal data
-        together.
-
-        In addition, return whether prompt replacements have been applied.
+        In contrast to the base class, this method always adds
+        `return_mm_token_type_ids` to the processor data
         """
-        processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
+        processor_data, passthrough_data = super()._get_hf_mm_data(mm_items)
         processor_data["return_mm_token_type_ids"] = True
-
-        processed_data = self._call_hf_processor(
-            prompt=prompt_text,
-            mm_data=processor_data,
-            mm_kwargs=hf_processor_mm_kwargs,
-            tok_kwargs=tokenization_kwargs,
-        )
-        processed_data.update(passthrough_data)
-
-        prompt_ids, = processed_data.pop("input_ids").tolist()
-        mm_token_type_ids = processed_data.pop(
-            "mm_token_type_ids"
-        ) if "mm_token_type_ids" in processed_data else processed_data.pop(
-            "token_type_ids")  # for gemma3 only
-
-        return prompt_ids, processed_data, mm_token_type_ids
+        return processor_data, passthrough_data
 
     def apply(
         self,
@@ -367,28 +397,40 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             # into string
             prompt = hf_processor.decode(prompt)
 
-        (prompt_ids, processed_data,
-         mm_token_type_ids) = self._apply_hf_processor_text_mm(
-             prompt_text=prompt,
-             mm_items=mm_items,
-             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-             tokenization_kwargs=tokenization_kwargs,
-         )
+        # Bypass cached processor and always apply to the full set of mm inputs
+        # NOTE: we can't just set caching=False because base class method
+        # transforms outputs to `MultiModalKwargs` which is not going to
+        # work for Transformers. We have a lot of logic tied to
+        # `mm_tokens_per_modality` below
+        prompt_ids, processed_data, _ = self._apply_hf_processor_text_mm(
+            prompt_text=prompt,
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
+        )
 
-        # HF processor will return `mm_token_type_ids` from which
-        # we can infer mm_placeholders. Until then hardcode to make code run
-        # Below tested on Llava. Prompts and `mm_token_type_ids` are always bs=1
+        # For gemma3 we check `token_type_ids` as the key
+        token_type_key = (
+            "mm_token_type_ids"
+            if "mm_token_type_ids" in processed_data
+            else "token_type_ids"
+        )
+        mm_token_type_ids = processed_data.pop(token_type_key)
+
+        # We can infer vLLM style placeholder from token type ids, if we split
+        # it for each input `mm_data`.
         mm_positions = torch.where(mm_token_type_ids == 1)[1]
         images = mm_items.get_items("image", ImageProcessorItems)
-        mm_processor_kwargs = (self.info.ctx.model_config.mm_processor_kwargs
-                               or {})
+        multimodal_config = self.info.ctx.model_config.multimodal_config
+        mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
         image_sizes = []
         for item_idx in range(len(images)):
             image_size = images.get_image_size(item_idx)
             image_sizes.append((image_size.height, image_size.width))
 
         mm_tokens_per_modality = hf_processor._get_num_multimodal_tokens(
-            image_sizes=image_sizes, **mm_processor_kwargs)
+            image_sizes=image_sizes, **mm_processor_kwargs
+        )
 
         mm_placeholders = {}
         split_sizes = mm_tokens_per_modality["num_image_tokens"]
@@ -400,28 +442,27 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                 PlaceholderRange(
                     offset=positions[0].item(),
                     length=positions.shape[0],
-                    is_embed=(mm_tokens == hf_processor.image_token_id).bool())
-                for positions, mm_tokens in zip(chunked_mm_positions,
-                                                chunked_mm_tokens)
+                    is_embed=(mm_tokens == hf_processor.image_token_id).bool(),
+                )
+                for positions, mm_tokens in zip(chunked_mm_positions, chunked_mm_tokens)
             ]
             mm_placeholders = {"image": ranges}
 
-        num_image_patches = torch.tensor(
+        processed_data["num_image_patches"] = torch.tensor(
             mm_tokens_per_modality["num_image_patches"]
-        ) if "num_image_patches" in mm_tokens_per_modality else None
-        processed_data['num_image_patches'] = num_image_patches
+        )
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             processed_data,
-            self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs,
-                                       num_image_patches),
+            self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs),
         )
+
         # Use overrides if provided; fallback to data-dependent hashing.
-        mm_hashes = (mm_uuids if mm_uuids is not None else self._hash_mm_items(
-            mm_items, hf_processor_mm_kwargs, tokenization_kwargs))
+        mm_hashes = self._hash_mm_items(
+            mm_items, hf_processor_mm_kwargs, tokenization_kwargs, mm_uuids=mm_uuids
+        )
 
         return MultiModalInputs(
             type="multimodal",
-            prompt=prompt,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
@@ -431,8 +472,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
 class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
     embedding_padding_modules = ["lm_head"]
-    embedding_modules = ["embed_tokens"
-                         ]  # TODO transformers will have a util to get it
+    embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -444,19 +484,34 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         self.device_config: DeviceConfig = vllm_config.device_config
         self.model_config: ModelConfig = vllm_config.model_config
         self.parallel_config: ParallelConfig = vllm_config.parallel_config
-        self.quant_config: QuantizationConfig = vllm_config.quant_config
+        self.quant_config: Optional[QuantizationConfig] = vllm_config.quant_config
 
         self.pp_group = get_pp_group()
-        self.pp_size = self.pp_group.world_size
-        self.pp_rank = self.pp_group.rank_in_group
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_group = get_tp_group()
 
-        # To be updated in child classes for use in `load_weights`
-        self.skip_prefixes: Optional[list[str]] = None
+        # Weights to skip in `self.load_weights`
+        self.skip_prefixes: list[str] = []
+        """Skip loading weights whose qualname starts with these prefixes."""
+        self.skip_substrs: list[str] = []
+        """Skip loading weights whose qualname contains these substrings."""
+        self.ignore_unexpected_prefixes: list[str] = []
+        """Ignore unexpected weights whose qualname starts with these prefixes.
+        """
+        self.ignore_unexpected_suffixes: list[str] = []
+        """Ignore unexpected weights whose qualname ends with these suffixes."""
+
+        if self.quant_config:
+            quant_method_name = self.quant_config.get_name()
+            # Check for unsupported quantization methods.
+            if quant_method_name == "mxfp4":
+                raise NotImplementedError(
+                    "Transformers backend does not support MXFP4 quantization yet."
+                )
+            # Skip loading extra bias for GPTQ models.
+            if "gptq" in quant_method_name:
+                self.ignore_unexpected_suffixes.append(".bias")
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
-        # TODO: @raushan, use the public `model.set_attn_implementation()`
-        # method once its checks are fixed in Transformers.
         self.text_config._attn_implementation = "vllm"
         with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(
@@ -465,39 +520,49 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 trust_remote_code=self.model_config.trust_remote_code,
             )
 
+        # Remove layers not on this pipeline parallel rank
         self.pipeline_parallel()
-        self.tensor_parallel()
+        # Substitute remaining layers with vLLM's layers as needed
+        self.recursive_replace()
+        # Create attention instances for KV cache allocation
+        self.attention_instances = self.create_attention_instances()
 
         # Input embeddings
-        if not isinstance(self.model.get_input_embeddings(), PPMissingLayer):
+        input_embeddings = self.model.get_input_embeddings()
+        if not isinstance(input_embeddings, PPMissingLayer):
+            # Some models use embedding scales
+            self.embed_scale = getattr(input_embeddings, "embed_scale", None)
+            names = ("embedding_size", "hidden_size")
+            embedding_dim = getattr_iter(self.text_config, names, None)
+            assert embedding_dim is not None
             self.model.set_input_embeddings(
                 VocabParallelEmbedding(
                     self.text_config.vocab_size,
-                    self.text_config.hidden_size,
+                    embedding_dim=embedding_dim,
                     org_num_embeddings=self.text_config.vocab_size,
                     quant_config=self.quant_config,
-                ))
-
-        # Attention layers
-        self.attention_instances = self.create_attention_instances()
+                )
+            )
 
         # Initialize any parameters that have not had their modules replaced
         self.init_parameters(self.model)
 
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states"], self.text_config.hidden_size))
+        # Pipeline parallel intermediate tensors
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], self.text_config.hidden_size
+        )
 
     def pipeline_parallel(self):
         """
         Apply the model's pipeline parallelization plan.
         """
-        if self.pp_size <= 1:
+        if self.pp_group.world_size <= 1:
             return
 
         if not self.model.supports_pp_plan:
-            tip = get_feature_request_tip(self.model_config.model,
-                                          self.model_config.trust_remote_code)
+            tip = get_feature_request_tip(
+                self.model_config.model, self.model_config.trust_remote_code
+            )
             raise ValueError(
                 f"{type(self.model)} does not support pipeline parallel. {tip}"
             )
@@ -513,22 +578,25 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         if len(module_lists) > 1:
             raise ValueError(
                 "Pipeline parallel of models with multiple `ModuleList`s "
-                "in the base model are not supported yet!")
+                "in the base model are not supported yet!"
+            )
         if module_list_idx is None:
-            raise ValueError(
-                f"Could not find `ModuleList` in {type(self.model)}")
+            raise ValueError(f"Could not find `ModuleList` in {type(self.model)}")
 
         # Layers before module list
         for name in pp_plan[:module_list_idx]:
             if self.pp_group.is_first_rank or (
-                    self.text_config.tie_word_embeddings
-                    and self.pp_group.is_last_rank):
+                self.text_config.tie_word_embeddings and self.pp_group.is_last_rank
+            ):
                 continue
             setattr(self.model, name, PPMissingLayer())
 
         # Module list
         start_layer, end_layer = get_pp_indices(
-            self.text_config.num_hidden_layers, self.pp_rank, self.pp_size)
+            self.text_config.num_hidden_layers,
+            self.pp_group.rank_in_group,
+            self.pp_group.world_size,
+        )
         layers_name = pp_plan[module_list_idx]
         layers = getattr(self.model, layers_name)
         for i in range(len(layers)):
@@ -537,81 +605,84 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             layers[i] = PPMissingLayer()
 
         # Layers after module list
-        for name in pp_plan[module_list_idx + 1:]:
+        for name in pp_plan[module_list_idx + 1 :]:
             # Modules that should be on last rank
             if not self.pp_group.is_last_rank:
                 setattr(self.model, name, PPMissingLayer())
 
-    def tensor_parallel(self):
-        """
-        Apply the model's tensor parallelization plan.
-        Currently only supports linear layers.
-        """
-        # Look for tp plans in all of the PreTrainedModels found in self.model
-        is_pretrained_model = lambda m: isinstance(m, PreTrainedModel)
-        supports_tp_plan = lambda m: m.config.base_model_tp_plan is not None
-        pretrained_models = filter(is_pretrained_model, self.model.modules())
-        models_with_tp_plan = filter(supports_tp_plan, pretrained_models)
+    def recursive_replace(self):
+        """Recursively replace modules in the model as needed.
 
-        if not any(models_with_tp_plan) and self.tp_size > 1:
-            tip = get_feature_request_tip(self.model_config.model,
-                                          self.model_config.trust_remote_code)
+        Currently, this replaces:
+
+        - `nn.Linear` with vLLM's tensor parallel linear classes
+        - `*RMSNorm` with vLLM's `RMSNorm`
+        """
+        tp_plan = self.model.tp_plan
+
+        if not tp_plan and self.tp_group.world_size > 1:
+            tip = get_feature_request_tip(
+                self.model_config.model, self.model_config.trust_remote_code
+            )
             raise ValueError(
-                f"{type(self.model)} does not support tensor parallel. {tip}")
+                f"{type(self.model)} does not support tensor parallel. {tip}"
+            )
 
-        def _tensor_parallel(module: nn.Module,
-                             prefix: str = "",
-                             tp_plan=None):
-            tp_plan = tp_plan or {}
+        # Prefix the patterns because we always start from `self.model`
+        tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
 
-            # If the current module is a PreTrainedModel, set the tp_plan for
-            # all of its children
-            if isinstance(module, PreTrainedModel):
-                tp_plan = module.config.base_model_tp_plan or {}
-                tp_plan = {
-                    maybe_prefix(prefix, k): v
-                    for k, v in tp_plan.items()
-                }
-
-            # Some weight loaders expect linear layers to inherit from vLLM's
-            # LinearBase class, so we set a default style which causes any
-            # unspecified linear layers to be replaced with ReplicatedLinear
+        def _recursive_replace(module: nn.Module, prefix: str):
             for child_name, child_module in module.named_children():
+                new_module = child_module
                 qual_name = maybe_prefix(prefix, child_name)
                 if isinstance(child_module, nn.Linear):
                     generator = (p for p in tp_plan if re.match(p, qual_name))
                     pattern = next(generator, None)
+                    # Some weight loaders expect all linear layers to inherit
+                    # LinearBase, so we set a default style which causes any
+                    # unspecified layers to be replaced with ReplicatedLinear
                     style = tp_plan.get(pattern, "replicate")
-                    new_module = replace_linear_class(child_module,
-                                                      style,
-                                                      self.quant_config,
-                                                      prefix=qual_name)
+                    new_module = replace_linear_class(
+                        child_module, style, self.quant_config, prefix=qual_name
+                    )
+                # TODO(hmellor): Enable RMSNorm replacement once we have a way
+                # to choose RMSNorm vs GemmaRMSNorm
+                # elif child_module.__class__.__name__.endswith("RMSNorm"):
+                #     new_module = replace_rms_norm_class(
+                #         child_module, self.config.hidden_size)
+                else:
+                    _recursive_replace(child_module, prefix=qual_name)
+
+                if new_module is not child_module:
                     setattr(module, child_name, new_module)
                     log_replacement(qual_name, child_module, new_module)
-                else:
-                    _tensor_parallel(child_module,
-                                     prefix=qual_name,
-                                     tp_plan=tp_plan)
 
-        _tensor_parallel(self.model)
+        _recursive_replace(self.model, prefix="model")
 
-    def create_attention_instances(self) -> dict[int, Attention]:
+    def create_attention_instances(
+        self, attn_type: AttentionType = AttentionType.DECODER
+    ) -> dict[int, Attention]:
         """
         Create `Attention` instances to inform KV cache allocation.
         """
-        num_heads = self.model_config.get_num_attention_heads(
-            self.parallel_config)
+        num_heads = self.model_config.get_num_attention_heads(self.parallel_config)
         head_size = self.model_config.get_head_size()
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
-        start, end = get_pp_indices(self.text_config.num_hidden_layers,
-                                    self.pp_rank, self.pp_size)
+        logits_soft_cap = getattr(self.text_config, "attn_logit_softcapping", None)
+        start, end = get_pp_indices(
+            self.text_config.num_hidden_layers,
+            self.pp_group.rank_in_group,
+            self.pp_group.world_size,
+        )
 
         attention_instances = {}
         for i in range(start, end):
             # Handle interleaved sliding window attention
             per_layer_sliding_window = None
-            if (hasattr(self.config, "layer_types")
-                    and self.config.layer_types[i] == "sliding_attention"):
+            if (
+                hasattr(self.config, "layer_types")
+                and self.config.layer_types[i] == "sliding_attention"
+            ):
                 per_layer_sliding_window = self.config.sliding_window
 
             attention_instances[i] = Attention(
@@ -623,11 +694,14 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
+                logits_soft_cap=logits_soft_cap,
                 per_layer_sliding_window=per_layer_sliding_window,
-                prefix=f"{i}.attn")
+                prefix=f"{i}.attn",
+                attn_type=attn_type,
+            )
         return attention_instances
 
-    def init_parameters(self, module: nn.Module):
+    def init_parameters(self, module: nn.Module, dtype: Optional[torch.dtype] = None):
         """
         If a `parameter` is on the `meta` device, then its parent
         `module` is the original module created by:
@@ -637,15 +711,22 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             self.model: PreTrainedModel = AutoModel.from_config(...)
         ```
         """
-        for name, param in module.named_parameters(recurse=False):
-            if param.device == torch.device("meta"):
-                new_param = nn.Parameter(
-                    torch.empty_like(param.data,
-                                     dtype=self.model_config.dtype,
-                                     device=self.device_config.device))
-                setattr(module, name, new_param)
-        for child in module.children():
-            self.init_parameters(child)
+
+        def _init_parameters(module: nn.Module, dtype: Optional[torch.dtype]):
+            for name, param in module.named_parameters(recurse=False):
+                if param.device == torch.device("meta"):
+                    new_param = nn.Parameter(
+                        torch.empty_like(
+                            param.data,
+                            dtype=dtype or self.model_config.dtype,
+                            device=self.device_config.device,
+                        )
+                    )
+                    setattr(module, name, new_param)
+            for child in module.children():
+                _init_parameters(child, dtype)
+
+        _init_parameters(module, dtype)
 
     def forward(
         self,
@@ -653,8 +734,9 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        if not get_pp_group().is_first_rank:
+        if not self.pp_group.is_first_rank:
             assert intermediate_tensors is not None
             input_ids = None
             inputs_embeds = intermediate_tensors["hidden_states"]
@@ -675,43 +757,49 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             use_cache=False,
             position_ids=position_ids,
             attention_instances=self.attention_instances,
-            return_dict=False)[0][0, ...]  # we remove batch dimension for now
+            return_dict=False,
+            **kwargs,
+        )[0][0, ...]  # we remove batch dimension for now
 
-        if not get_pp_group().is_last_rank:
+        if not self.pp_group.is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
 
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=self.skip_prefixes)
+    def load_weights(
+        self,
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=self.skip_prefixes,
+            skip_substrs=self.skip_substrs,
+            ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
+            ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
+        )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
-
-@support_torch_compile(enable_if=can_enable_torch_compile)
-class TransformersModel(TransformersBase):
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            # Add `model.` prefix for base model checkpoints
-            "": "model.",
-            # Remove `model.` from places it should not be
-            "model.model.": "model.",
-            "model.score": "score",
-        })
+    def check_version(self, min_version: str, feature: str):
+        installed = Version(transformers.__version__)
+        required = Version(min_version)
+        if installed < required:
+            raise ImportError(
+                f"Transformers backend requires transformers>={required} "
+                f"for {feature}, but got {installed}"
+            )
 
 
 @support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersForCausalLM(TransformersBase):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         # Tell `TransformersBase.load_weights` to skip
         # `lm_head` if the model has tied word embeddings
         if self.text_config.tie_word_embeddings:
-            self.skip_prefixes = ["lm_head."]
+            self.skip_prefixes.append("lm_head.")
 
-        if get_pp_group().is_last_rank:
+        if self.pp_group.is_last_rank:
             self.unpadded_vocab_size = self.text_config.vocab_size
             self.lm_head = ParallelLMHead(
                 self.text_config.vocab_size,
@@ -721,40 +809,35 @@ class TransformersForCausalLM(TransformersBase):
             )
             if self.text_config.tie_word_embeddings:
                 self.lm_head = self.lm_head.tie_weights(
-                    self.model.get_input_embeddings())
+                    self.model.get_input_embeddings()
+                )
 
             logit_scale = getattr(self.text_config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size, self.text_config.vocab_size,
-                logit_scale)
+                self.unpadded_vocab_size, self.text_config.vocab_size, logit_scale
+            )
         else:
             self.lm_head = PPMissingLayer()
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        inputs_embeds = self.model.get_input_embeddings()(input_ids)
+        if self.embed_scale is not None:
+            inputs_embeds *= self.embed_scale
+        return inputs_embeds
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-
-def flatten_and_concat(x: list[torch.Tensor]) -> torch.Tensor:
-    """Flatten until a list of tensors can be concatenated then do concat"""
-
-    def _can_concat(x: list[torch.Tensor]):
-        return len(set(map(lambda _x: _x.shape[1:], x))) == 1
-
-    if _can_concat(x):
-        return torch.concat(x)
-    return flatten_and_concat(flatten_bn(x))
 
 
 @MULTIMODAL_REGISTRY.register_processor(
     MultiModalProcessor,
     info=MultiModalProcessingInfo,
-    dummy_inputs=MultiModalDummyInputsBuilder)
+    dummy_inputs=MultiModalDummyInputsBuilder,
+)
 @support_torch_compile(
     # set `positions` to last dim to support Qwen-mrope
     dynamic_arg_dims={
@@ -763,8 +846,11 @@ def flatten_and_concat(x: list[torch.Tensor]) -> torch.Tensor:
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
     },
-    enable_if=can_enable_torch_compile)
+    enable_if=can_enable_torch_compile,
+)
 class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
+    supports_multimodal_raw_input_only = True
+    merge_by_field_config = True
     # Backwards compatibility for prev released models. State dicts back then
     # had different formats and cannot be loaded with `AutoModel` mapping as is
     hf_to_vllm_mapper = WeightsMapper(
@@ -786,7 +872,8 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
             "model.embed_tokens": "model.language_model.embed_tokens",
             "model.layers": "model.language_model.layers",
             "model.norm": "model.language_model.norm",
-        })
+        }
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -801,53 +888,45 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        # NOTE: In v1, inputs_embeds is always generated at model runner from
-        # `get_multimodal_embeddings` and `get_input_embeddings`, this
-        # condition is only for v0 compatibility.
-        if inputs_embeds is None:
-            multimodal_embeds = self.get_multimodal_embeddings(**kwargs)
-            if multimodal_embeds is not None:
-                inputs_embeds = self.get_input_embeddings(
-                    input_ids, multimodal_embeds)
-                input_ids = None
-
-        model_output = super().forward(input_ids, positions,
-                                       intermediate_tensors, inputs_embeds)
+        # Gemma3 and PaliGemma needs `token_type_ids` to work correctly
+        # Other models will not have `token_type_ids` in kwargs
+        kwargs = {k: v for k, v in kwargs.items() if k == "token_type_ids"}
+        model_output = super().forward(
+            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+        )
         return model_output
 
+    def get_language_model(self) -> torch.nn.Module:
+        """`TransformersForMultimodalLM` does not contain a vLLM language model class.
+        Therefore, in order to return a language model vLLM class, we use a wrapper to
+        give `self` the same interface as `TransformersForCausalLM`."""
+
+        class LanguageModelWrapper(TransformersForCausalLM):
+            def __init__(self, multimodal_model):
+                # Don't call super().__init__() to avoid re-initialization
+                self.__dict__.update(multimodal_model.__dict__)
+
+            model = getattr_iter(self.model, ("language_model", "text_model"), None)
+
+        return LanguageModelWrapper(self)
+
     def get_multimodal_embeddings(self, **kwargs):
-        pixel_values = kwargs.pop("pixel_values", None)
-        pixel_values = pixel_values if pixel_values is not None else kwargs.pop(
-            "image_patches", None)
-        image_embeds = kwargs.pop("image_embeds", None)
+        pixel_values: Optional[torch.Tensor] = kwargs.pop("pixel_values", None)
+        image_embeds: Optional[torch.Tensor] = kwargs.pop("image_embeds", None)
+        # Model might use `image_patches` instead of `pixel_values`
+        if pixel_values is None:
+            pixel_values = kwargs.pop("image_patches", None)
 
         if image_embeds is not None:
             return image_embeds
 
-        if pixel_values is None and image_embeds is None:
+        if pixel_values is None:
             return None
 
         num_image_patches = kwargs.pop("num_image_patches")
+        kwargs.pop("token_type_ids", None)  # used only in `forward`
         if pixel_values is not None:
-            if isinstance(pixel_values, torch.Tensor):
-                pixel_values = flatten_bn(pixel_values).to(self.dtype)
-            elif is_list_of(pixel_values, torch.Tensor):
-                pixel_values = flatten_and_concat(pixel_values).to(self.dtype)
-            else:
-                raise ValueError(
-                    f"Unsupported pixel_values type {type(pixel_values)}. "
-                    "Expected `torch.Tensor` or list of `torch.Tensor`.")
-
-            if isinstance(num_image_patches, list):
-                num_image_patches = torch.cat(num_image_patches)
-
-            vision_embeddings = self.model.get_image_features(
-                pixel_values,
-                **{
-                    k: v.flatten(0, 1)
-                    for k, v in kwargs.items()
-                },
-            )
+            vision_embeddings = self.model.get_image_features(pixel_values, **kwargs)
 
             if isinstance(vision_embeddings, torch.Tensor):
                 if vision_embeddings.ndim == 2:
@@ -857,8 +936,8 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
                 # but transformers returns concat tensors if each patch
                 # is of different size. We split it back to make vLLM happy
                 vision_embeddings = torch.split(
-                    vision_embeddings,
-                    num_image_patches.flatten().tolist())
+                    vision_embeddings, num_image_patches.flatten().tolist()
+                )
                 vision_embeddings = [
                     embed.flatten(start_dim=0, end_dim=-2)
                     for embed in vision_embeddings
@@ -866,18 +945,4 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
 
             return vision_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings=None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.model.get_input_embeddings()(input_ids)
-        if (multimodal_embeddings is not None
-                and len(multimodal_embeddings) != 0):
-            mask = (input_ids == self.config.image_token_id)
-            mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
-            multimodal_embeddings = torch.cat(multimodal_embeddings)
-
-            inputs_embeds = inputs_embeds.masked_scatter(
-                mask, multimodal_embeddings)
-        return inputs_embeds
+    get_input_embeddings = SupportsMultiModal.get_input_embeddings

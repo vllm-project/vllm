@@ -8,20 +8,20 @@ import torch
 import torch.nn as nn
 from transformers import LlamaConfig
 
-from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+    DEFAULT_VOCAB_PADDING_SIZE,
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.llama import (LlamaDecoderLayer,
-                                              LlamaForCausalLM)
-from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
+from vllm.multimodal.inputs import NestedTensors
 
 from .utils import AutoWeightsLoader, maybe_prefix
 
@@ -29,14 +29,16 @@ logger = init_logger(__name__)
 
 
 class LlamaDecoderLayer(LlamaDecoderLayer):
-
     def __init__(
         self,
-        config: LlamaConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
+        config: Optional[LlamaConfig] = None,
     ) -> None:
-        super().__init__(config, quant_config=quant_config, prefix=prefix)
+        super().__init__(vllm_config, prefix=prefix, config=config)
+
+        config = config or vllm_config.model_config.hf_config
+        quant_config = self.get_quant_config(vllm_config)
 
         # override qkv
         self.self_attn.qkv_proj = QKVParallelLinear(
@@ -56,16 +58,27 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         else:
             self._residual_norm = self._norm_after_residual
 
+    def get_quant_config(self, vllm_config: VllmConfig) -> Optional[QuantizationConfig]:
+        """Use drafter's quantization config instead of verifier's."""
+        draft_model_config = vllm_config.speculative_config.draft_model_config
+        draft_load_config = vllm_config.load_config
+
+        return (
+            VllmConfig.get_quantization_config(draft_model_config, draft_load_config)
+            if draft_model_config
+            else None
+        )
+
     def _norm_before_residual(
-            self,
-            hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states = self.hidden_norm(hidden_states)
         residual = hidden_states
         return hidden_states, residual
 
     def _norm_after_residual(
-            self,
-            hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         residual = hidden_states
         hidden_states = self.hidden_norm(hidden_states)
         return hidden_states, residual
@@ -77,11 +90,9 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-
         embeds = self.input_layernorm(embeds)
 
-        hidden_states, residual = self._residual_norm(
-            hidden_states=hidden_states)
+        hidden_states, residual = self._residual_norm(hidden_states=hidden_states)
 
         hidden_states = torch.cat([embeds, hidden_states], dim=-1)
         # Self Attention
@@ -90,8 +101,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
             hidden_states=hidden_states,
         )
 
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         # Fully Connected
         hidden_states = self.mlp(hidden_states)
@@ -99,9 +109,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         return hidden_states, residual
 
 
-@support_torch_compile
 class LlamaModel(nn.Module):
-
     def __init__(
         self,
         *,
@@ -110,9 +118,10 @@ class LlamaModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.config = vllm_config. \
-            speculative_config.draft_model_config.hf_config
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
+
+        current_vllm_config = get_current_vllm_config()
 
         self.embed_tokens = VocabParallelEmbedding(
             self.config.vocab_size,
@@ -120,32 +129,40 @@ class LlamaModel(nn.Module):
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
-        self.layers = nn.ModuleList([
-            LlamaDecoderLayer(
-                config=self.config,
-                prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
-            )
-        ])
+        self.layers = nn.ModuleList(
+            [
+                LlamaDecoderLayer(
+                    current_vllm_config,
+                    prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
+                    config=self.config,
+                )
+            ]
+        )
         if hasattr(self.config, "target_hidden_size"):
-            self.fc = torch.nn.Linear(self.config.target_hidden_size * 3,
-                                      self.config.hidden_size,
-                                      bias=False)
+            self.fc = torch.nn.Linear(
+                self.config.target_hidden_size * 3, self.config.hidden_size, bias=False
+            )
         else:
-            self.fc = torch.nn.Linear(self.config.hidden_size * 3,
-                                      self.config.hidden_size,
-                                      bias=False)
+            self.fc = torch.nn.Linear(
+                self.config.hidden_size * 3, self.config.hidden_size, bias=False
+            )
         self.norm = RMSNorm(
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
         )
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        input_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        input_embeds = self.embed_tokens(input_ids)
+        if input_embeds is None:
+            input_embeds = self.get_input_embeddings(input_ids)
         assert hidden_states.shape[-1] == input_embeds.shape[-1]
 
         residual = None
@@ -159,8 +176,7 @@ class LlamaModel(nn.Module):
         hidden_states, hidden_prenorm = self.norm(hidden_states, residual)
         return hidden_states, hidden_prenorm
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -172,8 +188,8 @@ class LlamaModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if 'midlayer.' in name:
-                name = name.replace('midlayer.', 'layers.0.')
+            if "midlayer." in name:
+                name = name.replace("midlayer.", "layers.0.")
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -184,28 +200,31 @@ class LlamaModel(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
 
 class Eagle3LlamaForCausalLM(LlamaForCausalLM):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.config = vllm_config. \
-            speculative_config.draft_model_config.hf_config
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        # Ensure draft_vocab_size is set
+        # default to the base vocab size when absent
+        if getattr(self.config, "draft_vocab_size", None) is None:
+            base_vocab_size = getattr(self.config, "vocab_size", None)
+            self.config.draft_vocab_size = base_vocab_size
         target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config)
+            vllm_config.parallel_config
+        )
 
         # Store target layer count in draft config for
         # proper layer_types indexing in draft models
         self.config.target_layer_count = target_layer_num
-        self.model = LlamaModel(vllm_config=vllm_config,
-                                prefix="model",
-                                start_layer_id=target_layer_num)
+        self.model = LlamaModel(
+            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
+        )
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.lm_head = ParallelLMHead(
@@ -213,13 +232,23 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             self.config.hidden_size,
             org_num_embeddings=self.config.draft_vocab_size,
             padding_size=(DEFAULT_VOCAB_PADDING_SIZE),
-            prefix="")
-        self.logits_processor = LogitsProcessor(self.config.draft_vocab_size,
-                                                scale=logit_scale)
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
+        self.logits_processor = LogitsProcessor(
+            self.config.draft_vocab_size, scale=logit_scale
+        )
         self.draft_id_to_target_id = nn.Parameter(
             torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
             requires_grad=False,
         )
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[NestedTensors] = None,
+        is_multimodal: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -228,31 +257,29 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         hidden_states: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if inputs_embeds is not None:
-            raise NotImplementedError(
-                f"{type(self).__name__} does not support multimodal inputs yet."
-            )
-        return self.model(input_ids, positions, hidden_states)
+        return self.model(input_ids, positions, hidden_states, inputs_embeds)
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         if self.draft_id_to_target_id is None:
-            assert logits.shape[1] == self.config.vocab_size, \
-                "Expected logits to have shape " \
+            assert logits.shape[1] == self.config.vocab_size, (
+                "Expected logits to have shape "
                 f"(*, {self.config.vocab_size}), but got {logits.shape}"
+            )
             return logits
 
         base = torch.arange(self.config.draft_vocab_size, device=logits.device)
         targets = base + self.draft_id_to_target_id
-        logits_new = logits.new_full((
-            logits.shape[0],
-            self.config.vocab_size,
-        ), float('-inf'))
+        logits_new = logits.new_full(
+            (
+                logits.shape[0],
+                self.config.vocab_size,
+            ),
+            float("-inf"),
+        )
         logits_new[:, targets] = logits
         return logits_new
 

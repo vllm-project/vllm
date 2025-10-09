@@ -1,24 +1,22 @@
 steps:
   # aarch64 + CUDA builds. PyTorch 2.8 aarch64 + CUDA wheel is only available on CUDA 12.9
   - label: "Build arm64 wheel - CUDA 12.9"
+    depends_on: ~
     id: build-wheel-arm64-cuda-12-9
     agents:
       queue: arm64_cpu_queue_postmerge
     commands:
       # #NOTE: torch_cuda_arch_list is derived from upstream PyTorch build files here:
       # https://github.com/pytorch/pytorch/blob/main/.ci/aarch64_linux/aarch64_ci_build.sh#L7
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list='8.7 9.0 10.0+PTX 12.0' --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg VLLM_MAIN_CUDA_VERSION=12.9 --build-arg torch_cuda_arch_list='8.7 9.0 10.0+PTX 12.0' --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
       - "bash .buildkite/scripts/upload-wheels.sh"
     env:
       DOCKER_BUILDKIT: "1"
 
-  - block: "Build CUDA 12.8 wheel"
-    key: block-build-cu128-wheel
-
   - label: "Build wheel - CUDA 12.8"
-    depends_on: block-build-cu128-wheel
+    depends_on: ~
     id: build-wheel-cuda-12-8
     agents:
       queue: cpu_queue_postmerge
@@ -30,12 +28,8 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
-  - block: "Build CUDA 12.6 wheel"
-    key: block-build-cu126-wheel
-    depends_on: ~
-
   - label: "Build wheel - CUDA 12.6"
-    depends_on: block-build-cu126-wheel
+    depends_on: ~
     id: build-wheel-cuda-12-6
     agents:
       queue: cpu_queue_postmerge
@@ -82,7 +76,7 @@ steps:
       queue: arm64_cpu_queue_postmerge
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list='8.7 9.0 10.0+PTX 12.0' --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) --target vllm-openai --progress plain -f docker/Dockerfile ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg torch_cuda_arch_list='8.7 9.0 10.0+PTX 12.0' --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) --target vllm-openai --progress plain -f docker/Dockerfile ."
       - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)"
 
   # Add job to create multi-arch manifest
@@ -102,8 +96,6 @@ steps:
     depends_on:
       - create-multi-arch-manifest
       - build-wheel-cuda-12-8
-      - build-wheel-cuda-12-6
-      - build-wheel-cuda-12-9
     id: annotate-release-workflow
     agents:
       queue: cpu_queue_postmerge
@@ -158,11 +150,16 @@ steps:
       queue: cpu_queue_postmerge
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
-      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT vllm/vllm-openai:nightly"
-      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT vllm/vllm-openai:nightly-$BUILDKITE_COMMIT"
-      - "docker push vllm/vllm-openai:nightly"
-      - "docker push vllm/vllm-openai:nightly-$BUILDKITE_COMMIT"
+      - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64"
+      - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64"
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64 vllm/vllm-openai:nightly-x86_64"
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64 vllm/vllm-openai:nightly-aarch64"
+      - "docker push vllm/vllm-openai:nightly-x86_64"
+      - "docker push vllm/vllm-openai:nightly-aarch64"
+      - "docker manifest create vllm/vllm-openai:nightly vllm/vllm-openai:nightly-x86_64 vllm/vllm-openai:nightly-aarch64 --amend"
+      - "docker manifest create vllm/vllm-openai:nightly-$BUILDKITE_COMMIT vllm/vllm-openai:nightly-x86_64 vllm/vllm-openai:nightly-aarch64 --amend"
+      - "docker manifest push vllm/vllm-openai:nightly"
+      - "docker manifest push vllm/vllm-openai:nightly-$BUILDKITE_COMMIT"
       # Clean up old nightly builds (keep only last 14)
       - "bash .buildkite/scripts/cleanup-nightly-builds.sh"
     plugins:
@@ -171,3 +168,4 @@ steps:
           password-env: DOCKERHUB_TOKEN
     env:
       DOCKER_BUILDKIT: "1"
+      DOCKERHUB_USERNAME: "vllmbot"

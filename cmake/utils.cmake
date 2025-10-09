@@ -310,13 +310,13 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   list(REMOVE_DUPLICATES _PTX_ARCHS)
   list(REMOVE_DUPLICATES _SRC_CUDA_ARCHS)
 
-  # if x.0a is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
-  # remove x.0a from SRC_CUDA_ARCHS and add x.0a to _CUDA_ARCHS
+  # If x.0a or x.0f is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
+  # remove x.0a or x.0f from SRC_CUDA_ARCHS and add x.0a or x.0f to _CUDA_ARCHS
   set(_CUDA_ARCHS)
   foreach(_arch ${_SRC_CUDA_ARCHS})
-    if(_arch MATCHES "\\a$")
+    if(_arch MATCHES "[af]$")
       list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
-      string(REPLACE "a" "" _base "${_arch}")
+      string(REGEX REPLACE "[af]$" "" _base "${_arch}")
       if ("${_base}" IN_LIST TGT_CUDA_ARCHS)
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
         list(APPEND _CUDA_ARCHS "${_arch}")
@@ -480,7 +480,6 @@ function (define_gpu_extension_target GPU_MOD_NAME)
       ${GPU_LANGUAGE}_ARCHITECTURES "${GPU_ARCHITECTURES}")
   endif()
 
-  set_property(TARGET ${GPU_MOD_NAME} PROPERTY CXX_STANDARD 17)
 
   target_compile_options(${GPU_MOD_NAME} PRIVATE
     $<$<COMPILE_LANGUAGE:${GPU_LANGUAGE}>:${GPU_COMPILE_FLAGS}>)

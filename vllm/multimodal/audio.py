@@ -66,23 +66,25 @@ class AudioResampler:
         orig_sr: float,
     ) -> npt.NDArray[np.floating]:
         if self.target_sr is None:
-            raise RuntimeError("Audio resampling is not supported when "
-                               "`target_sr` is not provided")
+            raise RuntimeError(
+                "Audio resampling is not supported when `target_sr` is not provided"
+            )
         if self.method == "librosa":
-            return resample_audio_librosa(audio,
-                                          orig_sr=orig_sr,
-                                          target_sr=self.target_sr)
+            return resample_audio_librosa(
+                audio, orig_sr=orig_sr, target_sr=self.target_sr
+            )
         elif self.method == "scipy":
-            return resample_audio_scipy(audio,
-                                        orig_sr=orig_sr,
-                                        target_sr=self.target_sr)
+            return resample_audio_scipy(
+                audio, orig_sr=orig_sr, target_sr=self.target_sr
+            )
         else:
-            raise ValueError(f"Invalid resampling method: {self.method}. "
-                             "Supported methods are 'librosa' and 'scipy'.")
+            raise ValueError(
+                f"Invalid resampling method: {self.method}. "
+                "Supported methods are 'librosa' and 'scipy'."
+            )
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
-
     def __init__(self, **kwargs) -> None:
         super().__init__()
 
@@ -106,11 +108,11 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, float]:
         return librosa.load(filepath, sr=None)
 
-    def encode_base64(self, media: tuple[npt.NDArray, float]) -> str:
+    def encode_base64(self, media: tuple[npt.NDArray, int]) -> str:
         audio, sr = media
 
         with BytesIO() as buffer:
             soundfile.write(buffer, audio, sr, format="WAV")
             data = buffer.getvalue()
 
-        return base64.b64encode(data).decode('utf-8')
+        return base64.b64encode(data).decode("utf-8")
