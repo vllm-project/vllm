@@ -358,26 +358,31 @@ class CoreEngineActorManager:
         if envs.VLLM_RAY_DP_PACK_STRATEGY == "strict":
             logger.info(
                 "Using strict local size packing strategy based "
-                "on VLLM_RAY_DP_PACK_STRATEGY (%s)",
-                envs.VLLM_RAY_DP_PACK_STRATEGY,
-            )
-            strict_local_size = True
-        elif (
-            envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
-            or envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency"
-        ):
-            logger.info(
-                "Using strict local size packing strategy based "
-                "on VLLM_ALL2ALL_BACKEND (%s)",
-                envs.VLLM_ALL2ALL_BACKEND,
+                "on VLLM_RAY_DP_PACK_STRATEGY=strict"
             )
             strict_local_size = True
         else:
-            logger.info(
-                "Using fill packing strategy based on VLLM_RAY_DP_PACK_STRATEGY (%s)",
-                envs.VLLM_RAY_DP_PACK_STRATEGY,
-            )
-            strict_local_size = False
+            if envs.VLLM_RAY_DP_PACK_STRATEGY != "fill":
+                raise ValueError(
+                    "VLLM_RAY_DP_PACK_STRATEGY must be either 'strict' or 'fill'"
+                )
+            if (
+                envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
+                or envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency"
+            ):
+                logger.info(
+                    "Using strict local size packing strategy based "
+                    "on VLLM_ALL2ALL_BACKEND=%s",
+                    envs.VLLM_ALL2ALL_BACKEND,
+                )
+                strict_local_size = True
+            else:
+                logger.info(
+                    "Using fill packing strategy based on "
+                    "VLLM_RAY_DP_PACK_STRATEGY=fill"
+                )
+                strict_local_size = False
+
         for node_resources in nodes:
             node_ip_keys = [key for key in node_resources if key.startswith("node:")]
             assert len(node_ip_keys) == 1, (
