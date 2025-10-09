@@ -355,33 +355,21 @@ class CoreEngineActorManager:
         )
         device_str = current_platform.ray_device_key
 
-        if envs.VLLM_RAY_DP_PACK_STRATEGY == "strict":
-            logger.info(
-                "Using strict local size packing strategy based "
-                "on VLLM_RAY_DP_PACK_STRATEGY=strict"
+        if envs.VLLM_RAY_DP_PACK_STRATEGY == "fill" and (
+            envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
+            or envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency"
+        ):
+            raise ValueError(
+                "DeepEP kernels require EP ranks [0,7] (same for [8,15], ...) "
+                "to be on the same node, but VLLM_RAY_DP_PACK_STRATEGY=fill "
+                "does not guarantee that. "
+                "Please use VLLM_RAY_DP_PACK_STRATEGY=strict instead."
             )
-            strict_local_size = True
-        else:
-            if envs.VLLM_RAY_DP_PACK_STRATEGY != "fill":
-                raise ValueError(
-                    "VLLM_RAY_DP_PACK_STRATEGY must be either 'strict' or 'fill'"
-                )
-            if (
-                envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
-                or envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency"
-            ):
-                logger.info(
-                    "Using strict local size packing strategy based "
-                    "on VLLM_ALL2ALL_BACKEND=%s",
-                    envs.VLLM_ALL2ALL_BACKEND,
-                )
-                strict_local_size = True
-            else:
-                logger.info(
-                    "Using fill packing strategy based on "
-                    "VLLM_RAY_DP_PACK_STRATEGY=fill"
-                )
-                strict_local_size = False
+        logger.info(
+            "Using '%s' DP packing strategy based on VLLM_RAY_DP_PACK_STRATEGY",
+            envs.VLLM_RAY_DP_PACK_STRATEGY,
+        )
+        strict_local_size = envs.VLLM_RAY_DP_PACK_STRATEGY == "strict"
 
         for node_resources in nodes:
             node_ip_keys = [key for key in node_resources if key.startswith("node:")]
