@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 import json
 import os
 import sys
@@ -1407,81 +1406,37 @@ def set_vllm_use_v1(use_v1: bool):
     os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
 
 
-def compute_hash() -> str:
+def compile_factors() -> dict[str, object]:
     """
-    WARNING: Whenever a new key is added to this environment
-    variables, ensure that it is included in the factors list if
-    it affects the computation graph. For example, different values
-    of VLLM_PP_LAYER_PARTITION will generate different computation
-    graphs, so it is included in the factors list. The env vars that
-    affect the choice of different kernels or attention backends should
-    also be included in the factors list.
+    Return raw env factors for compile hashing using the legacy opt-out
+    strategy: include all known env vars except a minimal set that clearly
+    does not affect compiled graph structure or kernel routing.
     """
 
-    # The values of envs may affects the computation graph.
-    # TODO(DefTruth): hash all environment variables?
-    # for key in environment_variables:
-    #     factorize(key)
-    environment_variables_to_hash = [
-        "VLLM_PP_LAYER_PARTITION",
-        "VLLM_MLA_DISABLE",
-        "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH",
-        "VLLM_USE_TRITON_FLASH_ATTN",
-        "VLLM_USE_TRITON_AWQ",
-        "VLLM_DP_RANK",
-        "VLLM_DP_SIZE",
-        "VLLM_USE_STANDALONE_COMPILE",
-        "VLLM_FUSED_MOE_CHUNK_SIZE",
-        "VLLM_FLASHINFER_MOE_BACKEND",
-        "VLLM_V1_USE_PREFILL_DECODE_ATTENTION",
-        "VLLM_ATTENTION_BACKEND",
-        "VLLM_USE_FLASHINFER_SAMPLER",
-        "VLLM_DISABLED_KERNELS",
-        "VLLM_USE_DEEP_GEMM",
-        "VLLM_USE_DEEP_GEMM_E8M0",
-        "VLLM_USE_TRTLLM_FP4_GEMM",
-        "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
-        "VLLM_USE_FLASHINFER_MOE_FP16",
-        "VLLM_USE_FLASHINFER_MOE_FP8",
-        "VLLM_USE_FLASHINFER_MOE_FP4",
-        "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
-        "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
-        "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
-        "VLLM_USE_CUDNN_PREFILL",
-        "VLLM_USE_TRTLLM_ATTENTION",
-        "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION",
-        "VLLM_ROCM_USE_AITER",
-        "VLLM_ROCM_USE_AITER_PAGED_ATTN",
-        "VLLM_ROCM_USE_AITER_LINEAR",
-        "VLLM_ROCM_USE_AITER_MOE",
-        "VLLM_ROCM_USE_AITER_RMSNORM",
-        "VLLM_ROCM_USE_AITER_MLA",
-        "VLLM_ROCM_USE_AITER_MHA",
-        "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
-        "VLLM_ROCM_USE_TRITON_ROPE",
-        "VLLM_ROCM_USE_AITER_FP8BMM",
-        "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION",
-        "VLLM_ROCM_USE_SKINNY_GEMM",
-        "VLLM_ROCM_FP8_PADDING",
-        "VLLM_ROCM_MOE_PADDING",
-        "VLLM_ROCM_CUSTOM_PAGED_ATTN",
-        "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
-        "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16",
-        "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB",
-        "VLLM_ROCM_FP8_MFMA_PAGE_ATTN",
-        "VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE",
-        "VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING",
-        "VLLM_USE_FBGEMM",
-    ]
-    for key in environment_variables_to_hash:
-        # if this goes out of sync with environment_variables,
-        # it's not a user error, it's a bug
-        assert key in environment_variables, (
-            "Please update environment_variables_to_hash in envs.py"
-        )
+    ignored_factors: set[str] = {
+        "MAX_JOBS",
+        "VLLM_RPC_BASE_PATH",
+        "VLLM_USE_MODELSCOPE",
+        "VLLM_RINGBUFFER_WARNING_INTERVAL",
+        "LD_LIBRARY_PATH",
+        "VLLM_PATTERN_MATCH_DEBUG",
+        "VLLM_SERVER_DEV_MODE",
+        "VLLM_DP_MASTER_IP",
+        "VLLM_DP_MASTER_PORT",
+        "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
+        "VLLM_CI_USE_S3",
+        "VLLM_MODEL_REDIRECT_PATH",
+    }
 
-    factors = [environment_variables[key]() for key in environment_variables_to_hash]
+    from vllm.config.utils import normalize_value
 
-    hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+    factors: dict[str, object] = {}
+    for factor, getter in environment_variables.items():
+        if factor in ignored_factors:
+            continue
 
-    return hash_str
+        raw = getter()
+
+        factors[factor] = normalize_value(raw)
+
+    return factors
