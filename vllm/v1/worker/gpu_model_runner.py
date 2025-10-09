@@ -3222,7 +3222,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         is_profile: bool = False,
         create_mixed_batch: bool = False,
         remove_lora: bool = True,
-        with_lora: bool = False,
+        activate_lora: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -3245,7 +3245,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             create_mixed_batch: If True, create a mixed batch with both decode
                 (1 token) and prefill (multiple tokens) requests.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
-            with_lora: If False, dummy_run is performed without LoRAs.
+            activate_lora: If False, dummy_run is performed without LoRAs.
         """
         assert (
             cudagraph_runtime_mode is None
@@ -3403,7 +3403,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             attn_metadata[layer_name] = attn_metadata_i
 
         with self.maybe_dummy_run_with_lora(
-            self.lora_config, num_scheduled_tokens, with_lora, remove_lora
+            self.lora_config, num_scheduled_tokens, activate_lora, remove_lora
         ):
             model_kwargs = self._init_model_kwargs(num_tokens)
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
@@ -3448,7 +3448,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     BatchDescriptor(
                         num_tokens=num_tokens_after_padding,
                         uniform_decode=uniform_decode,
-                        has_lora=with_lora and self.lora_config is not None,
+                        has_lora=activate_lora and self.lora_config is not None,
                     )
                 )
                 if not is_profile
@@ -3870,7 +3870,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         # We skip EPLB here since we don't want to record dummy metrics
-        for num_tokens, with_lora in compilation_cases:
+        for num_tokens, activate_lora in compilation_cases:
             # We currently only capture ubatched graphs when its a FULL
             # cudagraph, a uniform decode batch, and the number of tokens
             # is above the threshold. Otherwise we just capture a non-ubatched
@@ -3901,7 +3901,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     allow_microbatching=allow_microbatching,
                     skip_eplb=True,
                     remove_lora=False,
-                    with_lora=with_lora,
+                    activate_lora=activate_lora,
                 )
             self._dummy_run(
                 num_tokens,
@@ -3910,7 +3910,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 allow_microbatching=allow_microbatching,
                 skip_eplb=True,
                 remove_lora=False,
-                with_lora=with_lora,
+                activate_lora=activate_lora,
             )
         self.maybe_remove_all_loras(self.lora_config)
 

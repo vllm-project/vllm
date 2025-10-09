@@ -68,12 +68,15 @@ class CudagraphDispatcher:
     ):
         # This should be called only after attention backend is initialized.
 
+        # LoRA cases to specialize the cuda graphs on
+        lora_cases = [True, False] if self.vllm_config.lora_config else [False]
+
         # Note: we create all valid keys for cudagraph here but do not
         # guarantee all keys would be used. For example, if we allow lazy
         # capturing in future PR, some keys may never be triggered.
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
             for bs in self.compilation_config.cudagraph_capture_sizes:
-                for has_lora in [True, False]:
+                for has_lora in lora_cases:
                     self.add_cudagraph_key(
                         cudagraph_mode.mixed_mode(),
                         BatchDescriptor(
@@ -97,7 +100,7 @@ class CudagraphDispatcher:
                 if x <= max_num_tokens and x >= uniform_decode_query_len
             ]
             for bs in cudagraph_capture_sizes_for_decode:
-                for has_lora in [True, False]:
+                for has_lora in lora_cases:
                     self.add_cudagraph_key(
                         CUDAGraphMode.FULL,
                         BatchDescriptor(
