@@ -8,7 +8,6 @@ import numpy as np
 from fastapi import Request
 from typing_extensions import override
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
@@ -128,7 +127,6 @@ class ServingClassification(ClassificationMixin):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -136,7 +134,6 @@ class ServingClassification(ClassificationMixin):
     ) -> None:
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             log_error_stack=log_error_stack,

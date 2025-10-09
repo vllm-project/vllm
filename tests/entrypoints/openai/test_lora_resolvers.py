@@ -113,15 +113,17 @@ def mock_serving_setup():
     mock_engine.generate.reset_mock()
     mock_engine.add_lora.reset_mock()
 
-    mock_model_config = MockModelConfig()
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
+
     models = OpenAIServingModels(
         engine_client=mock_engine,
         base_model_paths=BASE_MODEL_PATHS,
-        model_config=mock_model_config,
     )
 
     serving_completion = OpenAIServingCompletion(
-        mock_engine, mock_model_config, models, request_logger=None
+        mock_engine, models, request_logger=None
     )
 
     serving_completion._process_inputs = AsyncMock(

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import AsyncExitStack
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -70,11 +70,14 @@ class TestInitializeToolSessions:
         """Create a real OpenAIServingResponses instance for testing"""
         # Create minimal mocks for required dependencies
         engine_client = MagicMock()
-        engine_client.get_model_config = AsyncMock()
 
         model_config = MagicMock()
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
+        engine_client.model_config = model_config
+
+        engine_client.processor = MagicMock()
+        engine_client.io_processor = MagicMock()
 
         models = MagicMock()
 
@@ -83,7 +86,6 @@ class TestInitializeToolSessions:
         # Create the actual instance
         instance = OpenAIServingResponses(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=None,
             chat_template=None,
@@ -132,18 +134,20 @@ class TestValidateGeneratorInput:
         """Create a real OpenAIServingResponses instance for testing"""
         # Create minimal mocks for required dependencies
         engine_client = MagicMock()
-        engine_client.get_model_config = AsyncMock()
 
         model_config = MagicMock()
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
+        engine_client.model_config = model_config
+
+        engine_client.processor = MagicMock()
+        engine_client.io_processor = MagicMock()
 
         models = MagicMock()
 
         # Create the actual instance
         instance = OpenAIServingResponses(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=None,
             chat_template=None,
