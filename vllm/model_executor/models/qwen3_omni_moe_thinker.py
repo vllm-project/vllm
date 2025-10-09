@@ -293,6 +293,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.spatial_merge_unit = self.spatial_merge_size**2
         self.temporal_patch_size = vision_config.temporal_patch_size
+        self.num_grid_per_side = self.image_size // self.patch_size
         self.apply_vit_abs_pos_embed = vision_config.apply_vit_abs_pos_embed
         self.deepstack_visual_indexes = vision_config.deepstack_visual_indexes
 
@@ -305,14 +306,10 @@ class Qwen3Omni_VisionTransformer(nn.Module):
 
         # vit pos embeding, TODO: spatial_patch_size vs patch_size
         if self.apply_vit_abs_pos_embed:
-            self.pos_embed = nn.Embedding(
-                (self.image_size // self.patch_size) ** 2, self.hidden_size
-            )
+            self.pos_embed = nn.Embedding(self.num_grid_per_side**2, self.hidden_size)
         else:
             self.pos_embed = nn.Parameter(
-                torch.empty(
-                    [1, (self.image_size // self.patch_size) ** 2, self.hidden_size]
-                )
+                torch.empty([1, self.num_grid_per_side**2, self.hidden_size])
             )
 
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
