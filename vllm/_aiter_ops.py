@@ -922,6 +922,13 @@ class rocm_aiter_ops:
         aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
         return aiter_per1x128_quant(input_2d.contiguous(), quant_dtype=dtypes.fp8)
 
+    def shuffle_weight(
+        self, tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
+    ) -> torch.Tensor:
+        from aiter.ops.shuffle import shuffle_weight
+
+        return shuffle_weight(tensor, layout=layout)
+
     @staticmethod
     def shuffle_weights(
         *tensors: torch.Tensor, layout: tuple[int, int] = (16, 16)
