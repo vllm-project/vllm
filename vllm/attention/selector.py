@@ -211,6 +211,30 @@ def _cached_get_attn_backend(
     return resolve_obj_by_qualname(attention_cls)
 
 
+def get_mamba_attn_backend(
+    mamba_type: str = "",
+    selected_backend: Optional[str] = None,
+) -> type[AttentionBackend]:
+    """Select which mamba attention backend to use and lazily import it."""
+    return _cached_get_mamba_attn_backend(mamba_type, selected_backend)
+
+
+@cache
+def _cached_get_mamba_attn_backend(
+    mamba_type: str = "",
+    selected_backend: Optional[str] = None,
+) -> type[AttentionBackend]:
+    # Get device-specific mamba_attn_backend.
+    mamba_cls = current_platform.get_mamba_attn_backend_cls(
+        mamba_type, selected_backend
+    )
+    if mamba_cls is None:
+        raise ValueError(
+            f"Invalid mamba attention backend for {current_platform.device_name}."
+        )
+    return resolve_obj_by_qualname(mamba_cls)
+
+
 @contextmanager
 def global_force_attn_backend_context_manager(
     attn_backend: _Backend,
