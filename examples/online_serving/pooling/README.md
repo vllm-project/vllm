@@ -15,7 +15,7 @@ python examples/online_serving/pooling/jinaai_rerank_client.py
 ## Named Entity Recognition (NER) usage
 
 ```bash
-python examples/online_serving/pooling/ner.py
+python examples/online_serving/pooling/ner_client.py
 ```
 
 ## Openai chat embedding for multimodal usage
@@ -34,6 +34,12 @@ python examples/online_serving/pooling/openai_classification_client.py
 
 ```bash
 python examples/online_serving/pooling/openai_embedding_client.py
+```
+
+## Openai embedding embed_dtype usage
+
+```bash
+python examples/online_serving/pooling/openai_embedding_embed_dtype_client.py
 ```
 
 ## Openai embedding matryoshka dimensions usage
