@@ -330,9 +330,12 @@ class VllmConfig:
             + self.compilation_config.custom_ops.count("all")
             == 0
         ):
+            from vllm.platforms import current_platform
+
             if (
                 self.compilation_config.level > 0
                 and self.compilation_config.backend != "eager"
+                and not current_platform.is_tpu()
             ):
                 self.compilation_config.custom_ops.append("none")
             else:
