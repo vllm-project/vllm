@@ -15,7 +15,7 @@ ARG PYTHON_VERSION=3.12
 # Example:
 # docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 
-# Important: We build with an old version of Ubuntu to maintain broad 
+# Important: We build with an old version of Ubuntu to maintain broad
 # compatibility with other Linux OSes. The main reason for this is that the
 # glibc version is baked into the distro, and binaries built with one glibc
 # version are not backwards compatible with OSes that use an earlier version.
@@ -378,7 +378,7 @@ BASH
 # Install FlashInfer from source
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
 # Keep this in sync with "flashinfer" extra in setup.py
-ARG FLASHINFER_GIT_REF="v0.3.1"
+ARG FLASHINFER_GIT_REF="v0.4.0"
 # Flag to control whether to compile FlashInfer AOT kernels
 # Set to "true" to enable AOT compilation:
 # docker build --build-arg FLASHINFER_AOT_COMPILE=true ...
@@ -399,7 +399,7 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
         FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
     fi
     pushd flashinfer
-        if [[ "${CUDA_VERSION}" == 12.8.* ]] && [ "$TARGETPLATFORM" = "linux/amd64" ]; then
+        if [[ "${CUDA_VERSION}" == 12.8.* ]] && [ "$TARGETPLATFORM" = "linux/amd64" ] && [ "${FLASHINFER_GIT_REF}" = "v0.3.1" ]; then
             # NOTE: To make new precompiled wheels, see tools/flashinfer-build.sh
             echo "🏗️  Installing FlashInfer from pre-compiled wheel"
             uv pip install --system https://download.pytorch.org/whl/test/cu128/flashinfer_python-0.3.1-cp39-abi3-linux_x86_64.whl \
@@ -551,7 +551,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     else \
         BITSANDBYTES_VERSION="0.46.1"; \
     fi; \
-    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' 'runai-model-streamer[s3]>=0.14.0'
+    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' 'runai-model-streamer[s3,gcs]>=0.14.0'
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
