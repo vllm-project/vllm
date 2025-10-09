@@ -40,8 +40,20 @@ fi
 if command -v git >/dev/null 2>&1; then
   dirty=$(git status --porcelain --untracked-files=no)
   if [[ -n "$dirty" ]]; then
-    echo "[entrypoint] WARNING: tracked files modified during patch application" >&2
-    printf '%s\n' "$dirty" >&2
+    warn_limit=${PATCH_OVERLAY_WARN_LIMIT:-20}
+    if [[ ! "$warn_limit" =~ ^[0-9]+$ ]]; then
+      warn_limit=20
+    fi
+    dirty_count=$(printf '%s\n' "$dirty" | sed '/^$/d' | wc -l | tr -d ' ')
+    echo "[entrypoint] WARNING: tracked files modified during patch application (${dirty_count})" >&2
+    if (( warn_limit > 0 )); then
+      printf '%s\n' "$dirty" | head -n "$warn_limit" >&2
+      if (( dirty_count > warn_limit )); then
+        echo "[entrypoint] ... suppressed $((dirty_count - warn_limit)) additional entries (set PATCH_OVERLAY_WARN_LIMIT to adjust)" >&2
+      fi
+    else
+      echo "[entrypoint] diff output suppressed (PATCH_OVERLAY_WARN_LIMIT=$warn_limit)" >&2
+    fi
   fi
 fi
 

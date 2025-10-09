@@ -64,6 +64,13 @@ apply_one() {
     rm -f "$tmp"
     return 0
   fi
+
+  if git apply --reverse --check "$tmp" 2>/dev/null; then
+    echo "[patches] ${base} already applied" >&2
+    rm -f "$tmp"
+    return 0
+  fi
+
   rm -f "$tmp"
 
   if [[ "$OVERLAY_MODE" == "1" ]]; then

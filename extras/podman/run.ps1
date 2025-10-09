@@ -298,7 +298,32 @@ if ($Env) {
 		}
 	}
 }
-$runArgs += @('--env','ENGINE=podman','--env','NVIDIA_VISIBLE_DEVICES=all','--env','NVIDIA_DRIVER_CAPABILITIES=compute,utility','--env','NVIDIA_REQUIRE_CUDA=')
+
+$hasPatchLimit = $false
+$hasVisibleDevices = $false
+$hasDriverCaps = $false
+$hasRequireCuda = $false
+
+for ($i = 0; $i -lt $runArgs.Length - 1; $i++) {
+	if ($runArgs[$i] -ne '--env') { continue }
+	$value = $runArgs[$i + 1]
+	if ($value -like 'PATCH_OVERLAY_WARN_LIMIT=*') { $hasPatchLimit = $true }
+	if ($value -like 'NVIDIA_VISIBLE_DEVICES=*') { $hasVisibleDevices = $true }
+	if ($value -like 'NVIDIA_DRIVER_CAPABILITIES=*') { $hasDriverCaps = $true }
+	if ($value -like 'NVIDIA_REQUIRE_CUDA=*') { $hasRequireCuda = $true }
+}
+
+if (-not $hasPatchLimit) {
+	$envPatchLimit = [Environment]::GetEnvironmentVariable('PATCH_OVERLAY_WARN_LIMIT')
+	if (-not [string]::IsNullOrEmpty($envPatchLimit)) {
+		$runArgs += @('--env',"PATCH_OVERLAY_WARN_LIMIT=$envPatchLimit")
+	} else {
+		$runArgs += @('--env','PATCH_OVERLAY_WARN_LIMIT=0')
+	}
+}
+if (-not $hasVisibleDevices) { $runArgs += @('--env','NVIDIA_VISIBLE_DEVICES=all') }
+if (-not $hasDriverCaps) { $runArgs += @('--env','NVIDIA_DRIVER_CAPABILITIES=compute,utility') }
+if (-not $hasRequireCuda) { $runArgs += @('--env','NVIDIA_REQUIRE_CUDA=') }
 
 if ($GPUCheck) {
 	$pyDiag = @'
