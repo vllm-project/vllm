@@ -552,6 +552,7 @@ class NixlConnectorWorker:
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
         self.num_blocks = 0
+        self.enable_permute_local_kv = False
 
         # KV Caches and nixl tracking data.
         self.device_type = current_platform.device_type
@@ -1065,6 +1066,8 @@ class NixlConnectorWorker:
         is_kv_replicated = self._tp_size[engine_id] // total_num_kv_heads >= 1
 
         remote_block_len = nixl_agent_meta.block_lens[0]
+        if nixl_agent_meta.kv_cache_layout == "HND" and self.kv_cache_layout == "NHD":
+            self.enable_permute_local_kv = True
         if self.use_mla or is_kv_replicated:
             # With replicated KV cache, only the number of blocks can differ.
             assert self.block_len_per_layer == nixl_agent_meta.block_lens, (
@@ -1085,7 +1088,10 @@ class NixlConnectorWorker:
                 remote_block_size //= 2
             if tp_ratio > 1:
                 # Heterogeneous TP expects same kv_cache_layout.
-                assert nixl_agent_meta.kv_cache_layout == self.kv_cache_layout
+                if nixl_agent_meta.kv_cache_layout == "NHD":
+                    raise ValueError(
+                        "Heterogeneous TP is not supported for remote with NHD."
+                    )
                 if self.device_type == "xpu":
                     raise ValueError("Heterogeneous TP is not supported on XPU")
 
@@ -1197,6 +1203,41 @@ class NixlConnectorWorker:
                 "d2h",
             )
 
+    def permute_device_kv(self, block_ids: list[int]):
+        """
+        update local KV cache with NHD when actually received data is HND
+
+        nixl_connector is simply copy data buffer to specified data_ptr. If
+        sender and receiver are with different layout, we can permute in place.
+
+        Imagine received kv is a big memory chunk of
+        (num_block * block_size * n_kv_head * head_dim)
+        and actual layout is what sender layout is like:
+        [num_block, n_kv_head, block_size, head_dim]
+
+        To get all data to right dimension:
+        - x = blocks_to_update.reshape(src_shape) => view with sender layout
+        - x = x.permute(*inv_order) => transpose for (n_kv_heads, block_size)
+        - x = x.reshape(target_shape) => so we can copy back
+
+        """
+        inv_order = [0, 2, 1, 3]
+        sample_cache = list(self.device_kv_caches.values())[0][0]
+        target_shape = list(sample_cache.shape)
+        target_shape[0] = -1
+        src_shape = tuple(target_shape[i] for i in inv_order)
+        indices = torch.tensor(block_ids, device=sample_cache.device)
+
+        for _, per_layer_kv_cache in self.device_kv_caches.items():
+            for _, cache in enumerate(per_layer_kv_cache):
+                blocks_to_update = cache.index_select(0, indices)
+                permuted_blocks = (
+                    blocks_to_update.reshape(src_shape)
+                    .permute(*inv_order)
+                    .reshape(target_shape)
+                )
+                cache.index_copy_(0, indices, permuted_blocks)
+
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
         Get requests that are done sending or recving on this specific worker.
@@ -1238,6 +1279,15 @@ class NixlConnectorWorker:
             self._reqs_to_process.remove(req_id)
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
+
+        if self.enable_permute_local_kv and len(done_recving) > 0:
+            block_ids = []
+            for req_id in done_recving:
+                meta = self._recving_metadata.pop(req_id)
+                assert meta, f"{req_id} not found in recving_metadata list"
+                block_ids += meta.local_block_ids
+
+            self.permute_device_kv(block_ids)
 
         return done_sending, done_recving
 
@@ -1317,8 +1367,7 @@ class NixlConnectorWorker:
                 len(meta.local_block_ids),
                 len(meta.remote_block_ids),
             )
-            if self.use_host_buffer:
-                self._recving_metadata[req_id] = meta
+            self._recving_metadata[req_id] = meta
             if remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
