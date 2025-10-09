@@ -79,6 +79,7 @@ class InputBatch:
         block_sizes: list[int],  # The block_size of each kv cache group
         kernel_block_sizes: list[int],
         logitsprocs: Optional[LogitsProcessors] = None,
+        logitsprocs_need_output_token_ids: bool = False,
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
         num_speculative_tokens: int = 0,
@@ -240,6 +241,7 @@ class InputBatch:
         # Store provided logitsprocs. If none are provided, initialize empty
         # data structure
         self.logitsprocs = logitsprocs or LogitsProcessors()
+        self.logitsprocs_need_output_token_ids = logitsprocs_need_output_token_ids
 
         # Store last speculative tokens for sampler.
         self.spec_token_ids: list[Optional[list[int]]] = []
@@ -813,7 +815,11 @@ class InputBatch:
 
         # Only set output_token_ids if required by the current requests'
         # sampling parameters.
-        needs_output_token_ids = not self.no_penalties or bool(self.bad_words_token_ids)
+        needs_output_token_ids = (
+            not self.no_penalties
+            or bool(self.bad_words_token_ids)
+            or self.logitsprocs_need_output_token_ids
+        )
         output_token_ids = (
             cast(list[list[int]], self.req_output_token_ids)
             if needs_output_token_ids
