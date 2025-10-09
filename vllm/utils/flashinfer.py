@@ -12,6 +12,7 @@ import functools
 import importlib
 import importlib.util
 import os
+import shutil
 from typing import Any, Callable, NoReturn
 
 import requests
@@ -37,7 +38,14 @@ def has_flashinfer() -> bool:
     """Return ``True`` if FlashInfer is available."""
     # Use find_spec to check if the module exists without importing it
     # This avoids potential CUDA initialization side effects
-    return importlib.util.find_spec("flashinfer") is not None
+    if importlib.util.find_spec("flashinfer") is None:
+        logger.debug_once("FlashInfer unavailable since package was not found")
+        return False
+    # Also check if nvcc is available since it's required to JIT compile flashinfer
+    if shutil.which("nvcc") is None:
+        logger.debug_once("FlashInfer unavailable since nvcc was not found")
+        return False
+    return True
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
