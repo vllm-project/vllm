@@ -35,8 +35,8 @@ class SuffixDecodingProposer:
         sampled_token_ids: list[list[int]],
     ):
         """
-        Update the suffix cache with the newly sampled token ids for each active request.
-        Assumes that any request id not in `input_batch.req_ids` is no longer active and
+        Update suffix cache with the newly sampled token ids for each active request.
+        Assumes that request ids not in `input_batch.req_ids` is no longer active and
         should be stopped (i.e. deletes the per-prompt tree for that request id).
         """
         seen_req_ids = set()
@@ -74,7 +74,7 @@ class SuffixDecodingProposer:
     ) -> list[list[int]]:
         """
         Propose speculative tokens for each request in the input batch. Suffix Decoding
-        will speculate a dynamic number of tokens for each request at each decoding step,
+        will speculate a dynamic number of tokens for each request every decoding step,
         so each entry in the returned list may have different lengths.
         """
         req_ids = input_batch.req_ids
