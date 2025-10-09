@@ -75,8 +75,7 @@ async def test_merge_async_iterators():
 
     for iterator in iterators:
         try:
-            # Can use anext() in python >= 3.10
-            await asyncio.wait_for(iterator.__anext__(), 1)
+            await asyncio.wait_for(anext(iterator), 1)
         except StopAsyncIteration:
             # All iterators should be cancelled and print this message.
             print("Iterator was cancelled normally")
