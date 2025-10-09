@@ -1511,6 +1511,7 @@ class NixlConnectorWorker:
 
     def shutdown(self):
         """Shutdown the connector worker."""
+        self._handshake_initiation_executor.shutdown(wait=False)
         self._handshake_strategy.cleanup()
         for handles in self._recving_transfers.values():
             for handle, _ in handles:
