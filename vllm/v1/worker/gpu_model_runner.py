@@ -20,6 +20,7 @@ from typing_extensions import TypeAlias
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.layer import MLAAttention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
@@ -783,6 +784,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 ] = spec_token_ids
                 # NOTE(woosuk): `num_tokens` here may include spec tokens.
                 self.input_batch.num_tokens[req_index] += num_spec_tokens
+                self.input_batch.spec_token_ids[req_index] = spec_token_ids
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -2197,6 +2199,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampler_output = self.sampler(
                 logits=bonus_logits,
                 sampling_metadata=sampling_metadata,
+                predict_bonus_token=True,
             )
             bonus_token_ids = sampler_output.sampled_token_ids
 
@@ -2315,30 +2318,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
             end_idx = start_idx + len(sampled_ids)
-            assert end_idx <= self.max_model_len + 1, (
-                "Sampled token IDs exceed the max model length + 1. "
-                f"Total number of tokens: {end_idx} > max_model_len + 1: "
-                f"{self.max_model_len + 1}"
+            assert end_idx <= self.max_model_len, (
+                "Sampled token IDs exceed the max model length. "
+                f"Total number of tokens: {end_idx} > max_model_len: "
+                f"{self.max_model_len}"
             )
 
-            n_tokens_cache = len(sampled_ids)
-
-            # Sampled token IDs exceed the max model length by 1. This is
-            # legitimate as we can still sample 1 last token when the context
-            # length equals the max model length. Note that we do not need to
-            # cache this token ID as the sequence finishes after this step.
-            # Additionally, the buffers token_ids_cpu and is_token_ids are of
-            # size max model length only.
-            if end_idx == self.max_model_len + 1:
-                n_tokens_cache -= 1
-
-            self.input_batch.token_ids_cpu[
-                req_idx, start_idx : (start_idx + n_tokens_cache)
-            ] = sampled_ids[:n_tokens_cache]
-            self.input_batch.is_token_ids[
-                req_idx, start_idx : (start_idx + n_tokens_cache)
-            ] = True
-
+            self.input_batch.token_ids_cpu[req_idx, start_idx:end_idx] = sampled_ids
+            self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
 
@@ -3491,6 +3478,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             presence_penalties=dummy_tensors(0.1),
             repetition_penalties=dummy_tensors(0.1),
             output_token_ids=[[] for _ in range(num_reqs)],
+            spec_token_ids=[[] for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
             logitsprocs=LogitsProcessors(),
@@ -4401,98 +4389,100 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         use_mla = self.vllm_config.model_config.use_mla
         cache_dtype_str = self.vllm_config.cache_config.cache_dtype
         kv_cache_spec: dict[str, KVCacheSpec] = {}
-        attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         for layer_name, attn_module in attn_layers.items():
-            if (kv_tgt_layer := attn_module.kv_sharing_target_layer_name) is not None:
-                # The layer doesn't need its own KV cache and will use that of
-                # the target layer. We skip creating a KVCacheSpec for it, so
-                # that KV cache management logic will act as this layer does
-                # not exist, and doesn't allocate KV cache for the layer. This
-                # enables the memory saving of cross-layer kv sharing, allowing
-                # a given amount of memory to accommodate longer context lengths
-                # or enable more requests to be processed simultaneously.
-                self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
-                continue
+            if isinstance(attn_module, Attention):
+                if (
+                    kv_tgt_layer := attn_module.kv_sharing_target_layer_name
+                ) is not None:
+                    # The layer doesn't need its own KV cache and will use that of
+                    # the target layer. We skip creating a KVCacheSpec for it, so
+                    # that KV cache management logic will act as this layer does
+                    # not exist, and doesn't allocate KV cache for the layer. This
+                    # enables the memory saving of cross-layer kv sharing, allowing
+                    # a given amount of memory to accommodate longer context lengths
+                    # or enable more requests to be processed simultaneously.
+                    self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
+                    continue
 
-            # TODO(lucas): move the attention specs into the model layers like
-            # the attention backends
-            if attn_module.attn_type == AttentionType.DECODER:
-                if attn_module.sliding_window is not None:
-                    assert not use_mla, "MLA is not supported for slidingwindow"
-                    kv_cache_spec[layer_name] = SlidingWindowSpec(
+                # TODO(lucas): move the attention specs into the model layers like
+                # the attention backends
+                if attn_module.attn_type == AttentionType.DECODER:
+                    if attn_module.sliding_window is not None:
+                        assert not use_mla, "MLA is not supported for slidingwindow"
+                        kv_cache_spec[layer_name] = SlidingWindowSpec(
+                            block_size=block_size,
+                            num_kv_heads=attn_module.num_kv_heads,
+                            head_size=attn_module.head_size,
+                            dtype=self.kv_cache_dtype,
+                            sliding_window=attn_module.sliding_window,
+                        )
+                    elif self.attention_chunk_size is not None and isinstance(
+                        attn_module, ChunkedLocalAttention
+                    ):
+                        kv_cache_spec[layer_name] = ChunkedLocalAttentionSpec(
+                            block_size=block_size,
+                            num_kv_heads=attn_module.num_kv_heads,
+                            head_size=attn_module.head_size,
+                            dtype=self.kv_cache_dtype,
+                            attention_chunk_size=self.attention_chunk_size,
+                        )
+                    else:
+                        kv_cache_spec[layer_name] = FullAttentionSpec(
+                            block_size=block_size,
+                            num_kv_heads=attn_module.num_kv_heads,
+                            head_size=attn_module.head_size,
+                            dtype=self.kv_cache_dtype,
+                        )
+                elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
+                    kv_cache_spec[layer_name] = CrossAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
-                        sliding_window=attn_module.sliding_window,
                     )
-                elif use_mla:
-                    kv_cache_spec[layer_name] = MLAAttentionSpec(
-                        block_size=block_size,
-                        num_kv_heads=attn_module.num_kv_heads,
-                        head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
-                        cache_dtype_str=cache_dtype_str,
-                    )
-                elif self.attention_chunk_size is not None and isinstance(
-                    attn_module, ChunkedLocalAttention
+                elif attn_module.attn_type in (
+                    AttentionType.ENCODER,
+                    AttentionType.ENCODER_ONLY,
                 ):
-                    kv_cache_spec[layer_name] = ChunkedLocalAttentionSpec(
-                        block_size=block_size,
-                        num_kv_heads=attn_module.num_kv_heads,
-                        head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
-                        attention_chunk_size=self.attention_chunk_size,
-                    )
+                    # encoder-only attention does not need KV cache.
+                    continue
                 else:
-                    kv_cache_spec[layer_name] = FullAttentionSpec(
-                        block_size=block_size,
-                        num_kv_heads=attn_module.num_kv_heads,
-                        head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
-                    )
-            elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
-                kv_cache_spec[layer_name] = CrossAttentionSpec(
+                    raise ValueError(f"Unknown attention type: {attn_module.attn_type}")
+
+            elif isinstance(attn_module, MLAAttention):
+                kv_cache_spec[layer_name] = MLAAttentionSpec(
                     block_size=block_size,
-                    num_kv_heads=attn_module.num_kv_heads,
+                    num_kv_heads=1,
                     head_size=attn_module.head_size,
                     dtype=self.kv_cache_dtype,
+                    cache_dtype_str=cache_dtype_str,
                 )
-            elif attn_module.attn_type in (
-                AttentionType.ENCODER,
-                AttentionType.ENCODER_ONLY,
-            ):
-                # encoder-only attention does not need KV cache.
-                continue
-            else:
-                raise ValueError(f"Unknown attention type: {attn_module.attn_type}")
 
-        mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
-        if len(mamba_layers) > 0:
-            if (
-                self.vllm_config.speculative_config is not None
-                and self.vllm_config.model_config.hf_config.model_type
-                not in ["qwen3_next"]
-            ):
-                raise NotImplementedError(
-                    "Mamba with speculative decoding is not supported yet."
-                )
-            mamba_block_size = self.vllm_config.cache_config.mamba_block_size
-            page_size_padded = self.vllm_config.cache_config.mamba_page_size_padded
-
-            for layer_name, mamba_module in mamba_layers.items():
+            elif isinstance(attn_module, MambaBase):
+                if (
+                    self.vllm_config.speculative_config is not None
+                    and self.vllm_config.model_config.hf_config.model_type
+                    not in ["qwen3_next"]
+                ):
+                    raise NotImplementedError(
+                        "Mamba with speculative decoding is not supported yet."
+                    )
+                mamba_block_size = self.vllm_config.cache_config.mamba_block_size
+                page_size_padded = self.vllm_config.cache_config.mamba_page_size_padded
                 kv_cache_spec[layer_name] = MambaSpec(
-                    shapes=mamba_module.get_state_shape(),
-                    dtypes=mamba_module.get_state_dtype(),
+                    shapes=attn_module.get_state_shape(),
+                    dtypes=attn_module.get_state_dtype(),
                     block_size=mamba_block_size,
                     page_size_padded=page_size_padded,
-                    mamba_type=mamba_module.mamba_type,
+                    mamba_type=attn_module.mamba_type,
                     num_speculative_blocks=(
                         self.speculative_config.num_speculative_tokens
                         if self.speculative_config
                         else 0
                     ),
                 )
+
         ds_indexer_layers = get_layers_from_vllm_config(
             self.vllm_config, DeepseekV32IndexerCache
         )
