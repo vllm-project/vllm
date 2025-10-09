@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 # Third Party
 import torch
+
 # First Party
 from lmcache.config import LMCacheEngineConfig as Config
 from lmcache.logging import init_logger
@@ -49,7 +50,8 @@ def lmcache_get_or_create_config() -> Union[Config, V1Config]:
                         "Detected LMCACHE_USE_EXPERIMENTAL is set to False. "
                         "Using legacy configuration is deprecated and will "
                         "be remove soon! Please set LMCACHE_USE_EXPERIMENTAL "
-                        "to True.")
+                        "to True."
+                    )
                     LMCacheEngineConfig = Config  # type: ignore[assignment]
                 else:
                     LMCacheEngineConfig = V1Config  # type: ignore[assignment]
@@ -57,16 +59,17 @@ def lmcache_get_or_create_config() -> Union[Config, V1Config]:
                 if "LMCACHE_CONFIG_FILE" not in os.environ:
                     logger.warning(
                         "No LMCache configuration file is set. Trying to read"
-                        " configurations from the environment variables.")
+                        " configurations from the environment variables."
+                    )
                     logger.warning(
                         "You can set the configuration file through "
-                        "the environment variable: LMCACHE_CONFIG_FILE")
+                        "the environment variable: LMCACHE_CONFIG_FILE"
+                    )
                     _config_instance = LMCacheEngineConfig.from_env()
                 else:
                     config_file = os.environ["LMCACHE_CONFIG_FILE"]
                     logger.info("Loading LMCache config file %s", config_file)
-                    _config_instance = LMCacheEngineConfig.from_file(
-                        config_file)
+                    _config_instance = LMCacheEngineConfig.from_file(config_file)
                     # Update config from environment variables
                     _config_instance.update_config_from_env()
     return _config_instance
@@ -99,15 +102,16 @@ def apply_mm_hashes_to_token_ids(
 
 
 def mla_enabled(model_config: "ModelConfig") -> bool:
-    return (hasattr(model_config, "use_mla")
-            and isinstance(model_config.use_mla, bool)
-            and model_config.use_mla)
+    return (
+        hasattr(model_config, "use_mla")
+        and isinstance(model_config.use_mla, bool)
+        and model_config.use_mla
+    )
 
 
-def create_lmcache_metadata(vllm_config=None,
-                            model_config=None,
-                            parallel_config=None,
-                            cache_config=None):
+def create_lmcache_metadata(
+    vllm_config=None, model_config=None, parallel_config=None, cache_config=None
+):
     """
     Create LMCacheEngineMetadata from vLLM configuration.
 
@@ -152,8 +156,7 @@ def create_lmcache_metadata(vllm_config=None,
     chunk_size = config.chunk_size
     num_kv_head = model_cfg.get_num_kv_heads(parallel_cfg)
     head_size = model_cfg.get_head_size()
-    kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head,
-                head_size)
+    kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
 
     # Create metadata
     metadata = LMCacheEngineMetadata(
@@ -170,8 +173,8 @@ def create_lmcache_metadata(vllm_config=None,
 
 
 def extract_mm_features(
-        request: "Request",
-        modify: bool = False) -> tuple[list[str], list["PlaceholderRange"]]:
+    request: "Request", modify: bool = False
+) -> tuple[list[str], list["PlaceholderRange"]]:
     """
     Normalize multimodal information from a Request into parallel lists.
 
@@ -180,8 +183,8 @@ def extract_mm_features(
       `.mm_position`), or
       2) legacy fields `request.mm_hashes` and `request.mm_positions`.
 
-    It returns two equally sized lists: the multimodal hash identifiers and 
-    their corresponding positions. If the request contains no multimodal info, 
+    It returns two equally sized lists: the multimodal hash identifiers and
+    their corresponding positions. If the request contains no multimodal info,
     it returns `([], [])`.
 
     Args:
@@ -198,8 +201,9 @@ def extract_mm_features(
         May be `([], [])` when no multimodal data is present.
     """
     if getattr(request, "mm_features", None):
-        mm_hashes, mm_positions = zip(*((f.identifier, f.mm_position)
-                                        for f in request.mm_features))
+        mm_hashes, mm_positions = zip(
+            *((f.identifier, f.mm_position) for f in request.mm_features)
+        )
         return (list(mm_hashes), list(mm_positions))
     elif getattr(request, "mm_hashes", None):
         if modify:
