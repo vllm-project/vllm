@@ -120,7 +120,9 @@ class AttentionBackend(ABC):
         return []
 
     @classmethod
-    def supports_block_size(cls, block_size: int) -> bool:
+    def supports_block_size(cls, block_size: Optional[int]) -> bool:
+        if block_size is None:
+            return True
         try:
             block_size_literal = cast(BlockSize, block_size)
         except ValueError:
@@ -164,7 +166,7 @@ class AttentionBackend(ABC):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: Optional[str],
-        block_size: int,
+        block_size: Optional[int],
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -178,7 +180,7 @@ class AttentionBackend(ABC):
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: Optional[str],
-        block_size: int,
+        block_size: Optional[int],
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,

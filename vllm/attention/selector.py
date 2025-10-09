@@ -149,7 +149,24 @@ def _cached_get_attn_backend(
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}"
         )
-    return resolve_obj_by_qualname(attention_cls)
+    backend = resolve_obj_by_qualname(attention_cls)
+
+    # Adjust block size if the selected backend doesn't support it
+    if not backend.supports_block_size(block_size):
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+        if vllm_config and vllm_config.cache_config:
+            new_block_size = backend.get_supported_block_sizes()[0]
+            logger.info(
+                "Adjusting kv cache block size from %d to %d for %s backend.",
+                block_size,
+                new_block_size,
+                backend.get_name(),
+            )
+            vllm_config.cache_config.block_size = new_block_size
+
+    return backend
 
 
 @contextmanager

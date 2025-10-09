@@ -131,7 +131,6 @@ class CudaPlatformBase(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         parallel_config = vllm_config.parallel_config
-        model_config = vllm_config.model_config
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
@@ -139,38 +138,6 @@ class CudaPlatformBase(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
-
-        # Note: model_config may be None during testing
-        if model_config is not None and model_config.use_mla:
-            # If `VLLM_ATTENTION_BACKEND` is not set and we are using MLA,
-            # then we default to FlashMLA backend for non-blackwell GPUs,
-            # else we default to CutlassMLA. For each case, we force the
-            # required block_size.
-
-            if envs.VLLM_ATTENTION_BACKEND is None:
-                # Default case
-                if cls.is_device_capability(100):
-                    # Blackwell => Force CutlassMLA.
-                    # TODO: This does not work, because the
-                    # global_force_attn_backend_context_manager is not set.
-                    # See vllm/attention/selector.py:_cached_get_attn_backend
-                    envs.VLLM_ATTENTION_BACKEND = "CUTLASS_MLA"
-                else:
-                    # Not Blackwell => Force FlashMLA.
-                    envs.VLLM_ATTENTION_BACKEND = "FLASHMLA"
-
-            # Adjust block sizes for MLA backends based on their requirements
-            from vllm.attention.backends.registry import _Backend, backend_to_class
-
-            backend_enum = _Backend[envs.VLLM_ATTENTION_BACKEND]
-            backend_class = backend_to_class(backend_enum)
-            if not backend_class.supports_block_size(cache_config.block_size):
-                cache_config.block_size = backend_class.get_supported_block_sizes()[0]
-                logger.info(
-                    "Forcing kv cache block size to %s for %s backend.",
-                    cache_config.block_size,
-                    envs.VLLM_ATTENTION_BACKEND,
-                )
 
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
@@ -253,7 +220,7 @@ class CudaPlatformBase(Platform):
                     head_size,
                     dtype,
                     kv_cache_dtype,
-                    block_size,
+                    None,  # ignore block_size here, it will be adjusted if needed
                     use_mla,
                     has_sink,
                     use_sparse,
@@ -300,7 +267,7 @@ class CudaPlatformBase(Platform):
                     head_size,
                     dtype,
                     kv_cache_dtype,
-                    block_size,
+                    None,  # ignore block_size here, it will be adjusted if needed
                     use_mla,
                     has_sink,
                     use_sparse,

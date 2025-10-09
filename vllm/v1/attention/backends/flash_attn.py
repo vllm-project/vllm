@@ -113,7 +113,9 @@ class FlashAttentionBackend(AttentionBackend):
         return kv_cache_dtype in [None, "auto", "fp16", "bf16"]
 
     @classmethod
-    def supports_block_size(cls, block_size: int) -> bool:
+    def supports_block_size(cls, block_size: Optional[int]) -> bool:
+        if block_size is None:
+            return True
         return block_size % 16 == 0
 
     @classmethod
