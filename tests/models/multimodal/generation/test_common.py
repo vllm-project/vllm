@@ -749,6 +749,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         hf_output_post_proc=model_utils.smolvlm_trunc_hf_output,
+        num_logprobs=10,
     ),
     "tarsier": VLMTestInfo(
         models=["omni-research/Tarsier-7b"],
