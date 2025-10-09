@@ -235,6 +235,31 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
     ) -> TTModelInput:
         return TTModelInput.from_broadcasted_tensor_dict(tensor_dict, )
 
+    def recover_orphaned_slots(self, orphaned_seq_ids: List[int]):
+        for seq_id in orphaned_seq_ids:
+            slot = self.seq_groups_to_batch_slot[seq_id]
+            if slot not in self.empty_slots:
+                self.empty_slots.append(slot)
+                logger.warning(
+                    "SLOT_DEBUG: Recovered slot %s from orphaned seq %s", slot,
+                    seq_id)
+            else:
+                logger.warning(
+                    "SLOT_DEBUG: Orphaned slot %s already in "
+                    "empty_slots, from seq %s", slot, seq_id)
+            del self.seq_groups_to_batch_slot[seq_id]
+            # Clean up req_id_to_seq_id mapping for orphaned sequences
+            req_ids_to_remove = [
+                req_id
+                for req_id, mapped_seq_id in self.req_id_to_seq_id.items()
+                if mapped_seq_id == seq_id
+            ]
+            for req_id in req_ids_to_remove:
+                del self.req_id_to_seq_id[req_id]
+
+        # sort empty_slots for consistency
+        self.empty_slots.sort()
+
     def prepare_model_input(
             self,
             seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -263,12 +288,23 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         if supports_multimodal(self.model) and is_prompt:
             multi_modal_kwargs = {"images": []}
         cross_block_tables_list: List[List[int]] = []
+
+        # create seq_groups_list before any cleanup to active batch slots
+        for seq_group_metadata in seq_group_metadata_list:
+            _seq_ids = list(seq_group_metadata.seq_data.keys())
+            assert len(_seq_ids) == 1, (
+                "Currently only supporting one sequence per request group")
+            seq_groups_list.append(_seq_ids[0])
+
         if self.dp_kv_cache and finished_requests_ids is not None:
             # Delete finished requests from req_id_to_seq_id
             finished_requests_seq_ids = []
             for req_id in finished_requests_ids:
-                finished_requests_seq_ids.append(self.req_id_to_seq_id[req_id])
-                del self.req_id_to_seq_id[req_id]
+                # Only delete if the request was added in the first place
+                if req_id in self.req_id_to_seq_id:
+                    finished_requests_seq_ids.append(
+                        self.req_id_to_seq_id[req_id])
+                    del self.req_id_to_seq_id[req_id]
 
         # Compat sampling is off by default, and enabled only on request
         # or if any of the requests in the batch require it
@@ -284,11 +320,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
-            assert len(
-                seq_ids
-            ) == 1, "Currently only supporting one sequence per request group"
             seq_id = seq_ids[0]
-            seq_groups_list.append(seq_id)
             if self.dp_kv_cache:
                 # Add new request id to req_id_to_seq_id
                 self.req_id_to_seq_id[seq_group_metadata.request_id] = seq_id
@@ -495,27 +527,72 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                                                    dim=1)
 
         if self.dp_kv_cache:
-            prev_seq_groups_list = list(self.seq_groups_to_batch_slot.keys())
+            # Clean up finished requests
+            if finished_requests_ids:
+                for seq_id in finished_requests_seq_ids:
+                    if seq_id in self.seq_groups_to_batch_slot:
+                        empty_batch_slot = (
+                            self.seq_groups_to_batch_slot[seq_id])
+                        # Only add to empty_slots if not already present
+                        # (prevent duplicates)
+                        if empty_batch_slot not in self.empty_slots:
+                            self.empty_slots.append(empty_batch_slot)
+                        else:
+                            logger.warning(
+                                "SLOT_DEBUG: Slot %s from seq %s already in "
+                                "empty_slots", empty_batch_slot, seq_id)
+                        del self.seq_groups_to_batch_slot[seq_id]
+                    else:
+                        logger.warning(
+                            "SLOT_DEBUG: Finished seq %s not found in "
+                            "seq_groups_to_batch_slot", seq_id)
 
-            # check for preempted requests
-            if seq_groups_list != prev_seq_groups_list and not is_prompt:
-                finished_requests_seq_ids_current = [
-                    seq_id for seq_id in prev_seq_groups_list
-                    if seq_id not in seq_groups_list
-                ]
-            else:
-                finished_requests_seq_ids_current = []
+            # Clean up disappeared sequences (preempted/swapped out)
+            # ONLY during DECODE batches: all active sequences should be
+            # present, so any missing sequence is truly gone
+            # (preempted/swapped/finished).
+            # During PREFILL batches: NEVER clean up based on "not in
+            # batch" because we can't distinguish between active decode
+            # sequences and truly gone sequences.
+            # Only finished_requests_ids is a reliable signal for cleanup
+            # during prefill.
+            if not is_prompt:
+                # Decode batch: clean up sequences not in this batch
+                orphaned_seq_ids = []
+                current_batch_seq_ids = set(seq_groups_list)
+                for seq_id in list(self.seq_groups_to_batch_slot.keys()):
+                    if seq_id not in current_batch_seq_ids:
+                        orphaned_seq_ids.append(seq_id)
 
-            # check for any remaining finished requests
-            for seq_id in finished_requests_seq_ids:
-                if seq_id not in finished_requests_seq_ids_current:
-                    finished_requests_seq_ids_current.append(seq_id)
-
-            # update the empty slots
-            for req in finished_requests_seq_ids_current:
-                empty_batch_slot = self.seq_groups_to_batch_slot[req]
-                self.empty_slots.append(empty_batch_slot)
-                del self.seq_groups_to_batch_slot[req]
+                if orphaned_seq_ids:
+                    logger.info(
+                        "SLOT_DEBUG: Detected %s sequences not in decode "
+                        "batch (preempted/swapped): %s", len(orphaned_seq_ids),
+                        orphaned_seq_ids)
+                    logger.info(
+                        "SLOT_DEBUG: Before cleanup - empty_slots "
+                        "(len=%s)=%s", len(self.empty_slots), self.empty_slots)
+                    # Free their slots immediately
+                    self.recover_orphaned_slots(orphaned_seq_ids)
+                    logger.info(
+                        "SLOT_DEBUG: After cleanup - empty_slots "
+                        "(len=%s)=%s", len(self.empty_slots), self.empty_slots)
+                    logger.info(
+                        "SLOT_DEBUG: After cleanup - "
+                        "seq_groups_to_batch_slot=%s",
+                        self.seq_groups_to_batch_slot)
+            elif is_prompt and len(self.empty_slots) < unpadded_batch_size:
+                # Prefill batch without enough slots: this is a scheduler
+                # bug. Log an error but don't forcibly clean up - we can't
+                # safely determine which sequences are truly gone vs just
+                # not in this prefill batch
+                logger.error(
+                    "SLOT_DEBUG: Prefill batch needs %s slots but only "
+                    "%s available. This indicates a scheduler issue - "
+                    "sequences may not be properly freed. Active slots: "
+                    "%s, seq_groups_to_batch_slot=%s", unpadded_batch_size,
+                    len(self.empty_slots), len(self.seq_groups_to_batch_slot),
+                    self.seq_groups_to_batch_slot)
 
         return TTModelInput(input_tokens=input_tokens,
                             input_positions=input_positions,
@@ -733,9 +810,9 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
 
         if not is_decode:
             if self.dp_kv_cache:
-                execute_model_kwargs[
-                    "empty_slots"] = self.empty_slots[:model_input.
-                                                      unpadded_batch_size]
+                slots_to_allocate = self.empty_slots[:model_input.
+                                                     unpadded_batch_size]
+                execute_model_kwargs["empty_slots"] = slots_to_allocate
 
             outputs = self.model.prefill_forward(**execute_model_kwargs)
 
@@ -746,9 +823,9 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 self.empty_slots = self.empty_slots[model_input.
                                                     unpadded_batch_size:]
 
-                for s in model_input.seq_groups:
-                    self.seq_groups_to_batch_slot[
-                        s] = recently_filled_slots.pop(0)
+                # iterate through recently_filled_slots slice
+                for i, s in enumerate(model_input.seq_groups):
+                    self.seq_groups_to_batch_slot[s] = recently_filled_slots[i]
 
             if self.model_config.is_encoder_decoder:
                 # Save encoder-decoder data for use in subsequent decode steps
@@ -842,18 +919,18 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             if self.dp_kv_cache:
                 # Calculate perm_table_tensor:
                 # perm_table_tensor[new_idx] = current_slot_idx
+                active_slots = [
+                    self.seq_groups_to_batch_slot[s]
+                    for s in model_input.seq_groups
+                ]
+
                 perm_table_tensor = torch.as_tensor(
-                    [
-                        self.seq_groups_to_batch_slot[s]
-                        for s in model_input.seq_groups
-                    ] + self.empty_slots,
+                    active_slots + self.empty_slots,
                     dtype=torch.long,
                 )
                 if self.async_torch_proc:
                     self.perm_table_tensor.append(perm_table_tensor)
 
-                assert perm_table_tensor.shape[
-                    0] == self.scheduler_config.max_num_seqs
                 # Calculate inverse_perm_indices:
                 # inverse_perm_indices[current_slot_idx] = new_idx
                 inverse_perm_indices = torch.empty_like(perm_table_tensor)
