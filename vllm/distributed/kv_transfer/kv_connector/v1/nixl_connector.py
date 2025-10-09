@@ -622,7 +622,7 @@ class NixlConnectorWorker:
 
         # invalid blocks from failed NIXL operations
         self._invalid_block_ids: set[int] = set()
-        # requests that skipped transfer (failures or prefix cache hits)
+        # requests that skipped transfer (handshake or transfer failures)
         self._skipped_transfer: set[ReqId] = set()
 
         # Background thread for handling new handshake requests.
