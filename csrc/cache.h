@@ -1,6 +1,7 @@
 #pragma once
 
 #include <torch/all.h>
+#include <c10/util/Optional.h>
 
 #include <map>
 #include <vector>
@@ -72,3 +73,8 @@ void cp_gather_indexer_k_quant_cache(
     torch::Tensor& dst_scale,  // [num_tokens, head_dim / quant_block_size * 4]
     const torch::Tensor& block_table,   // [batch_size, num_blocks]
     const torch::Tensor& cu_seq_lens);  // [batch_size + 1]
+
+void upconvert_ds_mla_tokens(
+    torch::Tensor const& src_cache, torch::Tensor& dst_workspace,
+    torch::Tensor const& indices,
+    c10::optional<torch::Tensor> const& unique_count_opt = c10::nullopt);

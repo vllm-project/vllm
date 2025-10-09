@@ -18,7 +18,7 @@ from vllm.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
 )
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -108,6 +109,13 @@ class FlashMLASparseMetadata:
     block_size: int = 64
     topk_tokens: int = 2048
 
+    # Prefill ("> decode_threshold" tokens) vs decode bookkeeping. Requests are
+    # assumed to be ordered so that all prefills come before decodes.
+    num_prefill_reqs: int = 0
+    num_decode_reqs: int = 0
+    num_prefill_tokens: int = 0
+    num_decode_tokens: int = 0
+
     @dataclass
     class FP8KernelMetadata:
         scheduler_metadata: Optional[torch.Tensor]
@@ -135,6 +143,11 @@ def _convert_req_index_to_global_index_kernel(
     ti_stride1,
     out_stride0,
     out_stride1,
+    prefill_mask_ptr,
+    unique_out_ptr,
+    seen_ptr,
+    unique_count_ptr,
+    HAS_PREFILL: tl.constexpr,
 ):
     # program_id(0) -> token_id (row)
     # program_id(1) -> tile index along columns
@@ -172,24 +185,42 @@ def _convert_req_index_to_global_index_kernel(
     out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
     tl.store(out_ptr_ij, out_val)
 
+    if HAS_PREFILL:
+        is_prefill = tl.load(prefill_mask_ptr + token_id)
+        if is_prefill != 0:
+            out_tile_base = (
+                out_ptr + token_id * out_stride0 + (tile_id * BLOCK_N) * out_stride1
+            )
+            for i in tl.static_range(0, BLOCK_N):
+                val = tl.load(out_tile_base + i * out_stride1)
+                if val >= 0:
+                    seen_ptr_i = seen_ptr + val
+                    old = tl.atomic_cas(seen_ptr_i, 0, 1)
+                    if old == 0:
+                        idx = tl.atomic_add(unique_count_ptr, 1)
+                        tl.store(unique_out_ptr + idx, val)
+
 
 def triton_convert_req_index_to_global_index(
     req_id: torch.Tensor,  # int32 [num_tokens]
-    block_table: torch.Tensor,  # int32 [num_requests, max_num_blocks_per_req]
+    block_table: torch.Tensor,
     token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
     BLOCK_SIZE: int = 64,
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,  # tile width along columns
-):
-    """
-    out[token_id, indice_id] =
-        block_table[req_id[token_id],
-            token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
-        + token_indices[token_id, indice_id] % BLOCK_SIZE
+    prefill_token_mask: Optional[torch.Tensor] = None,
+    prefill_seen: Optional[torch.Tensor] = None,
+    prefill_unique_out: Optional[torch.Tensor] = None,
+    prefill_unique_count: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Convert per-request indices into global cache slots.
 
-    Only when token_indices[token_id, indice_id] == -1 do we output -1.
-    For safety, we also output -1 if the derived block_id would be
-        out-of-bounds.
+    Returns:
+        The dense tensor of global slot ids (with ``-1`` for invalid entries).
+        When ``prefill_token_mask`` is provided, also returns a 1-D tensor of
+        unique slot ids touched by the masked tokens. The caller is
+        responsible for resetting the visited bitmap entries corresponding to
+        those slots.
     """
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
@@ -217,6 +248,11 @@ def triton_convert_req_index_to_global_index(
     # Exact 2D grid: tokens × column tiles
     grid = (num_tokens, tiles_per_row)
 
+    has_prefill = prefill_token_mask is not None
+    if has_prefill:
+        assert prefill_unique_count is not None
+        prefill_unique_count.zero_()
+
     _convert_req_index_to_global_index_kernel[grid](
         req_id_c,
         block_table_c,
@@ -233,8 +269,14 @@ def triton_convert_req_index_to_global_index(
         ti_stride1,
         out_stride0,
         out_stride1,
+        prefill_token_mask,
+        prefill_unique_out,
+        prefill_seen,
+        prefill_unique_count,
+        HAS_PREFILL=has_prefill,
     )
-    return out
+
+    return out, prefill_unique_out
 
 
 @dataclass
@@ -243,23 +285,42 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 
     def __init__(
         self,
+        *,
+        vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
         layer_names: list[str],
-        vllm_config: VllmConfig,
         device: torch.device,
-    ):
+    ) -> None:
+        self.vllm_config = vllm_config
+        self.layer_names = layer_names
         cache_config = vllm_config.cache_config
         self.kv_cache_spec = kv_cache_spec
         self.model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         self.device = device
 
+        # Treat requests with query length <= 128 as decodes so the scheduler
+        # can group them at the front of the batch when permitted.
+        self._init_reorder_batch_threshold(128)
+
         props = torch.cuda.get_device_properties(device)
         sm_count = props.multi_processor_count
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens = vllm_config.model_config.hf_config.index_topk
+
+        hf_config = vllm_config.model_config.hf_config
+        topk_tokens = getattr(hf_config, "index_topk", None)
+        if topk_tokens is None:
+            attn_cfg = getattr(hf_config, "attn_module_list_cfg", None)
+            if attn_cfg:
+                topk_tokens = attn_cfg[0].get("topk_tokens")
+        if topk_tokens is None:
+            raise AttributeError(
+                "Unable to determine topk_tokens from hf_config"
+                " for FlashMLA sparse backend"
+            )
+        self.topk_tokens = topk_tokens
         self.use_fp8_kv_cache = cache_config.cache_dtype == "fp8_ds_mla"
         self.topk_tokens_tensor = torch.tensor(
             [self.topk_tokens], device=device, dtype=torch.int32
@@ -319,6 +380,20 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         )
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
 
+        (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
+            split_decodes_and_prefills(
+                common_attn_metadata, decode_threshold=self.reorder_batch_threshold or 0
+            )
+        )
+
+        num_prefill_reqs = num_prefills
+        num_decode_reqs = num_decodes
+        prefill_token_count = num_prefill_tokens
+        decode_token_count = num_decode_tokens
+
+        assert num_prefill_reqs + num_decode_reqs == common_attn_metadata.num_reqs
+        assert prefill_token_count + decode_token_count == num_tokens
+
         fp8_extra_metadata = None
         if self.use_fp8_kv_cache:
             tile_scheduler_metadata, num_splits = get_mla_metadata(
@@ -361,6 +436,10 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            num_prefill_reqs=num_prefill_reqs,
+            num_decode_reqs=num_decode_reqs,
+            num_prefill_tokens=prefill_token_count,
+            num_decode_tokens=decode_token_count,
             fp8_extra_metadata=fp8_extra_metadata,
         )
         return metadata
@@ -401,6 +480,32 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         assert indexer is not None
         self.topk_indices_buffer = indexer.topk_indices_buffer
         self.padding = 128 if current_platform.is_device_capability(100) else 64
+
+        self.prefill_bf16_workspace: Optional[torch.Tensor] = None
+        self.prefill_seen_buffer: Optional[torch.Tensor] = None
+        self.prefill_unique_output: Optional[torch.Tensor] = None
+        self.prefill_unique_count: Optional[torch.Tensor] = None
+
+    def _allocate_prefill_workspaces(self, device: torch.device) -> None:
+        # Allocate workspace for converting indices to global slots
+        if self.prefill_bf16_workspace is None:
+            vllm_config = get_current_vllm_config()
+            cache_config = vllm_config.cache_config
+            model_config = vllm_config.model_config
+            kv_cache_size_in_tokens = (
+                cache_config.num_gpu_blocks * cache_config.block_size
+            )
+            self.prefill_bf16_workspace = torch.empty(
+                (kv_cache_size_in_tokens, self.head_size),
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            self.prefill_seen_buffer = torch.zeros(
+                (model_config.max_model_len,), dtype=torch.int32, device=device
+            )
+            self.prefill_unique_count = torch.zeros(
+                (1,), dtype=torch.int32, device=device
+            )
 
     def _forward_bf16_kv(
         self,
@@ -481,6 +586,9 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             )
 
         if attn_metadata is None:
+            # In a prefill run allocate the workspace for prefill handling
+            self._allocate_prefill_workspaces(q.device)
+
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
             # same expert outputs.
@@ -504,13 +612,51 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
 
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        # TODO: handle index / kv_cache correctly
-        topk_indices_global = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token,
-            attn_metadata.block_table,
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
+        use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
+
+        prefill_token_mask: Optional[torch.Tensor] = None
+        prefill_seen: Optional[torch.Tensor] = None
+        prefill_unique_out: Optional[torch.Tensor] = None
+        prefill_unique_count: Optional[torch.Tensor] = None
+
+        if use_fp8_cache and attn_metadata.num_prefill_tokens > 0:
+            if kv_cache.numel() == 0:
+                raise RuntimeError(
+                    "Expected non-empty kv_cache for fp8_ds_mla prefill handling"
+                )
+            # Scheduler places decode tokens first, so the remaining suffix maps
+            # to prefills for the masked unique-index gather.
+            prefill_token_mask = torch.zeros(
+                num_actual_toks, dtype=torch.int32, device=topk_indices.device
+            )
+            prefill_token_mask[attn_metadata.num_decode_tokens :] = True
+
+            assert (
+                self.prefill_seen_buffer is not None
+                and self.prefill_unique_output is not None
+                and self.prefill_unique_count is not None
+            )
+            prefill_seen = self.prefill_seen_buffer
+            prefill_unique_out = self.prefill_unique_output
+            prefill_unique_count = self.prefill_unique_count
+
+            # TODO(lucas): zero on a seperate stream
+            prefill_seen.zero_()
+            prefill_unique_count.zero_()
+            prefill_unique_out.zero_()
+
+        topk_indices_global, unique_prefill_indices = (
+            triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token,
+                attn_metadata.block_table,
+                topk_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
+                prefill_token_mask=prefill_token_mask,
+                prefill_seen=prefill_seen,
+                prefill_unique_out=prefill_unique_out,
+                prefill_unique_count=prefill_unique_count,
+            )
         )
 
         q = torch.cat([ql_nope, q_pe], dim=-1)
@@ -526,14 +672,55 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                 scale=layer._k_scale,
             )
 
-        if self.kv_cache_dtype != "fp8_ds_mla":
+        if not use_fp8_cache:
             attn_out = self._forward_bf16_kv(
                 q, kv_cache, topk_indices_global, attn_metadata
             )
         else:
-            attn_out = self._forward_fp8_kv(
-                q, kv_cache, topk_indices_global, attn_metadata
+            num_decode_tokens = attn_metadata.num_decode_tokens
+            num_prefill_tokens = attn_metadata.num_prefill_tokens
+            attn_out = q.new_empty(
+                (num_actual_toks, self.num_heads, self.kv_lora_rank),
+                dtype=q.dtype,
+                device=q.device,
             )
+
+            if num_decode_tokens > 0:
+                attn_out[:num_decode_tokens] = self._forward_fp8_kv(
+                    q[:num_decode_tokens],
+                    kv_cache,
+                    topk_indices_global[:num_decode_tokens],
+                    attn_metadata,
+                )
+
+            if num_prefill_tokens > 0:
+                prefill_start = num_decode_tokens
+                topk_prefill = topk_indices_global[prefill_start:]
+                if (
+                    unique_prefill_indices is not None
+                    and unique_prefill_indices.numel() > 0
+                ):
+                    indices_for_upconvert = unique_prefill_indices.to(
+                        dtype=torch.int32, copy=False
+                    )
+                    print("upconverting cache")
+                    ops.upconvert_ds_mla_tokens(
+                        kv_cache,
+                        self.prefill_bf16_workspace,
+                        indices_for_upconvert.contiguous(),
+                        self.prefill_unique_count,
+                    )
+                # Zero the bitmap wholesale; cheaper than selectively
+                # clearing the visited slots and keeps next call ready.
+                assert self.prefill_seen_buffer is not None
+                self.prefill_seen_buffer.zero_()
+                print("bf16 prefill")
+                attn_out[prefill_start:] = self._forward_bf16_kv(
+                    q[prefill_start:],
+                    self.prefill_bf16_workspace,
+                    topk_prefill,
+                    attn_metadata,
+                )
 
         self._v_up_proj(attn_out, out=output[:num_actual_toks])
         return output
