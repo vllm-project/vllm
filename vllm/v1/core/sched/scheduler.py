@@ -97,16 +97,9 @@ class Scheduler(SchedulerInterface):
             self.parallel_config.data_parallel_rank,
         )
         self.ec_connector = None
-        self.ec_max_num_scheduled_tokens = 0
         if self.vllm_config.ec_transfer_config is not None:
             self.ec_connector = ECConnectorFactory.create_connector(
                 config=self.vllm_config, role=ECConnectorRole.SCHEDULER
-            )
-            transfer_config = self.vllm_config.ec_transfer_config
-            self.ec_max_num_scheduled_tokens = int(
-                transfer_config.get_from_extra_config(
-                    "ec_max_num_scheduled_tokens", 0
-                )
             )
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
@@ -197,8 +190,7 @@ class Scheduler(SchedulerInterface):
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
-        token_budget = max(self.max_num_scheduled_tokens, \
-                           self.ec_max_num_scheduled_tokens)
+        token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
@@ -552,10 +544,8 @@ class Scheduler(SchedulerInterface):
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
-        assert total_num_scheduled_tokens <= max(
-            self.max_num_scheduled_tokens,
-            self.ec_max_num_scheduled_tokens,
-        )
+        assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
+
         assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in

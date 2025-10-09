@@ -23,17 +23,6 @@ logger = init_logger(__name__)
 
 # Defined as a EC connector functionality mixin for ModelRunner (GPU, TPU)
 class ECConnectorModelRunnerMixin:
-
-    @staticmethod
-    def maybe_setup_ec_connector(scheduler_output: "SchedulerOutput"):
-        # Set up EC connector for load cache
-        if has_ec_transfer():
-            ec_connector = get_ec_transfer()
-            assert isinstance(ec_connector, ECConnectorBase)
-            assert scheduler_output.ec_connector_metadata is not None
-            ec_connector.bind_connector_metadata(
-                scheduler_output.ec_connector_metadata)
-            ec_connector.start_load_caches()
     
     @staticmethod
     def maybe_save_ec_to_connector(

@@ -19,7 +19,7 @@ GPU_E="${GPU_E:-2}"
 GPU_P="${GPU_P:-2}"
 GPU_D="${GPU_D:-3}"
 
-EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/tmp/}"
+EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/tmp/ec_cache}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
 
 NUM_PROMPTS="${NUM_PROMPTS:-100}"    # number of prompts to send in benchmark
@@ -95,12 +95,12 @@ CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
     --enable-request-id-headers \
     --no-enable-prefix-caching \
     --max-num-seqs 128 \
+    --max-num-batched-tokens 4096 \
     --ec-transfer-config '{
         "ec_connector": "ECSharedStorageConnector",
         "ec_role": "ec_producer",
         "ec_connector_extra_config": {
-            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
-            "ec_max_num_scheduled_tokens": "4096"
+            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
         }
     }' \
     >"${ENC_LOG}" 2>&1 &

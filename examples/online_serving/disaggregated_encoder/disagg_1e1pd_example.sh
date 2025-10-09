@@ -88,13 +88,13 @@ CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
     --port "$ENCODE_PORT" \
     --enable-request-id-headers \
     --no-enable-prefix-caching \
+    --max-num-batched-tokens 4096 \
     --max-num-seqs 128 \
     --ec-transfer-config '{
         "ec_connector": "ECSharedStorageConnector",
         "ec_role": "ec_producer",
         "ec_connector_extra_config": {
-            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
-            "ec_max_num_scheduled_tokens": "4096"
+            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
         }
     }' \
     >"${ENC_LOG}" 2>&1 &
