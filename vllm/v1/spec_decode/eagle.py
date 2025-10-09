@@ -9,11 +9,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
@@ -522,13 +522,9 @@ class EagleProposer:
         )
 
         # Generate a mask for all valid tokens within those requests
-        max_gen_len = sampled_token_ids.shape[-1]
-        if max_gen_len == 1:
-            valid_mask = torch.ones_like(valid_sampled_token_ids_gpu, dtype=torch.bool)
-        else:
-            valid_mask = (valid_sampled_token_ids_gpu != -1) & (
-                valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size
-            )
+        valid_mask = (valid_sampled_token_ids_gpu != -1) & (
+            valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size
+        )
 
         # Count the number of valid tokens in each request
         valid_sampled_tokens_count = valid_mask.sum(dim=1)
@@ -884,7 +880,7 @@ class EagleProposer:
     def load_model(self, target_model: nn.Module) -> None:
         draft_model_config = self.vllm_config.speculative_config.draft_model_config
         target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys()
+            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
         )
         # FIXME: support hybrid kv for draft model
         target_indexer_layer_names = set(
@@ -901,7 +897,7 @@ class EagleProposer:
             )
 
         draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys()
+            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
             - target_attn_layer_names
         )
         indexer_layers = get_layers_from_vllm_config(

@@ -713,11 +713,9 @@ def load_ovis2_5(question: str, image_urls: list[str]) -> ModelRequestData:
     placeholders = "\n".join(
         f"Image-{i}: <image>\n" for i, _ in enumerate(image_urls, start=1)
     )
-    messages = [{"role": "user", "content": f"{placeholders}\n{question}"}]
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    prompt = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
+    prompt = (
+        f"<|im_start|>user\n\n{placeholders}\n{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
     )
 
     return ModelRequestData(

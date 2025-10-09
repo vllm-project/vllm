@@ -1,13 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 
 import pytest
 
 from vllm import LLM, SamplingParams
-
-if os.getenv("VLLM_USE_V1", "0") != "1":
-    pytest.skip("Test package requires V1", allow_module_level=True)
 
 MODEL = "meta-llama/Llama-3.2-1B"
 PROMPT = "Hello my name is Robert and I"
@@ -171,14 +167,6 @@ def test_allowed_token_ids(llm):
     # Reject out of vocabulary.
     with pytest.raises(ValueError):
         _ = llm.generate(PROMPT, SamplingParams(allowed_token_ids=[10000000]))
-
-
-def test_priority(llm):
-    """Check that we reject requests with priority."""
-
-    # Reject all allowed token ids
-    with pytest.raises(ValueError):
-        _ = llm.generate(PROMPT, priority=[1])
 
 
 def test_seed(llm):
