@@ -45,10 +45,12 @@ class ModelRequestData(NamedTuple):
 # Voxtral
 def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
     from mistral_common.audio import Audio
-    from mistral_common.protocol.instruct.messages import (
+    from mistral_common.protocol.instruct.chunk import (
         AudioChunk,
         RawAudio,
         TextChunk,
+    )
+    from mistral_common.protocol.instruct.messages import (
         UserMessage,
     )
     from mistral_common.protocol.instruct.request import ChatCompletionRequest

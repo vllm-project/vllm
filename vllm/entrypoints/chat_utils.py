@@ -403,20 +403,12 @@ def resolve_mistral_chat_template(
     chat_template: Optional[str],
     **kwargs: Any,
 ) -> Optional[str]:
-    if chat_template is not None:
-        logger.warning_once(
-            "'chat_template' cannot be overridden for mistral tokenizer."
+    if chat_template is not None or kwargs.get("chat_template_kwargs") is not None:
+        raise ValueError(
+            "'chat_template' or 'chat_template_kwargs' cannot be overridden "
+            "for mistral tokenizer."
         )
-    if "add_generation_prompt" in kwargs:
-        logger.warning_once(
-            "'add_generation_prompt' is not supported for mistral tokenizer, "
-            "so it will be ignored."
-        )
-    if "continue_final_message" in kwargs:
-        logger.warning_once(
-            "'continue_final_message' is not supported for mistral tokenizer, "
-            "so it will be ignored."
-        )
+
     return None
 
 
