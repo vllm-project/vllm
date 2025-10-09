@@ -6,11 +6,11 @@ from typing import ClassVar, Optional, Union
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionLayer, AttentionType
+from vllm.attention.backends.abstract import AttentionLayer, AttentionType, MultipleOf
 from vllm.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
-    is_flashmla_supported,
+    is_flashmla_dense_supported,
 )
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -43,6 +43,10 @@ class FlashMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["FlashMLAImpl"]:
         return FlashMLAImpl
+
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
+        return [64]
 
 
 @dataclass
@@ -177,7 +181,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             **mla_args,
         )
 
-        is_supported, reason = is_flashmla_supported()
+        is_supported, reason = is_flashmla_dense_supported()
         assert is_supported, reason
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
