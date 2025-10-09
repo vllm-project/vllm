@@ -1765,7 +1765,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
         output = output[:num_actual_toks, ...]
-        q = q[:num_actual_toks, ...]
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
@@ -1779,9 +1778,25 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        decode_q = q[:num_decode_tokens]
+        # Prepare decode and prefill queries. Support either concatenated q
+        # or tuple (q_nope, q_pe) coming from the MLA op boundary.
+        if isinstance(q, tuple):
+            q_nope, q_pe = q
+            q_nope = q_nope[:num_actual_toks, ...]
+            q_pe = q_pe[:num_actual_toks, ...]
 
-        prefill_q = q[num_decode_tokens:]
+            decode_q_nope = q_nope[:num_decode_tokens]
+            decode_q_pe = q_pe[:num_decode_tokens]
+            prefill_q = torch.cat(
+                (q_nope[num_decode_tokens:], q_pe[num_decode_tokens:]), dim=-1
+            )
+        else:
+            q = q[:num_actual_toks, ...]
+            decode_q = q[:num_decode_tokens]
+            prefill_q = q[num_decode_tokens:]
+            decode_q_nope, decode_q_pe = decode_q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
         prefill_k_pe = k_pe[num_decode_tokens:]
         prefill_k_c_normed = k_c_normed[num_decode_tokens:]
 
@@ -1811,9 +1826,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         if has_decode:
             assert attn_metadata.decode is not None
-            decode_q_nope, decode_q_pe = decode_q.split(
-                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-            )
             # Convert from (B, N, P) to (N, B, P)
             decode_q_nope = decode_q_nope.transpose(0, 1)
 
