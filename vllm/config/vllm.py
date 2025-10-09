@@ -309,7 +309,6 @@ class VllmConfig:
                 self.compilation_config.level = CompilationLevel.PIECEWISE
             else:
                 self.compilation_config.level = CompilationLevel.NO_COMPILATION
-
         else:
             assert self.compilation_config.level >= CompilationLevel.NO_COMPILATION
             assert self.compilation_config.level <= CompilationLevel.PIECEWISE
