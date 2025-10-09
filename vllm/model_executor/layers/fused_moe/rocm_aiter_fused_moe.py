@@ -173,26 +173,3 @@ def rocm_aiter_fused_experts(
             a2_scale=quant_config.a2_scale,
             doweight_stage1=apply_router_weight_on_input,
         )
-
-
-def shuffle_weights(
-    *tensors: torch.Tensor, layout: tuple[int, int] = (16, 16)
-) -> tuple[torch.Tensor, ...]:
-    """
-    Applies shuffle_weight function from AITER to each
-    input tensor and returns them.
-
-    Rearranges (shuffles) the input tensor/s
-    into a specified block layout for optimized computation.
-
-    Args:
-        *tensors: Variable number of torch.Tensor objects.
-        layout: A pair of integers specifying the block sizes used to divide
-            the tensors during shuffling. Default is (16, 16).
-
-    Returns:
-    A Tuple of shuffled tensors.
-    """
-    from aiter.ops.shuffle import shuffle_weight
-
-    return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)

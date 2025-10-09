@@ -916,11 +916,34 @@ class rocm_aiter_ops:
     def per_1x128_fp8_quant(
         input_2d: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
-        """Only applies quantization method for fp8 data type."""
+        """Only applies quantization method for fp8 data type only."""
         from aiter import QuantType, dtypes, get_hip_quant
 
         aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
         return aiter_per1x128_quant(input_2d.contiguous(), quant_dtype=dtypes.fp8)
+
+    @staticmethod
+    def shuffle_weights(
+        *tensors: torch.Tensor, layout: tuple[int, int] = (16, 16)
+    ) -> tuple[torch.Tensor, ...]:
+        """
+        Applies shuffle_weight function from AITER to each
+        input tensor and returns them.
+
+        Rearranges (shuffles) the input tensor/s
+        into a specified block layout for optimized computation.
+
+        Args:
+            *tensors: Variable number of torch.Tensor objects.
+            layout: A pair of integers specifying the block sizes used to divide
+                the tensors during shuffling. Default is (16, 16).
+
+        Returns:
+        A Tuple of shuffled tensors.
+        """
+        from aiter.ops.shuffle import shuffle_weight
+
+        return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)
 
 
 rocm_aiter_ops.register_ops_once()
