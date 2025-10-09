@@ -783,7 +783,7 @@ pycparser==2.22
     # via cffi
 pycryptodomex==3.22.0
     # via blobfile
-pydantic==2.11.7
+pydantic==2.12.0
     # via
     #   -r requirements/test.in
     #   albumentations
@@ -797,7 +797,7 @@ pydantic==2.11.7
     #   openai-harmony
     #   pydantic-extra-types
     #   ray
-pydantic-core==2.33.2
+pydantic-core==2.41.1
     # via pydantic
 pydantic-extra-types==2.10.5
     # via mistral-common
@@ -1224,7 +1224,7 @@ types-python-dateutil==2.9.0.20241206
     # via arrow
 typeshed-client==2.8.2
     # via jsonargparse
-typing-extensions==4.12.2
+typing-extensions==4.15.0
     # via
     #   aiosignal
     #   albumentations
@@ -1253,7 +1253,7 @@ typing-extensions==4.12.2
     #   typer
     #   typeshed-client
     #   typing-inspection
-typing-inspection==0.4.1
+typing-inspection==0.4.2
     # via pydantic
 tzdata==2024.2
     # via pandas
