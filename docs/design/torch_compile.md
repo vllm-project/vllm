@@ -17,6 +17,11 @@ INFO 03-07 03:06:55 [backends.py:409] Using cache directory: ~/.cache/vllm/torch
 
 vLLM will take all the available factors into consideration, and decide a directory to store all the compilation artifact. This means, you can directly copy the whole `~/.cache/vllm/torch_compile_cache` directory in your deployment scenario to save a great amount of compilation time, and hence accelerating the starting time of the vLLM instance.
 
+### Concurrent Access Control
+
+When multiple vLLM processes start simultaneously with the same configuration, vLLM automatically coordinates their access to the compilation cache using file locks. The first process to start will compile and hold a lock, while other processes wait for compilation to complete. Once the first process finishes and marks the cache as ready (with a `.cache_ready` marker file), subsequent processes can load the cache without any locks, enabling zero-contention reads.
+
+
 The factors considered include:
 
 - All the related configs (see the `compute_hash` functions in their respective configs in the [config folder](gh-file:vllm/config))

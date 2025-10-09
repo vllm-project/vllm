@@ -7,9 +7,10 @@ import os
 import pprint
 import time
 from collections.abc import Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from typing import Any, Callable, Optional
 
+import filelock
 import torch
 import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
@@ -72,15 +73,108 @@ class CompilerManager:
         self.is_cache_updated = False
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
+        self.cache_lock: Optional[filelock.FileLock] = None
+        self._lock_stack: Optional[ExitStack] = (
+            None  # Manages lock context across function calls
+        )
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
+
+    def get_cache_lock(self, cache_dir: str) -> filelock.FileLock:
+        """
+        Get a file lock for the cache directory.
+
+        This prevents race conditions when multiple processes try to compile
+        and write to the same cache directory simultaneously. The lock ensures
+        only one process compiles while others wait for completion.
+
+        Args:
+            cache_dir: Directory to create the lock file in
+
+        Returns:
+            FileLock instance for the cache directory
+
+        Note:
+            Uses mode 0o666 to allow lock sharing across different users
+        """
+        lock_file = os.path.join(cache_dir, ".vllm_compile.lock")
+        # mode 0o666 is required for the filelock to be shared across users
+        return filelock.FileLock(lock_file, mode=0o666)
+
+    def get_cache_ready_marker(self, cache_dir: str) -> str:
+        """
+        Get path to the cache ready marker file.
+
+        This marker indicates the cache is complete and safe to read without
+        acquiring a lock. Once this file exists, subsequent processes can
+        bypass compilation entirely.
+
+        Args:
+            cache_dir: Cache directory path
+
+        Returns:
+            Path to the .cache_ready marker file
+        """
+        return os.path.join(cache_dir, ".cache_ready")
+
+    def is_cache_ready(self, cache_dir: str) -> bool:
+        """
+        Check if cache is complete and ready to use.
+
+        This is a lock-free check that enables the fast path where processes
+        can load completed caches without any synchronization overhead.
+
+        Args:
+            cache_dir: Cache directory path
+
+        Returns:
+            True if cache is ready, False otherwise
+        """
+        return os.path.exists(self.get_cache_ready_marker(cache_dir))
+
+    def mark_cache_ready(self, cache_dir: str):
+        """
+        Mark the cache as complete and ready for use.
+
+        Creates the .cache_ready marker file that signals to other processes
+        that compilation is complete and the cache can be safely read.
+        Should be called after all cache files have been successfully written.
+
+        Args:
+            cache_dir: Cache directory path
+        """
+        ready_marker = self.get_cache_ready_marker(cache_dir)
+        with open(ready_marker, "w") as f:
+            f.write(f"Cache ready at {time.time()}\n")
+
+    def _load_cache_file(self):
+        """
+        Load cache data from the cache file.
+        """
+        with open(self.cache_file_path) as f:
+            self.cache = ast.literal_eval(f.read())
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
     ):
         """
-        Initialize the cache directory for the compiler.
+        Initialize the cache directory for the compiler with concurrent access control.
+
+        This method implements a write-lock mechanism to prevent race conditions when
+        multiple processes attempt to compile and write to the same cache directory
+        simultaneously. It uses a two-phase approach:
+
+        **Fast Path (cache ready):**
+        - Checks for .cache_ready marker without acquiring lock
+        - If cache exists and is ready, loads it immediately
+        - Zero contention for reading completed caches
+
+        **Slow Path (needs compilation):**
+        - Acquires file lock (blocks other processes)
+        - Double-checks cache status (another process may have finished)
+        - If cache still not ready, holds lock during compilation
+        - Releases lock after cache is written
 
         The organization of the cache directory is as follows:
         cache_dir=/path/to/hash_str/rank_i_j/prefix/
@@ -92,31 +186,105 @@ class CompilerManager:
         for multiple prefixes, they can share the same
         base cache dir of /path/to/hash_str/rank_i_j/ ,
         to store some common compilation artifacts.
+
+        Note:
+            The lock is held across function boundaries using ExitStack and
+            released in save_to_file() after compilation completes.
         """
 
         self.disable_cache = disable_cache
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, "vllm_compile_cache.py")
 
-        if not disable_cache and os.path.exists(self.cache_file_path):
-            # load the cache from the file
-            with open(self.cache_file_path) as f:
-                # we use ast.literal_eval to parse the data
-                # because it is a safe way to parse Python literals.
-                # do not use eval(), it is unsafe.
-                self.cache = ast.literal_eval(f.read())
+        if disable_cache:
+            self.compiler.initialize_cache(
+                cache_dir=cache_dir, disable_cache=disable_cache, prefix=prefix
+            )
+            return
 
+        self.cache_lock = self.get_cache_lock(cache_dir)
+
+        # Fast path: Check if cache is ready without lock
+        if self.is_cache_ready(cache_dir) and os.path.exists(self.cache_file_path):
+            logger.debug("Compilation cache is ready. Loading without lock")
+            self._load_cache_file()
+            with self.cache_lock:
+                self.compiler.initialize_cache(
+                    cache_dir=cache_dir, disable_cache=disable_cache, prefix=prefix
+                )
+            return
+
+        # Slow path: Acquire lock and hold it during compilation
+        logger.debug(
+            "Acquiring lock for compilation cache initialization and compilation"
+        )
+        self._lock_stack = ExitStack()
+        self._lock_stack.enter_context(self.cache_lock)
+
+        # Double-check inside lock (another process may have just finished)
+        if self.is_cache_ready(cache_dir) and os.path.exists(self.cache_file_path):
+            logger.debug("Compilation cache became ready while waiting for lock")
+            self._load_cache_file()
+            self._lock_stack.close()
+            self._lock_stack = None
+        else:
+            # We're first - initialize and keep lock held for compilation
+            logger.debug("This process will compile while holding lock")
+            os.makedirs(cache_dir, exist_ok=True)
+            if os.path.exists(self.cache_file_path):
+                self._load_cache_file()
+            # Lock stays held - will be released in save_to_file()
+
+        # Initialize compiler cache
         self.compiler.initialize_cache(
             cache_dir=cache_dir, disable_cache=disable_cache, prefix=prefix
         )
 
     def save_to_file(self):
+        """
+        Save compiled cache to disk and release compilation lock if held.
+
+        This method handles cache persistence with proper lock management:
+        - If holding lock from compilation, writes cache and releases lock
+        - If not holding lock, temporarily acquires lock for write
+        - Always releases lock using ExitStack.close() for clean cleanup
+
+        The lock lifetime spans from initialize_cache() to save_to_file(),
+        ensuring only one process compiles for a given cache directory.
+
+        After saving, creates .cache_ready marker to enable lock-free reads
+        by subsequent processes.
+        """
         if self.disable_cache or not self.is_cache_updated:
+            # Release lock if we're holding it from compilation
+            if self._lock_stack is not None:
+                self._lock_stack.close()
+                self._lock_stack = None
             return
+
+        # Defensive check: cache_lock should be set by initialize_cache
+        if self.cache_lock is None:
+            logger.warning("Cache lock not initialized, skipping save")
+            return
+
         printer = pprint.PrettyPrinter(indent=4)
         data = printer.pformat(self.cache)
-        with open(self.cache_file_path, "w") as f:
-            f.write(data)
+
+        # If holding lock from compilation, use it; otherwise acquire temporarily
+        if self._lock_stack is not None:
+            # Lock held from compilation - write and release
+            logger.info("Writing cache and releasing compilation lock")
+            with open(self.cache_file_path, "w") as f:
+                f.write(data)
+            self.mark_cache_ready(self.cache_dir)
+            self._lock_stack.close()
+            self._lock_stack = None
+        else:
+            # Not holding lock - acquire temporarily
+            with self.cache_lock:
+                with open(self.cache_file_path, "w") as f:
+                    f.write(data)
+                self.mark_cache_ready(self.cache_dir)
 
     def load(
         self,
@@ -640,16 +808,26 @@ class VllmBackend:
         ).run(*example_inputs)
 
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")
-        if not os.path.exists(graph_path):
-            # code adapted from https://github.com/thuml/depyf/blob/dab831108a752d1facc00acdd6d4243891845c37/depyf/explain/patched_lazy_format_graph_code.py#L30 # noqa
-            # use `print_readable` because it can include submodules
-            src = (
-                "from __future__ import annotations\nimport torch\n"
-                + self.split_gm.print_readable(print_output=False)
-            )
-            src = src.replace("<lambda>", "GraphModule")
-            with open(graph_path, "w") as f:
-                f.write(src)
+
+        # Use write lock for cache, or nullcontext when cache is disabled
+        # Defensive: use nullcontext if cache_lock is None
+        lock_context = (
+            self.compiler_manager.cache_lock
+            if not disable_cache and self.compiler_manager.cache_lock is not None
+            else nullcontext()
+        )
+
+        with lock_context:
+            if not os.path.exists(graph_path):
+                # code adapted from https://github.com/thuml/depyf/blob/dab831108a752d1facc00acdd6d4243891845c37/depyf/explain/patched_lazy_format_graph_code.py#L30 # noqa
+                # use `print_readable` because it can include submodules
+                src = (
+                    "from __future__ import annotations\nimport torch\n"
+                    + self.split_gm.print_readable(print_output=False)
+                )
+                src = src.replace("<lambda>", "GraphModule")
+                with open(graph_path, "w") as f:
+                    f.write(src)
 
             logger.debug("Computation graph saved to %s", graph_path)
 
