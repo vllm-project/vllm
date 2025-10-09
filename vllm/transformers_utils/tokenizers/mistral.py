@@ -188,6 +188,8 @@ class MistralTokenizer(TokenizerBase):
             self.convert_ids_to_tokens([i], skip_special_tokens=False)[0]: i
             for i in range(self.vocab_size - 1, -1, -1)
         }
+        # Sort the dict for convenience
+        self._vocab_dict = dict(sorted(self._vocab_dict.items(), key=lambda x: x[1]))
 
         # Vocab sorted by token id.
         self._vocab = self.tokenizer._vocab
