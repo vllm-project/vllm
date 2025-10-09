@@ -50,7 +50,7 @@ def can_initialize(model: str, extra_args: Optional[list[str]] = None):
     with RemoteOpenAIServer(
         model,
         server_args,
-        max_wait_seconds=1000,  # Due to FlashInfer compile
+        max_wait_seconds=1500,  # Due to FlashInfer compile
         override_hf_configs=dummy_hf_overrides,
     ) as server:
         client = server.get_client()
