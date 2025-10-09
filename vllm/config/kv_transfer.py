@@ -5,7 +5,7 @@ import hashlib
 import uuid
 from typing import Any, Literal, Optional, get_args
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -26,7 +26,7 @@ class KVTransferConfig:
     """The KV connector for vLLM to transmit KV caches between vLLM instances.
     """
 
-    engine_id: Optional[str] = None
+    engine_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     """The engine id for KV transfers."""
 
     kv_buffer_device: Optional[KVBufferDevice] = "cuda"
@@ -80,13 +80,6 @@ class KVTransferConfig:
         factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
-
-    @field_validator("engine_id", mode="after")
-    @classmethod
-    def _generate_engine_id(cls, engine_id: Optional[str]) -> str:
-        if engine_id is None:
-            return str(uuid.uuid4())
-        return engine_id
 
     @model_validator(mode="after")
     def _validate_kv_transfer_config(self) -> Self:
