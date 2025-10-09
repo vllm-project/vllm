@@ -37,7 +37,7 @@ from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -74,7 +74,15 @@ logger = init_logger(__name__)
 
 
 class Ernie4_5_VLMoeMLP(Ernie4_5_MoeMLP):
-    pass
+    def __init__(self, shared_experts: Optional[torch.nn.Module] = None, **kwargs):
+        super().__init__(**kwargs)
+        self.shared_experts = shared_experts
+
+    def forward(self, x):
+        if self.shared_experts is not None:
+            return self.shared_experts(x) + super().forward(x)
+        else:
+            return super().forward(x)
 
 
 class Ernie4_5_VLMoeAttention(nn.Module):
@@ -223,6 +231,21 @@ class Ernie4_5_VLMoeMoE(nn.Module):
 
         assert text_moe_layer_start_index <= text_moe_layer_end_index
 
+        if self.has_shared_experts:
+            intermediate_size = (
+                config.moe_intermediate_size[0] * config.moe_num_shared_experts
+            )
+            self.shared_experts = Ernie4_5_VLMoeMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                prefix=f"{prefix}.shared_experts",
+                reduce_results=False,
+            )
+        else:
+            self.shared_experts = None
+
         if (
             layer_idx >= text_moe_layer_start_index
             and layer_idx <= text_moe_layer_end_index
@@ -236,7 +259,8 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 prefix=f"{prefix}.text_experts_gate",
             )
 
-            self.text_experts = FusedMoE(
+            self.text_experts = SharedFusedMoE(
+                shared_experts=self.shared_experts,
                 num_experts=config.moe_num_experts[0],
                 top_k=config.moe_k,
                 hidden_size=config.hidden_size,
@@ -249,6 +273,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
             )
         else:
             self.text_experts = Ernie4_5_VLMoeMLP(
+                shared_experts=self.shared_experts,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
@@ -271,7 +296,8 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 prefix=f"{prefix}.vision_experts_gate",
             )
 
-            self.vision_experts = FusedMoE(
+            self.vision_experts = SharedFusedMoE(
+                shared_experts=self.shared_experts,
                 num_experts=config.moe_num_experts[1],
                 top_k=config.moe_k,
                 hidden_size=config.hidden_size,
@@ -284,25 +310,13 @@ class Ernie4_5_VLMoeMoE(nn.Module):
             )
         else:
             self.vision_experts = Ernie4_5_VLMoeMLP(
+                shared_experts=self.shared_experts,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 use_bias=getattr(config, "use_bias", False),
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
-            )
-
-        if self.has_shared_experts:
-            intermediate_size = (
-                config.moe_intermediate_size[0] * config.moe_num_shared_experts
-            )
-            self.shared_experts = Ernie4_5_VLMoeMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                prefix=f"{prefix}.shared_experts",
-                reduce_results=self.text_experts.must_reduce_shared_expert_outputs(),
             )
 
     def forward(
@@ -314,9 +328,6 @@ class Ernie4_5_VLMoeMoE(nn.Module):
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
-
-        if self.has_shared_experts:
-            shared_output = self.shared_experts(hidden_states)
 
         if visual_token_mask is not None and visual_token_mask.all():
             # only vision modal input
@@ -362,8 +373,8 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 hidden_states=hidden_states, router_logits=text_router_logits
             )
 
-        if self.has_shared_experts and shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
+        if self.has_shared_experts:
+            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
 
         if self.tp_size > 1:
             final_hidden_states = (
@@ -649,7 +660,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+        expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
