@@ -3,10 +3,9 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Any, Literal, Optional, Union
+from typing import Any, Optional, Union
 
 import torch
-import torch.nn as nn
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm.distributed import (
