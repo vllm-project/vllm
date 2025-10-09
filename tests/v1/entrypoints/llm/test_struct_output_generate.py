@@ -899,7 +899,7 @@ def test_structured_output_with_structural_tag(
     sampling_params = SamplingParams(
         temperature=0.0,
         max_tokens=500,
-        guided_decoding=GuidedDecodingParams(
+        guided_decoding=StructuredOutputsParams(
             structural_tag=json.dumps(structural_tag_config)),
     )
 

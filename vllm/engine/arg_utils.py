@@ -416,7 +416,6 @@ class EngineArgs:
     tokenizer_revision: Optional[str] = ModelConfig.tokenizer_revision
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
-    max_seq_len_to_capture: int = ModelConfig.max_seq_len_to_capture
     need_structured_in_reasoning: bool = \
         ModelConfig.need_structured_in_reasoning
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
@@ -439,6 +438,7 @@ class EngineArgs:
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
+    video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled

@@ -115,7 +115,7 @@ class XgrammarBackend(StructuredOutputBackend):
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
             s_tag = json.loads(grammar_spec)
             if "structures" in s_tag:
-                #Falling back to deprecated method of compiling structural tag
+                # Falling back to deprecated method of compiling structural tag
                 tags = [
                     xgr.StructuralTagItem(
                         begin=s["begin"],
@@ -126,8 +126,8 @@ class XgrammarBackend(StructuredOutputBackend):
                 ctx = self.compiler.compile_structural_tag(
                     tags, s_tag["triggers"])
             else:
-                logger.info("Compiling structural tag grammar_spec:\%s",
-                            grammar_spec)
+                logger.info(f"Compiling structural tag grammar_spec: \
+                    {grammar_spec}")
                 ctx = self.compiler.compile_structural_tag(grammar_spec)
         else:
             logger.error(
@@ -346,17 +346,18 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     if so_params.structural_tag:
         try:
             s_tag = json.loads(so_params.structural_tag)
-            tags = [
-                xgr.StructuralTagItem(
-                    begin=s["begin"],
-                    schema=json.dumps(s["schema"]),
-                    end=s["end"],
-                )
-                for s in s_tag["structures"]
-            ]
-            structural_tag = xgr.StructuralTag.from_legacy_structural_tag(
-                tags, s_tag["triggers"]
-            )
-            xgr.Grammar.from_structural_tag(structural_tag)
+
+            # Using the deprecated method of compiling structural tag
+            if "structures" in s_tag:
+                tags = [
+                    xgr.StructuralTagItem(
+                        begin=s["begin"],
+                        schema=json.dumps(s["schema"]),
+                        end=s["end"],
+                    ) for s in s_tag["structures"]
+                ]
+                xgr.Grammar.from_structural_tag(tags, s_tag["triggers"])
+            else:
+                xgr.Grammar.from_structural_tag(so_params.structural_tag)
         except Exception as e:
             raise ValueError("Invalid structural tag specification.") from e
