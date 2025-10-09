@@ -170,13 +170,23 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     typename Ktraits::state_t *intermediate_states = params.cache_enabled && params.intermediate_states_ptr != nullptr ?
                           reinterpret_cast<typename Ktraits::state_t *>(params.intermediate_states_ptr) : nullptr;
 
-    // Pre-calculate n_blocks once (used for intermediate state indexing)
-    const int n_blocks = params.cache_enabled ?
-                        (seqlen + params.block_size - 1) / params.block_size : 0;
-
-    const int batch_dim_offset = params.cache_enabled ?
-                                 batch_id * n_blocks * params.dim * params.dstate +
-                                 dim_id * kNRows * params.dstate : 0;
+    // The intermediate_states tensor has shape [batch_size, max_blocks, dim, dstate]
+    // In varlen mode, max_blocks must match what Python allocated: total_seqlen / block_size
+    int max_blocks = 0;
+    if (params.cache_enabled) {
+        if constexpr (kVarlen) {
+            // For varlen mode with chunked prefill, the intermediate_states tensor is allocated
+            // based on the TOTAL sequence length across all sequences in the original batch.
+            // Even though we process in chunks, each batch_id gets the same max_blocks allocation.
+            int *query_start_loc = reinterpret_cast<int *>(params.query_start_loc_ptr);
+            const int num_seqs = params.batch;
+            int total_seqlen = query_start_loc[num_seqs] - query_start_loc[0];
+            max_blocks = (total_seqlen + params.block_size - 1) / params.block_size;
+        } else {
+            // For non-varlen mode, all sequences have the same length
+            max_blocks = (seqlen + params.block_size - 1) / params.block_size;
+        }
+    }
 
     for (int chunk = 0; chunk < n_chunks; ++chunk) {
         int chunk_start_pos = chunk * kChunkSize;
@@ -194,13 +204,15 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                                     chunk_seqlen;
             int tokens_to_process = block_end_in_chunk - block_start_in_chunk;
 
-            // Calculate global block index for caching
-            int global_block_idx = params.cache_enabled ?
+            // Calculate block index within this sequence
+            int block_idx_in_seq = params.cache_enabled ?
                                   (chunk_start_pos + block_start_in_chunk) / params.block_size : 0;
 
             // Pre-calculate block offset component for intermediate states (used in state loop)
+            // intermediate_states has shape [batch_size, max_blocks, dim, dstate]
+            // So the offset for batch_id, block_idx is: batch_id * max_blocks * dim * dstate + block_idx * dim * dstate
             const int block_state_offset = params.cache_enabled ?
-                                          global_block_idx * params.dim * params.dstate : 0;
+                                          (batch_id * max_blocks + block_idx_in_seq) * params.dim * params.dstate : 0;
 
             input_t u_vals[kNRows][kNItems], delta_vals_load[kNRows][kNItems];
 
@@ -304,10 +316,10 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 // Initialize running total
                 scan_t running_prefix;
 
-                if (params.cache_enabled && intermediate_states != nullptr && global_block_idx > 0) {
+                if (params.cache_enabled && intermediate_states != nullptr && block_idx_in_seq > 0) {
                     // Load state from previous block (hence the - params.dim * params.dstate)
-                    int state_offset = batch_dim_offset +
-                                      block_state_offset - params.dim * params.dstate +
+                    int state_offset = block_state_offset - params.dim * params.dstate +
+                                      dim_id * kNRows * params.dstate +
                                       r * params.dstate +
                                       state_idx;
                     running_prefix = make_float2(1.0, float(intermediate_states[state_offset]));
@@ -330,8 +342,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     // Store state at block boundary if cache is enabled
                     // Store ALL blocks to intermediate_states, including the last one
                     if (params.cache_enabled && intermediate_states != nullptr) {
-                        int state_offset = batch_dim_offset +
-                                         block_state_offset +
+                        int state_offset = block_state_offset +
+                                         dim_id * kNRows * params.dstate +
                                          r * params.dstate +
                                          state_idx;
                         intermediate_states[state_offset] = typename Ktraits::state_t(prefix_op.running_prefix.y);
