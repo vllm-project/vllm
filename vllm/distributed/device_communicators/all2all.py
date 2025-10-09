@@ -377,6 +377,8 @@ class FlashInferAllToAllManager(All2AllManagerBase):
     All2All communication based on flashinfer kernels.
     """
 
+    # This type lint could be removed after all of the work in
+    # https://github.com/vllm-project/vllm/issues/26533 done.
     rank: int
     world_size: int
 
