@@ -6,7 +6,7 @@ import sys
 from argparse import SUPPRESS, HelpFormatter
 from pathlib import Path
 from typing import Literal
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 from pydantic_core import core_schema
 
@@ -58,6 +58,7 @@ ChatCommand = auto_mock("vllm.entrypoints.cli.openai", "ChatCommand")
 CompleteCommand = auto_mock("vllm.entrypoints.cli.openai", "CompleteCommand")
 cli_args = auto_mock("vllm.entrypoints.openai", "cli_args")
 run_batch = auto_mock("vllm.entrypoints.openai", "run_batch")
+CpuPlatform = auto_mock("vllm.platforms.cpu", "CpuPlatform")
 FlexibleArgumentParser = auto_mock("vllm.utils", "FlexibleArgumentParser")
 
 
@@ -124,7 +125,7 @@ def create_parser(add_cli_args, **kwargs) -> FlexibleArgumentParser:
     """
     parser = FlexibleArgumentParser(add_json_tip=False)
     parser.formatter_class = MarkdownFormatter
-    with patch("vllm.platforms.current_platform", Mock(device_type="cpu")):
+    with patch("vllm.platforms.current_platform", CpuPlatform()):
         _parser = add_cli_args(parser, **kwargs)
     # add_cli_args might be in-place so return parser if _parser is None
     return _parser or parser
