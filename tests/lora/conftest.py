@@ -229,9 +229,11 @@ def qwen25vl_lora_files():
 def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
+
 @pytest.fixture(scope="session")
 def deepseekv2_lora_files():
     return snapshot_download(repo_id="wuchen01/DeepSeek-V2-Lite-Chat-All-LoRA")
+
 
 @pytest.fixture
 def reset_default_device():

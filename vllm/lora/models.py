@@ -23,15 +23,14 @@ from vllm.lora.utils import (
     get_supported_lora_modules,
     is_regex_target_modules,
     parse_fine_tuned_lora_name,
+    process_packed_modules_mapping,
     replace_submodule,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer, WeightsMapper
-from vllm.model_executor.utils import get_packed_modules_mapping
 from vllm.utils import is_pin_memory_available
 from vllm.utils.cache import LRUCache
 
@@ -58,14 +57,6 @@ def get_lora_id():
     global _GLOBAL_LORA_ID
     _GLOBAL_LORA_ID += 1
     return _GLOBAL_LORA_ID
-
-
-def is_moe_model(model: nn.Module) -> bool:
-    """Checks if the model contains FusedMoE layers and warns the user."""
-    if any(isinstance(module, FusedMoE) for module in model.modules()):
-        logger.info_once("MoE model detected. Using fused MoE LoRA implementation.")
-        return True
-    return False
 
 
 class LoRAModel:
@@ -377,7 +368,7 @@ class LoRAModelManager:
         assert self.supported_lora_modules, "No supported LoRA modules found in"
         f" {self.model.__class__.__name__}."
 
-        self.packed_modules_mapping = get_packed_modules_mapping(self.model)
+        self.packed_modules_mapping = process_packed_modules_mapping(self.model)
         # Used to indicate whether the model is a multimodal model
         self.supports_mm: bool = (
             supports_multimodal(self.model)
@@ -386,7 +377,6 @@ class LoRAModelManager:
             and hasattr(self.model, "get_mm_mapping")
         )
         self.is_pooling_model = is_pooling_model(self.model)
-        self.is_moe_model = is_moe_model(self.model)
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a set for compatibility with LRUCache.

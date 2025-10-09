@@ -49,12 +49,6 @@ def set_weight_attrs(
 
 
 def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
-    # call the method if the model has defined it.
-    if (method := getattr(model, "get_packed_modules_mapping", None)) and callable(
-        method
-    ):
-        return method()
-
     parent_map = getattr(model, "packed_modules_mapping", None)
     parent_map = copy.deepcopy(parent_map) if parent_map is not None else {}
 

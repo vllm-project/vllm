@@ -5,7 +5,6 @@
 from typing import Optional
 
 import torch
-from typing import Callable
 from typing_extensions import override
 
 import vllm._custom_ops as ops
@@ -13,7 +12,8 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP)
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -42,8 +42,8 @@ def fused_marlin_moe(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     activation: Optional[str] = "silu",
-    activation_func: Optional[str] = None, # FIXME: type Callable
-    moe_sum: Optional[str] = None, # FIXME: type Callable
+    activation_func: Optional[str] = None,  # FIXME: type Callable
+    moe_sum: Optional[str] = None,  # FIXME: type Callable
     expert_map: Optional[torch.Tensor] = None,
     global_scale1: Optional[torch.Tensor] = None,
     global_scale2: Optional[torch.Tensor] = None,
@@ -195,17 +195,17 @@ def fused_marlin_moe(
     if activation_func is not None:
         activation_func(
             activation, intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
-    )
+        )
     else:
         if activation == "silu":
             torch.ops._C.silu_and_mul(
                 intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
-        )
+            )
         elif activation == "swigluoai":
             # alpha = 1.702, limit = 7.0
             torch.ops._C.swigluoai_and_mul(
                 intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
-        )
+            )
         else:
             raise ValueError(
                 f"Unsupported activation: {activation}. "
@@ -241,7 +241,6 @@ def fused_marlin_moe(
         is_k_full=is_k_full,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=True,
-
         is_zp_float=False,
     ).view(-1, topk, K)
 
@@ -422,9 +421,9 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)
 
+
 def modular_marlin_fused_moe(
-    quant_config: FusedMoEQuantConfig,
-    shared_experts: Optional[torch.nn.Module] = None
+    quant_config: FusedMoEQuantConfig, shared_experts: Optional[torch.nn.Module] = None
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),

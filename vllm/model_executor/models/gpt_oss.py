@@ -652,23 +652,6 @@ class GptOssForCausalLM(
         },
     )
 
-    def get_packed_modules_mapping(self) -> dict[str, list[str]]:
-        # This method generates and returns a dictionary mapping packed module
-        # names to lists of their corresponding submodule names. It includes
-        # both static mappings and dynamic mappings for expert layers, where
-        # the expert indices are expanded based on the configured number
-        # of routed experts.
-
-        expert_params_mapping = self.get_expert_mapping()
-
-        packed_modules_mapping = self.packed_modules_mapping.copy()
-
-        packed_modules_mapping["experts"] = [
-            weight_name.rstrip(".") for _, weight_name, _, _ in expert_params_mapping
-        ]
-
-        return packed_modules_mapping
-
     def __init__(
         self,
         vllm_config: VllmConfig,

@@ -17,8 +17,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     outputs = llm.generate(
         prompts,
         sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None,
+        lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None,
     )
     # Print the outputs.
     generated_texts: list[str] = []
@@ -33,13 +32,15 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
 def test_deepseekv2_lora(deepseekv2_lora_files):
     # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
     # Otherwise, the lora-test will fail due to CUDA OOM.
-    llm = vllm.LLM(MODEL_PATH,
-                   max_model_len=1024,
-                   enable_lora=True,
-                   max_loras=1,
-                   enforce_eager=True,
-                   trust_remote_code=True,
-                   enable_chunked_prefill=True)
+    llm = vllm.LLM(
+        MODEL_PATH,
+        max_model_len=1024,
+        enable_lora=True,
+        max_loras=1,
+        enforce_eager=True,
+        trust_remote_code=True,
+        enable_chunked_prefill=True,
+    )
 
     expected_lora_output = [
         "I am \u5f20\u5b50\u8c6a, an AI assistant developed by \u9648\u58eb\u680b.",  # noqa: E501

@@ -17,9 +17,8 @@ def CEILDIV(x, y):
 
 
 def sample_data(num_experts, max_loras, num_tokens, topk_num):
-
     topk_ids = torch.zeros((num_tokens, topk_num), dtype=torch.int32)
-    token_lora_mapping = torch.zeros((num_tokens, ), dtype=torch.int32)
+    token_lora_mapping = torch.zeros((num_tokens,), dtype=torch.int32)
 
     for i in range(num_tokens):
         pool = list(range(num_experts))
@@ -28,21 +27,20 @@ def sample_data(num_experts, max_loras, num_tokens, topk_num):
             topk_ids[i, j] = pool[j]
         token_lora_mapping[i] = random.randint(0, max_loras - 1)
 
-    return topk_ids.to('cuda'), token_lora_mapping.to('cuda')
+    return topk_ids.to("cuda"), token_lora_mapping.to("cuda")
 
 
-@pytest.mark.parametrize("num_tokens", [100, 200, 1024, 4096])  #81920
+@pytest.mark.parametrize("num_tokens", [100, 200, 1024, 4096])  # 81920
 @pytest.mark.parametrize("topk_num", [6])
 @pytest.mark.parametrize("num_experts", [64, 128])
 @pytest.mark.parametrize("max_loras", [64])
 @pytest.mark.parametrize("block_size", [16])
-def test_moe_lora_align_block_size(M, topk_num, num_experts, max_loras,
-                                   block_size):
-
-    #sample data
+def test_moe_lora_align_block_size(M, topk_num, num_experts, max_loras, block_size):
+    # sample data
     random.seed(1)
-    topk_ids, token_lora_mapping = sample_data(num_experts, max_loras,
-                                               topk_num, topk_num)
+    topk_ids, token_lora_mapping = sample_data(
+        num_experts, max_loras, topk_num, topk_num
+    )
 
     # compute paddings
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
@@ -50,14 +48,13 @@ def test_moe_lora_align_block_size(M, topk_num, num_experts, max_loras,
     max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size)
 
     # init output tensors
-    sorted_token_ids = torch.full((max_loras * max_num_tokens_padded, ),
-                                  topk_ids.numel(),
-                                  dtype=torch.int32).to('cuda')
-    expert_ids = torch.full((max_loras * max_num_m_blocks, ),
-                            num_experts,
-                            dtype=torch.int32).to('cuda')
-    num_tokens_post_pad = torch.zeros((max_loras, ),
-                                      dtype=torch.int32).to('cuda')
+    sorted_token_ids = torch.full(
+        (max_loras * max_num_tokens_padded,), topk_ids.numel(), dtype=torch.int32
+    ).to("cuda")
+    expert_ids = torch.full(
+        (max_loras * max_num_m_blocks,), num_experts, dtype=torch.int32
+    ).to("cuda")
+    num_tokens_post_pad = torch.zeros((max_loras,), dtype=torch.int32).to("cuda")
 
     # call kernel
     ops.moe_lora_align_block_size(
@@ -71,7 +68,7 @@ def test_moe_lora_align_block_size(M, topk_num, num_experts, max_loras,
         num_tokens_post_pad,
     )
 
-    #verify values
+    # verify values
     expert_ids = expert_ids.view(max_loras, -1)
     sorted_token_ids = sorted_token_ids.view(max_loras, -1, block_size)
 
