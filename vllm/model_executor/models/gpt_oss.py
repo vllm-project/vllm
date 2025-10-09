@@ -33,7 +33,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
-from .interfaces import MixtureOfExperts, SupportsEagle3, SupportsLoRA, SupportsPP
+from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -627,9 +627,7 @@ class GptOssModel(nn.Module):
             )
 
 
-class GptOssForCausalLM(
-    nn.Module, SupportsPP, SupportsEagle3, MixtureOfExperts, SupportsLoRA
-):
+class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
     packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(
