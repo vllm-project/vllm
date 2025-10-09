@@ -496,10 +496,6 @@ class MoriAll2AllManager(All2AllManagerBase):
         import torch.distributed as dist
 
         try:
-            # Wait for PyTorch distributed to be ready
-            if not dist.is_initialized():
-                raise RuntimeError("PyTorch distributed not initialized yet")
-
             # Check if we have a valid backend
             backend = dist.get_backend()
             if backend is None:
@@ -511,12 +507,11 @@ class MoriAll2AllManager(All2AllManagerBase):
                 backend,
             )
 
-            # just to make line fit into 80
-            world = dist.group.WORLD
-            current_group = self.cpu_group if self.cpu_group is not None else world
+            current_group = (
+                self.cpu_group if self.cpu_group is not None else dist.group.WORLD
+            )
+            group_name = "mori_shmem_group"
 
-            # TODO(inhyeok): make group_name more reasonable
-            group_name = "default"
             try:
                 import contextlib
 

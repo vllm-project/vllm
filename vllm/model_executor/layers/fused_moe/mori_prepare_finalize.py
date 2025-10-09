@@ -75,13 +75,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[
-        torch.Tensor,
-        Optional[torch.Tensor],
-        Optional[mk.ExpertTokensMetadata],
-        Optional[torch.Tensor],
-        Optional[torch.Tensor],
-    ]:
+    ) -> mk.PrepareResultType:
         """
         Prepare inputs for mori dispatch operation.
         Supports pre-dispatch quantization to reduce communication overhead.
@@ -98,60 +92,55 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                       dispatch_indices, dispatch_weights)
             where dispatched_x is in Standard format (2D tensor)
         """
-        try:
-            # Pre-dispatch quantization to reduce communication overhead
-            dispatch_input = a1
-            scales = None
+        # Pre-dispatch quantization to reduce communication overhead
+        dispatch_input = a1
+        scales = None
 
-            if self.use_fp8_dispatch:
-                from aiter import QuantType, get_hip_quant
+        if self.use_fp8_dispatch:
+            from aiter import QuantType, get_hip_quant
 
-                block_shape = quant_config.block_shape
-                if block_shape is not None:
-                    assert not apply_router_weight_on_input, (
-                        "apply_router_weight_on_input is"
-                        " not supported for block scaled moe"
-                    )
-                    quant_type = QuantType.per_1x128
-                else:
-                    quant_type = QuantType.per_Token
-
-                quant_func = get_hip_quant(quant_type)
-
-                dispatch_input, scales = quant_func(
-                    a1,
-                    quant_dtype=quant_config.quant_dtype,
+            block_shape = quant_config.block_shape
+            if block_shape is not None:
+                assert not apply_router_weight_on_input, (
+                    "apply_router_weight_on_input is"
+                    " not supported for block scaled moe"
                 )
+                quant_type = QuantType.per_1x128
+            else:
+                quant_type = QuantType.per_Token
 
-            (
-                dispatch_output,
-                dispatch_weights,
-                dispatch_scales,
-                dispatch_indices,
-                dispatch_recv_num_token,
-            ) = self.handle.dispatch(
-                input=dispatch_input,
-                weights=topk_weights,
-                scales=scales,
-                indices=topk_ids,
+            quant_func = get_hip_quant(quant_type)
+
+            dispatch_input, scales = quant_func(
+                a1,
+                quant_dtype=quant_config.quant_dtype,
             )
 
-            expert_tokens_meta = mk.ExpertTokensMetadata(
-                expert_num_tokens=dispatch_recv_num_token,
-                expert_num_tokens_cpu=None,
-            )
+        (
+            dispatch_output,
+            dispatch_weights,
+            dispatch_scales,
+            dispatch_indices,
+            dispatch_recv_num_token,
+        ) = self.handle.dispatch(
+            input=dispatch_input,
+            weights=topk_weights,
+            scales=scales,
+            indices=topk_ids,
+        )
 
-            return (
-                dispatch_output,
-                dispatch_scales,
-                expert_tokens_meta,
-                dispatch_indices,
-                dispatch_weights,
-            )
+        expert_tokens_meta = mk.ExpertTokensMetadata(
+            expert_num_tokens=dispatch_recv_num_token,
+            expert_num_tokens_cpu=None,
+        )
 
-        except Exception as e:
-            logger.error("mori dispatch failed: %s", e)
-            raise RuntimeError("mori dispatch failed: %s", e) from e
+        return (
+            dispatch_output,
+            dispatch_scales,
+            expert_tokens_meta,
+            dispatch_indices,
+            dispatch_weights,
+        )
 
     def finalize(
         self,
@@ -178,21 +167,16 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         num_original_tokens = output.size(0)  # Original number of tokens
 
-        try:
-            combined_output, combined_weights = self.handle.combine(
-                input=fused_expert_output,
-                weights=topk_weights,
-                indices=topk_ids,
-            )
+        combined_output, combined_weights = self.handle.combine(
+            input=fused_expert_output,
+            weights=topk_weights,
+            indices=topk_ids,
+        )
 
-            output.copy_(
-                combined_output[:num_original_tokens],
-                non_blocking=True,
-            )
-
-        except Exception as e:
-            logger.error("mori combine failed: %s", e)
-            raise RuntimeError("mori combine failed: %s", e) from e
+        output.copy_(
+            combined_output[:num_original_tokens],
+            non_blocking=True,
+        )
 
     def __repr__(self) -> str:
         return (
