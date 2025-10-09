@@ -75,6 +75,23 @@ def write_to_json(filename: str, records: list) -> None:
         )
 
 
+TERM_GREEN: str = "\033[92m"
+TERM_RED: str = "\033[91m"
+
+
+def throughput_change(
+    test_avg_elpased_time: float, baseline_avg_elpased_time: float
+) -> str:
+    color = (
+        TERM_GREEN if test_avg_elpased_time < baseline_avg_elpased_time else TERM_RED
+    )
+    return (
+        f"{color}"
+        f"{baseline_avg_elpased_time / test_avg_elpased_time * 100 - 100:.2f}%"
+        "\033[0m"
+    )
+
+
 # Collect time and generate time metrics
 #
 # Example Usage:
@@ -104,8 +121,11 @@ class TimeCollector:
         else:
             self._max = max(self._max, v)
 
+    def avg_v(self) -> float:
+        return self._sum * 1.0 / self.cnt / self.scale
+
     def avg(self) -> float | str:
-        return self._sum * 1.0 / self.cnt / self.scale if self.cnt > 0 else "N/A"
+        return self.avg_v() if self.cnt > 0 else "N/A"
 
     def max(self) -> float | str:
         return self._max / self.scale if self._max else "N/A"
