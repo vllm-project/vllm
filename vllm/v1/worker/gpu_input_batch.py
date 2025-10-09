@@ -62,10 +62,9 @@ class CachedRequestState:
                     "provided via prompt_embeds, and its ID is unknown."
                 )
             return self.prompt_token_ids[idx]
-        elif idx - self.num_prompt_tokens < len(self.output_token_ids):
+        if idx - self.num_prompt_tokens < len(self.output_token_ids):
             return self.output_token_ids[idx - self.num_prompt_tokens]
-        else:
-            return -1
+        return -1
 
 
 class InputBatch:
@@ -770,14 +769,13 @@ class InputBatch:
             not self.no_penalties
             or self.logits_processing_needs_token_ids[:num_reqs].any()
         )
-        if needs_prompt_token_ids:
-            # The prompt tokens are used only for applying penalties or
-            # step pooling during the sampling/pooling process.
-            # Hence copy these tensors only when there are requests which
-            # need penalties/step_pooler to be applied.
-            prompt_token_ids = self._make_prompt_token_ids_tensor()
-        else:
-            prompt_token_ids = None
+        # The prompt tokens are used only for applying penalties or
+        # step pooling during the sampling/pooling process.
+        # Hence copy these tensors only when there are requests which
+        # need penalties/step_pooler to be applied.
+        prompt_token_ids = (
+            self._make_prompt_token_ids_tensor() if needs_prompt_token_ids else None
+        )
 
         allowed_token_ids_mask: Optional[torch.Tensor] = None
         if not self.no_allowed_token_ids:

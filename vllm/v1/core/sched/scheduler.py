@@ -1474,7 +1474,7 @@ class Scheduler(SchedulerInterface):
 
                 affected_req_ids.add(request.request_id)
 
-        return (affected_req_ids, total_affected_tokens)
+        return affected_req_ids, total_affected_tokens
 
     def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
         total_requests_to_reschedule = 0
