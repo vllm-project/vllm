@@ -87,6 +87,10 @@ EMBED_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
+    # I'm not sure if other platforms' CPUs support the fp8 data format.
+    # EMBED_DTYPE only uses the fp8 data representation,
+    # does not use fp8 computation, and only occurs on the CPU.
+    # Apologize for any possible break.
     "fp8_e4m3": torch.float8_e4m3fn,
     "fp8_e5m2": torch.float8_e5m2,
 }
