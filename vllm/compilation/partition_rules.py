@@ -34,6 +34,46 @@ def _resolve_operator_overload(op_name: str) -> torch._ops.OpOverload:
         raise ValueError(f"Failed to resolve operator '{op_name}'") from exc
 
 
+def _resolve_operators_safely(op_names: list[str]) -> list[torch._ops.OpOverload]:
+    """Safely resolve operator names to OpOverload objects.
+
+    Filters out built-in PyTorch operators (aten::*, torch::*) and only resolves
+    vLLM custom operators (vllm::*). Skips operators that fail to resolve.
+
+    Built-in PyTorch operators are filtered because they are often decomposed,
+    fused, or transformed during Inductor's compilation passes (lowering, fusion,
+    decomposition). This makes them unreliable for Inductor partition rules, as
+    the scheduler may fail to find corresponding FX nodes after transformations.
+
+    Args:
+        op_names: List of operator names in PyTorch format
+            (e.g., "vllm::unified_attention")
+
+    Returns:
+        List of successfully resolved vLLM custom operator overloads
+    """
+    resolved = []
+    for op_name in op_names:
+        # Only register vLLM custom operators for Inductor partitioning
+        # Skip aten/torch operators as they may be decomposed/fused
+        if not op_name.startswith("vllm::"):
+            logger.debug(
+                "Skipping non-vLLM operator for Inductor partition: %s", op_name
+            )
+            continue
+
+        try:
+            resolved.append(_resolve_operator_overload(op_name))
+        except ValueError:
+            # Skip operators that don't exist (e.g., model-specific ops)
+            logger.warning(
+                "Failed to resolve operator for Inductor partition: %s", op_name
+            )
+            continue
+
+    return resolved
+
+
 @contextlib.contextmanager
 def inductor_partition_rule_context(op_names: list[str]):
     """Context manager to temporarily register Inductor partition rules.
@@ -61,8 +101,13 @@ def inductor_partition_rule_context(op_names: list[str]):
         register_should_partition_rule,
     )
 
-    unique_names = list(dict.fromkeys(op_names))
-    overloads = [_resolve_operator_overload(name) for name in unique_names]
+    # Safely resolve and filter operators
+    overloads = _resolve_operators_safely(op_names)
+
+    if not overloads:
+        logger.debug("No valid vLLM operators to register for Inductor partition.")
+        yield
+        return
 
     def _always_partition(*_args, **_kwargs):
         return True
@@ -76,7 +121,9 @@ def inductor_partition_rule_context(op_names: list[str]):
             _always_partition,
         )
 
-    logger.debug("Registered inductor partition rules for ops: %s", unique_names)
+    logger.debug(
+        "Registered inductor partition rules for %d vLLM operators", len(overloads)
+    )
 
     try:
         yield
