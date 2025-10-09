@@ -316,7 +316,6 @@ class Attention(nn.Module, AttentionLayerBase):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        positions: Optional[torch.Tensor] = None,
         # For some alternate attention backends like MLA the attention output
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
@@ -370,7 +369,6 @@ class Attention(nn.Module, AttentionLayerBase):
                     value,
                     self_kv_cache,
                     attn_metadata,
-                    positions=positions,
                     output=output,
                 )
             else:
@@ -380,7 +378,6 @@ class Attention(nn.Module, AttentionLayerBase):
                     value,
                     output,
                     self.layer_name,
-                    positions=positions,
                 )
             return output.view(-1, hidden_size)
         else:
@@ -701,6 +698,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
+        positions: Optional[torch.Tensor] = None,
         output_shape: Optional[torch.Size] = None,
     ) -> torch.Tensor:
         if self.use_direct_call:
@@ -725,12 +723,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     k_pe,
                     self_kv_cache,
                     attn_metadata,
+                    positions=positions,
                     output=output,
                 )
                 return output
             else:
                 return self.impl.forward(
-                    self, q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
+                    self,
+                    q,
+                    kv_c_normed,
+                    k_pe,
+                    self_kv_cache,
+                    attn_metadata,
+                    positions=positions,
                 )
         else:
             if self.attn_backend.accept_output_buffer:
@@ -741,6 +746,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     k_pe,
                     output,
                     self.layer_name,
+                    positions=positions,
                 )
                 return output
             else:
@@ -934,6 +940,7 @@ def unified_attention_with_output_fake(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    positions: Optional[torch.Tensor] = None,
     output_scale: Optional[torch.Tensor] = None,
     output_block_scale: Optional[torch.Tensor] = None,
 ) -> None:
@@ -954,6 +961,7 @@ def unified_mla_attention(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
+    positions: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     wait_for_kv_layer_from_connector(layer_name)
 
@@ -963,7 +971,9 @@ def unified_mla_attention(
         attn_metadata = attn_metadata[layer_name]
     self: MLAAttention = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    output = self.impl.forward(self, q, kv_c_normed, k_pe, kv_cache, attn_metadata)
+    output = self.impl.forward(
+        self, q, kv_c_normed, k_pe, kv_cache, attn_metadata, positions=positions
+    )
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
     return output
@@ -974,6 +984,7 @@ def unified_mla_attention_fake(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
+    positions: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     return torch.empty_like(q).contiguous()
 
@@ -993,6 +1004,7 @@ def unified_mla_attention_with_output(
     k_pe: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    positions: Optional[torch.Tensor] = None,
     output_scale: Optional[torch.Tensor] = None,
     output_block_scale: Optional[torch.Tensor] = None,
 ) -> None:
@@ -1010,6 +1022,7 @@ def unified_mla_attention_with_output(
         k_pe,
         kv_cache,
         attn_metadata,
+        positions=positions,
         output=output,
         output_scale=output_scale,
         output_block_scale=output_block_scale,
