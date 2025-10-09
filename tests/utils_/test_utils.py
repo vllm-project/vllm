@@ -31,6 +31,7 @@ from vllm.utils import (
     common_broadcastable_dtype,
     current_stream,
     deprecate_kwargs,
+    find_library,
     get_open_port,
     get_tcp_uri,
     is_lossless_cast,
@@ -993,3 +994,21 @@ def test_unique_filepath():
         paths.add(path)
     assert len(paths) == 10
     assert len(list(Path(temp_dir).glob("*.txt"))) == 10
+
+
+def test_find_library():
+    # Monkey patch subprocess.check_output
+    with patch("vllm.utils.subprocess.check_output") as mock_check_output:
+        # This mock output simulates `ldconfig -p` output with garbage chars.
+        mock_output = (
+            b"libgood.so.1 (libc6,x86-64) => /path/to/libgood.so.1\n"
+            b"\tlibfoo\x80.so (libc6,x86-64) => /path/to/libfoo.so\n"
+        )
+        mock_check_output.return_value = mock_output
+
+        # Clear the cache for find_library to ensure it runs with our mock
+        find_library.cache_clear()
+
+        # Test that we can find the library from the line with garbage
+        result = find_library("libfoo.so")
+        assert result == "/path/to/libfoo.so"
