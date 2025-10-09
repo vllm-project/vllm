@@ -444,8 +444,10 @@ steps:
   - vllm/attention
   - vllm/v1/attention
   - tests/kernels/attention
+  - tests/v1/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
 - label: Kernels Quantization Test %N # 64min
