@@ -3,8 +3,9 @@
 """Tests for v1 MLA backends without GPUModelRunner dependency.
 
 Known Issues:
-- FLASH_ATTN_MLA backend produces NaN values in test_backend_correctness[mixed_small]
-  when run after test_backend_correctness[small_prefill], but passes when run alone.
+- FLASH_ATTN_MLA backend occasionally produces NaN values in
+  test_backend_correctness[mixed_small] when run after
+  test_backend_correctness[small_prefill], but passes when run alone.
 """
 
 from typing import Optional, Union
