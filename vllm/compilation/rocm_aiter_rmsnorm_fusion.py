@@ -10,6 +10,9 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
 import vllm.envs as envs
+
+# add this import to make sure the custom ops are registered
+import vllm.model_executor.layers.layernorm  # noqa: F401
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -51,10 +54,6 @@ def rocm_aiter_rmsnorm_fused_dynamic_quant_impl(
     epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     import aiter as rocm_aiter
-
-    torch._dynamo.comptime._Comptime.print(
-        "Calling rocm_aiter_rmsnorm_fused__static_quant_impl"
-    )
 
     rocm_aiter.rmsnorm2d_fwd_with_dynamicquant(
         out, input, y_scale, weight, epsilon, use_model_sensitive_rmsnorm=0
@@ -322,6 +321,7 @@ class RMSNormAiterQuantFusionPass(VllmPatternMatcherPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
         self.matched_count = self.patterns.apply(graph)
+        print("Matched count:", self.matched_count)
         logger.debug("Replaced %s patterns", self.matched_count)
 
     def uuid(self) -> Any:
