@@ -1449,8 +1449,7 @@ class MRotaryEmbedding(RotaryEmbedding):
             raise RuntimeError("Position ids length mismatch with input ids length")
 
         position_ids = llm_positions.to(device=device, dtype=dtype)
-        delta = llm_positions.max() + 1 - seq_len
-        mrope_position_delta = torch.tensor(delta, dtype=torch.long, device=device)
+        mrope_position_delta = llm_positions.max() + 1 - seq_len
         return position_ids, mrope_position_delta
 
     @classmethod
