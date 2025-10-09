@@ -9,7 +9,6 @@ import torch.distributed as dist
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
@@ -21,7 +20,8 @@ logger = init_logger(__name__)
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
-    device = current_platform.device_type
+    # Use the actual device assigned to the DP group, not just the device type
+    device = get_dp_group().device
     group = get_dp_group().device_group
 
     # Transfering this tensor from GPU to CPU will introduce a GPU sync
@@ -48,6 +48,7 @@ def _run_ar(
     tensor[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
+    print("current device: ", torch.cuda.current_device())
     dist.all_reduce(tensor, group=group)
     return tensor
 

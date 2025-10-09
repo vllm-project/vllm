@@ -3198,6 +3198,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             or cudagraph_runtime_mode.valid_runtime_modes()
         )
 
+        # Ensure the active CUDA device matches the runner's device
+        if isinstance(self.device, torch.device) and self.device.type == "cuda":
+            dev_index = self.device.index
+            if dev_index is not None:
+                assert torch.cuda.current_device() == dev_index, (
+                    f"torch.cuda.current_device()={torch.cuda.current_device()} "
+                    f"!= runner device index {dev_index}"
+                )
+
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.separate_routine(). This means that we are using
         # different graphs and/or modes for mixed prefill-decode batches vs.
@@ -3418,6 +3427,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     ubatch_slices=ubatch_slices,
                 ),
             ):
+                # Sanity-check that all inputs are on the expected device
+                def _assert_on_device(t: Optional[torch.Tensor], name: str) -> None:
+                    if t is None:
+                        return
+                    if torch.is_tensor(t):
+                        assert t.device == self.device, (
+                            f"{name} on {t.device}, expected {self.device}"
+                        )
+
+                _assert_on_device(input_ids, "input_ids")
+                _assert_on_device(positions, "positions")
+                _assert_on_device(inputs_embeds, "inputs_embeds")
+                if intermediate_tensors is not None:
+                    for k, v in intermediate_tensors.tensors.items():
+                        _assert_on_device(v, f"intermediate_tensors[{k}]")
+                for k, v in list(model_kwargs.items()):
+                    if torch.is_tensor(v):
+                        _assert_on_device(v, f"model_kwargs[{k}]")
+
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,

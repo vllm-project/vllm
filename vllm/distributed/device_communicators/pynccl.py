@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from typing import Optional, Union
 
 # ===================== import region =====================
@@ -143,8 +144,11 @@ class PyNcclCommunicator:
             stream = current_stream()
             # A small all_reduce for warmup.
             data = torch.zeros(1, device=device)
+            time_start = time.perf_counter()
             self.all_reduce(data)
             stream.synchronize()
+            time_end = time.perf_counter()
+            print(f"all_reduce time: {time_end - time_start:.2f}s")
             del data
 
     def all_reduce(

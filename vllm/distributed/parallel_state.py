@@ -1058,14 +1058,17 @@ def init_distributed_environment(
         # adjust to take into account data parallelism
         # offset the rank by the data parallel rank
         rank = parallel_config.data_parallel_rank * world_size + rank
+        local_rank = parallel_config.data_parallel_rank_local
         # adjust the world size to take into account data parallelism
         world_size = parallel_config.world_size_across_dp
         ip = parallel_config.data_parallel_master_ip
         port = parallel_config.get_next_dp_init_port()
         distributed_init_method = get_distributed_init_method(ip, port)
         logger.info(
-            "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
+            "Adjusting world_size=%d local_rank=%d rank=%d "
+            "distributed_init_method=%s for DP",
             world_size,
+            local_rank,
             rank,
             distributed_init_method,
         )
@@ -1099,6 +1102,7 @@ def init_distributed_environment(
         # setting, where we can use rank as local rank
         local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
     global _WORLD, _NODE_COUNT
+    print(f"Initializing world group with local_rank: {local_rank}")
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
