@@ -546,7 +546,7 @@ class Qwen3_VisionTransformer(nn.Module):
 
         hidden_states = hidden_states.unsqueeze(1)
         max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
-        cu_seqlens.to(self.device, non_blocking=True)
+        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
 
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
