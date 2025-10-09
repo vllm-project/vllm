@@ -18,6 +18,7 @@ import vllm.envs as envs
 from vllm.compilation.inductor_pass import pass_context
 from vllm.compilation.partition_rules import inductor_partition_rule_context
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.config.compilation import convert_to_dot_format
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
@@ -286,13 +287,17 @@ def split_graph(
     graph: fx.GraphModule, ops: list[str]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
     # split graph by ops
+    # Convert :: format to . format for matching str(node.target)
+    # str(torch.ops.namespace.op) returns "namespace.op"
+    ops_dot_format = convert_to_dot_format(ops)
+
     subgraph_id = 0
     node_to_subgraph_id = {}
     split_op_graphs = []
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
             continue
-        if node.op == "call_function" and str(node.target) in ops:
+        if node.op == "call_function" and str(node.target) in ops_dot_format:
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             split_op_graphs.append(subgraph_id)

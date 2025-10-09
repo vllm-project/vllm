@@ -75,6 +75,26 @@ class CUDAGraphMode(enum.Enum):
         return self.name
 
 
+def convert_to_dot_format(ops: list[str]) -> list[str]:
+    """Convert operator names from double-colon to dot format for FX graph matching.
+
+    PyTorch FX graph nodes use dot notation (e.g., str(torch.ops.vllm.attention)
+    returns "vllm.attention"), so we need to convert our internal :: format
+    back to dot format for matching.
+
+    Args:
+        ops: List of operator names in :: format
+
+    Returns:
+        List of operator names in dot format
+
+    Example:
+        >>> convert_to_dot_format(["vllm::unified_attention", "aten::addmm.default"])
+        ["vllm.unified_attention", "aten.addmm.default"]
+    """
+    return [op.replace("::", ".") for op in ops]
+
+
 @config
 @dataclass
 class PassConfig:
