@@ -347,6 +347,13 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
        simulated paged KV cache.
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
     """
+    # Reset random seeds to ensure deterministic behavior across test runs
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+
+    # Clear CUDA cache to avoid reusing stale memory from previous tests
+    torch.cuda.empty_cache()
+
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")
     spec_decode_backends = {_Backend.FLASH_ATTN_MLA, _Backend.FLASHMLA}
@@ -433,7 +440,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         # decode path (MQA-style), while others will use prefill path (MHA-style).
         # This ensures the reference implementation matches each backend's actual path.
         is_decode = []
-        for i, backend in enumerate(BACKENDS_TO_TEST):
+        for backend_idx, backend in enumerate(BACKENDS_TO_TEST):
             builder_cls, _ = try_get_attention_backend(backend)
             # For spec decode tests, check if backend supports uniform spec decode
             if is_spec_decode_test:
@@ -523,11 +530,11 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         sdpa_out_i_prefill = sdpa_out_i_prefill.transpose(1, 2).squeeze(0)
         sdpa_out_i_prefill = sdpa_out_i_prefill.flatten(start_dim=-2)
 
-        for i, backend in enumerate(BACKENDS_TO_TEST):
-            if is_decode[i]:
-                all_sdpa_outputs[i].append(sdpa_out_i_decode)
+        for backend_idx, backend in enumerate(BACKENDS_TO_TEST):
+            if is_decode[backend_idx]:
+                all_sdpa_outputs[backend_idx].append(sdpa_out_i_decode)
             else:
-                all_sdpa_outputs[i].append(sdpa_out_i_prefill)
+                all_sdpa_outputs[backend_idx].append(sdpa_out_i_prefill)
 
         # Inputs for vLLM MLA backends are just the new tokens
         all_q_vllm.append(q_c)
@@ -543,8 +550,8 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     kv_c_vllm = torch.cat(all_kv_c_vllm, dim=0)
     k_pe_vllm = torch.cat(all_k_pe_vllm, dim=0)
     sdpa_outputs = []
-    for i, backend in enumerate(BACKENDS_TO_TEST):
-        sdpa_outputs.append(torch.cat(all_sdpa_outputs[i], dim=0))
+    for backend_idx, backend in enumerate(BACKENDS_TO_TEST):
+        sdpa_outputs.append(torch.cat(all_sdpa_outputs[backend_idx], dim=0))
 
     # Create mock kv_b_proj using the same weights as reference implementation
     from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -582,7 +589,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     )
 
     # 4. Run vLLM backends and compare
-    for i, backend_name in enumerate(BACKENDS_TO_TEST):
+    for backend_idx, backend_name in enumerate(BACKENDS_TO_TEST):
         # Skip backends that don't support spec decode for spec decode tests
         if is_spec_decode_test and backend_name not in spec_decode_backends:
             continue
@@ -606,13 +613,13 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         )
 
         # Check shape and dtype consistency
-        assert backend_output.shape == sdpa_outputs[i].shape, (
+        assert backend_output.shape == sdpa_outputs[backend_idx].shape, (
             f"[{backend_name}] shape {backend_output.shape} != "
-            f"SDPA shape {sdpa_outputs[i].shape}"
+            f"SDPA shape {sdpa_outputs[backend_idx].shape}"
         )
-        assert backend_output.dtype == sdpa_outputs[i].dtype, (
+        assert backend_output.dtype == sdpa_outputs[backend_idx].dtype, (
             f"[{backend_name}] dtype {backend_output.dtype} != "
-            f"SDPA dtype {sdpa_outputs[i].dtype}"
+            f"SDPA dtype {sdpa_outputs[backend_idx].dtype}"
         )
 
         assert torch.isfinite(backend_output).all(), (
@@ -623,12 +630,15 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         rtol = 1e-2
         atol = 5e-1
 
-        max_diff = torch.max(torch.abs(backend_output - sdpa_outputs[i])).item()
+        max_diff = torch.max(
+            torch.abs(backend_output - sdpa_outputs[backend_idx])
+        ).item()
         max_rel_diff = torch.max(
-            torch.abs(backend_output - sdpa_outputs[i]) / torch.abs(sdpa_outputs[i])
+            torch.abs(backend_output - sdpa_outputs[backend_idx])
+            / torch.abs(sdpa_outputs[backend_idx])
         ).item()
         all_close = torch.allclose(
-            backend_output, sdpa_outputs[i], rtol=rtol, atol=atol
+            backend_output, sdpa_outputs[backend_idx], rtol=rtol, atol=atol
         )
 
         assert all_close, (
