@@ -62,7 +62,7 @@ class FlashInferMLABackend(MLACommonBackend):
 
     @classmethod
     def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
-        return DeviceCapability(10, 9)
+        return DeviceCapability(10, 3)
 
 
 g_fi_workspace = torch.zeros(
