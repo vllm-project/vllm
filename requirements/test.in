@@ -55,3 +55,4 @@ fastsafetensors>=0.1.10
 pydantic>=2.10 # 2.9 leads to error on python 3.10
 decord==0.6.0
 terratorch @ git+https://github.com/IBM/terratorch.git@1.1.rc3 # required for PrithviMAE test
+gpt-oss >= 0.0.7; python_version > '3.11'
