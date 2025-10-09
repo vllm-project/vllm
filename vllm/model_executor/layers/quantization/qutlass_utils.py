@@ -21,12 +21,12 @@ from torch.library import wrap_triton
 
 @triton.jit
 def triton_scale_swizzle(
-    scale_ptr,
-    scale_rows,
-    scale_cols,
-    output_ptr,
-    input_row_stride,
-    output_block_stride,
+    scale_ptr: torch.Tensor,
+    scale_rows: int,
+    scale_cols: int,
+    output_ptr: torch.Tensor,
+    input_row_stride: int,
+    output_block_stride: int,
     BLOCK_ROWS: tl.constexpr,
     BLOCK_COLS: tl.constexpr,
 ):
@@ -146,7 +146,7 @@ def ceil_div(a, b):
 
 
 def to_blocked(
-    input_matrix, backend: Literal["torch", "triton"] = "triton"
+    input_matrix: torch.Tensor, backend: Literal["torch", "triton"] = "triton"
 ) -> torch.Tensor:
     """
     Rearrange a large matrix by breaking it into blocks and applying
