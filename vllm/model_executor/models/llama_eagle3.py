@@ -22,6 +22,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 
 from .utils import AutoWeightsLoader, maybe_prefix
@@ -110,7 +111,15 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         return hidden_states, residual
 
 
-@support_torch_compile
+@support_torch_compile(
+    # torch.compile is disabled for multimodal EAGLE3 models due to constraint
+    # violations with dynamic shapes during tensor concatenation operations.
+    # See: https://github.com/vllm-project/vllm/pull/22872/files#r2362028132
+    # Non-multimodal EAGLE3 models can still use torch.compile safely.
+    enable_if=lambda vllm_config: not MULTIMODAL_REGISTRY.supports_multimodal_inputs(
+        vllm_config.model_config
+    ),
+)
 class LlamaModel(nn.Module):
     def __init__(
         self,
