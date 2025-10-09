@@ -124,9 +124,11 @@ from vllm.v1.outputs import (
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import RejectionSampler
+from vllm.v1.sample.rejection_sampler import (PLACEHOLDER_TOKEN_ID,
+                                              RejectionSampler)
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.spec_decode.dynamic_proposer import DynamicProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -143,6 +145,7 @@ from vllm.v1.worker.ubatch_utils import (
     check_ubatch_thresholds,
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
+import logging
 
 from .utils import (
     AttentionGroup,
@@ -322,7 +325,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
-                self.drafter = EagleProposer(self.vllm_config, self.device, self)  # type: ignore
+                if self.speculative_config.method == "eagle_dynamic":
+                    self.drafter = DynamicProposer(self.vllm_config, self.device,
+                                                   self)  # type: ignore
+                else:
+                    self.drafter = EagleProposer(self.vllm_config, self.device,
+                                                 self)  # type: ignore
                 if self.speculative_config.method == "eagle3":
                     self.use_aux_hidden_state_outputs = True
             elif self.speculative_config.method == "medusa":
@@ -836,6 +844,109 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         for i, num_tokens in enumerate(num_accepted_tokens):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+
+    @staticmethod
+    def _calculate_prefix_match(emitted_tokens: list[int],
+                                draft_tokens: list[int]) -> int:
+        """Calculates the length of the common prefix between two token lists."""
+        if not draft_tokens or not emitted_tokens:
+            return 0
+
+        match_count = 0
+        for i, token in enumerate(emitted_tokens):
+            if i >= len(draft_tokens) or token != draft_tokens[i]:
+                break
+            match_count += 1
+        return match_count
+
+    def _record_eagle_acceptance(
+        self,
+        output_token_ids: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata,
+    ) -> None:
+        """
+        Calculates the number of accepted draft tokens for each request in a
+        batch by comparing the emitted tokens with the proposed draft tokens.
+
+        This function performs a prefix match between the tokens verified by the
+        main model ("emitted") and the speculative draft tokens ("drafts").
+        The resulting accepted length for each request is then written to
+        `self.input_batch.num_accepted_tokens_cpu` for use in subsequent
+        steps, such as adjusting `k` in a dynamic speculative decoding policy.
+
+        The function also updates cumulative statistics for overall acceptance
+        rate calculation and generates detailed logs.
+        """
+        if output_token_ids.numel() == 0:
+            return
+
+        # 1. Prepare data structures and copy tensors to CPU for safe processing.
+        batch_size = len(spec_decode_metadata.num_draft_tokens)
+        num_sampler_rows = int(output_token_ids.size(0))
+        num_rows_to_process = min(batch_size, num_sampler_rows)
+
+        if num_sampler_rows != batch_size:
+            logger.warning(
+                "Sampler output rows (%d) != batch rows (%d). "
+                "Processing first %d rows.", num_sampler_rows, batch_size,
+                num_rows_to_process)
+        if num_rows_to_process == 0:
+            return
+
+        emitted_tokens_np = output_token_ids[:num_rows_to_process].cpu().numpy()
+        flat_drafts = spec_decode_metadata.draft_token_ids.tolist()
+        cu_num_draft_tokens = spec_decode_metadata.cu_num_draft_tokens.tolist(
+        )
+
+        accepted_per_row = [0] * num_rows_to_process
+        draft_lengths = [0] * num_rows_to_process
+        log_chunks = []
+
+        # 2. Main loop: Calculate acceptance for each request.
+        # This loop extracts data, calculates acceptance, and prepares log
+        # messages all in one pass to avoid redundant logic.
+        for i in range(num_rows_to_process):
+            # Extract the draft tokens for the current request.
+            start = cu_num_draft_tokens[i - 1] if i > 0 else 0
+            end = cu_num_draft_tokens[i]
+            draft_tokens = flat_drafts[start:end]
+            draft_lengths[i] = len(draft_tokens)
+
+            # Extract emitted tokens, filtering out placeholders.
+            emitted_row = emitted_tokens_np[i].tolist()
+            emitted_tokens = [
+                int(t) for t in emitted_row if int(t) != PLACEHOLDER_TOKEN_ID
+            ]
+
+            # Calculate the number of accepted tokens via prefix matching.
+            num_accepted = self._calculate_prefix_match(
+                emitted_tokens, draft_tokens)
+            accepted_per_row[i] = num_accepted
+
+            # If logging is enabled, prepare the log string for this request.
+            if logger.isEnabledFor(logging.INFO):
+                req_id = self.input_batch.req_ids[i]
+                if req_id is not None:
+                    log_chunks.append(
+                        f"req={req_id} accepted={num_accepted}/"
+                        f"{len(draft_tokens)} emitted={emitted_tokens}")
+
+        # 3. Update batch state with the acceptance results.
+        # This buffer is used by dynamic proposers to adjust k.
+        self.input_batch.num_accepted_tokens_cpu[:batch_size].fill(0)
+        self.input_batch.num_accepted_tokens_cpu[:num_rows_to_process] = np.asarray(
+            accepted_per_row, dtype=np.int32)
+
+        # 4. Update cumulative stats for final acceptance rate metrics.
+        if not hasattr(self, "_eagle_prop_sum"):
+            self._eagle_prop_sum = 0
+            self._eagle_acc_sum = 0
+        self._eagle_prop_sum += sum(draft_lengths)
+        self._eagle_acc_sum += sum(accepted_per_row)
+
+        # 5. Finalize and publish logs.
+        if log_chunks:
+            logger.info("EAGLE acceptance step: %s", " | ".join(log_chunks))
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         image_grid_thw = []
@@ -2218,6 +2329,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampling_metadata,
         )
         sampler_output.sampled_token_ids = output_token_ids
+        if self.speculative_config.method == "eagle_dynamic":
+            self._record_eagle_acceptance(output_token_ids,
+                                            spec_decode_metadata)
         self._update_states_after_model_execute(output_token_ids)
         return sampler_output
 
@@ -2641,6 +2755,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=[],
             kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
+            num_draft_tokens_per_seq=(spec_decode_metadata.num_draft_tokens
+                                      if spec_decode_metadata else None),
         )
 
         if not self.use_async_scheduling:
@@ -2803,6 +2919,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
                 mm_embed_inputs=mm_embed_inputs,
             )
+
+            true_lengths = None
+            if isinstance(self.drafter, DynamicProposer):
+                true_lengths = getattr(self, "_true_draft_lengths", None)
+            
+            if true_lengths and isinstance(draft_token_ids, torch.Tensor):
+                draft_lists = draft_token_ids.tolist()
+                trimmed_lists = [
+                    draft_lists[i][:true_lengths[i]]
+                    for i in range(len(true_lengths))
+                ]
+                return trimmed_lists
 
         return draft_token_ids
 

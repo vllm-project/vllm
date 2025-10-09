@@ -41,6 +41,11 @@ class SpecDecodingStats:
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
         assert num_accepted_tokens <= self.num_spec_tokens
+        #For dynamic_spec_decode
+        if num_accepted_tokens > len(self.num_accepted_tokens_per_pos):
+            self.num_accepted_tokens_per_pos.extend(
+                [0] * (num_accepted_tokens - len(self.num_accepted_tokens_per_pos))
+            )
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
 
