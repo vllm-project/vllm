@@ -31,6 +31,7 @@ from vllm.utils import (
     common_broadcastable_dtype,
     current_stream,
     deprecate_kwargs,
+    find_library,
     get_open_port,
     get_tcp_uri,
     is_lossless_cast,
@@ -993,3 +994,18 @@ def test_unique_filepath():
         paths.add(path)
     assert len(paths) == 10
     assert len(list(Path(temp_dir).glob("*.txt"))) == 10
+
+
+def test_find_library():
+    # Monkey patch subprocess.check_output
+    with patch("vllm.utils.subprocess.check_output") as mock_check_output:
+        mock_check_output.return_value = b"as\x02\xcfabc bac"
+
+        # Clear the cache for find_library to ensure it runs with our mock
+        find_library.cache_clear()
+
+        # Call find_library with argument "bac"
+        result = find_library("bac")
+
+        # Check that the result is "bac"
+        assert result == "bac"
