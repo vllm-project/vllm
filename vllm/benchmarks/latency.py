@@ -80,7 +80,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
-    # Clear lite-profiler log at the beginning of benchmark run to start fresh
+    # Empty lite-profiler log for fresh benchmark data
     clear_profiler_log()
 
     if args.profile and not envs.VLLM_TORCH_PROFILER_DIR:

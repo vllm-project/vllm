@@ -5,44 +5,41 @@ from __future__ import annotations
 
 import atexit
 import os
-import sys
-import threading
 import time
 from contextlib import suppress
 from types import TracebackType
 from typing import TextIO
 
 import vllm.envs as envs
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 _LOG_PATH = envs.VLLM_LITE_PROFILER_LOG_PATH
-_THREAD_LOCK = threading.Lock()
 
 
 def _get_process_rank() -> int | None:
     """Get the current process rank in distributed/multi-process environments.
 
-    In distributed machine learning setups, multiple processes are spawned
-    across different GPUs/nodes. Each process has a unique rank (0, 1, 2, ...).
-    To avoid duplicate profiling data and file contention, we typically want
-    only rank 0 (the main process) to perform profiling and logging.
+    In distributed setups, multiple processes are spawned across different
+    GPUs/nodes. Each process has a unique rank (0, 1, 2, ...). To avoid
+    duplicate profiling data and file contention, we typically want only
+    rank 0 (the main process) to perform profiling and logging.
 
-    This function checks common environment variables used by different
-    frameworks:
-    - VLLM_DP_RANK: vLLM's data parallel rank
-    - LOCAL_RANK: Local rank within a single node
+    This function checks the LOCAL_RANK environment variable to determine
+    the process rank within a single node.
     """
-    for env_name in ("VLLM_DP_RANK", "LOCAL_RANK"):
-        value = os.environ.get(env_name)
-        if value is not None:
-            try:
-                return int(value)
-            except ValueError:
-                return None
+    value = os.environ.get("LOCAL_RANK")
+    if value is not None:
+        try:
+            return int(value)
+        except ValueError:
+            return None
     return None
 
 
-_SHOULD_LOG = _LOG_PATH and ((rank := _get_process_rank()) is None
-                             or rank == 0)
+_process_rank = _get_process_rank()
+_SHOULD_LOG = _LOG_PATH and (_process_rank is None or _process_rank == 0)
 
 # Cache for log file handles
 _log_file_cache: dict[str, TextIO] = {}
@@ -62,19 +59,22 @@ def _write_log_entry(name: str, elapsed_us: int) -> None:
     if not _SHOULD_LOG or _LOG_PATH is None:
         return
 
-    log_line = f"{name}|{elapsed_us}\n"
-    with _THREAD_LOCK:
-        log_file = _log_file_cache.get(_LOG_PATH)
-        if log_file is None:
-            directory = os.path.dirname(_LOG_PATH)
-            if directory:
-                os.makedirs(directory, exist_ok=True)
-            # ruff: noqa: SIM115 - intentionally keeping file handle cached globally
-            log_file = open(_LOG_PATH, "a", buffering=50000)
-            _log_file_cache[_LOG_PATH] = log_file
-            atexit.register(log_file.close)
+    # Ensure only rank 0 writes (only one log file should be used)
+    assert len(_log_file_cache) <= 1, \
+        "Multiple log files detected - only rank 0 should write"
 
-        log_file.write(log_line)  # Ensure data is written immediately
+    log_line = f"{name}|{elapsed_us}\n"
+    log_file = _log_file_cache.get(_LOG_PATH)
+    if log_file is None:
+        directory = os.path.dirname(_LOG_PATH)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        # ruff: noqa: SIM115 - intentionally keeping file handle cached globally
+        log_file = open(_LOG_PATH, "a", buffering=50000)
+        _log_file_cache[_LOG_PATH] = log_file
+        atexit.register(log_file.close)
+
+    log_file.write(log_line)
 
 
 class LiteScope:
@@ -117,20 +117,19 @@ def clear_profiler_log() -> None:
     if not _LOG_PATH:
         return
 
-    with _THREAD_LOCK:
-        # Close and remove any existing cached file handle
-        if _LOG_PATH in _log_file_cache:
-            with suppress(OSError):
-                _log_file_cache[_LOG_PATH].close()
-            del _log_file_cache[_LOG_PATH]
-
-        # Truncate the log file by opening in write mode
+    # Close and remove any existing cached file handle
+    if _LOG_PATH in _log_file_cache:
         with suppress(OSError):
-            directory = os.path.dirname(_LOG_PATH)
-            if directory:
-                os.makedirs(directory, exist_ok=True)
-            with open(_LOG_PATH, 'w'):
-                pass
+            _log_file_cache[_LOG_PATH].close()
+        del _log_file_cache[_LOG_PATH]
+
+    # Truncate the log file by opening in write mode
+    with suppress(OSError):
+        directory = os.path.dirname(_LOG_PATH)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(_LOG_PATH, 'w'):
+            pass
 
 
 def maybe_emit_lite_profiler_report() -> None:
@@ -147,27 +146,21 @@ def maybe_emit_lite_profiler_report() -> None:
         return
 
     if not os.path.exists(log_path):
-        print(
+        logger.warning(
             "Lite profiler log not found. Ensure the profiled process sets "
-            "the expected path.",
-            file=sys.stderr,
-        )
+            "the expected path.")
         return
 
     try:
         from vllm.utils import lite_profiler_report
     except Exception as exc:  # pragma: no cover - import error should not crash
-        print(
-            f"Failed to import lite profiler report helper: {exc}",
-            file=sys.stderr,
-        )
+        logger.error("Failed to import lite profiler report helper: %s", exc)
         return
 
-    print(f"\nLite profiler summary ({log_path}):")
+    logger.info("")
+    logger.info("Lite profiler summary (%s):", log_path)
     try:
-        lite_profiler_report.summarize_log(log_path, stream=sys.stdout)
+        lite_profiler_report.summarize_log(log_path)
     except Exception as exc:  # pragma: no cover - avoid crashing benchmarks
-        print(
-            f"Failed to summarize lite profiler log {log_path}: {exc}",
-            file=sys.stderr,
-        )
+        logger.error("Failed to summarize lite profiler log %s: %s", log_path,
+                     exc)

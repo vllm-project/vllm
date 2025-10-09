@@ -1147,7 +1147,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-    # Clear lite-profiler log at the beginning of benchmark run to start fresh
+    # Empty lite-profiler log for fresh benchmark data
     clear_profiler_log()
 
     # Validate ramp-up arguments

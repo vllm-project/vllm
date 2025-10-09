@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
-from typing import TextIO
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def _extract_event_us(filename: str) -> dict[str, list[int]]:
@@ -51,29 +54,28 @@ def _format_duration_us(value_us: int, total_us: int) -> str:
 
 
 def _render_table(title: str, headers: Sequence[str],
-                  rows: Iterable[Sequence[str]], *, stream: TextIO) -> None:
+                  rows: Iterable[Sequence[str]]) -> None:
     table = [list(headers)] + [list(row) for row in rows]
     widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
 
-    print(f"\n{title}", file=stream)
-    print("-" * sum(widths) + "-" * (len(widths) - 1), file=stream)
+    logger.info("")
+    logger.info(title)
+    separator = "-" * sum(widths) + "-" * (len(widths) - 1)
+    logger.info(separator)
 
     def _fmt(row: Sequence[str]) -> str:
         return " ".join(cell.ljust(widths[i]) for i, cell in enumerate(row))
 
-    print(_fmt(table[0]), file=stream)
-    print(" ".join("-" * w for w in widths), file=stream)
+    logger.info(_fmt(table[0]))
+    logger.info(" ".join("-" * w for w in widths))
     for row in table[1:]:
-        print(_fmt(row), file=stream)
+        logger.info(_fmt(row))
 
 
 TOP_EVENTS = [
-    # Input processing
     "Input:Process",
     "Step:Schedule",
-    # Model execution
     "Step:Model",
-    # Output processing
     "Step:Output",
 ]
 
@@ -103,8 +105,7 @@ def _compute_table_rows(
     return cells
 
 
-def _print_breakdown_tables(event_us_sum: dict[str, int], *,
-                            stream: TextIO) -> None:
+def _print_breakdown_tables(event_us_sum: dict[str, int]) -> None:
     for title, events in (
         ("Top-level pipeline events", TOP_EVENTS),
         ("Model events breakdown (only includes the main key events)",
@@ -112,10 +113,10 @@ def _print_breakdown_tables(event_us_sum: dict[str, int], *,
     ):
         headers = [*events, "TOTAL"]
         rows = [_compute_table_rows(event_us_sum, events)]
-        _render_table(title, headers, rows, stream=stream)
+        _render_table(title, headers, rows)
 
 
-def summarize_log(log_path: str, *, stream: TextIO) -> None:
+def summarize_log(log_path: str) -> None:
     event_us = _extract_event_us(log_path)
     event_us_sum = _sum_events(event_us)
-    _print_breakdown_tables(event_us_sum, stream=stream)
+    _print_breakdown_tables(event_us_sum)

@@ -635,9 +635,9 @@ def main(args: argparse.Namespace):
         args.seed = 0
     random.seed(args.seed)
 
-    # Clear lite-profiler log at the beginning of benchmark run to start fresh
+    # Empty lite-profiler log for fresh benchmark data
     clear_profiler_log()
-    
+
     # Sample the requests.
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code)
