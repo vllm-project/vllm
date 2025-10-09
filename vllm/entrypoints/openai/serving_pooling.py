@@ -13,7 +13,6 @@ import torch
 from fastapi import Request
 from typing_extensions import assert_never
 
-from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
@@ -34,7 +33,6 @@ from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
-from vllm.plugins.io_processors import get_io_processor
 from vllm.utils import merge_async_iterators
 
 logger = init_logger(__name__)
@@ -60,7 +58,6 @@ class OpenAIServingPooling(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
-        vllm_config: VllmConfig,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -71,7 +68,6 @@ class OpenAIServingPooling(OpenAIServing):
     ) -> None:
         super().__init__(
             engine_client=engine_client,
-            model_config=vllm_config.model_config,
             models=models,
             request_logger=request_logger,
             log_error_stack=log_error_stack,
@@ -80,8 +76,6 @@ class OpenAIServingPooling(OpenAIServing):
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
-        io_processor_plugin = self.model_config.io_processor_plugin
-        self.io_processor = get_io_processor(vllm_config, io_processor_plugin)
 
     async def create_pooling(
         self,

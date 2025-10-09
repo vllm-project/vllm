@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Optional, Union
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.protocol import (
     ErrorInfo,
@@ -51,18 +50,14 @@ class OpenAIServingModels:
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         base_model_paths: list[BaseModelPath],
         *,
         lora_modules: Optional[list[LoRAModulePath]] = None,
     ):
         super().__init__()
 
-        self.base_model_paths = base_model_paths
-
-        self.max_model_len = model_config.max_model_len
         self.engine_client = engine_client
-        self.model_config = model_config
+        self.base_model_paths = base_model_paths
 
         self.static_lora_modules = lora_modules
         self.lora_requests: dict[str, LoRARequest] = {}
@@ -74,6 +69,11 @@ class OpenAIServingModels:
                 LoRAResolverRegistry.get_resolver(lora_resolver_name)
             )
         self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
+
+        self.processor = self.engine_client.processor
+        self.io_processor = self.engine_client.io_processor
+        self.model_config = self.engine_client.model_config
+        self.max_model_len = self.model_config.max_model_len
 
     async def init_static_loras(self):
         """Loads all static LoRA modules.

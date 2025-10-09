@@ -459,7 +459,7 @@ def test_all_logprobs(example_prompts):
     results_logprobs_all = runner.llm.generate(
         example_prompts, sampling_params=sampling_params_logprobs_all
     )
-    vocab_size = runner.llm.llm_engine.get_model_config().get_vocab_size()
+    vocab_size = runner.llm.llm_engine.model_config.get_vocab_size()
 
     for i in range(len(results_logprobs_all)):
         logprobs = results_logprobs_all[i].outputs[0].logprobs
