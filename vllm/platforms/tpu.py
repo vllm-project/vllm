@@ -54,7 +54,7 @@ class TpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "_Backend",
+        selected_backend: Optional["_Backend"],
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: Optional[str],

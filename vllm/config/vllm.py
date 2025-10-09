@@ -305,7 +305,7 @@ class VllmConfig:
         # we use the default level. The default level depends on other
         # settings (see the below code).
         if self.compilation_config.level is None:
-            if getattr(self.model_config, "enforce_eager", False):
+            if not (self.model_config is None or self.model_config.enforce_eager):
                 self.compilation_config.level = CompilationLevel.PIECEWISE
             else:
                 self.compilation_config.level = CompilationLevel.NO_COMPILATION

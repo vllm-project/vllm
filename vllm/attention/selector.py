@@ -187,8 +187,6 @@ def _cached_get_attn_backend(
                     f"Invalid attention backend: '{backend_by_env_var}'. "
                     f"Valid backends are: {list(_Backend.__members__.keys())}"
                 )
-        else:
-            raise ValueError("Attention backend was not forced or set in env var.")
 
     # get device-specific attn_backend
     attention_cls = current_platform.get_attn_backend_cls(
