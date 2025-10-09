@@ -21,7 +21,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 
 from .cache import CacheConfig
-from .compilation import CompilationConfig, CompilationLevel, CUDAGraphMode
+from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
@@ -84,16 +84,16 @@ class VllmConfig:
     """`torch.compile` and cudagraph capture configuration for the model.
 
     As a shorthand, `-O<n>` can be used to directly specify the compilation
-    level `n`: `-O3` is equivalent to `-O.level=3` (same as `-O='{"level":3}'`).
+    mode `n`: `-O3` is equivalent to `-O.mode=3` (same as `-O='{"mode":3}'`).
     Currently, -O <n> and -O=<n> are supported as well but this will likely be
     removed in favor of clearer -O<n> syntax in the future.
 
-    NOTE: level 0 is the default level without any optimization. level 1 and 2
-    are for internal testing only. level 3 is the recommended level for
+    NOTE: mode 0 is the default mode without any optimization. mode 1 and 2
+    are for internal testing only. mode 3 is the recommended mode for
     production, also default in V1.
 
     You can specify the full compilation config like so:
-    `{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
+    `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
     kv_transfer_config: Optional[KVTransferConfig] = None
     """The configurations for distributed KV cache transfer."""
@@ -301,37 +301,36 @@ class VllmConfig:
                 "precision for chunked prefill triton kernels."
             )
 
-        # If the user does not explicitly set a compilation level, then
-        # we use the default level. The default level depends on other
+        # If the user does not explicitly set a compilation mode, then
+        # we use the default mode. The default mode depends on other
         # settings (see the below code).
-        if self.compilation_config.level is None:
+        if self.compilation_config.mode is None:
             if envs.VLLM_USE_V1:
                 if (
                     self.model_config is not None
                     and not self.model_config.enforce_eager
                 ):
-                    self.compilation_config.level = CompilationLevel.PIECEWISE
+                    self.compilation_config.mode = CompilationMode.VLLM_COMPILE
                 else:
-                    self.compilation_config.level = CompilationLevel.NO_COMPILATION
+                    self.compilation_config.mode = CompilationMode.NONE
 
             else:
-                # NB: Passing both --enforce-eager and a compilation level
-                # in V0 means the compilation level wins out.
-                self.compilation_config.level = CompilationLevel.NO_COMPILATION
+                # NB: Passing both --enforce-eager and a compilation mode
+                # in V0 means the compilation mode wins out.
+                self.compilation_config.mode = CompilationMode.NONE
         else:
-            assert self.compilation_config.level >= CompilationLevel.NO_COMPILATION
-            assert self.compilation_config.level <= CompilationLevel.PIECEWISE
-            assert self.compilation_config.level <= 3
+            assert self.compilation_config.mode >= CompilationMode.NONE
+            assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
 
         # If user does not set custom ops via none or all set it here based on
-        # compilation level and backend.
+        # compilation mode and backend.
         if (
             self.compilation_config.custom_ops.count("none")
             + self.compilation_config.custom_ops.count("all")
             == 0
         ):
             if (
-                self.compilation_config.level > 0
+                self.compilation_config.mode > 0
                 and self.compilation_config.backend != "eager"
             ):
                 self.compilation_config.custom_ops.append("none")
@@ -351,7 +350,7 @@ class VllmConfig:
             if self.compilation_config.cudagraph_mode is None:
                 if (
                     envs.VLLM_USE_V1
-                    and self.compilation_config.level == CompilationLevel.PIECEWISE
+                    and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
                 ):
                     # default to full and piecewise for most models
                     self.compilation_config.cudagraph_mode = (
@@ -478,10 +477,10 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        # Do this after all the updates to compilation_config.level
+        # Do this after all the updates to compilation_config.mode
         if (
             envs.VLLM_USE_V1
-            and self.compilation_config.level == CompilationLevel.PIECEWISE
+            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
         ):
             self.compilation_config.set_splitting_ops_for_v1()
 
@@ -500,8 +499,8 @@ class VllmConfig:
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
-                assert self.compilation_config.level == CompilationLevel.PIECEWISE, (
-                    "Compilation level should be CompilationLevel.PIECEWISE "
+                assert self.compilation_config.mode == CompilationMode.VLLM_COMPILE, (
+                    "Compilation mode should be CompilationMode.VLLM_COMPILE "
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
@@ -829,7 +828,7 @@ def set_current_vllm_config(
 
         if (
             check_compile
-            and vllm_config.compilation_config.level == CompilationLevel.PIECEWISE
+            and vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and compilation_counter.num_models_seen == num_models_seen
         ):
             # If the model supports compilation,

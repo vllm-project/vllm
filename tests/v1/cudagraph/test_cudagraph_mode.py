@@ -72,9 +72,7 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supporte
             trust_remote_code=True,
             gpu_memory_utilization=0.45,
             max_model_len=1024,
-            compilation_config=CompilationConfig(
-                level=3, cudagraph_mode=cudagraph_mode
-            ),
+            compilation_config=CompilationConfig(mode=3, cudagraph_mode=cudagraph_mode),
         )
         llm.generate(["Hello, my name is"] * 10)
     # when above code raises, `llm` may be undefined, so we need to catch that
@@ -90,8 +88,8 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supporte
     )
 
 
-# test cudagraph_mode with different compilation level.
-# (backend_name, cudagraph_mode, compilation_level, supported)
+# test cudagraph_mode with different compilation mode.
+# (backend_name, cudagraph_mode, compilation_mode, supported)
 combo_cases_2 = [
     ("FA2", "FULL", 0, True),  # no compilation + full cudagraph
     ("FA2", "FULL", 3, True),  # piecewise compilation + full cudagraph
@@ -112,10 +110,10 @@ combo_cases_2 = [
 
 
 @pytest.mark.parametrize(
-    "backend_name,cudagraph_mode,compilation_level,supported", combo_cases_2
+    "backend_name,cudagraph_mode,compilation_mode,supported", combo_cases_2
 )
 def test_cudagraph_compilation_combo(combo_case):
-    backend_name, cudagraph_mode, compilation_level, supported = combo_case
+    backend_name, cudagraph_mode, compilation_mode, supported = combo_case
 
     env_vars = backend_configs[backend_name].env_vars
 
@@ -130,7 +128,7 @@ def test_cudagraph_compilation_combo(combo_case):
             gpu_memory_utilization=0.45,
             max_model_len=1024,
             compilation_config=CompilationConfig(
-                level=compilation_level, cudagraph_mode=cudagraph_mode
+                mode=compilation_mode, cudagraph_mode=cudagraph_mode
             ),
         )
         llm.generate(["Hello, my name is"] * 10)

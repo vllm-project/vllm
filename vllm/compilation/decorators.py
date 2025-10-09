@@ -13,7 +13,7 @@ from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import CompilationMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils import resolve_obj_by_qualname, supports_dynamo
@@ -201,11 +201,11 @@ def _support_torch_compile(
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
         self.vllm_config = vllm_config
         enable_compile = enable_if is None or enable_if(vllm_config)
-        # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
+        # for CompilationMode.STOCK_TORCH_COMPILE , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
         self.do_not_compile = (
-            vllm_config.compilation_config.level
-            in [CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS]
+            vllm_config.compilation_config.mode
+            in [CompilationMode.NONE, CompilationMode.STOCK_TORCH_COMPILE]
             or not supports_dynamo()
             or _should_ignore_torch_compile(self.__class__)
             or not enable_compile
@@ -215,7 +215,7 @@ def _support_torch_compile(
 
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
-            self, compilation_level=vllm_config.compilation_config.level
+            self, compilation_mode=vllm_config.compilation_config.mode
         )
 
     cls.__init__ = __init__

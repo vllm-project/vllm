@@ -6,7 +6,7 @@ import torch
 
 import vllm
 from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.config import CompilationConfig, CompilationLevel, PassConfig, VllmConfig
+from vllm.config import CompilationConfig, CompilationMode, PassConfig, VllmConfig
 
 from .backend import TestBackend
 
@@ -42,7 +42,7 @@ def test_noop_elimination(dtype, num_tokens, hidden_size):
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             pass_config=PassConfig(enable_noop=True),
         )
     )
@@ -89,7 +89,7 @@ def test_non_noop_slice_preserved():
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             pass_config=PassConfig(enable_noop=True),
         )
     )
