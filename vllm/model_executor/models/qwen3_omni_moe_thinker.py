@@ -702,11 +702,13 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
 
-        use_audio_in_video = (
-            all(item["use_audio_in_video"].data for item in mm_kwargs["video"])
-            if "video" in mm_kwargs
-            else False
-        )
+        use_audio_in_video = False
+        if "video" in mm_kwargs:
+            for item in mm_kwargs["video"]:
+                if item.get("use_audio_in_video") and item["use_audio_in_video"].data:
+                    use_audio_in_video = True
+                else:
+                    use_audio_in_video = False
 
         if use_audio_in_video and "video" in mm_item_counts:
             assert "audio" in mm_item_counts
