@@ -8,13 +8,14 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def mxfp8_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-
+def mxfp8_e4m3_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     try:
-        from flashinfer import mxfp8_quantize
+        from flashinfer import mxfp8_quantize as mxfp8_e4m3_quantize
     except ImportError as err:
-        raise ImportError("The package `flashinfer` is required to do "
-                          "MX-FP8 quantization. Please install it with" \
-                          "`pip install flashinfer`") from err
+        raise ImportError(
+            "The package `flashinfer` is required to do "
+            "MX-FP8 quantization. Please install it with"
+            "`pip install flashinfer`"
+        ) from err
 
-    return mxfp8_quantize(x, is_sf_swizzled_layout=False)
+    return mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=False)

@@ -15,7 +15,6 @@ from .utils import _get_layer_device, _get_layer_dtype
 
 
 class ClassifierWithLoRA(BaseLayerWithLoRA):
-
     def __init__(self, base_layer: ReplicatedLinear) -> None:
         super().__init__()
         self.base_layer = base_layer
@@ -60,9 +59,9 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
         # so type conversion is performed here
         if lora_a.dtype != self.lora_type:
             lora_a = lora_a.to(self.lora_type)
-        self.lora_a_stacked[index,
-                            0, :lora_a.shape[0], :lora_a.shape[1]].copy_(
-                                lora_a, non_blocking=True)
+        self.lora_a_stacked[index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
+            lora_a, non_blocking=True
+        )
         self._label_slot[index] = lora_a.shape[0]
 
     def forward(self, input_: torch.Tensor, **kwargs) -> torch.Tensor:
@@ -76,24 +75,20 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
 
         """
         lora_id = kwargs.get("activate_lora_id", [0])
-        bias = (self.base_layer.bias
-                if not self.base_layer.skip_bias_add else None)
+        bias = self.base_layer.bias if not self.base_layer.skip_bias_add else None
         # 0 denotes non lora request
         all_no_lora = all(x == 0 for x in lora_id)
         if all_no_lora:
-            
-            return self.base_layer.quant_method.apply(self.base_layer, input_,
-                                                      bias)
+            return self.base_layer.quant_method.apply(self.base_layer, input_, bias)
         assert input_.size(0) == len(lora_id)
-        y = torch.zeros(input_.size(0),
-                        self.max_class_label,
-                        device=input_.device)
-        lora_weight = tuple(self.lora_a_stacked, )
+        y = torch.zeros(input_.size(0), self.max_class_label, device=input_.device)
+        lora_weight = tuple(
+            self.lora_a_stacked,
+        )
 
-        self.punica_wrapper.add_shrink(y.unsqueeze(dim=0),
-                                       input_,
-                                       lora_weight,
-                                       scale=1.0)
+        self.punica_wrapper.add_shrink(
+            y.unsqueeze(dim=0), input_, lora_weight, scale=1.0
+        )
         # TODO Cast y using self._label_slot
         # Keep consistent with the base_layer output
         return None
