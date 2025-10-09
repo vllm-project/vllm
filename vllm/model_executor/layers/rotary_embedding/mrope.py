@@ -1488,16 +1488,12 @@ class MRotaryEmbedding(RotaryEmbedding):
         thinker_config = hf_config.thinker_config
 
         if isinstance(image_grid_thw, list):
-            image_grid_thw = torch.tensor(image_grid_thw, dtype=torch.long)
-        elif isinstance(image_grid_thw, torch.Tensor):
-            image_grid_thw = image_grid_thw.to(dtype=torch.long)
+            image_grid_thw = torch.tensor(image_grid_thw)
         if isinstance(video_grid_thw, list):
-            video_grid_thw = torch.tensor(video_grid_thw, dtype=torch.long)
-        elif isinstance(video_grid_thw, torch.Tensor):
-            video_grid_thw = video_grid_thw.to(dtype=torch.long)
+            video_grid_thw = torch.tensor(video_grid_thw)
 
         if "qwen3_omni" in model_type:
-            input_tensor = torch.tensor(input_tokens, dtype=torch.long)
+            input_tensor = torch.tensor(input_tokens)
             audio_lengths_tensor = audio_feature_lengths
             if audio_lengths_tensor is not None and not isinstance(
                 audio_lengths_tensor, torch.Tensor
@@ -1505,14 +1501,8 @@ class MRotaryEmbedding(RotaryEmbedding):
                 audio_lengths_tensor = torch.as_tensor(
                     audio_lengths_tensor, dtype=torch.long
                 )
-            second_per_grids_tensor: Optional[torch.Tensor] = None
-            if isinstance(second_per_grid_ts, torch.Tensor):
-                if second_per_grid_ts.numel() > 0:
-                    second_per_grids_tensor = second_per_grid_ts.to(dtype=torch.float32)
-            elif second_per_grid_ts:
-                second_per_grids_tensor = torch.tensor(
-                    second_per_grid_ts, dtype=torch.float32
-                )
+            if second_per_grid_ts:
+                second_per_grids_tensor = torch.tensor(second_per_grid_ts)
 
             llm_positions, mrope_position_delta = cls._omni3_get_input_positions_tensor(  # noqa: E501
                 thinker_config,
