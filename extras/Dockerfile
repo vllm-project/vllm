@@ -2,11 +2,13 @@
 # Uses vLLM's own requirements for automatic dependency management
 
 # Build-time args to control CUDA/OS base and PyTorch nightly index
-ARG CUDA_VERSION=13.0.0
-ARG UBI_VERSION=9
+ARG CUDA_VERSION=13.0.1
+ARG UBI_VERSION=10
 ARG TORCH_CUDA_INDEX=cu130
 # Base flavor for CUDA image: e.g. 'rockylinux9' (default) or 'ubi9'
-ARG BASE_FLAVOR=rockylinux9
+ARG BASE_FLAVOR=rockylinux10
+ARG INSTALL_CUDA_OPTIONAL_DEVEL=1
+ARG CUDNN_FLAVOR=9
 
 # Switchable base: defaults to Rocky Linux to avoid subscription-gated repos
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-${BASE_FLAVOR}
@@ -32,8 +34,6 @@ RUN dnf update -y && dnf install --allowerasing -y \
     && dnf clean all
 
 # Prefer Python 3.12 from packages if available (fallback to system python3)
-RUN dnf install -y python3.12 python3.12-devel || true
-
 ## Ensure /usr/bin/python exists for compatibility
 RUN ln -sf $(command -v python3) /usr/bin/python || true
 
@@ -87,6 +87,40 @@ RUN set -euxo pipefail \
     && dnf makecache -y \
     && (dnf install -y libnccl libnccl-devel || dnf install -y libnccl-2 libnccl-devel-2) \
     && dnf clean all
+
+# Optional CUDA developer libraries (cuBLAS, cuSOLVER, cuSPARSE, cuFFT, cuRAND, cuSPARSElt, cuDNN, NVRTC, CUPTI, NVTX, NVJITLINK)
+RUN if [ "${INSTALL_CUDA_OPTIONAL_DEVEL}" = "1" ]; then \
+        set -euxo pipefail; \
+        CUDA_MAJOR="$(printf '%s' "${CUDA_VERSION}" | cut -d. -f1)"; \
+        CUDA_MINOR="$(printf '%s' "${CUDA_VERSION}" | cut -d. -f2)"; \
+    CUDA_SLOT="${CUDA_MAJOR}-${CUDA_MINOR}"; \
+        CUDNN_PKGS=""; \
+        if [ "${CUDNN_FLAVOR}" = "8" ]; then \
+            CUDNN_PKGS="libcudnn8 libcudnn8-devel"; \
+        else \
+            CUDNN_PKGS="libcudnn${CUDNN_FLAVOR}-cuda-${CUDA_MAJOR} libcudnn${CUDNN_FLAVOR}-devel-cuda-${CUDA_MAJOR}"; \
+            if dnf list --available "libcudnn${CUDNN_FLAVOR}-headers-cuda-${CUDA_MAJOR}" >/dev/null 2>&1; then \
+                CUDNN_PKGS="${CUDNN_PKGS} libcudnn${CUDNN_FLAVOR}-headers-cuda-${CUDA_MAJOR}"; \
+            fi; \
+        fi; \
+        dnf install -y \
+            "libcublas-${CUDA_SLOT}" "libcublas-devel-${CUDA_SLOT}" \
+            "libcurand-${CUDA_SLOT}" "libcurand-devel-${CUDA_SLOT}" \
+            "libcusolver-${CUDA_SLOT}" "libcusolver-devel-${CUDA_SLOT}" \
+            "libcufft-${CUDA_SLOT}" "libcufft-devel-${CUDA_SLOT}" \
+            "libcusparse-${CUDA_SLOT}" "libcusparse-devel-${CUDA_SLOT}" \
+            "libcufile-${CUDA_SLOT}" "libcufile-devel-${CUDA_SLOT}" \
+            "libcusparselt0-cuda-${CUDA_MAJOR}" "libcusparselt0-devel-cuda-${CUDA_MAJOR}" \
+            "cuda-nvrtc-${CUDA_SLOT}" "cuda-nvrtc-devel-${CUDA_SLOT}" \
+            "cuda-cupti-${CUDA_SLOT}" \
+            "cuda-nvtx-${CUDA_SLOT}" \
+            "libnvjitlink-${CUDA_SLOT}" "libnvjitlink-devel-${CUDA_SLOT}" \
+            ${CUDNN_PKGS}; \
+        if dnf list --available "libcurand-static-${CUDA_SLOT}" >/dev/null 2>&1; then \
+            dnf install -y "libcurand-static-${CUDA_SLOT}" || true; \
+        fi; \
+        dnf clean all; \
+    fi
 
 # Set working directory and adjust ownership
 WORKDIR /workspace
@@ -258,6 +292,15 @@ RUN echo '#!/bin/bash' > /home/vllmuser/check_cuda_libs.sh && \
     echo 'echo "Searching for CUDA libraries..."' >> /home/vllmuser/check_cuda_libs.sh && \
     echo 'find /usr/lib/wsl -name "libcuda.so*" 2>/dev/null | head -3 || echo "No WSL CUDA libs"' >> /home/vllmuser/check_cuda_libs.sh && \
     echo 'ldconfig -p | grep cuda | head -3 || echo "No CUDA in ldconfig"' >> /home/vllmuser/check_cuda_libs.sh && \
+    echo 'echo "--- Optional CUDA Libraries ---"' >> /home/vllmuser/check_cuda_libs.sh && \
+    echo 'libs=(libcublas libcufft libcusolver libcusparse libcurand libcudnn libcusparselt libnvrtc libcupti libnvtx libnvjitlink)' >> /home/vllmuser/check_cuda_libs.sh && \
+    echo 'for entry in "${libs[@]}"; do' >> /home/vllmuser/check_cuda_libs.sh && \
+    echo '  if ldconfig -p | grep -q "$entry"; then' >> /home/vllmuser/check_cuda_libs.sh && \
+    echo '    echo "  ✓ $entry"' >> /home/vllmuser/check_cuda_libs.sh && \
+    echo '  else' >> /home/vllmuser/check_cuda_libs.sh && \
+    echo '    echo "  ✗ $entry (not found in ldconfig cache)"' >> /home/vllmuser/check_cuda_libs.sh && \
+    echo '  fi' >> /home/vllmuser/check_cuda_libs.sh && \
+    echo 'done' >> /home/vllmuser/check_cuda_libs.sh && \
     echo 'echo "PyTorch CUDA status:"' >> /home/vllmuser/check_cuda_libs.sh && \
     echo 'python -c "import torch; print(f\"CUDA available: {torch.cuda.is_available()}\"); print(f\"Device count: {torch.cuda.device_count()}\")" 2>/dev/null || echo "PyTorch not available"' >> /home/vllmuser/check_cuda_libs.sh && \
     chmod +x /home/vllmuser/check_cuda_libs.sh

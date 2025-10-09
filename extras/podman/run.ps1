@@ -100,6 +100,8 @@ if ($Build) {
 	$baseFlavor = $null
 	$archList = $null
 	$cudaArchs = $null
+	$installCudaOptional = $null
+	$cudnnFlavor = $null
 	$requireFfmpegArg = '1'
 	function Get-DockerArgDefault([string]$name, [string]$fallback) {
 		if (Test-Path $dockerfilePath) {
@@ -131,10 +133,12 @@ if ($Build) {
 			}
 			return $val
 		}
-		$cudaVer = Get-EnvDefault -name 'CUDA_VERSION' -fallback (Get-DockerArgDefault 'CUDA_VERSION' '13.0.0')
-		$baseFlavor = Get-EnvDefault -name 'BASE_FLAVOR' -fallback (Get-DockerArgDefault 'BASE_FLAVOR' 'rockylinux9')
-		$archList = Get-EnvDefault -name 'TORCH_CUDA_ARCH_LIST' -fallback (Get-DockerArgDefault 'TORCH_CUDA_ARCH_LIST' '8.0 8.6 8.9 9.0 12.0 13.0')
-		$cudaArchs = Get-EnvDefault -name 'CUDA_ARCHS' -fallback (Get-DockerArgDefault 'CUDA_ARCHS' '80;86;89;90;120')
+	$cudaVer = Get-EnvDefault -name 'CUDA_VERSION' -fallback (Get-DockerArgDefault 'CUDA_VERSION' '13.0.0')
+	$baseFlavor = Get-EnvDefault -name 'BASE_FLAVOR' -fallback (Get-DockerArgDefault 'BASE_FLAVOR' 'rockylinux9')
+	$archList = Get-EnvDefault -name 'TORCH_CUDA_ARCH_LIST' -fallback (Get-DockerArgDefault 'TORCH_CUDA_ARCH_LIST' '8.0 8.6 8.9 9.0 12.0 13.0')
+	$cudaArchs = Get-EnvDefault -name 'CUDA_ARCHS' -fallback (Get-DockerArgDefault 'CUDA_ARCHS' '80;86;89;90;120')
+	$installCudaOptional = Get-EnvDefault -name 'INSTALL_CUDA_OPTIONAL_DEVEL' -fallback (Get-DockerArgDefault 'INSTALL_CUDA_OPTIONAL_DEVEL' '1')
+	$cudnnFlavor = Get-EnvDefault -name 'CUDNN_FLAVOR' -fallback (Get-DockerArgDefault 'CUDNN_FLAVOR' '9')
 	# No longer used: wheels-only installs for torchvision/torchaudio
 		$requireFfmpeg = Get-EnvDefault -name 'REQUIRE_FFMPEG' -fallback (Get-DockerArgDefault 'REQUIRE_FFMPEG' '1')
 		if ($requireFfmpeg -match '^[01]$') { $requireFfmpegArg = $requireFfmpeg } else { $requireFfmpegArg = '1' }
@@ -144,14 +148,16 @@ if ($Build) {
 		$parts = $cudaVer.Split('.')
 		if ($parts.Length -ge 2) { 'cu' + $parts[0] + $parts[1] + '0' } else { 'cu129' }
 	}
-	Write-Host ("Config: CUDA={0} BASE_FLAVOR={1} TORCH_CUDA_INDEX={2} ARCH_LIST=({3}) CUDA_ARCHS={4}" -f $cudaVer,$baseFlavor,$torchCudaIndex,$archList,$cudaArchs) -ForegroundColor DarkGray
+	Write-Host ("Config: CUDA={0} BASE_FLAVOR={1} TORCH_CUDA_INDEX={2} ARCH_LIST=({3}) CUDA_ARCHS={4} OPTIONAL_DEVEL={5} CUDNN_FLAVOR={6}" -f $cudaVer,$baseFlavor,$torchCudaIndex,$archList,$cudaArchs,$installCudaOptional,$cudnnFlavor) -ForegroundColor DarkGray
 	$buildCmd = @("build","-f","extras/Dockerfile",
 		"--build-arg","CUDA_VERSION=$cudaVer",
 		"--build-arg","BASE_FLAVOR=$baseFlavor",
 		"--build-arg","TORCH_CUDA_INDEX=$torchCudaIndex",
 		"--build-arg","TORCH_CUDA_ARCH_LIST=$archList",
 		"--build-arg","CUDA_ARCHS=$cudaArchs",
-	"--build-arg","REQUIRE_FFMPEG=$requireFfmpegArg",
+		"--build-arg","INSTALL_CUDA_OPTIONAL_DEVEL=$installCudaOptional",
+		"--build-arg","CUDNN_FLAVOR=$cudnnFlavor",
+		"--build-arg","REQUIRE_FFMPEG=$requireFfmpegArg",
 		"-t",$ImageTag,".")
 	# Use cache by default; add --no-cache only when requested
 	if ($NoCache) { $buildCmd = @($buildCmd[0],"--no-cache") + $buildCmd[1..($buildCmd.Length-1)] }

@@ -143,6 +143,8 @@ load_build_config() {
 	TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-$(docker_arg_default TORCH_CUDA_ARCH_LIST '8.0 8.6 8.9 9.0 12.0 13.0')}"
 	CUDA_ARCHS="${CUDA_ARCHS:-$(docker_arg_default CUDA_ARCHS '80;86;89;90;120')}"
 	REQUIRE_FFMPEG="${REQUIRE_FFMPEG:-$(docker_arg_default REQUIRE_FFMPEG 1)}"
+	INSTALL_CUDA_OPTIONAL_DEVEL="${INSTALL_CUDA_OPTIONAL_DEVEL:-$(docker_arg_default INSTALL_CUDA_OPTIONAL_DEVEL 1)}"
+	CUDNN_FLAVOR="${CUDNN_FLAVOR:-$(docker_arg_default CUDNN_FLAVOR 9)}"
 	TORCH_CUDA_INDEX="${TORCH_CUDA_INDEX:-$(derive_torch_index "$CUDA_VERSION")}"
 }
 
@@ -156,6 +158,8 @@ build_image_if_requested() {
 		--build-arg "TORCH_CUDA_INDEX=$TORCH_CUDA_INDEX"
 		--build-arg "TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST"
 		--build-arg "CUDA_ARCHS=$CUDA_ARCHS"
+		--build-arg "INSTALL_CUDA_OPTIONAL_DEVEL=$INSTALL_CUDA_OPTIONAL_DEVEL"
+		--build-arg "CUDNN_FLAVOR=$CUDNN_FLAVOR"
 		--build-arg "REQUIRE_FFMPEG=$REQUIRE_FFMPEG")
 	[[ $BUILD_NO_CACHE -eq 1 ]] && args=(build --no-cache "${args[@]:1}")
 	[[ $BUILD_PULL -eq 1 ]] && args=(build --pull=always "${args[@]:1}")
