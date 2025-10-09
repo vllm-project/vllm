@@ -413,11 +413,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                     prompt_ids,
                     filtered_updates,
                 )
-                # Now derive audio placeholders from video (done in
-                # _apply_prompt_updates)
-                # But we called it with filtered updates, so we need to call it again
-                # Actually, let's just call our override with the full updates
-                # and let it handle the audio derivation
+                # Derive audio placeholders from video placeholders
                 mm_placeholders = self._derive_audio_from_video_placeholders(
                     mm_placeholders, mm_prompt_updates
                 )
@@ -570,6 +566,15 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         """
         if "video" not in placeholders:
             return placeholders
+
+        # Validate audio and video counts match
+        num_videos = len(placeholders["video"])
+        num_audios = len(mm_prompt_updates.get("audio", []))
+        if num_audios != num_videos:
+            raise ValueError(
+                f"use_audio_in_video requires equal number of audio and video items, "
+                f"got audio={num_audios}, video={num_videos}"
+            )
 
         tokenizer = self.info.get_tokenizer()
         processor = self.info.get_hf_processor()
