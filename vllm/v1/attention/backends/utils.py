@@ -32,11 +32,11 @@ if TYPE_CHECKING:
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
-from vllm.attention.layer import Attention
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.ubatch_utils import UBatchSlice
 
@@ -92,6 +92,9 @@ class CommonAttentionMetadata:
 
     # Needed by CrossAttentionBuilder
     encoder_seq_lens: Optional[np.ndarray] = None
+
+    dcp_local_seq_lens: Optional[torch.Tensor] = None
+    """Sequence lengths of the local rank in decode context parallelism world"""
 
 
 def slice_query_start_locs(
@@ -408,7 +411,7 @@ def get_per_layer_parameters(
     to use during `plan`.
     """
 
-    layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+    layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, layer_names)
     per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():

@@ -6,7 +6,7 @@ from typing import ClassVar, Optional, Union
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionLayer, AttentionType
+from vllm.attention.backends.abstract import AttentionLayer, AttentionType, MultipleOf
 from vllm.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
@@ -43,6 +43,10 @@ class FlashMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["FlashMLAImpl"]:
         return FlashMLAImpl
+
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
+        return [64]
 
 
 @dataclass
@@ -102,6 +106,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        dcp_tot_seq_lens_device: Optional[torch.Tensor],
     ) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = get_mla_metadata(
             seq_lens_device,
@@ -142,6 +147,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             seq_lens=seq_lens_device,
             tile_scheduler_metadata=tile_scheduler_metadata,
             num_splits=num_splits,
+            dcp_tot_seq_lens=dcp_tot_seq_lens_device,
         )
 
 

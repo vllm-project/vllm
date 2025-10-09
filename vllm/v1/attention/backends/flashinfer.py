@@ -23,6 +23,7 @@ from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
+    MultipleOf,
 )
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
@@ -164,6 +165,13 @@ class FlashInferBackend(AttentionBackend):
     def get_supported_head_sizes(cls) -> list[int]:
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
         return [64, 128, 256]
+
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
+        # Note: Not sure for all platforms,
+        # but on Blackwell, only support a page size of
+        # 16, 32, 64
+        return [16, 32, 64]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
@@ -1191,7 +1199,7 @@ def fast_plan_decode(
     qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
 
     try:
-        # Make sure we pass exactly 15 arguments for tensor core version
+        # Make sure we pass exactly 18 arguments for tensor core version
         self._plan_info = self._cached_module.plan(
             self._float_workspace_buffer,
             self._int_workspace_buffer,
@@ -1208,6 +1216,9 @@ def fast_plan_decode(
             head_dim,
             head_dim,
             False,  # causal
+            window_left,
+            -1,  # fixed_split_size
+            False,  # disable_split_kv
         )
     except Exception as e:
         raise RuntimeError(f"Error in tensor core plan: {e}") from e

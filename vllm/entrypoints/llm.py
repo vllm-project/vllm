@@ -66,7 +66,6 @@ from vllm.outputs import (
     RequestOutput,
     ScoringRequestOutput,
 )
-from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
@@ -79,7 +78,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, Device, as_iter, is_list_of
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.llm_engine import LLMEngine
-from vllm.v1.engine.processor import Processor
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
@@ -335,21 +333,13 @@ class LLM:
         self.request_counter = Counter()
         self.default_sampling_params: Union[dict[str, Any], None] = None
 
-        supported_tasks = self.llm_engine.get_supported_tasks()  # type: ignore
-
-        logger.info("Supported_tasks: %s", supported_tasks)
-
+        supported_tasks = self.llm_engine.get_supported_tasks()
+        logger.info("Supported tasks: %s", supported_tasks)
         self.supported_tasks = supported_tasks
 
-        # Load the Input/Output processor plugin if any
-        io_processor_plugin = self.llm_engine.model_config.io_processor_plugin
-        self.io_processor = get_io_processor(
-            self.llm_engine.vllm_config, io_processor_plugin
-        )
-
-    @property
-    def model_config(self):
-        return self.llm_engine.model_config
+        self.model_config = self.llm_engine.model_config
+        self.processor = self.llm_engine.processor
+        self.io_processor = self.llm_engine.io_processor
 
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer()
@@ -364,18 +354,9 @@ class LLM:
         else:
             self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
-    def _get_processor(self) -> Processor:
-        if not hasattr(self, "_processor"):
-            vllm_config = self.llm_engine.vllm_config
-            self._processor = Processor(vllm_config)
-
-        return self._processor
-
     def get_default_sampling_params(self) -> SamplingParams:
         if self.default_sampling_params is None:
-            self.default_sampling_params = (
-                self.llm_engine.model_config.get_diff_sampling_param()
-            )
+            self.default_sampling_params = self.model_config.get_diff_sampling_param()
         if self.default_sampling_params:
             return SamplingParams.from_optional(**self.default_sampling_params)
         return SamplingParams()
@@ -423,7 +404,7 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the `inputs` parameter.
         """
-        model_config = self.llm_engine.model_config
+        model_config = self.model_config
         runner_type = model_config.runner_type
         if runner_type != "generate":
             raise ValueError(
@@ -463,7 +444,7 @@ class LLM:
         # isn't multimodal, leave the lora as is.
         if (
             lora_config is None
-            or not self.llm_engine.model_config.is_multimodal_model
+            or not self.model_config.is_multimodal_model
             or (lora_config and lora_config.default_mm_loras is None)
         ):
             return lora_request
@@ -495,15 +476,13 @@ class LLM:
         if (
             not default_mm_loras
             or not isinstance(prompt, dict)
-            or "multi_modal_data" not in prompt
+            or not (mm_data := prompt.get("multi_modal_data") or {})
         ):
             return lora_request
 
-        prompt = cast(Union[TextPrompt, TokensPrompt], prompt)
-
-        intersection = set(prompt["multi_modal_data"].keys()).intersection(
-            default_mm_loras.keys()
-        )
+        intersection = set(
+            mm_data.keys()  # type: ignore
+        ).intersection(default_mm_loras.keys())
         if not intersection:
             return lora_request
         if len(intersection) > 1:
@@ -819,7 +798,7 @@ class LLM:
             list_of_messages = [cast(list[ChatCompletionMessageParam], messages)]
 
         tokenizer = self.get_tokenizer()
-        model_config = self.llm_engine.get_model_config()
+        model_config = self.model_config
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,
             tools,
@@ -1031,7 +1010,7 @@ class LLM:
                 pooling_task,
             )
 
-        model_config = self.llm_engine.model_config
+        model_config = self.model_config
         runner_type = model_config.runner_type
         if runner_type != "pooling":
             raise ValueError(
@@ -1276,7 +1255,7 @@ class LLM:
         pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[ScoringRequestOutput]:
-        model_config = self.llm_engine.model_config
+        model_config = self.model_config
 
         if isinstance(tokenizer, MistralTokenizer):
             raise ValueError("Score API is not supported for Mistral tokenizer")
@@ -1287,7 +1266,6 @@ class LLM:
         if pooling_params is None:
             pooling_params = PoolingParams(task="score")
 
-        model_config = self.llm_engine.model_config
         pooling_params.verify("score", model_config)
         pooling_params_list = list[PoolingParams]()
 
@@ -1300,8 +1278,6 @@ class LLM:
         prompts = list[PromptType]()
 
         input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
-
-        model_config = self.llm_engine.model_config
 
         for q, d in input_pairs:
             _, engine_prompt = get_score_prompt(
@@ -1380,7 +1356,7 @@ class LLM:
             A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
         """
-        model_config = self.llm_engine.model_config
+        model_config = self.model_config
         runner_type = model_config.runner_type
         if runner_type != "pooling":
             raise ValueError(
@@ -1658,8 +1634,7 @@ class LLM:
             tokenization_kwargs,
         )
 
-        processor = self._get_processor()
-        engine_request = processor.process_inputs(
+        engine_request = self.processor.process_inputs(
             request_id,
             engine_prompt,
             params,

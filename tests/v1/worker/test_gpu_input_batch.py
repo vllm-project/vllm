@@ -241,6 +241,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
         block_sizes=[1],
+        kernel_block_sizes=[1],
     )
     reqs: list[CachedRequestState] = []
     req_id_reqs = {}
@@ -335,6 +336,7 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
         block_sizes=[1],
+        kernel_block_sizes=[1],
     )
     ref_input_batch: InputBatch = InputBatch(
         max_num_reqs=batch_size,
@@ -344,6 +346,7 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
         pin_memory=is_pin_memory_available(),
         vocab_size=1024,
         block_sizes=[1],
+        kernel_block_sizes=[1],
     )
 
     reqs: list[CachedRequestState] = []
