@@ -360,13 +360,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             --pre pytorch_triton==3.3.0+gitab727c40 ; \
     fi
 
-    
-# # Install vllm wheel first, so that torch etc will be installed.
-# RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
-#     --mount=type=cache,target=/root/.cache/uv \
-#     uv pip install --system dist/*.whl --verbose \
-#         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
-
 # install build and runtime dependencies
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
