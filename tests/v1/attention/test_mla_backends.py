@@ -446,24 +446,41 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         # K_PE (rope component): [s_len, 1, qk_rope_head_dim]
         k_pe_full = torch.randn(s_len, 1, qk_rope_head_dim, dtype=dtype, device=device)
 
-        # Determine if this is decode or prefill
+        # Determine if this sequence uses the decode pipeline or prefill
+        # pipeline for each backend
         # NOTE: For spec decode tests with uniform query_len > 1, backends that
-        # support uniform spec decode (FLASH_ATTN_MLA, FLASHMLA) will use the
-        # decode path (MQA-style), while others will use prefill path (MHA-style).
-        # This ensures the reference implementation matches each backend's actual path.
+        # support spec decode (FLASH_ATTN_MLA with varlen support, FLASHMLA with
+        # uniform support) will use the decode pipeline (MQA-style), while
+        # backends that only support single-token queries will use the prefill
+        # pipeline (MHA-style). This ensures the reference implementation
+        # matches each backend's actual decode/prefill pipeline path.
         is_decode = []
         for backend_idx, backend in enumerate(BACKENDS_TO_TEST):
             builder_cls, _ = try_get_attention_backend(backend)
-            # For spec decode tests, check if backend supports uniform spec decode
             if is_spec_decode_test:
-                supports_spec = getattr(
-                    builder_cls, "supports_uniform_spec_as_decode", False
+                from vllm.v1.attention.backends.mla.common import QueryLenSupport
+
+                query_len_support = getattr(
+                    builder_cls, "query_len_support", QueryLenSupport.SINGLE_ONLY
                 )
+                supports_spec = query_len_support != QueryLenSupport.SINGLE_ONLY
                 is_decode.append(supports_spec)
             else:
-                # For non-spec-decode tests, use the class-level threshold
+                from vllm.v1.attention.backends.mla.common import QueryLenSupport
+
                 threshold = getattr(builder_cls, "reorder_batch_threshold", None)
-                is_decode.append(q_len <= threshold if threshold else False)
+                query_len_support = getattr(
+                    builder_cls, "query_len_support", QueryLenSupport.SINGLE_ONLY
+                )
+                within_threshold = q_len <= threshold if threshold else False
+                if (
+                    within_threshold
+                    and query_len_support == QueryLenSupport.UNIFORM
+                    and i > 0
+                ):
+                    first_q_len = query_lens[0]
+                    within_threshold = q_len == first_q_len
+                is_decode.append(within_threshold)
 
         # Split q into nope and rope components
         q_nope, q_pe = q_c.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)

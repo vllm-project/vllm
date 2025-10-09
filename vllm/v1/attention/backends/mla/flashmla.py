@@ -20,6 +20,7 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    QueryLenSupport,
 )
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
@@ -66,7 +67,8 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-    supports_uniform_spec_as_decode: ClassVar[bool] = True
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+    reorder_batch_threshold: int = 512  # TODO(matt): tune this
 
     def __init__(
         self,
@@ -102,11 +104,6 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
                 device=self.device,
                 dtype=torch.int32,
             )
-
-        supports_spec_as_decode = self.supports_uniform_spec_as_decode
-        self._init_reorder_batch_threshold(
-            self.reorder_batch_threshold, supports_spec_as_decode
-        )
 
     def _build_decode(
         self,
