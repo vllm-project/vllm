@@ -16,6 +16,8 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.attention.backends.registry import _Backend
+from vllm.attention.ops.flashmla import is_flashmla_dense_supported
+from vllm.config.vllm import set_current_vllm_config
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -30,6 +32,10 @@ BACKENDS_TO_TEST = [
 # Remove CUTLASS_MLA from the list if not using sm100
 if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
     BACKENDS_TO_TEST.remove(_Backend.CUTLASS_MLA)
+
+# Remove FLASHMLA from the list if not supported
+if not is_flashmla_dense_supported()[0]:
+    BACKENDS_TO_TEST.remove(_Backend.FLASHMLA)
 
 torch.manual_seed(42)
 
@@ -247,61 +253,64 @@ def run_attention_backend(
 
     builder_cls, impl_cls = try_get_attention_backend(backend)
 
-    # Build metadata
-    builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
-    attn_metadata = builder.build(
-        common_prefix_len=0,
-        common_attn_metadata=common_attn_metadata,
-    )
+    # Set the current vllm config so that get_current_vllm_config() works
+    # in the backend implementations
+    with set_current_vllm_config(vllm_config):
+        # Build metadata
+        builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
+        attn_metadata = builder.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+        )
 
-    # Instantiate MLA implementation
-    num_heads = vllm_config.model_config.get_num_attention_heads(
-        vllm_config.parallel_config
-    )
-    num_kv_heads = vllm_config.model_config.get_num_kv_heads(
-        vllm_config.parallel_config
-    )
-    head_size = vllm_config.model_config.get_head_size()
-    scale = 1.0 / (head_size**0.5)
-    impl = impl_cls(
-        num_heads=num_heads,
-        head_size=head_size,
-        scale=scale,
-        num_kv_heads=num_kv_heads,
-        alibi_slopes=None,
-        sliding_window=None,
-        kv_cache_dtype="auto",
-        logits_soft_cap=None,
-        attn_type="decoder",
-        kv_sharing_target_layer_name=None,
-        q_lora_rank=None,
-        kv_lora_rank=kv_lora_rank,
-        qk_nope_head_dim=qk_nope_head_dim,
-        qk_rope_head_dim=qk_rope_head_dim,
-        qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
-        v_head_dim=v_head_dim,
-        kv_b_proj=mock_kv_b_proj,
-    )
+        # Instantiate MLA implementation
+        num_heads = vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config
+        )
+        num_kv_heads = vllm_config.model_config.get_num_kv_heads(
+            vllm_config.parallel_config
+        )
+        head_size = vllm_config.model_config.get_head_size()
+        scale = 1.0 / (head_size**0.5)
+        impl = impl_cls(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=None,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            kv_b_proj=mock_kv_b_proj,
+        )
 
-    # Process weights to create W_UK_T and W_UV attributes needed by MLA
-    act_dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
-    impl.process_weights_after_loading(act_dtype)
+        # Process weights to create W_UK_T and W_UV attributes needed by MLA
+        act_dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
+        impl.process_weights_after_loading(act_dtype)
 
-    # Create mock layer and output buffer
-    mock_layer = MockAttentionLayer(device)
-    num_tokens = query.shape[0]
-    output = torch.empty(
-        num_tokens, num_heads * v_head_dim, dtype=query.dtype, device=query.device
-    )
+        # Create mock layer and output buffer
+        mock_layer = MockAttentionLayer(device)
+        num_tokens = query.shape[0]
+        output = torch.empty(
+            num_tokens, num_heads * v_head_dim, dtype=query.dtype, device=query.device
+        )
 
-    # Run forward pass
-    # NOTE: The query, key, and value are already shaped correctly
-    # in the calling test function.
-    output = impl.forward(
-        mock_layer, query, kv_c, k_pe, kv_cache, attn_metadata, output=output
-    )
+        # Run forward pass
+        # NOTE: The query, key, and value are already shaped correctly
+        # in the calling test function.
+        output = impl.forward(
+            mock_layer, query, kv_c, k_pe, kv_cache, attn_metadata, output=output
+        )
 
-    return output
+        return output
 
 
 @pytest.mark.parametrize(
@@ -542,7 +551,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     kv_b_proj_weight = kv_b_proj_weight.view(
         kv_lora_rank, num_q_heads * (qk_nope_head_dim + v_head_dim)
     )
-    mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T)
+    mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T, requires_grad=False)
 
     # Create metadata using original batch spec
     common_attn_metadata = create_common_attn_metadata(
