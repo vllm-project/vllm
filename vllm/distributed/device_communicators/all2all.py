@@ -147,8 +147,9 @@ class PPLXAll2AllManager(All2AllManagerBase):
 
     def __init__(self, cpu_group):
         assert has_pplx(), (
-            "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install pplx_kernels."
-        )  # noqa
+            "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md"
+            " to install pplx_kernels."
+        )
         super().__init__(cpu_group)
 
         if self.internode:
@@ -220,7 +221,8 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
 
     def __init__(self, cpu_group):
         assert has_deep_ep(), (
-            "DeepEP kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install DeepEP kernels."
+            "DeepEP kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md"
+            " to install DeepEP kernels."
         )  # noqa
         super().__init__(cpu_group)
         self.handle_cache = Cache()

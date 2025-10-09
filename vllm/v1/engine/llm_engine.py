@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
@@ -96,16 +97,14 @@ class LLMEngine:
         self.should_execute_dummy_batch = False
 
         if self.model_config.skip_tokenizer_init:
-            self.tokenizer = None
+            tokenizer = None
         else:
-            # Tokenizer (+ ensure liveness if running in another process).
-            self.tokenizer = init_tokenizer_from_configs(
-                model_config=vllm_config.model_config
-            )
+            tokenizer = init_tokenizer_from_configs(self.model_config)
 
-        # Processor (convert Inputs --> EngineCoreRequests)
-        self.processor = Processor(
-            vllm_config=vllm_config, tokenizer=self.tokenizer, mm_registry=mm_registry
+        self.processor = Processor(self.vllm_config, tokenizer)
+        self.io_processor = get_io_processor(
+            self.vllm_config,
+            self.model_config.io_processor_plugin,
         )
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
@@ -315,12 +314,6 @@ class LLMEngine:
 
         return processed_outputs.request_outputs
 
-    def get_vllm_config(self):
-        return self.vllm_config
-
-    def get_model_config(self):
-        return self.model_config
-
     def start_profile(self):
         self.engine_core.profile(True)
 
@@ -346,6 +339,14 @@ class LLMEngine:
     def get_metrics(self) -> list[Metric]:
         assert self.log_stats, "Stat logging disabled"
         return get_metrics_snapshot()
+
+    @property
+    def tokenizer(self) -> Optional[AnyTokenizer]:
+        return self.processor.tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, tokenizer: Optional[AnyTokenizer]) -> None:
+        self.processor.tokenizer = tokenizer
 
     def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:

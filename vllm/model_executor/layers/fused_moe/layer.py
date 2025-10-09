@@ -283,6 +283,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> Optional[FusedMoEQuantConfig]:
         raise NotImplementedError
 
+    @property
+    def using_modular_kernel(self) -> bool:
+        return self.fused_experts is not None
+
     @abstractmethod
     def apply(
         self,
@@ -886,10 +890,7 @@ def determine_expert_map(
     # Distribute experts as evenly as possible to each rank.
     base_experts = global_num_experts // ep_size
     remainder = global_num_experts % ep_size
-    if ep_rank < remainder:
-        local_num_experts = base_experts + 1
-    else:
-        local_num_experts = base_experts
+    local_num_experts = base_experts + 1 if ep_rank < remainder else base_experts
 
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
@@ -1197,6 +1198,8 @@ class FusedMoE(CustomOp):
             if quant_config is None
             else quant_config.get_quant_method(self, prefix)
         )
+        if quant_method is None:
+            quant_method = UnquantizedFusedMoEMethod(moe)
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
@@ -1238,39 +1241,25 @@ class FusedMoE(CustomOp):
         self.batched_hidden_states: Optional[torch.Tensor] = None
         self.batched_router_logits: Optional[torch.Tensor] = None
 
-        # TODO(bnell): flashinfer uses non-batched format.
-        # Does it really need a batched buffer?
-        if (
-            self.moe_parallel_config.use_pplx_kernels
-            or self.moe_parallel_config.use_deepep_ll_kernels
-            or self.moe_config.use_flashinfer_cutlass_kernels
-        ):
+        if self.use_dp_chunking:
+            states_shape: tuple[int, ...]
+            logits_shape: tuple[int, ...]
+
+            # Note here we use `num_experts` which is logical expert count
             if vllm_config.parallel_config.enable_dbo:
-                self.batched_hidden_states = torch.zeros(
-                    (2, moe.max_num_tokens, self.hidden_size),
-                    dtype=moe.in_dtype,
-                    device=torch.cuda.current_device(),
-                )
-
-                # Note here we use `num_experts` which is logical expert count
-                self.batched_router_logits = torch.zeros(
-                    (2, moe.max_num_tokens, num_experts),
-                    dtype=moe.in_dtype,
-                    device=torch.cuda.current_device(),
-                )
+                states_shape = (2, moe.max_num_tokens, self.hidden_size)
+                logits_shape = (2, moe.max_num_tokens, num_experts)
             else:
-                self.batched_hidden_states = torch.zeros(
-                    (moe.max_num_tokens, self.hidden_size),
-                    dtype=moe.in_dtype,
-                    device=torch.cuda.current_device(),
-                )
+                states_shape = (moe.max_num_tokens, self.hidden_size)
+                logits_shape = (moe.max_num_tokens, num_experts)
 
-                # Note here we use `num_experts` which is logical expert count
-                self.batched_router_logits = torch.zeros(
-                    (moe.max_num_tokens, num_experts),
-                    dtype=moe.in_dtype,
-                    device=torch.cuda.current_device(),
-                )
+            self.batched_hidden_states = torch.zeros(
+                states_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
+            )
+
+            self.batched_router_logits = torch.zeros(
+                logits_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
+            )
 
     @property
     def shared_experts(self) -> Optional[torch.nn.Module]:
@@ -1322,6 +1311,16 @@ class FusedMoE(CustomOp):
             self.moe_quant_config is not None
             and self.moe_quant_config.quant_dtype == "nvfp4"
             and self.moe_config.use_flashinfer_cutlass_kernels
+        )
+
+    @property
+    def use_dp_chunking(self) -> bool:
+        # Route to the chunked forward path using the FlashInfer Cutlass kernel
+        # only when data parallelism (DP) is enabled.
+        return (
+            self.moe_parallel_config.use_pplx_kernels
+            or self.moe_parallel_config.use_deepep_ll_kernels
+            or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
         )
 
     def update_expert_map(self):
@@ -1988,21 +1987,17 @@ class FusedMoE(CustomOp):
         Therefore it is required that we reduce the shared_experts output
         early.
         """
+        assert self.quant_method is not None
         return (
-            self.use_pplx_kernels
-            or self.use_deepep_ht_kernels
-            or self.use_deepep_ll_kernels
+            self.quant_method.fused_experts is not None
+            and self.quant_method.fused_experts.output_is_reduced()
         )
 
     def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
         """
-        The pplx combine kernel reduces across GPU ranks by default.
+        Some combine kernels reduce across GPU ranks by default.
         """
-        if (
-            self.use_pplx_kernels
-            or self.use_deepep_ht_kernels
-            or self.use_deepep_ll_kernels
-        ):
+        if self.must_reduce_shared_expert_outputs():
             return final_hidden_states
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
@@ -2210,23 +2205,11 @@ class FusedMoE(CustomOp):
 
         self.ensure_moe_quant_config()
 
-        # Route to the chunked forward path using the FlashInfer Cutlass kernel
-        # only when data parallelism (DP) is enabled.
-        _use_flashinfer_cutlass_kernels = (
-            self.dp_size > 1 and self.use_flashinfer_cutlass_kernels
-        )
-
-        if (
-            self.moe_parallel_config.use_pplx_kernels
-            or self.moe_parallel_config.use_deepep_ll_kernels
-            or _use_flashinfer_cutlass_kernels
-        ):
+        if self.use_dp_chunking:
             return self.forward_impl_chunked(hidden_states, router_logits)
 
         do_naive_dispatch_combine: bool = (
-            self.dp_size > 1
-            and not self.moe_parallel_config.use_deepep_ht_kernels
-            and not self.moe_config.use_flashinfer_cutlass_kernels
+            self.dp_size > 1 and not self.quant_method.using_modular_kernel
         )
 
         # If there are shared experts but we are not using a modular kernel, the

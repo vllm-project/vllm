@@ -89,7 +89,7 @@ flashinfer_trtllm_fp8_per_tensor_scale_moe = _lazy_import_wrapper(
 flashinfer_cutlass_fused_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "cutlass_fused_moe"
 )
-fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
+flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer", "nvfp4_block_scale_interleave"
 )
@@ -220,6 +220,8 @@ def force_use_trtllm_attention() -> bool | None:
 
 def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:
     """Check if the current configuration supports TRTLLM attention."""
+    if force_use_trtllm_attention() is False:
+        return False
     has_trtllm = supports_trtllm_attention()
     return has_trtllm and (num_qo_heads % num_kv_heads == 0)
 
@@ -267,11 +269,6 @@ def use_trtllm_attention(
 
     # Must use TRTLLM attention if query is FP8 quantized
     if q_dtype == current_platform.fp8_dtype():
-        if has_sinks:
-            raise RuntimeError(
-                "TRTLLM FP8-qkv kernel is not supported for attention sinks. "
-                "Use kv_cache_dtype=auto for now."
-            )
         logger.info_once("Using TRTLLM attention (query is quantized).")
         return True
 
@@ -283,11 +280,18 @@ def use_trtllm_attention(
 
     if force_use_trtllm is None:
         # Environment variable not set - use auto-detection
-        use_trtllm = (
-            num_tokens <= 256 and max_seq_len <= 131072 and kv_cache_dtype == "auto"
-        )
-        if use_trtllm:
-            logger.warning_once("Using TRTLLM attention (auto-detected).")
+        if is_prefill:
+            # Prefill auto-detection
+            use_trtllm = max_seq_len <= 131072 and kv_cache_dtype == "auto"
+            if use_trtllm:
+                logger.warning_once("Using TRTLLM prefill attention (auto-detected).")
+        else:
+            # Decode auto-detection
+            use_trtllm = (
+                num_tokens <= 256 and max_seq_len <= 131072 and kv_cache_dtype == "auto"
+            )
+            if use_trtllm:
+                logger.warning_once("Using TRTLLM decode attention (auto-detected).")
         return use_trtllm
 
     # Environment variable is set to 1 - respect it
@@ -377,8 +381,6 @@ def flashinfer_scaled_fp4_mm(
     assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
     assert a.stride(-1) == 1 and b.stride(-1) == 1
     assert a.shape[1] == b.shape[1]
-    assert block_scale_a.shape[1] == a.shape[1] // 8
-    assert block_scale_b.shape[1] == b.shape[1] // 8
 
     if backend == "cutlass":
         block_scale_a = block_scale_a.view(torch.uint8)
@@ -435,7 +437,7 @@ __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
-    "fp4_quantize",
+    "flashinfer_fp4_quantize",
     "nvfp4_block_scale_interleave",
     "trtllm_fp4_block_scale_moe",
     "autotune",

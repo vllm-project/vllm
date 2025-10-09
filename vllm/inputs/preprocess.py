@@ -18,6 +18,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils.jsontree import json_iter_leaves
 
 from .data import (
     DecoderOnlyInputs,
@@ -65,7 +66,7 @@ class InputPreprocessor:
 
     def get_bos_token_id(self) -> Optional[int]:
         if self.tokenizer is None:
-            logger.warning(
+            logger.warning_once(
                 "Using None for BOS token id because tokenizer is not initialized"
             )
             return None
@@ -74,7 +75,7 @@ class InputPreprocessor:
 
     def get_eos_token_id(self) -> Optional[int]:
         if self.tokenizer is None:
-            logger.warning(
+            logger.warning_once(
                 "Using None for EOS token id because tokenizer is not initialized"
             )
             return None
@@ -273,7 +274,10 @@ class InputPreprocessor:
         mm_hashes = mm_input["mm_hashes"]
 
         # Validate that all mm items have a string as their hash
-        if not contains_only_strings(mm_hashes):
+        contains_only_strings = all(
+            isinstance(leaf, str) for leaf in json_iter_leaves(mm_hashes)
+        )
+        if not contains_only_strings:
             raise ValueError(
                 f"mm_hashes must contain only strings, got: {mm_hashes}. "
                 "This is likely due to an incorrect custom implementation of "
@@ -344,8 +348,8 @@ class InputPreprocessor:
         if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_token_ids,
-                parsed_content.get("multi_modal_data", {}),
-                parsed_content.get("mm_processor_kwargs"),
+                parsed_content.get("multi_modal_data") or {},
+                parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
@@ -373,8 +377,8 @@ class InputPreprocessor:
         if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_text,
-                parsed_content.get("multi_modal_data", {}),
-                parsed_content.get("mm_processor_kwargs"),
+                parsed_content.get("multi_modal_data") or {},
+                parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
@@ -693,15 +697,3 @@ class InputPreprocessor:
     def clear_cache(self) -> None:
         if self.mm_processor_cache is not None:
             self.mm_processor_cache.clear_cache()
-
-
-# Helper function to validate that a nested dictionary contains
-# only strings or list of strings as the leaf values.
-def contains_only_strings(obj: object):
-    if isinstance(obj, str):
-        return True
-    if isinstance(obj, list):
-        return all(isinstance(x, str) for x in obj)
-    if isinstance(obj, dict):
-        return all(contains_only_strings(v) for v in obj.values())
-    return False

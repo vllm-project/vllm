@@ -12,17 +12,17 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 from vllm.inputs import PromptType
-from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
@@ -105,18 +105,14 @@ class AsyncLLM(EngineClient):
             )
 
         if self.model_config.skip_tokenizer_init:
-            self.tokenizer = None
+            tokenizer = None
         else:
-            # Tokenizer (+ ensure liveness if running in another process).
-            self.tokenizer = init_tokenizer_from_configs(
-                model_config=vllm_config.model_config
-            )
+            tokenizer = init_tokenizer_from_configs(self.model_config)
 
-        # Processor (converts Inputs --> EngineCoreRequests).
-        self.processor = Processor(
-            vllm_config=vllm_config,
-            tokenizer=self.tokenizer,
-            mm_registry=mm_registry,
+        self.processor = Processor(self.vllm_config, tokenizer)
+        self.io_processor = get_io_processor(
+            self.vllm_config,
+            self.model_config.io_processor_plugin,
         )
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
@@ -623,14 +619,13 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
 
-    async def get_vllm_config(self) -> VllmConfig:
-        return self.vllm_config
+    @property
+    def tokenizer(self) -> Optional[AnyTokenizer]:
+        return self.processor.tokenizer
 
-    async def get_model_config(self) -> ModelConfig:
-        return self.model_config
-
-    async def get_input_preprocessor(self) -> InputPreprocessor:
-        return self.processor.input_preprocessor
+    @tokenizer.setter
+    def tokenizer(self, tokenizer: Optional[AnyTokenizer]) -> None:
+        self.processor.tokenizer = tokenizer
 
     async def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:

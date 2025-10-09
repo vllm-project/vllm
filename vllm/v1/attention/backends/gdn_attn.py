@@ -79,7 +79,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.speculative_config = vllm_config.speculative_config
         self.kv_cache_spec = kv_cache_spec
         if self.speculative_config:
-            self.num_spec = self.speculative_config.num_speculative_tokens  # noqa: E501
+            self.num_spec = self.speculative_config.num_speculative_tokens
         else:
             self.num_spec = 0
         self.use_spec_decode = self.num_spec > 0
