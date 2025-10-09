@@ -165,16 +165,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-COPY setup.py setup.py
-COPY pyproject.toml pyproject.toml
-COPY cmake/ cmake/
-COPY csrc/ csrc/
-COPY requirements/ requirements
-COPY vllm/ vllm/
-COPY CMakeLists.txt CMakeLists.txt
-
-COPY tools/check_repo.sh tools/check_repo.sh
-
+COPY . .
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
