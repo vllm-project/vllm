@@ -278,7 +278,6 @@ def test_additional_cases():
             [12, 25, 50, 100, 150, 200],  # Increasing weights
         ]
     )
-    policy = DefaultEplb()
     phy2log2, log2phy2, logcnt2 = policy.rebalance_experts(weight2, 10, 3, 1, 2)
 
     assert phy2log2.shape == (2, 10)
