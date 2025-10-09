@@ -55,11 +55,11 @@ from typing import Optional
 
 import numpy as np
 from colorama import Fore, Style
+from profiler_utils import BlockManager, ExtraInfo
 from sortedcontainers import SortedDict
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from profiler_utils import BlockManager, ExtraInfo
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.inputs import TokensPrompt
@@ -1221,11 +1221,11 @@ if __name__ == "__main__":
             the hash_ids in trace, \
             which can be different from the block size of vLLM",
     )
-    # parser.add_argument(
-    #     "--enable-wa-policy",
-    #     action="store_true",
-    #     help="evictor policy, such as LRU, WA (workload-aware)",
-    # )
+    parser.add_argument(
+        "--enable-wa-policy",
+        action="store_true",
+        help="evictor policy, such as LRU, WA (workload-aware)",
+    )
     # parser.add_argument(
     #     "--wa-offline-param-path",
     #     type=str,
