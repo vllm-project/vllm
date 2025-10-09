@@ -369,6 +369,20 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         num_gpu_blocks=num_gpu_blocks,
         block_size=block_size,
     )
+
+    # For spec decode tests, add a speculative_config to set the reorder_batch_threshold
+    if is_spec_decode_test:
+        from vllm.config import SpeculativeConfig
+
+        # Get the query length from the batch spec (they should all be uniform)
+        query_len = batch_spec.query_lens[0]
+        # Set num_speculative_tokens to query_len - 1
+        # (since threshold is 1 + num_spec_tokens)
+        # Use ngram method which doesn't require a draft model
+        vllm_config.speculative_config = SpeculativeConfig(
+            method="ngram", num_speculative_tokens=query_len - 1
+        )
+
     device = torch.device("cuda:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
@@ -547,9 +561,9 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     query_vllm = torch.cat(all_q_vllm, dim=0)
     kv_c_vllm = torch.cat(all_kv_c_vllm, dim=0)
     k_pe_vllm = torch.cat(all_k_pe_vllm, dim=0)
-    sdpa_outputs = []
+    sdpa_outputs = {}
     for backend_idx, backend in enumerate(BACKENDS_TO_TEST):
-        sdpa_outputs.append(torch.cat(all_sdpa_outputs[backend_idx], dim=0))
+        sdpa_outputs[backend] = torch.cat(all_sdpa_outputs[backend_idx], dim=0)
 
     # Create mock kv_b_proj using the same weights as reference implementation
     from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -610,14 +624,17 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
             mock_kv_b_proj,
         )
 
+        # Use backend_idx to get the correct SDPA output for this backend
+        expected_output = sdpa_outputs[backend_name]
+
         # Check shape and dtype consistency
-        assert backend_output.shape == sdpa_outputs[backend_idx].shape, (
+        assert backend_output.shape == expected_output.shape, (
             f"[{backend_name}] shape {backend_output.shape} != "
-            f"SDPA shape {sdpa_outputs[backend_idx].shape}"
+            f"SDPA shape {expected_output.shape}"
         )
-        assert backend_output.dtype == sdpa_outputs[backend_idx].dtype, (
+        assert backend_output.dtype == expected_output.dtype, (
             f"[{backend_name}] dtype {backend_output.dtype} != "
-            f"SDPA dtype {sdpa_outputs[backend_idx].dtype}"
+            f"SDPA dtype {expected_output.dtype}"
         )
 
         assert torch.isfinite(backend_output).all(), (
@@ -628,15 +645,12 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         rtol = 1e-2
         atol = 5e-1
 
-        max_diff = torch.max(
-            torch.abs(backend_output - sdpa_outputs[backend_idx])
-        ).item()
+        max_diff = torch.max(torch.abs(backend_output - expected_output)).item()
         max_rel_diff = torch.max(
-            torch.abs(backend_output - sdpa_outputs[backend_idx])
-            / torch.abs(sdpa_outputs[backend_idx])
+            torch.abs(backend_output - expected_output) / torch.abs(expected_output)
         ).item()
         all_close = torch.allclose(
-            backend_output, sdpa_outputs[backend_idx], rtol=rtol, atol=atol
+            backend_output, expected_output, rtol=rtol, atol=atol
         )
 
         assert all_close, (
