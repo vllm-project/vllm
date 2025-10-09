@@ -294,8 +294,6 @@ class BailingMoE(nn.Module):
 
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_experts,
-            fused_output_scaling_factor=self.routed_scaling_factor,
-            shared_output_scaling_factor=1.0,
             num_experts=self.num_experts,
             top_k=self.top_k,
             hidden_size=self.hidden_size,
