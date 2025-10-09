@@ -56,23 +56,6 @@ def _get_processor_factory_fn(processor_cls: Union[type, tuple[type, ...]]):
     return processor_cls
 
 
-def split_and_quantize(allowed_kwargs: dict[str, Any]):
-    static_kwargs: dict[str, Any] = {}
-    dynamic_kwargs: dict[str, Any] = {}
-
-    for key, value in allowed_kwargs.items():
-        if key in DYNAMIC_KEYS:
-            # TODO: quantize value
-            dynamic_kwargs[key] = value
-        elif isinstance(value, dict):
-            static_kwargs[key] = HashableDict(value)
-        elif isinstance(value, list):
-            static_kwargs[key] = HashableList(value)
-        else:
-            static_kwargs[key] = value
-    return static_kwargs, dynamic_kwargs
-
-
 def _merge_mm_kwargs(
     model_config: "ModelConfig",
     processor_cls: Union[type, tuple[type, ...]],
@@ -168,7 +151,6 @@ def cached_processor_from_config(
     processor_cls: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
-
     return cached_get_processor(
         model_config.model,
         revision=model_config.revision,
