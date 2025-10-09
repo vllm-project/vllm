@@ -386,8 +386,6 @@ def flashinfer_scaled_fp4_mm(
     assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
     assert a.stride(-1) == 1 and b.stride(-1) == 1
     assert a.shape[1] == b.shape[1]
-    assert block_scale_a.shape[1] == a.shape[1] // 8
-    assert block_scale_b.shape[1] == b.shape[1] // 8
 
     if backend == "cutlass":
         block_scale_a = block_scale_a.view(torch.uint8)
