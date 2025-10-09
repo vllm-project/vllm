@@ -4,46 +4,90 @@
 from __future__ import annotations
 
 import atexit
-import logging
 import os
 import sys
+import threading
 import time
-from logging.handlers import MemoryHandler
+from contextlib import suppress
 from types import TracebackType
-from typing import Optional
+from typing import TextIO
 
 import vllm.envs as envs
-from vllm.logger import init_logger
 
-logger = init_logger(__name__)
+_LOG_PATH = envs.VLLM_LITE_PROFILER_LOG_PATH
+_THREAD_LOCK = threading.Lock()
 
-# Setup buffered file logging using MemoryHandler
-_log_path = envs.VLLM_LITE_PROFILER_LOG_PATH
-if _log_path:
-    # Create file handler for the profiler output
-    file_handler = logging.FileHandler(_log_path, mode="w")
-    file_handler.setFormatter(logging.Formatter("%(message)s"))
 
-    # Create memory handler that buffers logs and flushes periodically
-    memory_handler = MemoryHandler(
-        capacity=1000,  # Buffer up to 1000 log entries
-        flushLevel=logging.CRITICAL,  # Don't auto-flush unless critical
-        target=file_handler,
-    )
+def _get_process_rank() -> int | None:
+    """Get the current process rank in distributed/multi-process environments.
 
-    logger.addHandler(memory_handler)
-    logger.propagate = False
+    In distributed machine learning setups, multiple processes are spawned
+    across different GPUs/nodes. Each process has a unique rank (0, 1, 2, ...).
+    To avoid duplicate profiling data and file contention, we typically want
+    only rank 0 (the main process) to perform profiling and logging.
 
-    # Register cleanup to flush buffer on exit
-    atexit.register(memory_handler.flush)
+    This function checks common environment variables used by different
+    frameworks:
+    - VLLM_DP_RANK: vLLM's data parallel rank
+    - LOCAL_RANK: Local rank within a single node
+    """
+    for env_name in ("VLLM_DP_RANK", "LOCAL_RANK"):
+        value = os.environ.get(env_name)
+        if value is not None:
+            try:
+                return int(value)
+            except ValueError:
+                return None
+    return None
+
+
+_SHOULD_LOG = _LOG_PATH and ((rank := _get_process_rank()) is None
+                             or rank == 0)
+
+# Cache for log file handles
+_log_file_cache: dict[str, TextIO] = {}
+
+
+def _write_log_entry(name: str, elapsed_us: int) -> None:
+    """Write a profiler entry using cached file handles for optimal performance.
+
+    This function implements an efficient caching approach where file handles
+    are opened once per log path and reused for all subsequent writes. This
+    eliminates the significant overhead of opening/closing files for every
+    profiler entry, which is crucial for maintaining the lightweight nature
+    of the profiler.
+
+    The cached file handles are automatically closed on program exit via atexit.
+    """
+    if not _SHOULD_LOG or _LOG_PATH is None:
+        return
+
+    log_line = f"{name}|{elapsed_us}\n"
+    with _THREAD_LOCK:
+        log_file = _log_file_cache.get(_LOG_PATH)
+        if log_file is None:
+            directory = os.path.dirname(_LOG_PATH)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            # ruff: noqa: SIM115 - intentionally keeping file handle cached globally
+            log_file = open(_LOG_PATH, "a", buffering=50000)
+            _log_file_cache[_LOG_PATH] = log_file
+            atexit.register(log_file.close)
+
+        log_file.write(log_line)  # Ensure data is written immediately
 
 
 class LiteScope:
-    """Lite Scope that directly logs function duration"""
+    """Lightweight context manager for timing code blocks with minimal overhead.
+
+    This class provides a simple way to measure and log the execution time of
+    code blocks using Python's context manager protocol (with statement). It's
+    designed for high-frequency profiling with minimal performance impact.
+    """
 
     def __init__(self, name: str) -> None:
         self._name = name
-        self._start_time: Optional[int] = None
+        self._start_time: int | None = None
 
     def __enter__(self) -> None:
         self._start_time = time.perf_counter_ns()
@@ -58,13 +102,45 @@ class LiteScope:
             elapsed_ns = time.perf_counter_ns() - self._start_time
             # Use integer microseconds for better performance
             elapsed_us = elapsed_ns // 1000
-            # Simple format: "<name>|<elapsed_time_us>"
-            logger.info("%s|%s", self._name, elapsed_us)
+            _write_log_entry(self._name, elapsed_us)
         return False
 
 
+def clear_profiler_log() -> None:
+    """Clear the profiler log file to start fresh for a new benchmark run.
+
+    This function truncates the existing log file (if any) and removes any
+    cached file handles to ensure a clean state. This is typically called at
+    the beginning of benchmark runs to avoid accumulating data from previous
+    runs.
+    """
+    if not _LOG_PATH:
+        return
+
+    with _THREAD_LOCK:
+        # Close and remove any existing cached file handle
+        if _LOG_PATH in _log_file_cache:
+            with suppress(OSError):
+                _log_file_cache[_LOG_PATH].close()
+            del _log_file_cache[_LOG_PATH]
+
+        # Truncate the log file by opening in write mode
+        with suppress(OSError):
+            directory = os.path.dirname(_LOG_PATH)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(_LOG_PATH, 'w'):
+                pass
+
+
 def maybe_emit_lite_profiler_report() -> None:
-    """Print a lite-profiler summary when profiling is enabled."""
+    """Generate and display a summary report of profiling data if available.
+
+    This function serves as the main entry point for analyzing and displaying
+    profiling results. It checks if profiling was enabled and a log file exists,
+    then delegates to the lite_profiler_report module to generate statistics
+    like function call counts, timing distributions, and performance insights.
+    """
 
     log_path = envs.VLLM_LITE_PROFILER_LOG_PATH
     if log_path is None:

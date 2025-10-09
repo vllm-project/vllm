@@ -18,7 +18,8 @@ from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.sampling_params import BeamSearchParams
-from vllm.utils.lite_profiler import maybe_emit_lite_profiler_report
+from vllm.utils.lite_profiler import (clear_profiler_log,
+                                      maybe_emit_lite_profiler_report)
 
 
 def save_to_pytorch_benchmark_format(args: argparse.Namespace,
@@ -79,6 +80,9 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
+    # Clear lite-profiler log at the beginning of benchmark run to start fresh
+    clear_profiler_log()
+
     if args.profile and not envs.VLLM_TORCH_PROFILER_DIR:
         raise OSError(
             "The environment variable 'VLLM_TORCH_PROFILER_DIR' is not set. "
