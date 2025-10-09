@@ -156,7 +156,7 @@ def main():
         spec_token_tree_str = str(sorted(spec_token_tree, key=lambda t: (len(t), t)))
     else:
         spec_token_tree_str = None
-    print(spec_token_tree_str)
+    ic(args.num_spec_tokens, spec_token_tree_str)
 
     # vanilla inference if num_spec_tokens == 0
     if args.num_spec_tokens == 0:
@@ -202,7 +202,7 @@ def main():
         gpu_memory_utilization=0.8,
         speculative_config=speculative_config,
         disable_log_stats=False,
-        max_model_len=16384,
+        max_model_len=8192,
         seed=0,
         max_num_seqs=args.max_num_seqs,
         limit_mm_per_prompt={"image": 5},
@@ -225,13 +225,25 @@ def main():
     else:
         outputs = llm.chat(prompts, sampling_params=sampling_params)
 
+    # import Counter in the function b/c vllm has a seperate Counter object
+    def get_finish_reason_counts(outputs):
+        from collections import Counter
+        finish_reasons = [output.outputs[0].finish_reason for output in outputs]
+        return Counter(finish_reasons)
+    finish_reason_counts = get_finish_reason_counts(outputs)
+    ic(finish_reason_counts)
+
     # print the generated text
     if args.print_output:
-        for output in outputs:
-            print("-" * 50)
+        for i, output in enumerate(outputs):
+            # print("-" * 50)
             print(f"prompt: {output.prompt}")
             print(f"generated text: {output.outputs[0].text}")
-            print("-" * 50)
+            # print("-" * 50)
+            print(f"Output {i}:")
+            print(f"  Finish reason: {output.outputs[0].finish_reason}")
+            print(f"  Text: {output.outputs[0].text[:100]}...")  # First 100 chars
+            print()
 
     try:
         metrics = llm.get_metrics()
