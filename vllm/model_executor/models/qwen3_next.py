@@ -143,6 +143,8 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        self.shared_expert_gate = torch.nn.Linear(config.hidden_size, 1, bias=False)
+
         if config.shared_expert_intermediate_size > 0:
             self.shared_expert = Qwen3NextMLP(
                 hidden_size=config.hidden_size,
@@ -150,7 +152,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
-                expert_gate=torch.nn.Linear(config.hidden_size, 1, bias=False),
+                expert_gate=self.shared_expert_gate,
                 prefix=f"{prefix}.shared_expert",
             )
         else:
