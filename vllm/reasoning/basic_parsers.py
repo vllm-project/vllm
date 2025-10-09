@@ -66,7 +66,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
             self._last_checked_pos = len(input_ids)
             return True
         for idx in range(self._last_checked_pos, len(input_ids)):
-            if input_ids[idx] == self.think_end_token_id:
+            if input_ids[idx] == self.end_token_id:
                 self._reasoning_end_found = True
                 self._last_checked_pos = len(input_ids)
                 return True
