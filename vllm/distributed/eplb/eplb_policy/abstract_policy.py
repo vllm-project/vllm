@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import torch
-from typing import Optional
 from abc import ABC,abstractmethod
+from typing import Optional
+
+import torch
 
 
 class EplbPolicy(ABC):
-
     @abstractmethod
     def rebalance_experts(
         self,
