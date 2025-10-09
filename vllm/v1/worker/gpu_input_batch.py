@@ -253,6 +253,40 @@ class InputBatch:
         self.prev_sampled_token_ids: Optional[torch.Tensor] = None
         self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
         self.prev_req_id_to_index: Optional[dict[str, int]] = None
+        # These are used to update output_token_ids with real sampled
+        # ids from prior step, if required by current sampling params
+        # (e.g. penalties).
+        self.sampled_token_ids_cpu: Optional[torch.Tensor] = None
+        self.async_copy_ready_event: Optional[torch.cuda.Event] = None
+
+    def set_async_sampled_token_ids(
+        self,
+        sampled_token_ids_cpu: torch.Tensor,
+        async_copy_ready_event: torch.cuda.Event,
+    ) -> None:
+        if self.sampling_metadata.output_token_ids:
+            self.sampled_token_ids_cpu = sampled_token_ids_cpu
+            self.async_copy_ready_event = async_copy_ready_event
+        else:
+            self.sampled_token_ids_cpu = None
+            self.async_copy_ready_event = None
+
+    def update_async_output_token_ids(self) -> None:
+        output_token_ids = self.sampling_metadata.output_token_ids
+        if self.sampled_token_ids_cpu is None or not output_token_ids:
+            return
+
+        assert self.prev_req_id_to_index is not None
+        sampled_token_ids = None
+        for index, req_id in enumerate(self.req_ids):
+            prev_index = self.prev_req_id_to_index.get(req_id)
+            if prev_index is None:
+                continue
+            if sampled_token_ids is None:
+                assert self.async_copy_ready_event is not None
+                self.async_copy_ready_event.synchronize()
+                sampled_token_ids = self.sampled_token_ids_cpu.squeeze().tolist()
+            output_token_ids[index][-1] = sampled_token_ids[prev_index]
 
     @property
     def req_ids(self) -> list[str]:
@@ -777,6 +811,15 @@ class InputBatch:
             self._make_prompt_token_ids_tensor() if needs_prompt_token_ids else None
         )
 
+        # Only set output_token_ids if required by the current requests'
+        # sampling parameters.
+        needs_output_token_ids = not self.no_penalties or bool(self.bad_words_token_ids)
+        output_token_ids = (
+            cast(list[list[int]], self.req_output_token_ids)
+            if needs_output_token_ids
+            else []
+        )
+
         allowed_token_ids_mask: Optional[torch.Tensor] = None
         if not self.no_allowed_token_ids:
             assert self.allowed_token_ids_mask is not None
@@ -799,7 +842,7 @@ class InputBatch:
             frequency_penalties=self.frequency_penalties[:num_reqs],
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
-            output_token_ids=cast(list[list[int]], self.req_output_token_ids),
+            output_token_ids=output_token_ids,
             spec_token_ids=cast(list[list[int]], self.spec_token_ids),
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
