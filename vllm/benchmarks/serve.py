@@ -63,6 +63,7 @@ class TaskType(Enum):
 @dataclass
 class BenchmarkMetrics:
     completed: int
+    failed: int
     total_input: int
     total_output: int
     request_throughput: float
@@ -365,6 +366,7 @@ def calculate_metrics(
 
     # Find the time range across all successful requests
     successful_outputs = [output for output in outputs if output.success]
+    failed_outputs = [output for output in outputs if not output.success]
     if successful_outputs:
         min_start_time = min(output.start_time for output in successful_outputs)
         max_end_time = max(
@@ -426,6 +428,7 @@ def calculate_metrics(
 
     metrics = BenchmarkMetrics(
         completed=completed,
+        failed=len(failed_outputs),
         total_input=total_input,
         total_output=sum(actual_output_lens),
         request_throughput=completed / dur_s,
@@ -709,6 +712,7 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    print("{:<40} {:<10}".format("Failed requests:", metrics.failed))
     if max_concurrency is not None:
         print("{:<40} {:<10}".format("Maximum request concurrency:", max_concurrency))
     if request_rate != float("inf"):
@@ -754,6 +758,7 @@ async def benchmark(
         result = {
             "duration": benchmark_duration,
             "completed": metrics.completed,
+            "failed": metrics.failed,
             "total_input_tokens": metrics.total_input,
             "total_output_tokens": metrics.total_output,
             "request_throughput": metrics.request_throughput,
