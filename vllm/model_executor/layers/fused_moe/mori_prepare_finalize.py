@@ -66,6 +66,9 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
 
+    def output_is_reduced(self) -> bool:
+        return True
+
     def prepare(
         self,
         a1: torch.Tensor,

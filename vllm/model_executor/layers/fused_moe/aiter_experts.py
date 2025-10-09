@@ -74,7 +74,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         Aiter kernels manage memory internally, so minimal workspace is needed.
         """
         # Return minimal shapes since Aiter handles memory internally
-        workspace2 = ()  # No intermediate workspace needed
+        workspace2 = (0, )  # No intermediate workspace needed
         output_shape = aq.shape
         workspace13 = output_shape
         workspace_dtype = a.dtype
