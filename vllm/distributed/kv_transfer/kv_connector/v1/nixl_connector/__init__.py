@@ -218,9 +218,12 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_kv_connector_stats()
 
-    def get_handshake_metadata(self):
-        """Get the handshake metadata for NIXL connector."""
-        return self._handshake_metadata
+    @property
+    def handshake_metadata(self):
+        """Get current handshake metadata from worker process."""
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.xfer_metadata
 
     @classmethod
     def build_kv_connector_stats(

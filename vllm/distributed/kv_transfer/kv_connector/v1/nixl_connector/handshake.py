@@ -14,7 +14,7 @@ import zmq
 
 from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorMetadata,
+    KVConnectorHandshakeMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector._nixl_import import (  # noqa: E501
     NixlWrapper,
@@ -28,7 +28,7 @@ GET_META_MSG = b"get_meta_msg"
 
 
 @dataclass
-class NixlAgentMetadata(KVConnectorMetadata):
+class NixlAgentMetadata(KVConnectorHandshakeMetadata):
     engine_id: str
     agent_metadata: bytes
     kv_caches_base_addr: list[int]
