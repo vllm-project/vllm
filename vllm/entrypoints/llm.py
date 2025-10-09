@@ -344,7 +344,6 @@ class LLM:
         self.llm_engine = LLMEngine.from_engine_args(
             engine_args=engine_args, usage_context=UsageContext.LLM_CLASS
         )
-        self.engine_class = type(self.llm_engine)
 
         self.request_counter = Counter()
         self.default_sampling_params: dict[str, Any] | None = None
@@ -447,7 +446,7 @@ class LLM:
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        return self.engine_class.validate_outputs(outputs, RequestOutput)
+        return cast(list[RequestOutput], outputs)
 
     def _get_modality_specific_lora_reqs(
         self,
@@ -1088,15 +1087,11 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
 
-        model_outputs = self.engine_class.validate_outputs(
-            outputs, PoolingRequestOutput
-        )
-
         if io_processor_prompt:
             # get the post-processed model outputs
             assert self.io_processor is not None
             processed_outputs = self.io_processor.post_process(
-                model_output=model_outputs
+                model_output=cast(list[PoolingRequestOutput], outputs)
             )
 
             return [
@@ -1111,7 +1106,7 @@ class LLM:
                 )
             ]
         else:
-            return model_outputs
+            return cast(list[PoolingRequestOutput], outputs)
 
     def embed(
         self,
@@ -1275,8 +1270,10 @@ class LLM:
             tokenizer=tokenizer, embed_1=encoded_output_1, embed_2=encoded_output_2
         )
 
-        items = self.engine_class.validate_outputs(scores, PoolingRequestOutput)
-        return [ScoringRequestOutput.from_base(item) for item in items]
+        return [
+            ScoringRequestOutput.from_base(score)
+            for score in cast(list[PoolingRequestOutput], scores)
+        ]
 
     def _cross_encoding_score(
         self,
@@ -1339,9 +1336,10 @@ class LLM:
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        items = self.engine_class.validate_outputs(outputs, PoolingRequestOutput)
-
-        return [ScoringRequestOutput.from_base(item) for item in items]
+        return [
+            ScoringRequestOutput.from_base(output)
+            for output in cast(list[PoolingRequestOutput], outputs)
+        ]
 
     def score(
         self,
