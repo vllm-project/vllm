@@ -62,7 +62,6 @@ from vllm.model_executor.models.qwen2_audio import (
     _get_feat_extract_output_lengths,
 )
 from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalDataParser
-from vllm.model_executor.utils import split_list_into_ranges
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,
@@ -103,6 +102,7 @@ from .utils import (
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
+    split_list_into_ranges,
 )
 
 try:
