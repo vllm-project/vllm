@@ -305,23 +305,14 @@ class VllmConfig:
         # we use the default level. The default level depends on other
         # settings (see the below code).
         if self.compilation_config.level is None:
-            if envs.VLLM_USE_V1:
-                if (
-                    self.model_config is not None
-                    and not self.model_config.enforce_eager
-                ):
-                    self.compilation_config.level = CompilationLevel.PIECEWISE
-                else:
-                    self.compilation_config.level = CompilationLevel.NO_COMPILATION
-
+            if getattr(self.model_config, "enforce_eager", False):
+                self.compilation_config.level = CompilationLevel.PIECEWISE
             else:
-                # NB: Passing both --enforce-eager and a compilation level
-                # in V0 means the compilation level wins out.
                 self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
         else:
             assert self.compilation_config.level >= CompilationLevel.NO_COMPILATION
             assert self.compilation_config.level <= CompilationLevel.PIECEWISE
-            assert self.compilation_config.level <= 3
 
         # If user does not set custom ops via none or all set it here based on
         # compilation level and backend.

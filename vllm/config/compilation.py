@@ -8,7 +8,7 @@ from dataclasses import asdict, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
 
-from pydantic import TypeAdapter, field_validator
+from pydantic import Field, SkipValidation, TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
@@ -165,15 +165,15 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    level: Optional[int] = None
+    level: int = Field(default=None, ge=0, le=3)
     """The level of compilation:
 
-    - None: If None, we will select the default compilation level.
-      For V1 engine this is 3, for V0 engine this is 0.
-    - 0: no compilation.
-    - 1: dynamo as is.
-    - 2: dynamo once.
-    - 3: piecewise compilation."""
+    - 0: no compilation.\n
+    - 1: dynamo as is.\n
+    - 2: dynamo once.\n
+    - 3: piecewise compilation.
+
+    If unset, the default compilation level is used, 3."""
     debug_dump_path: Optional[Path] = None
     """The path to dump the debug information."""
     cache_dir: str = ""
@@ -210,7 +210,7 @@ class CompilationConfig:
     By default, all custom ops are enabled when running without Inductor and
     disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
-    splitting_ops: Optional[list[str]] = None
+    splitting_ops: list[str] = Field(default=None)
     """A list of ops to split the full graph into subgraphs, used in piecewise
     compilation."""
 
@@ -233,10 +233,9 @@ class CompilationConfig:
     For future compatibility:
     If use_inductor is True, backend="inductor" otherwise backend="eager".
     """
-    compile_sizes: Optional[list[Union[int, str]]] = None
-    """Sizes to compile for inductor. In addition
-    to integers, it also supports "cudagraph_capture_sizes" to
-    specify the sizes for cudagraph capture."""
+    compile_sizes: list[int] = Field(default=None)
+    """Sizes to compile for inductor. If unset, `self.cudagraph_capture_sizes`
+    will be used."""
     inductor_compile_config: dict = field(default_factory=dict)
     """Additional configurations for inductor.
     - None: use default configurations."""
@@ -248,7 +247,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: Optional[CUDAGraphMode] = None
+    cudagraph_mode: SkipValidation[CUDAGraphMode] = None
     """
     The mode of the cudagraph:
 
@@ -616,21 +615,11 @@ class CompilationConfig:
                 )
             self.cudagraph_capture_sizes = dedup_sizes
 
-        computed_compile_sizes = []
-        if self.compile_sizes is not None:
+        if self.compile_sizes is None:
+            self.compile_sizes = self.cudagraph_capture_sizes
+        else:
             # de-duplicate the sizes provided by the config
             self.compile_sizes = list(set(self.compile_sizes))
-            for x in self.compile_sizes:
-                if isinstance(x, str):
-                    assert x == "cudagraph_capture_sizes", (
-                        "Unrecognized size type in compile_sizes, "
-                        f"expect 'cudagraph_capture_sizes', got {x}"
-                    )
-                    computed_compile_sizes.extend(self.cudagraph_capture_sizes)
-                else:
-                    assert isinstance(x, int)
-                    computed_compile_sizes.append(x)
-        self.compile_sizes = computed_compile_sizes  # type: ignore
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.cudagraph_capture_sizes.sort(reverse=True)
