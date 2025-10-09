@@ -105,8 +105,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             block_shape = quant_config.block_shape
             if block_shape is not None:
                 assert not apply_router_weight_on_input, (
-                    "apply_router_weight_on_input is"
-                    " not supported for block scaled moe"
+                    "apply_router_weight_on_input is not supported for block scaled moe"
                 )
                 quant_type = QuantType.per_1x128
             else:

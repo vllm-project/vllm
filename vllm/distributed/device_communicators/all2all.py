@@ -513,8 +513,6 @@ class MoriAll2AllManager(All2AllManagerBase):
             group_name = "mori_shmem_group"
 
             try:
-                import contextlib
-
                 import torch._C._distributed_c10d as c10d
 
                 # Register the current process group
