@@ -226,6 +226,12 @@ class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
 
 
 class MiniCPM3Model(MiniCPMModel):
+    stacked_params_mapping = [
+        # (param_name, shard_name, shard_id)
+        ("gate_up_proj", "gate_proj", 0),
+        ("gate_up_proj", "up_proj", 1),
+    ]
+
     def _init_layers(
         self,
         prefix: str,
