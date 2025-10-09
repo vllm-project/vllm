@@ -403,6 +403,17 @@ class CompilationConfig:
         "vllm::plamo2_mamba_mixer",
         "vllm::gdn_attention",
         "vllm::sparse_attn_indexer",
+        "vllm.unified_attention",
+        "vllm.unified_attention_with_output",
+        "vllm.unified_mla_attention",
+        "vllm.unified_mla_attention_with_output",
+        "vllm.mamba_mixer2",
+        "vllm.mamba_mixer",
+        "vllm.short_conv",
+        "vllm.linear_attention",
+        "vllm.plamo2_mamba_mixer",
+        "vllm.gdn_attention",
+        "vllm.sparse_attn_indexer",
     ]
 
     def compute_hash(self) -> str:
