@@ -96,17 +96,4 @@ def backend_to_class(backend: _Backend) -> "type[AttentionBackend]":
         The backend class
     """
     backend_class_name = backend_to_class_str(backend)
-    return resolve_obj_by_qualname(backend_class_name)  # type: ignore[return-value]
-
-
-def backend_name_to_enum(backend_name: str) -> Optional[_Backend]:
-    """
-    Convert a string backend name to a _Backend enum value.
-
-    Returns:
-        _Backend: enum value if backend_name is a valid in-tree type
-        None: otherwise it's an invalid in-tree type or an out-of-tree platform
-              is loaded.
-    """
-    assert backend_name is not None
-    return _Backend[backend_name] if backend_name in _Backend.__members__ else None
+    return resolve_obj_by_qualname(backend_class_name)

@@ -11,7 +11,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.backends.registry import _Backend, backend_name_to_enum
+from vllm.attention.backends.registry import _Backend
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import STR_BACKEND_ENV_VAR, resolve_obj_by_qualname
@@ -30,7 +30,7 @@ def get_env_variable_attn_backend() -> Optional[_Backend]:
     * None otherwise
     """
     backend_name = os.environ.get(STR_BACKEND_ENV_VAR)
-    return None if backend_name is None else backend_name_to_enum(backend_name)
+    return None if backend_name is None else _Backend[backend_name]
 
 
 # Global state allows a particular choice of backend
@@ -125,12 +125,13 @@ def _cached_get_attn_backend(
                     STR_BACKEND_ENV_VAR,
                 )
                 backend_by_env_var = backend_by_env_var.removesuffix("_VLLM_V1")
-            selected_backend = backend_name_to_enum(backend_by_env_var)
-            if selected_backend is None:
+            try:
+                selected_backend = _Backend[backend_by_env_var]
+            except KeyError as e:
                 raise ValueError(
                     f"Invalid attention backend: '{backend_by_env_var}'. "
                     f"Valid backends are: {list(_Backend.__members__.keys())}"
-                )
+                ) from e
 
     # get device-specific attn_backend
     attention_cls = current_platform.get_attn_backend_cls(
