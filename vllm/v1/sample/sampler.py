@@ -259,8 +259,9 @@ class Sampler(nn.Module):
         sampling_metadata: SamplingMetadata,
         predict_bonus_token: bool,
     ) -> torch.Tensor:
+        bad_words_token_ids = sampling_metadata.bad_words_token_ids
         any_penalties_or_bad_words = (
-            sampling_metadata.bad_words_token_ids or not sampling_metadata.no_penalties
+            bool(bad_words_token_ids) or not sampling_metadata.no_penalties
         )
 
         output_token_ids = sampling_metadata.output_token_ids
@@ -268,7 +269,7 @@ class Sampler(nn.Module):
             # Combine base outputs with spec tokens when speculative decoding
             # is enabled.
             output_token_ids = self._combine_outputs_with_spec_tokens(
-                sampling_metadata.output_token_ids,
+                output_token_ids,
                 sampling_metadata.spec_token_ids,
             )
 
@@ -277,12 +278,8 @@ class Sampler(nn.Module):
             logits.masked_fill_(sampling_metadata.allowed_token_ids_mask, float("-inf"))
 
         # Apply bad words exclusion.
-        if sampling_metadata.bad_words_token_ids:
-            apply_bad_words(
-                logits,
-                sampling_metadata.bad_words_token_ids,
-                output_token_ids,
-            )
+        if bad_words_token_ids:
+            apply_bad_words(logits, bad_words_token_ids, output_token_ids)
 
         # Apply logits processors which can impact greedy sampling.
         for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
