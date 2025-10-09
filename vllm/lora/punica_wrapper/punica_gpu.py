@@ -221,16 +221,20 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 token_lora_indices, y, output_slices, lora_bias_stacked
             )
 
-        if buffer is None:
-            r = lora_b_stacked[0].size(-1)
-            # We set the buffer to be float32 by default, refer to:
-            # https://github.com/triton-lang/triton/issues/1387
-            # Note: buffer is zeroed inside the shrink op
-            buffer = torch.empty(  # type: ignore
-                (len(output_slices), x.size(0), r),
-                dtype=torch.float32,
-                device=x.device,
-            )
+        assert buffer is None, (
+            "To minimize overhead, the buffer should be created by "
+            ".add_lora_linear() instead of being passed in."
+        )
+        r = lora_b_stacked[0].size(-1)
+        # We set the buffer to be float32 by default, refer to:
+        # https://github.com/triton-lang/triton/issues/1387
+        # Note: buffer is zeroed inside the shrink op
+        buffer = torch.empty(  # type: ignore
+            (len(output_slices), x.size(0), r),
+            dtype=torch.float32,
+            device=x.device,
+        )
+
         self.add_shrink(
             buffer,  # type: ignore
             x,
