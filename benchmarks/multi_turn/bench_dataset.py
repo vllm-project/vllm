@@ -11,6 +11,7 @@ from bench_utils import (
     Color,
     logger,
 )
+from tqdm import tqdm
 from transformers import AutoTokenizer  # type: ignore
 
 # Conversation ID is a string (e.g: "UzTK34D")
@@ -449,18 +450,25 @@ def generate_conversations(
         )
         base_offset += common_prefix_tokens
 
-    for conv_id in range(args.num_conversations):
+    for conv_id in tqdm(
+        range(args.num_conversations),
+        total=args.num_conversations,
+        desc="Generating conversations",
+        unit="conv",
+    ):
         # Generate a single conversation
         messages: MessagesList = []
 
         nturns = turn_count[conv_id]
 
         # User prompt token count per turn (with lower limit)
-        input_token_count: np.ndarray = args.input_num_tokens.sample(nturns)
+        input_token_count: np.ndarray = args.input_num_tokens.sample(nturns).astype(int)
         input_token_count = np.maximum(input_token_count, base_prompt_token_count)
 
         # Assistant answer token count per turn (with lower limit)
-        output_token_count: np.ndarray = args.output_num_tokens.sample(nturns)
+        output_token_count: np.ndarray = args.output_num_tokens.sample(nturns).astype(
+            int
+        )
         output_token_count = np.maximum(output_token_count, 1)
 
         user_turn = True
