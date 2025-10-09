@@ -14,9 +14,9 @@ import lm_eval
 import pytest
 from packaging import version
 
-QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
-    "quark") is not None and version.parse(
-        importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
+QUARK_MXFP4_AVAILABLE = importlib.util.find_spec("quark") is not None and version.parse(
+    importlib.metadata.version("amd-quark")
+) >= version.parse("0.8.99")
 
 
 @dataclass
@@ -37,24 +37,19 @@ class EvaluationConfig:
 
 
 TEST_CONFIGS = {
-    "amd/Qwen3-8B-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8": {
-        "arc_challenge": 0.52,
-        "mmlu": 0.72
-    },
+    "amd/Qwen3-8B-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8": {"arc_challenge": 0.52, "mmlu": 0.72},
 }
 
 
 @pytest.mark.parametrize("model_name, accuracy_numbers", TEST_CONFIGS.items())
-@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE,
-                    reason="amd-quark>=0.9 is not available")
-def test_mixed_precision_model_accuracies(model_name: str,
-                                          accuracy_numbers: dict):
-
+@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
+def test_mixed_precision_model_accuracies(model_name: str, accuracy_numbers: dict):
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=EvaluationConfig(model_name).get_model_args(),
         tasks=list(accuracy_numbers.keys()),
-        batch_size=8)
+        batch_size=8,
+    )
 
     rtol = 0.05
 
