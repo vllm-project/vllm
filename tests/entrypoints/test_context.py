@@ -10,12 +10,6 @@ from vllm.entrypoints.context import HarmonyContext, StreamingHarmonyContext
 from vllm.outputs import CompletionOutput, RequestOutput
 
 
-# Helper function for Python < 3.10 compatibility
-async def async_next(async_iterator):
-    """Compatibility function equivalent to Python 3.10's anext()."""
-    return await async_iterator.__anext__()
-
-
 def create_mock_request_output(
     prompt_token_ids=None,
     output_token_ids=None,
@@ -129,7 +123,7 @@ async def test_multi_turn_token_counting():
     )
 
     # First turn - initial prompt and response
-    mock_output1 = await async_next(mock_generator)
+    mock_output1 = await anext(mock_generator)
     context.append_output(mock_output1)
 
     # At this point, we should have 5 prompt tokens and 3 output tokens
@@ -138,7 +132,7 @@ async def test_multi_turn_token_counting():
     assert context.num_tool_output_tokens == 0
 
     # Second turn - after tool output
-    mock_output2 = await async_next(mock_generator)
+    mock_output2 = await anext(mock_generator)
     context.append_output(mock_output2)
     # Current prompt tokens (15) - last_turn_input_tokens (5) -
     # last_turn_output_tokens (3) = 7
@@ -150,7 +144,7 @@ async def test_multi_turn_token_counting():
     assert context.num_cached_tokens == 5
 
     # Third turn - final response
-    mock_output3 = await async_next(mock_generator)
+    mock_output3 = await anext(mock_generator)
     context.append_output(mock_output3)
     # Additional tool output tokens from third turn:
     # Current prompt (20) - last_turn_input_tokens (15) -
