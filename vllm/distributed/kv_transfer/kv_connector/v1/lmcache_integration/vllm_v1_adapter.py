@@ -119,8 +119,6 @@ class RequestTracker:
 
     # The block ids that has been allocated so far
     # NOTE: allocated blocks could be more than the number of tokens
-    # FIXME: need to check whether the block ids will be changed after
-    #        preemption
     allocated_block_ids: list[int]
 
     # The number of tokens that has been saved
@@ -177,10 +175,6 @@ class RequestTracker:
             # (https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/
             # sched/scheduler.py#L943),
             # only one KVCacheGroup is supported in connector for now.
-
-            # TODO: Please support multiple KVCacheGroup in connector.
-            # NOTE: Also, `update` method in RequestTracker should be
-            # updated accordingly.
             unfolded_block_ids = new_request.block_ids[0].copy()
 
         # NOTE: Initialized in `update_state_after_alloc`
@@ -230,7 +224,6 @@ class RequestTracker:
 
         # When a request is scheduled again, and the number of new tokens
         # is 1 (excluding chunked prefill), the request is in decode phase.
-        # TODO: Need to further exclude the case of chunked prefill with 1 token
         if len(new_token_ids) == 1:
             self.is_decode_phase = True
 
@@ -332,7 +325,6 @@ class ReqMeta:
 
         # If the request has multimodal hashes, apply them to the token ids
         if tracker.mm_hashes:
-            # TODO: Optimize this
             token_ids_tensor = torch.tensor(token_ids)
             assert tracker.mm_positions is not None, (
                 "tracker got mm_hashes but no mm_positions"
@@ -364,7 +356,7 @@ class ReqMeta:
         )
 
         slot_mapping = slot_mapping.flatten()[: len(token_ids)]
-        assert slot_mapping.dtype == torch.long  # TODO: this could be removed
+        assert slot_mapping.dtype == torch.long
 
         # For load operation: check whether the request is scheduled to load
         if load_spec is not None and load_spec.can_load:
@@ -1195,10 +1187,6 @@ class LMCacheConnectorV1Impl:
 
         if need_to_allocate <= 0:
             return 0
-
-        # TODO: Align to vLLM block size. Should test whether it can be removed
-        # need_to_allocate = need_to_allocate // self._block_size * \
-        #        self._block_size
 
         return need_to_allocate
 

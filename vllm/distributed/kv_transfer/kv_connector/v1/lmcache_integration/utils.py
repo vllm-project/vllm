@@ -5,18 +5,15 @@ import os
 import threading
 from typing import TYPE_CHECKING, Union
 
+import torch
+from lmcache.config import LMCacheEngineConfig as Config
+from lmcache.logging import init_logger
+from lmcache.v1.config import LMCacheEngineConfig as V1Config
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.request import Request
-
-# Third Party
-import torch
-
-# First Party
-from lmcache.config import LMCacheEngineConfig as Config
-from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig as V1Config
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
