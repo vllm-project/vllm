@@ -150,19 +150,17 @@ llm = LLM(
 )
 ```
 
-Notes:
+For backward compatibility, passing an integer works as before and is interpreted as `{"count": <int>}`. For example:
 
-- Backward compatible and mixed format: passing an integer works as before and is interpreted as `{"count": <int>}`.
-  e.g., `limit_mm_per_prompt={"image": 5}` is equivalent to `limit_mm_per_prompt={"image": {"count": 5}}`.
-  e.g. `limit_mm_per_prompt={"image": 5, "video": {"count": 1, "num_frames": 32, "width": 640, "height": 640}}` is equivalent to `limit_mm_per_prompt={"image": {"count": 5}, "video": {"count": 1, "num_frames": 32, "width": 640, "height": 640}}`.
-- The size hints affect memory profiling only. They shape the dummy inputs
-  used to compute reserved activation sizes. They do not change how
-  inputs are actually processed at inference time.
-- If a hint exceeds what the model can accept, vLLM clamps it to the model’s
-  effective maximum and may log a warning.
+- `limit_mm_per_prompt={"image": 5}` is equivalent to `limit_mm_per_prompt={"image": {"count": 5}}`
+- You can mix formats: `limit_mm_per_prompt={"image": 5, "video": {"count": 1, "num_frames": 32, "width": 640, "height": 640}}`
+
+!!! note
+    - The size hints affect memory profiling only. They shape the dummy inputs used to compute reserved activation sizes. They do not change how inputs are actually processed at inference time.
+    - If a hint exceeds what the model can accept, vLLM clamps it to the model's effective maximum and may log a warning.
 
 !!! warning
-    Encoder cache size and actual input processing are not affected by these size hints, which should be addressed later.
+    These size hints currently only affect activation memory profiling. Encoder cache size is determined by the actual inputs at runtime and is not limited by these hints.
 
 ## Multi-modal processor arguments
 
