@@ -196,11 +196,11 @@ class DefaultEplb(EplbPolicy):
             weight: [layers, num_logical_experts], the load statistics for all
                 logical experts
             num_replicas: number of physical experts, must be a multiple of
-                `num_gpus`
+                `num_ranks`
             num_groups: number of expert groups
             num_nodes: number of server nodes, where the intra-node network
                 (e.g, NVLink) is faster
-            num_gpus: number of GPUs, must be a multiple of `num_nodes`
+            num_ranks: number of ranks, must be a multiple of `num_nodes`
 
         Returns:
             physical_to_logical_map: [layers, num_replicas], the expert
