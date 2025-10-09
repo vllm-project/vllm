@@ -269,11 +269,6 @@ def use_trtllm_attention(
 
     # Must use TRTLLM attention if query is FP8 quantized
     if q_dtype == current_platform.fp8_dtype():
-        if has_sinks:
-            raise RuntimeError(
-                "TRTLLM FP8-qkv kernel is not supported for attention sinks. "
-                "Use kv_cache_dtype=auto for now."
-            )
         logger.info_once("Using TRTLLM attention (query is quantized).")
         return True
 
@@ -386,8 +381,6 @@ def flashinfer_scaled_fp4_mm(
     assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
     assert a.stride(-1) == 1 and b.stride(-1) == 1
     assert a.shape[1] == b.shape[1]
-    assert block_scale_a.shape[1] == a.shape[1] // 8
-    assert block_scale_b.shape[1] == b.shape[1] // 8
 
     if backend == "cutlass":
         block_scale_a = block_scale_a.view(torch.uint8)
