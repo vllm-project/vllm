@@ -2038,6 +2038,20 @@ class FusedMoE(CustomOp):
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         return self.forward_native(hidden_states, router_logits)
 
+    def _combine_and_reduce_output(
+        self,
+        states: torch.Tensor,
+        do_combine: bool = True,
+        cond: bool = True,
+    ) -> torch.Tensor:
+        if do_combine:
+            states = get_ep_group().combine(states)
+
+        if cond and (self.tp_size > 1 or self.ep_size > 1):
+            states = self.maybe_all_reduce_tensor_model_parallel(states)
+
+        return states
+
     def forward_impl_chunked(
         self,
         full_hidden_states: torch.Tensor,
@@ -2195,24 +2209,10 @@ class FusedMoE(CustomOp):
             )
 
         full_fused_final_hidden_states = self._combine_and_reduce_output(
-            full_fused_final_hidden_states, True, False
+            full_fused_final_hidden_states, do_combine=False
         )
 
         return full_fused_final_hidden_states
-
-    def _combine_and_reduce_output(
-        self,
-        states: torch.Tensor,
-        cond: bool = True,
-        do_combine: bool = True,
-    ) -> torch.Tensor:
-        if do_combine:
-            states = get_ep_group().combine(states)
-
-        if cond and (self.tp_size > 1 or self.ep_size > 1):
-            states = self.maybe_all_reduce_tensor_model_parallel(states)
-
-        return states
 
     def forward_impl(
         self,
@@ -2304,23 +2304,35 @@ class FusedMoE(CustomOp):
 
             final_hidden_states = (
                 self._combine_and_reduce_output(
-                    final_hidden_states[0], cond=must_reduce, do_combine=False
+                    final_hidden_states[0],
+                    do_combine=False,
+                    cond=must_reduce,
                 ),
                 self._combine_and_reduce_output(
                     final_hidden_states[1],
-                    cond=not must_reduce,
                     do_combine=do_naive_dispatch_combine,
+                    cond=not must_reduce,
                 ),
             )
 
             return self.shared_fused_combine(
                 final_hidden_states[0], final_hidden_states[1]
             )
+        elif self.zero_expert_num is not None and self.zero_expert_num > 0:
+            assert isinstance(final_hidden_states, torch.Tensor)
+            assert zero_expert_result is not None
+            return (
+                self._combine_and_reduce_output(
+                    final_hidden_states, do_combine=do_naive_dispatch_combine
+                )
+                + zero_expert_result
+            )
         else:
             # print("GOT HERE A")
             assert not isinstance(final_hidden_states, tuple)
             return self._combine_and_reduce_output(
-                final_hidden_states, do_combine=do_naive_dispatch_combine
+                final_hidden_states,
+                do_combine=do_naive_dispatch_combine,
             )
 
     @classmethod
