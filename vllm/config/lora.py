@@ -88,13 +88,7 @@ class LoRAConfig:
         factors.append(self.lora_extra_vocab_size)
         factors.append(self.lora_vocab_padding_size)
         factors.append(self.bias_enabled)
-<<<<<<< HEAD
-        factors.append(self.max_num_labels)
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-=======
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
->>>>>>> origin/main
         return hash_str
 
     def __post_init__(self):
@@ -144,7 +138,9 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
-        if (self.max_num_labels is None
-                and model_config.pooler_config is not None):
-            self.max_num_labels = (8 if model_config.hf_config.num_labels < 8
-                                   else model_config.hf_config.num_labels)
+        if self.max_num_labels is None and model_config.pooler_config is not None:
+            self.max_num_labels = (
+                8
+                if model_config.hf_config.num_labels < 8
+                else model_config.hf_config.num_labels
+            )
