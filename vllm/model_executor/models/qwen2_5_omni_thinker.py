@@ -406,10 +406,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 filtered_updates = {
                     k: v for k, v in mm_prompt_updates.items() if k != "audio"
                 }
-                (
-                    prompt_ids,
-                    mm_placeholders,
-                ) = self._apply_prompt_updates(
+                prompt_ids, mm_placeholders = self._apply_prompt_updates(
                     prompt_ids,
                     filtered_updates,
                 )
@@ -418,10 +415,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                     mm_placeholders, mm_prompt_updates
                 )
             else:
-                (
-                    prompt_ids,
-                    mm_placeholders,
-                ) = self._apply_prompt_updates(
+                prompt_ids, mm_placeholders = self._apply_prompt_updates(
                     prompt_ids,
                     mm_prompt_updates,
                 )
@@ -573,7 +567,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         if num_audios != num_videos:
             raise ValueError(
                 f"use_audio_in_video requires equal number of audio and video items, "
-                f"got audio={num_audios}, video={num_videos}"
+                f"got {num_audios=}, {num_videos=}"
             )
 
         tokenizer = self.info.get_tokenizer()
