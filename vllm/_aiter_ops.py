@@ -11,7 +11,7 @@ from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
 
 
 def is_aiter_supported(func: Callable) -> Callable:
-    """Decorator that only executes the function if 
+    """Decorator that only executes the function if
     ROCm AITER package is supported on gfx9 archs.
     """
 
@@ -22,8 +22,7 @@ def is_aiter_supported(func: Callable) -> Callable:
 
         from vllm.platforms.rocm import on_gfx9
 
-        if (current_platform.is_rocm() and on_gfx9()
-                and find_spec("aiter") is not None):
+        if current_platform.is_rocm() and on_gfx9() and find_spec("aiter") is not None:
             return func(*args, **kwargs)
         else:
             # Return None or do nothing if not supported
@@ -53,9 +52,21 @@ def _rocm_aiter_fused_moe_impl(
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
 
-    return fused_moe(hidden_states, w1, w2, topk_weight, topk_ids, expert_mask,
-                     activation, quant_type, doweight_stage1, w1_scale,
-                     w2_scale, a1_scale, a2_scale)
+    return fused_moe(
+        hidden_states,
+        w1,
+        w2,
+        topk_weight,
+        topk_ids,
+        expert_mask,
+        activation,
+        quant_type,
+        doweight_stage1,
+        w1_scale,
+        w2_scale,
+        a1_scale,
+        a2_scale,
+    )
 
 
 def _rocm_aiter_fused_moe_fake(
@@ -77,132 +88,154 @@ def _rocm_aiter_fused_moe_fake(
 
 
 def _rocm_aiter_asm_moe_tkw1_impl(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        fc1_scale: Optional[torch.Tensor] = None,
-        fc2_scale: Optional[torch.Tensor] = None,
-        fc1_smooth_scale: Optional[torch.Tensor] = None,
-        fc2_smooth_scale: Optional[torch.Tensor] = None,
-        a16: bool = False,
-        per_tensor_quant_scale: Optional[torch.Tensor] = None,
-        expert_mask: Optional[torch.Tensor] = None,
-        activation_method: int = 0) -> torch.Tensor:
-
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    fc1_scale: Optional[torch.Tensor] = None,
+    fc2_scale: Optional[torch.Tensor] = None,
+    fc1_smooth_scale: Optional[torch.Tensor] = None,
+    fc2_smooth_scale: Optional[torch.Tensor] = None,
+    a16: bool = False,
+    per_tensor_quant_scale: Optional[torch.Tensor] = None,
+    expert_mask: Optional[torch.Tensor] = None,
+    activation_method: int = 0,
+) -> torch.Tensor:
     from aiter import ActivationType
     from aiter.fused_moe_bf16_asm import asm_moe_tkw1
 
     activation = ActivationType(activation_method)
 
-    return asm_moe_tkw1(hidden_states,
-                        w1,
-                        w2,
-                        topk_weights,
-                        topk_ids,
-                        fc1_scale=fc1_scale,
-                        fc2_scale=fc2_scale,
-                        fc1_smooth_scale=fc1_smooth_scale,
-                        fc2_smooth_scale=fc2_smooth_scale,
-                        a16=a16,
-                        per_tensor_quant_scale=per_tensor_quant_scale,
-                        expert_mask=expert_mask,
-                        activation=activation)
+    return asm_moe_tkw1(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        fc1_scale=fc1_scale,
+        fc2_scale=fc2_scale,
+        fc1_smooth_scale=fc1_smooth_scale,
+        fc2_smooth_scale=fc2_smooth_scale,
+        a16=a16,
+        per_tensor_quant_scale=per_tensor_quant_scale,
+        expert_mask=expert_mask,
+        activation=activation,
+    )
 
 
 def _rocm_aiter_asm_moe_tkw1_fake(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        fc1_scale: Optional[torch.Tensor] = None,
-        fc2_scale: Optional[torch.Tensor] = None,
-        fc1_smooth_scale: Optional[torch.Tensor] = None,
-        fc2_smooth_scale: Optional[torch.Tensor] = None,
-        a16: bool = False,
-        per_tensor_quant_scale: Optional[torch.Tensor] = None,
-        expert_mask: Optional[torch.Tensor] = None,
-        activation_method: int = 0) -> torch.Tensor:
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    fc1_scale: Optional[torch.Tensor] = None,
+    fc2_scale: Optional[torch.Tensor] = None,
+    fc1_smooth_scale: Optional[torch.Tensor] = None,
+    fc2_smooth_scale: Optional[torch.Tensor] = None,
+    a16: bool = False,
+    per_tensor_quant_scale: Optional[torch.Tensor] = None,
+    expert_mask: Optional[torch.Tensor] = None,
+    activation_method: int = 0,
+) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
 
-def _rocm_aiter_topk_softmax_impl(topk_weights: torch.Tensor,
-                                  topk_indices: torch.Tensor,
-                                  token_expert_indices: torch.Tensor,
-                                  gating_output: torch.Tensor,
-                                  renormalize: bool) -> None:
+def _rocm_aiter_topk_softmax_impl(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+) -> None:
     from aiter import topk_softmax
-    topk_softmax(topk_weights, topk_indices, token_expert_indices,
-                 gating_output, renormalize)
+
+    topk_softmax(
+        topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
+    )
 
 
-def _rocm_aiter_topk_softmax_fake(topk_weights: torch.Tensor,
-                                  topk_indices: torch.Tensor,
-                                  token_expert_indices: torch.Tensor,
-                                  gating_output: torch.Tensor,
-                                  renormalize: bool) -> None:
+def _rocm_aiter_topk_softmax_fake(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+) -> None:
     pass
 
 
 def _rocm_aiter_biased_grouped_topk_impl(
-        gating_output: torch.Tensor,
-        correction_bias: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        num_expert_group: int,
-        topk_group: int,
-        need_renorm: bool,
-        routed_scaling_factor: float = 1.0  # mul to topk_weights
+    gating_output: torch.Tensor,
+    correction_bias: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    num_expert_group: int,
+    topk_group: int,
+    need_renorm: bool,
+    routed_scaling_factor: float = 1.0,  # mul to topk_weights
 ) -> None:
-
     from aiter import biased_grouped_topk
 
-    biased_grouped_topk(gating_output, correction_bias, topk_weights, topk_ids,
-                        num_expert_group, topk_group, need_renorm,
-                        routed_scaling_factor)
+    biased_grouped_topk(
+        gating_output,
+        correction_bias,
+        topk_weights,
+        topk_ids,
+        num_expert_group,
+        topk_group,
+        need_renorm,
+        routed_scaling_factor,
+    )
 
 
 def _rocm_aiter_biased_grouped_topk_fake(
-        gating_output: torch.Tensor,
-        correction_bias: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        num_expert_group: int,
-        topk_group: int,
-        need_renorm: bool,
-        routed_scaling_factor: float = 1.0  # mul to topk_weights
+    gating_output: torch.Tensor,
+    correction_bias: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    num_expert_group: int,
+    topk_group: int,
+    need_renorm: bool,
+    routed_scaling_factor: float = 1.0,  # mul to topk_weights
 ) -> None:
     pass
 
 
 def _rocm_aiter_grouped_topk_impl(
-        gating_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        num_expert_group: int,
-        topk_group: int,
-        need_renorm: bool,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0  # mul to topk_weights
+    gating_output: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    num_expert_group: int,
+    topk_group: int,
+    need_renorm: bool,
+    scoring_func: str = "softmax",
+    routed_scaling_factor: float = 1.0,  # mul to topk_weights
 ) -> None:
-
     from aiter import grouped_topk
 
-    grouped_topk(gating_output, topk_weights, topk_ids, num_expert_group,
-                 topk_group, need_renorm, scoring_func, routed_scaling_factor)
+    grouped_topk(
+        gating_output,
+        topk_weights,
+        topk_ids,
+        num_expert_group,
+        topk_group,
+        need_renorm,
+        scoring_func,
+        routed_scaling_factor,
+    )
 
 
 def _rocm_aiter_grouped_topk_fake(
-        gating_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        num_expert_group: int,
-        topk_group: int,
-        need_renorm: bool,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0  # mul to topk_weights
+    gating_output: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    num_expert_group: int,
+    topk_group: int,
+    need_renorm: bool,
+    scoring_func: str = "softmax",
+    routed_scaling_factor: float = 1.0,  # mul to topk_weights
 ) -> None:
     pass
 
@@ -221,16 +254,18 @@ def _rocm_aiter_mla_decode_fwd_impl(
 ) -> None:
     from aiter.mla import mla_decode_fwd
 
-    mla_decode_fwd(q,
-                   kv_buffer.view(-1, 1, 1, q.shape[-1]),
-                   o,
-                   qo_indptr,
-                   kv_indptr,
-                   kv_indices,
-                   kv_last_page_lens,
-                   max_seqlen_qo,
-                   sm_scale=sm_scale,
-                   logit_cap=logit_cap)
+    mla_decode_fwd(
+        q,
+        kv_buffer.view(-1, 1, 1, q.shape[-1]),
+        o,
+        qo_indptr,
+        kv_indptr,
+        kv_indices,
+        kv_last_page_lens,
+        max_seqlen_qo,
+        sm_scale=sm_scale,
+        logit_cap=logit_cap,
+    )
 
 
 def _rocm_aiter_mla_decode_fwd_fake(
@@ -256,7 +291,6 @@ def _rocm_aiter_gemm_w8a8_impl(
     bias: Optional[torch.Tensor] = None,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-
     from aiter import gemm_a8w8_CK
 
     # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
@@ -274,7 +308,6 @@ def _rocm_aiter_gemm_w8a8_fake(
     bias: Optional[torch.Tensor] = None,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-
     m = A.shape[0]
     n = B.shape[0]
     Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
@@ -300,16 +333,17 @@ def _rocm_aiter_gemm_w8a8_blockscale_fake(
     Bs: torch.Tensor,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-
     m = A.shape[0]
     n = B.shape[0]
     Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
     return Y
 
 
-def _rocm_aiter_rms_norm_impl(x: torch.Tensor, weight: torch.Tensor,
-                              variance_epsilon: float) -> torch.Tensor:
+def _rocm_aiter_rms_norm_impl(
+    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
+) -> torch.Tensor:
     from aiter import rms_norm
+
     if x.dim() > 2:
         x_original_shape = x.shape
         x = x.reshape(-1, x_original_shape[-1])
@@ -319,15 +353,18 @@ def _rocm_aiter_rms_norm_impl(x: torch.Tensor, weight: torch.Tensor,
     return rms_norm(x, weight, variance_epsilon)
 
 
-def _rocm_aiter_rms_norm_fake(x: torch.Tensor, weight: torch.Tensor,
-                              variance_epsilon: float) -> torch.Tensor:
+def _rocm_aiter_rms_norm_fake(
+    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
+) -> torch.Tensor:
     return torch.empty_like(x)
 
 
 def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
-        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
-        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
-
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter import rmsnorm2d_fwd_with_add
 
     residual_out = torch.empty_like(residual)
@@ -344,8 +381,11 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
 
 
 def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
-        x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
-        variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty_like(x), torch.empty_like(residual)
 
 
@@ -369,17 +409,11 @@ def _rocm_aiter_fp4_gemm_with_dynamic_quant_impl(
 
         # 32 alignment is enough for dim0 padding of output for
         # gemm_a4w4 kernel
-        y = torch.empty((M + 31) // 32 * 32,
-                        weight.shape[0],
-                        device=x_q.device,
-                        dtype=out_dtype)
+        y = torch.empty(
+            (M + 31) // 32 * 32, weight.shape[0], device=x_q.device, dtype=out_dtype
+        )
 
-        gemm_a4w4(x_q,
-                  weight,
-                  x_s,
-                  weight_scale.view(x_s.dtype),
-                  y,
-                  bpreshuffle=True)
+        gemm_a4w4(x_q, weight, x_s, weight_scale.view(x_s.dtype), y, bpreshuffle=True)
         return y[:M]
 
 
@@ -390,9 +424,9 @@ def _rocm_aiter_fp4_gemm_with_dynamic_quant_fake(
     x_scales: torch.Tensor = None,
     out_dtype: Optional[torch.dtype] = torch.bfloat16,
 ) -> torch.Tensor:
-    return torch.empty((*x.shape[:-1], weight.shape[0]),
-                       dtype=out_dtype,
-                       device=x.device)
+    return torch.empty(
+        (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device
+    )
 
 
 # Global flag to ensure ops are registered only once
@@ -421,49 +455,49 @@ class rocm_aiter_ops:
     @classmethod
     @is_aiter_supported
     def is_linear_enabled(cls) -> bool:
-        """"Verifies device specs and availability of env variable."""
+        """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._LINEAR_ENABLED
 
     @classmethod
     @is_aiter_supported
     def is_linear_fp8_enaled(cls) -> bool:
-        """"Verifies device specs and availability of env variable."""
+        """ "Verifies device specs and availability of env variable."""
         return cls.is_linear_enabled() and current_platform.is_fp8_fnuz()
 
     @classmethod
     @is_aiter_supported
     def is_rmsnorm_enabled(cls) -> bool:
-        """"Verifies device specs and availability of env variable."""
+        """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._RMSNORM_ENABLED
 
     @classmethod
     @is_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
-        """"Verifies device specs and availability of env variable."""
+        """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._FMOE_ENABLED
 
     @classmethod
     @is_aiter_supported
     def is_mla_enabled(cls) -> bool:
-        """"Verifies device specs and availability of env variable."""
+        """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._MLA_ENABLED
 
     @classmethod
     @is_aiter_supported
     def is_mha_enabled(cls) -> bool:
-        """"Verifies device specs and availability of env variable."""
+        """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._MHA_ENABLED
 
     @classmethod
     @is_aiter_supported
     def is_pa_attn_enabled(cls) -> bool:
-        """"Verifies device specs and availability of env variable."""
+        """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._PG_ATTN_ENABLED
 
     @classmethod
     @is_aiter_supported
     def is_triton_unified_attn_enabled(cls) -> bool:
-        """"Verifies device specs and availability of env variable."""
+        """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._TRITON_UNIFIED_ATTN_ENABLED
 
     @classmethod
@@ -486,8 +520,11 @@ class rocm_aiter_ops:
     def register_ops_once() -> None:
         global _OPS_REGISTERED
         if not _OPS_REGISTERED:
-            tags = tuple() if is_torch_equal_or_newer("2.7.0") else (
-                torch.Tag.needs_fixed_stride_order, )
+            tags = (
+                tuple()
+                if is_torch_equal_or_newer("2.7.0")
+                else (torch.Tag.needs_fixed_stride_order,)
+            )
 
             # register all the custom ops here
             direct_register_custom_op(
@@ -509,9 +546,7 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_topk_softmax",
                 op_func=_rocm_aiter_topk_softmax_impl,
-                mutates_args=[
-                    "topk_weights", "topk_indices", "token_expert_indices"
-                ],
+                mutates_args=["topk_weights", "topk_indices", "token_expert_indices"],
                 fake_impl=_rocm_aiter_topk_softmax_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
@@ -537,7 +572,8 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_mla_decode_fwd_impl,
                 mutates_args=["o"],
                 fake_impl=_rocm_aiter_mla_decode_fwd_fake,
-                tags=tags)
+                tags=tags,
+            )
 
             direct_register_custom_op(
                 op_name="rocm_aiter_gemm_w8a8",
@@ -583,14 +619,19 @@ class rocm_aiter_ops:
 
     @staticmethod
     def rms_norm2d_with_add(
-            x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor,
-            variance_epsilon: float) -> tuple[torch.Tensor, torch.Tensor]:
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        variance_epsilon: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add(
-            x, residual, weight, variance_epsilon)
+            x, residual, weight, variance_epsilon
+        )
 
     @staticmethod
-    def rms_norm(x: torch.Tensor, weight: torch.Tensor,
-                 variance_epsilon: float) -> torch.Tensor:
+    def rms_norm(
+        x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
+    ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_rms_norm(x, weight, variance_epsilon)
 
     @staticmethod
@@ -602,8 +643,7 @@ class rocm_aiter_ops:
         bias: Optional[torch.Tensor] = None,
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_gemm_w8a8(A, B, As, Bs, bias,
-                                                   output_dtype)
+        return torch.ops.vllm.rocm_aiter_gemm_w8a8(A, B, As, Bs, bias, output_dtype)
 
     @staticmethod
     def gemm_w8a8_blockscale(
@@ -615,7 +655,8 @@ class rocm_aiter_ops:
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale(
-            A, B, As, Bs, output_dtype)
+            A, B, As, Bs, output_dtype
+        )
 
     @staticmethod
     def fused_moe(
@@ -634,66 +675,109 @@ class rocm_aiter_ops:
         a2_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
-            hidden_states, w1, w2, topk_weight, topk_ids, expert_mask,
-            activation_method, quant_method, doweight_stage1, w1_scale,
-            w2_scale, a1_scale, a2_scale)
+            hidden_states,
+            w1,
+            w2,
+            topk_weight,
+            topk_ids,
+            expert_mask,
+            activation_method,
+            quant_method,
+            doweight_stage1,
+            w1_scale,
+            w2_scale,
+            a1_scale,
+            a2_scale,
+        )
 
     @staticmethod
-    def asm_moe_tkw1(hidden_states: torch.Tensor,
-                     w1: torch.Tensor,
-                     w2: torch.Tensor,
-                     topk_weights: torch.Tensor,
-                     topk_ids: torch.Tensor,
-                     fc1_scale: Optional[torch.Tensor] = None,
-                     fc2_scale: Optional[torch.Tensor] = None,
-                     fc1_smooth_scale: Optional[torch.Tensor] = None,
-                     fc2_smooth_scale: Optional[torch.Tensor] = None,
-                     a16: bool = False,
-                     per_tensor_quant_scale: Optional[torch.Tensor] = None,
-                     expert_mask: Optional[torch.Tensor] = None,
-                     activation_method: int = 0) -> torch.Tensor:
+    def asm_moe_tkw1(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        fc1_scale: Optional[torch.Tensor] = None,
+        fc2_scale: Optional[torch.Tensor] = None,
+        fc1_smooth_scale: Optional[torch.Tensor] = None,
+        fc2_smooth_scale: Optional[torch.Tensor] = None,
+        a16: bool = False,
+        per_tensor_quant_scale: Optional[torch.Tensor] = None,
+        expert_mask: Optional[torch.Tensor] = None,
+        activation_method: int = 0,
+    ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_asm_moe_tkw1(
-            hidden_states, w1, w2, topk_weights, topk_ids, fc1_scale,
-            fc2_scale, fc1_smooth_scale, fc2_smooth_scale, a16,
-            per_tensor_quant_scale, expert_mask, activation_method)
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            fc1_scale,
+            fc2_scale,
+            fc1_smooth_scale,
+            fc2_smooth_scale,
+            a16,
+            per_tensor_quant_scale,
+            expert_mask,
+            activation_method,
+        )
 
     @staticmethod
-    def topk_softmax(topk_weights: torch.Tensor, topk_indices: torch.Tensor,
-                     token_expert_indices: torch.Tensor,
-                     gating_output: torch.Tensor,
-                     renormalize: bool) -> tuple[torch.Tensor, ...]:
-        torch.ops.vllm.rocm_aiter_topk_softmax(topk_weights, topk_indices,
-                                               token_expert_indices,
-                                               gating_output, renormalize)
+    def topk_softmax(
+        topk_weights: torch.Tensor,
+        topk_indices: torch.Tensor,
+        token_expert_indices: torch.Tensor,
+        gating_output: torch.Tensor,
+        renormalize: bool,
+    ) -> tuple[torch.Tensor, ...]:
+        torch.ops.vllm.rocm_aiter_topk_softmax(
+            topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
+        )
         return topk_weights, topk_indices
 
     @staticmethod
-    def biased_grouped_topk(gating_output: torch.Tensor,
-                            correction_bias: torch.Tensor,
-                            topk_weights: torch.Tensor,
-                            topk_ids: torch.Tensor,
-                            num_expert_group: int,
-                            topk_group: int,
-                            need_renorm: bool,
-                            routed_scaling_factor: float = 1.0) -> None:
+    def biased_grouped_topk(
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_expert_group: int,
+        topk_group: int,
+        need_renorm: bool,
+        routed_scaling_factor: float = 1.0,
+    ) -> None:
         torch.ops.vllm.rocm_aiter_biased_grouped_topk(
-            gating_output, correction_bias, topk_weights, topk_ids,
-            num_expert_group, topk_group, need_renorm, routed_scaling_factor)
+            gating_output,
+            correction_bias,
+            topk_weights,
+            topk_ids,
+            num_expert_group,
+            topk_group,
+            need_renorm,
+            routed_scaling_factor,
+        )
 
     @staticmethod
-    def grouped_topk(gating_output: torch.Tensor,
-                     topk_weights: torch.Tensor,
-                     topk_ids: torch.Tensor,
-                     num_expert_group: int,
-                     topk_group: int,
-                     need_renorm: bool,
-                     scoring_func: str = "softmax",
-                     routed_scaling_factor: float = 1.0) -> None:
-        torch.ops.vllm.rocm_aiter_grouped_topk(gating_output, topk_weights,
-                                               topk_ids, num_expert_group,
-                                               topk_group, need_renorm,
-                                               scoring_func,
-                                               routed_scaling_factor)
+    def grouped_topk(
+        gating_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_expert_group: int,
+        topk_group: int,
+        need_renorm: bool,
+        scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
+    ) -> None:
+        torch.ops.vllm.rocm_aiter_grouped_topk(
+            gating_output,
+            topk_weights,
+            topk_ids,
+            num_expert_group,
+            topk_group,
+            need_renorm,
+            scoring_func,
+            routed_scaling_factor,
+        )
 
     @staticmethod
     def mla_decode_fwd(
@@ -708,17 +792,18 @@ class rocm_aiter_ops:
         kv_last_page_lens: Optional[torch.Tensor] = None,
         logit_cap: float = 0.0,
     ):
-        torch.ops.vllm.rocm_aiter_mla_decode_fwd(q,
-                                                 kv_buffer.view(
-                                                     -1, 1, 1, q.shape[-1]),
-                                                 o,
-                                                 qo_indptr,
-                                                 max_seqlen_qo,
-                                                 kv_indptr,
-                                                 kv_indices,
-                                                 kv_last_page_lens,
-                                                 sm_scale=sm_scale,
-                                                 logit_cap=logit_cap)
+        torch.ops.vllm.rocm_aiter_mla_decode_fwd(
+            q,
+            kv_buffer.view(-1, 1, 1, q.shape[-1]),
+            o,
+            qo_indptr,
+            max_seqlen_qo,
+            kv_indptr,
+            kv_indices,
+            kv_last_page_lens,
+            sm_scale=sm_scale,
+            logit_cap=logit_cap,
+        )
 
     @staticmethod
     def asm_fp4_gemm_dynamic_quant(
@@ -753,21 +838,25 @@ class rocm_aiter_ops:
             x_q = x
             x_s = x_scales
 
-        y = torch.empty(x_q.shape[0],
-                        weight.shape[0],
-                        device=x_q.device,
-                        dtype=out_dtype)
+        y = torch.empty(
+            x_q.shape[0], weight.shape[0], device=x_q.device, dtype=out_dtype
+        )
 
         gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
         return y
 
     @staticmethod
-    def triton_rotary_embed(positions: torch.Tensor, query: torch.Tensor,
-                            key: torch.Tensor, cos_sin_cache: torch.Tensor,
-                            head_size: int, rotary_dim: int,
-                            is_neox_style: bool):
-        from aiter.ops.triton.rope import (
-            rope_cached_thd_positions_2c_fwd_inplace)
+    def triton_rotary_embed(
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        head_size: int,
+        rotary_dim: int,
+        is_neox_style: bool,
+    ):
+        from aiter.ops.triton.rope import rope_cached_thd_positions_2c_fwd_inplace
+
         num_tokens = positions.numel()
         cos, sin = cos_sin_cache.chunk(2, dim=-1)
         query_shape = query.shape
@@ -805,29 +894,33 @@ class rocm_aiter_ops:
         transpose_bm: Optional[bool] = False,
         config: Optional[dict] = None,
     ) -> torch.Tensor:
-        from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501 # isort: skip
-            batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant
-            as aiter_triton_fp8_bmm)
+        # ruff: noqa: E501 # isort: skip
+        from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (
+            batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm,
+        )
 
-        return aiter_triton_fp8_bmm(X,
-                                    WQ,
-                                    w_scale,
-                                    group_size=group_size,
-                                    bias=bias,
-                                    dtype=dtype,
-                                    splitK=splitK,
-                                    YQ=YQ,
-                                    transpose_bm=transpose_bm,
-                                    config=config)
+        return aiter_triton_fp8_bmm(
+            X,
+            WQ,
+            w_scale,
+            group_size=group_size,
+            bias=bias,
+            dtype=dtype,
+            splitK=splitK,
+            YQ=YQ,
+            transpose_bm=transpose_bm,
+            config=config,
+        )
 
     @staticmethod
     def per_1x128_fp8_quant(
-        input_2d: torch.Tensor, ) -> tuple[torch.Tensor, ...]:
-        """ Only applies quantization method for fp8 data type."""
+        input_2d: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        """Only applies quantization method for fp8 data type."""
         from aiter import QuantType, dtypes, get_hip_quant
 
         aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
-        return aiter_per1x128_quant(input_2d, quant_dtype=dtypes.fp8)
+        return aiter_per1x128_quant(input_2d.contiguous(), quant_dtype=dtypes.fp8)
 
 
 rocm_aiter_ops.register_ops_once()
