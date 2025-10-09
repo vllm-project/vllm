@@ -355,11 +355,12 @@ _MULTIMODAL_MODELS = {
         "Qwen2_5OmniThinkerForConditionalGeneration",
     ),
     "Qwen3OmniMoeForConditionalGeneration": (
-        "qwen3_omni_moe_thinker", 
-        "Qwen3OmniMoeThinkerForConditionalGeneration"),
+        "qwen3_omni_moe_thinker",
+        "Qwen3OmniMoeThinkerForConditionalGeneration",
+    ),
     "Qwen3OmniMoeModel": (
-        "qwen3_omni_moe_thinker", 
-        "Qwen3OmniMoeThinkerForConditionalGeneration"),
+        "qwen3_omni_moe_thinker",
+        "Qwen3OmniMoeThinkerForConditionalGeneration",
     ),
     "Qwen3VLForConditionalGeneration": ("qwen3_vl", "Qwen3VLForConditionalGeneration"),  # noqa: E501
     "Qwen3VLMoeForConditionalGeneration": (
