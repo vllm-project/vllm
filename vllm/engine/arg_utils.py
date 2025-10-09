@@ -27,47 +27,46 @@ import huggingface_hub
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
+from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm.config import (
-    BlockSize,
     CacheConfig,
-    CacheDType,
     CompilationConfig,
     ConfigType,
-    ConvertOption,
-    DetailedTraceModules,
-    Device,
     DeviceConfig,
-    DistributedExecutorBackend,
     EPLBConfig,
-    HfOverrides,
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
-    LogprobsMode,
     LoRAConfig,
-    MambaDType,
-    MMEncoderTPMode,
     ModelConfig,
-    ModelDType,
+    MultiModalConfig,
     ObservabilityConfig,
     ParallelConfig,
     PoolerConfig,
-    PrefixCachingHashAlgo,
-    RunnerOption,
     SchedulerConfig,
-    SchedulerPolicy,
     SpeculativeConfig,
     StructuredOutputsConfig,
-    TaskOption,
-    TokenizerMode,
     VllmConfig,
     get_attr_docs,
 )
-from vllm.config.multimodal import MMCacheType, MultiModalConfig
-from vllm.config.parallel import ExpertPlacementStrategy
+from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
+from vllm.config.device import Device
+from vllm.config.model import (
+    ConvertOption,
+    HfOverrides,
+    LogprobsMode,
+    ModelDType,
+    RunnerOption,
+    TaskOption,
+    TokenizerMode,
+)
+from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
+from vllm.config.observability import DetailedTraceModules
+from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
+from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -211,6 +210,13 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Get the default value of the field
         if field.default is not MISSING:
             default = field.default
+            # Handle pydantic.Field defaults
+            if isinstance(default, FieldInfo):
+                default = (
+                    default.default
+                    if default.default_factory is None
+                    else default.default_factory()
+                )
         elif field.default_factory is not MISSING:
             default = field.default_factory()
 
@@ -410,7 +416,6 @@ class EngineArgs:
     tokenizer_revision: Optional[str] = ModelConfig.tokenizer_revision
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
-    max_seq_len_to_capture: int = ModelConfig.max_seq_len_to_capture
     need_structured_in_reasoning: bool = \
         ModelConfig.need_structured_in_reasoning
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
@@ -433,6 +438,7 @@ class EngineArgs:
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
+    video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled

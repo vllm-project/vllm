@@ -281,10 +281,10 @@ class StructuredOutputManager:
         # NOTE (Hanchen) if need_structured_in_reasoning is True, it means that
         # the model needs to be constrained in reasoning. So we should always
         # enable the bitmask filling.
-        if self.need_structured_in_reasoning:
-            return self.need_structured_in_reasoning
 
         if self.reasoner is not None:
+            if self.need_structured_in_reasoning:
+                return True
             assert request.structured_output_request is not None
             if request.structured_output_request.reasoning_ended is None:
                 request.structured_output_request.reasoning_ended = (
