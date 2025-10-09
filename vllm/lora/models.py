@@ -252,6 +252,7 @@ class LoRAModel:
             from tensorizer import TensorDeserializer
 
             tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
+            assert tensorizer_config.tensorizer_dir is not None
             lora_tensor_path = os.path.join(
                 tensorizer_config.tensorizer_dir, "adapter_model.tensors"
             )
@@ -356,6 +357,7 @@ class LoRAModelManager:
             vocab_size: the vocab size of the model.
             lora_config: the LoRA configuration.
         """
+        assert isinstance(model, nn.Module)
         self.model: SupportsLoRA = model
         self._registered_adapters: dict[int, LoRAModel] = {}
         # Dict instead of a set for compatibility with LRUCache.
@@ -394,13 +396,14 @@ class LoRAModelManager:
         # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: Optional[LoRAMapping] = None
         self._create_lora_modules()
-        self.model.lora_manager = self
+        setattr(self.model, "lora_manager", self)
 
     def __len__(self) -> int:
         return len(self._registered_adapters)
 
     @property
     def capacity(self) -> int:
+        assert self.lora_config.max_cpu_loras is not None
         return self.lora_config.max_cpu_loras
 
     @property
@@ -503,7 +506,7 @@ class LoRAModelManager:
             #  - given an input 'x' return ''
             return module_name.rpartition(".")[0]
 
-        for module_name, module in self.model.named_modules(remove_duplicate=False):
+        for module_name, module in self.model.named_modules(remove_duplicate=False):  # type: ignore[attr-defined]
             if isinstance(module, PPMissingLayer):
                 continue
             if not self._match_target_modules(module_name):
@@ -527,7 +530,7 @@ class LoRAModelManager:
                     self.lora_slots,
                     self.lora_config,
                     packed_moduled_lst,
-                    self.model.config,
+                    self.model.config,  # type: ignore[attr-defined]
                 ),
             )
 
@@ -540,7 +543,7 @@ class LoRAModelManager:
                         f"{parent_module}.{logits_processor_module_name}"
                     )
 
-                logits_processor_module = self.model.get_submodule(
+                logits_processor_module = self.model.get_submodule(  # type: ignore[attr-defined]
                     logits_processor_module_name
                 )
 
@@ -552,7 +555,7 @@ class LoRAModelManager:
                         module,
                         self.lora_slots,
                         self.lora_config,
-                        self.model.config,
+                        self.model.config,  # type: ignore[attr-defined]
                     ),
                 )
 
@@ -580,7 +583,7 @@ class LoRAModelManager:
     ) -> LoRAModel:
         """Create zero-initialized LoRAModel for warmup."""
         model = LoRAModel(lora_id, rank, {})
-        for module_name, module in self.model.named_modules():
+        for module_name, module in self.model.named_modules():  # type: ignore[attr-defined]
             bias_enabled = self.lora_config.bias_enabled
             if (
                 not self._match_target_modules(module_name)
@@ -663,7 +666,7 @@ class LoRAModelManager:
         be filtered out.
         """
         if self.supports_mm:
-            module_mapping: MultiModelKeys = self.model.get_mm_mapping()
+            module_mapping: MultiModelKeys = self.model.get_mm_mapping()  # type: ignore[attr-defined]
             prefix_lst = module_mapping.connector + module_mapping.tower_model
             return any([module_name.startswith(prefix) for prefix in prefix_lst])
         return False

@@ -132,11 +132,13 @@ def parse_fine_tuned_lora_name(
     # mapping correctly.
     if name.startswith("base_model.model."):
         name = name.replace("base_model.model.", "")
-        name = weights_mapper._map_name(name) if weights_mapper else name
+        mapped_name = weights_mapper._map_name(name) if weights_mapper else name
+        name = mapped_name if mapped_name is not None else name
         # recover the prefix `base_model.model.`
         name = "base_model.model." + name
     else:
-        name = weights_mapper._map_name(name) if weights_mapper else name
+        mapped_name = weights_mapper._map_name(name) if weights_mapper else name
+        name = mapped_name if mapped_name is not None else name
 
     # In some situations, we may not start with `base_model.model.`.
     # If we don't (e.g., ibm-granite/granite-speech-3.3-8b),

@@ -7,6 +7,7 @@ from typing import Any, Literal, Optional, Union
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.models import (
     LoRAModel,
@@ -46,7 +47,9 @@ class WorkerLoRAManager:
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.vocab_size = vllm_config.model_config.get_vocab_size()
-        self.lora_config = vllm_config.lora_config
+        lora_config = vllm_config.lora_config
+        assert lora_config is not None
+        self.lora_config: LoRAConfig = lora_config
 
         # Use get_text_config() in case of multimodal models
         text_config = vllm_config.model_config.hf_config.get_text_config()

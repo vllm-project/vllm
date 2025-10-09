@@ -136,6 +136,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
     def apply(
         self, x: torch.Tensor, bias: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        assert self.base_layer.quant_method is not None
         output = self.base_layer.quant_method.apply(self.base_layer, x)
 
         x = x.view(-1, x.shape[-1])

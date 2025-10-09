@@ -91,6 +91,7 @@ class PEFTHelper:
             tensorizer_args = tensorizer_config._construct_tensorizer_args()
             from tensorizer.stream_io import open_stream
 
+            assert tensorizer_config.tensorizer_dir is not None
             lora_config_path = os.path.join(
                 tensorizer_config.tensorizer_dir, "adapter_config.json"
             )

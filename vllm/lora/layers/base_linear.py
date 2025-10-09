@@ -152,6 +152,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def apply(
         self, x: torch.Tensor, bias: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        assert self.base_layer.quant_method is not None
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
         # In transformers backend, x and output have extra batch dimension like

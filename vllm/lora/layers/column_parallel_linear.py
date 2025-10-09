@@ -35,6 +35,7 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
     if layer.lora_bias_stacked is not None:
         assert layer.n_slices == len(layer.lora_bias_stacked)
 
+    assert layer.base_layer.quant_method is not None
     output = layer.base_layer.quant_method.apply(layer.base_layer, x, bias)
 
     x = x.view(-1, x.shape[-1])
