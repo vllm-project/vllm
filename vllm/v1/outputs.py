@@ -24,18 +24,24 @@ if TYPE_CHECKING:
 TokenIDs: TypeAlias = Union[int, list[int]]
 
 
-# TODO(Jialin): !!!Add comments and unit tests!!!
 def convert_to_token_id_list(tokens: TokenIDs) -> list[int]:
+    """
+    Converts TokenIDs to a list of token IDs (i.e. list[int]).
+    """
     return [tokens] if isinstance(tokens, int) else tokens
 
 
-# TODO(Jialin): !!!Add comments and unit tests!!!
 def convert_to_token_ids(tokens: list[int]) -> TokenIDs:
+    """
+    Converts a list of token IDs (i.e. list[int]) to TokenIDs.
+    """
     return tokens[0] if len(tokens) == 1 else tokens
 
 
-# TODO(Jialin): !!!Add comments and unit tests!!!
 def get_token_count(tokens: TokenIDs) -> int:
+    """
+    Returns the number of tokens in TokenIDs.
+    """
     return 1 if isinstance(tokens, int) else len(tokens)
 
 
