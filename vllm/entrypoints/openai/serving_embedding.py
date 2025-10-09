@@ -14,7 +14,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
-    EMBED_DTYPE,
+    EMBED_DTYPE_TO_TORCH_DTYPE,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
     EmbeddingRequest,
@@ -40,7 +40,7 @@ from vllm.outputs import (
     RequestOutput,
 )
 from vllm.pooling_params import PoolingParams
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, chunk_list
+from vllm.utils import chunk_list
 
 logger = init_logger(__name__)
 
@@ -48,12 +48,13 @@ logger = init_logger(__name__)
 def _get_embedding(
     output: PoolingRequestOutput,
     encoding_format: Literal["float", "base64"],
-    embed_dtype: EMBED_DTYPE,
+    embed_dtype: str,
 ) -> Union[list[float], str]:
     if encoding_format == "float":
         return output.outputs.data.tolist()
     elif encoding_format == "base64":
-        torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[embed_dtype]
+        assert embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE
+        torch_dtype = EMBED_DTYPE_TO_TORCH_DTYPE[embed_dtype]
         embedding_bytes = (
             output.outputs.data.to(torch_dtype)
             .flatten()
@@ -90,6 +91,12 @@ class EmbeddingMixin(OpenAIServing):
     ) -> Optional[ErrorResponse]:
         ctx = cast(EmbeddingServeContext, ctx)
         try:
+            if ctx.request.embed_dtype not in EMBED_DTYPE_TO_TORCH_DTYPE:
+                return self.create_error_response(
+                    f"embed_dtype [{ctx.request.embed_dtype}] not support. "
+                    f"Support {EMBED_DTYPE_TO_TORCH_DTYPE.keys()}"
+                )
+
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
             tokenizer = await self.engine_client.get_tokenizer()

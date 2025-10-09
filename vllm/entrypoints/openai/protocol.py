@@ -83,9 +83,13 @@ from vllm.sampling_params import (
 )
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
-EMBED_DTYPE = Literal[
-    "float32", "half", "bfloat16", "float", "fp8", "fp8_e4m3", "fp8_e5m2", "int8"
-]
+EMBED_DTYPE_TO_TORCH_DTYPE = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "fp8_e4m3": torch.float8_e4m3fn,
+    "fp8_e5m2": torch.float8_e5m2,
+}
 
 logger = init_logger(__name__)
 
