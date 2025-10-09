@@ -305,9 +305,14 @@ class EplbState:
                 new_physical_to_logical_map,
                 new_logical_to_physical_map,
                 new_logical_replica_count,
-            ) = (policy.rebalance_experts(global_expert_load, num_replicas,
-                                          num_groups, num_nodes, num_gpus,
-                                          old_global_expert_indices))
+            ) = policy.rebalance_experts(
+                global_expert_load,
+                num_replicas,
+                num_groups,
+                num_nodes,
+                num_gpus,
+                old_global_expert_indices,
+            )
 
             max_physical_slots = new_logical_to_physical_map.shape[-1]
             assert max_physical_slots <= logical_to_physical_map.shape[-1]
@@ -336,15 +341,17 @@ class EplbState:
             )
             expert_rearrangement_step = 0
 
-        return cls(physical_to_logical_map,
-                   logical_to_physical_map,
-                   logical_replica_count,
-                   expert_load_pass,
-                   expert_load_window,
-                   expert_load_window_size=expert_load_window_size,
-                   expert_rearrangement_step=expert_rearrangement_step,
-                   expert_rearrangement_step_interval=eplb_step_interval,
-                   policy=policy)
+        return cls(
+            physical_to_logical_map,
+            logical_to_physical_map,
+            logical_replica_count,
+            expert_load_pass,
+            expert_load_window,
+            expert_load_window_size=expert_load_window_size,
+            expert_rearrangement_step=expert_rearrangement_step,
+            expert_rearrangement_step_interval=eplb_step_interval,
+            policy=policy,
+        )
 
     def step(
         self,
@@ -538,10 +545,14 @@ class EplbState:
             new_physical_to_logical_map,
             new_logical_to_physical_map,
             new_logical_replica_count,
-        ) = (self.policy.rebalance_experts(global_expert_load_window,
-                                           num_replicas, num_groups, num_nodes,
-                                           num_gpus,
-                                           self.physical_to_logical_map))
+        ) = self.policy.rebalance_experts(
+            global_expert_load_window,
+            num_replicas,
+            num_groups,
+            num_nodes,
+            num_gpus,
+            self.physical_to_logical_map,
+        )
 
         # Update expert weights
         rearrange_expert_weights_inplace(
