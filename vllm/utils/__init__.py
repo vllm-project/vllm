@@ -469,11 +469,6 @@ def make_async(
     return _async_wrapper
 
 
-def _next_task(iterator: AsyncGenerator[T, None], loop: AbstractEventLoop) -> Task:
-    # Can use anext() in python >= 3.10
-    return loop.create_task(iterator.__anext__())  # type: ignore[arg-type]
-
-
 async def merge_async_iterators(
     *iterators: AsyncGenerator[T, None],
 ) -> AsyncGenerator[tuple[int, T], None]:
@@ -491,7 +486,7 @@ async def merge_async_iterators(
 
     loop = asyncio.get_running_loop()
 
-    awaits = {_next_task(pair[1], loop): pair for pair in enumerate(iterators)}
+    awaits = {loop.create_task(anext(it)): (i, it) for i, it in enumerate(iterators)}
     try:
         while awaits:
             done, _ = await asyncio.wait(awaits.keys(), return_when=FIRST_COMPLETED)
@@ -500,7 +495,7 @@ async def merge_async_iterators(
                 try:
                     item = await d
                     i, it = pair
-                    awaits[_next_task(it, loop)] = pair
+                    awaits[loop.create_task(anext(it))] = pair
                     yield i, item
                 except StopAsyncIteration:
                     pass
