@@ -63,8 +63,8 @@ and keeps the Windows-mounted repository free of unexpected modifications.
 
 1. Make sure your Windows host has the latest NVIDIA driver with WSL2 support and that `wsl --update`
    has run recently.
-1. Initialize your Podman machine with the Fedora 42 image (`podman machine init --image-path fedora-42`)
-   if you have not done so already.
+1. Initialize your Podman machine with the Fedora 42 image (`podman machine init`) if you have not done
+  so already. Pass `--image <archive>` if you need to override Podman's default Fedora download.
 1. From the repository root, run the helper script:
 
   ```powershell
@@ -72,15 +72,16 @@ and keeps the Windows-mounted repository free of unexpected modifications.
   ```
 
    Add `-MachineName <name>` if you use a non-default Podman machine or `-SkipReboot` when you prefer
-  to restart it manually later. Add `-Reset` to wipe and reinitialize the Podman machine (equivalent to
-  `podman machine reset --force`) when you want to start from a clean slate.
+  to restart it manually later. Use `-ImagePath rocky-10` (or another image recognized by `podman machine
+  init`) to create a machine from a different base image, and pass `-Rootful` to enable rootful
+  mode automatically. Add `-Reset` to wipe and reinitialize the Podman machine (the helper removes the
+  existing VM and re-runs `podman machine init`) when you want to start from a clean slate.
 
 1. After the script restarts the machine, launch `extras/podman/run.ps1 -GPUCheck` (or `run.sh --gpu-check`)
    to confirm that `/dev/dxg` and the CUDA libraries are visible from inside the dev container.
 
 If the helper still reports missing `/dev/dxg`, open Podman Desktop, ensure GPU sharing is enabled for
-the selected machine, and rerun the script. Consider switching the machine to rootful mode
-(`podman machine set --rootful --now <name>`) so CDI-generated devices can be mounted. When running on
-other distributions, replicate the script’s steps manually: install `nvidia-container-toolkit`, run
-`nvidia-ctk runtime configure --runtime=/usr/bin/crun --set-as-default`, and generate a CDI spec via
-`nvidia-ctk cdi generate`.
+the selected machine, and rerun the script (include `-Rootful` if you skipped it the first time, since
+rootless containers cannot mount GPU device nodes). When running on other distributions, replicate the
+script’s steps manually: install `nvidia-container-toolkit`, and generate a CDI spec via
+`nvidia-ctk cdi generate --mode wsl`.

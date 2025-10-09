@@ -14,6 +14,9 @@
 .PARAMETER SkipReboot
     Prevents the script from automatically restarting the Podman machine after configuration.
 
+.PARAMETER ImagePath
+    Optional override for the Podman Fedora image. When omitted, Podman's default channel is used.
+
 .EXAMPLE
     pwsh extras/tools/enable-podman-wsl-gpu.ps1
 
@@ -26,7 +29,9 @@
 param(
     [string]$MachineName = "podman-machine-default",
     [switch]$SkipReboot,
-    [switch]$Reset
+    [switch]$Reset,
+    [string]$ImagePath,
+    [switch]$Rootful
 )
 
 Set-StrictMode -Version Latest
@@ -38,40 +43,81 @@ function Invoke-Podman {
     return $result
 }
 
+function Test-PodmanMachine {
+    try {
+        $name = Invoke-Podman @('machine','inspect',$MachineName,'--format','{{.Name}}') | Select-Object -First 1
+        if ($name -and $name.TrimEnd('*') -eq $MachineName) {
+            return $true
+        }
+    } catch {
+    }
+    return $false
+}
+
 function Confirm-PodmanCli {
     if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {
         throw "Podman CLI not found. Install Podman Desktop or Podman for Windows first."
     }
 }
 
-function Confirm-PodmanMachine {
-    try {
-        $inspect = Invoke-Podman @('machine','inspect',$MachineName,'--format','{{.Name}}') | Select-Object -First 1
-    } catch {
-        throw "Podman machine '$MachineName' not found. Create it with 'podman machine init $MachineName --image-path fedora-42' before running this script."
+function Initialize-PodmanMachine {
+    if (Test-PodmanMachine) {
+        return
     }
-    if (-not $inspect -or $inspect.TrimEnd('*') -ne $MachineName) {
-        throw "Podman machine '$MachineName' not found. Create it with 'podman machine init $MachineName --image-path fedora-42' before running this script."
+    Write-Host "🆕 Creating Podman machine '$MachineName'..." -ForegroundColor Cyan
+    $initArgs = @('machine','init')
+    if ($ImagePath) {
+        $initArgs += @('--image',$ImagePath)
     }
+    $initArgs += $MachineName
+    Invoke-Podman $initArgs | Out-Null
 }
 
 function Start-MachineIfNeeded {
-    $state = Invoke-Podman @('machine','inspect',$MachineName,'--format','{{.State}}') | Select-Object -First 1
+    $state = $null
+    try {
+        $state = Invoke-Podman @('machine','inspect',$MachineName,'--format','{{.State}}') | Select-Object -First 1
+    } catch {}
+    if (-not $state) {
+        throw "Machine '$MachineName' could not be inspected. Ensure it exists or rerun with -Reset."
+    }
     if ($state.Trim() -ne 'Running') {
         Write-Host "🟢 Starting Podman machine '$MachineName'..." -ForegroundColor Green
         Invoke-Podman @('machine','start',$MachineName) | Out-Null
+    }
+}
+
 function Reset-PodmanMachine {
     if (-not $Reset.IsPresent) {
         return
     }
     Write-Host "♻️ Resetting Podman machine '$MachineName'..." -ForegroundColor Yellow
+    if (Test-PodmanMachine) {
+        try {
+            Invoke-Podman @('machine','stop',$MachineName) | Out-Null
+        } catch {}
+        Invoke-Podman @('machine','rm','-f',$MachineName) | Out-Null
+    } else {
+        Write-Host "ℹ️  Machine '$MachineName' already absent." -ForegroundColor DarkGray
+    }
+}
+
+function Set-PodmanRootfulMode {
+    if (-not $Rootful.IsPresent) {
+        return
+    }
+    if (-not (Test-PodmanMachine)) {
+        return
+    }
+    $rootfulState = Invoke-Podman @('machine','inspect',$MachineName,'--format','{{.Rootful}}') | Select-Object -First 1
+    if ($rootfulState -and $rootfulState.Trim().ToLower() -eq 'true') {
+        return
+    }
+    Write-Host "🔑 Enabling rootful mode for '$MachineName'..." -ForegroundColor Yellow
+    Invoke-Podman @('machine','set','--rootful',$MachineName) | Out-Null
     try {
         Invoke-Podman @('machine','stop',$MachineName) | Out-Null
     } catch {}
-    Invoke-Podman @('machine','reset',$MachineName,'--force') | Out-Null
-}
-
-    }
 }
 
 function Get-OsRelease {
@@ -112,7 +158,6 @@ if command -v nvidia-ctk >/dev/null 2>&1; then
     sudo mkdir -p /etc/cdi /var/cdi
     sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml --mode=wsl || true
     sudo cp -f /etc/cdi/nvidia.yaml /var/cdi/nvidia.yaml || true
-    sudo nvidia-ctk runtime configure --runtime=/usr/bin/crun --set-as-default || true
 fi
 
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -148,8 +193,9 @@ function Test-PodmanGpu {
 }
 
 Confirm-PodmanCli
-Confirm-PodmanMachine
 Reset-PodmanMachine
+Initialize-PodmanMachine
+Set-PodmanRootfulMode
 Start-MachineIfNeeded
 $osInfo = Get-OsRelease
 $machineId = if ($osInfo.ContainsKey('ID') -and $osInfo['ID']) { $osInfo['ID'] } elseif ($osInfo.ContainsKey('ID_LIKE') -and $osInfo['ID_LIKE']) { $osInfo['ID_LIKE'] } elseif ($osInfo.ContainsKey('PRETTY_NAME') -and $osInfo['PRETTY_NAME']) { $osInfo['PRETTY_NAME'] } else { 'unknown' }
