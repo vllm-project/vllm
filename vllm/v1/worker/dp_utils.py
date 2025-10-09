@@ -86,7 +86,7 @@ def _post_process_dp_padding(tensor: torch.Tensor, should_dp_pad: bool) -> torch
             dtype=torch.int32,
         )
     else:
-        return num_tokens_across_dp
+        return num_tokens_across_dp.cpu()
 
 
 def _synchronize_dp_ranks(
