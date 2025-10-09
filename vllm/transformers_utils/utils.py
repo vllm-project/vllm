@@ -35,23 +35,23 @@ def check_gguf_file(model: Union[str, PathLike]) -> bool:
         logger.debug("Error reading file %s: %s", model, e)
         return False
 
-
-def modelscope_list_repo_files(
-    repo_id: str,
-    revision: Optional[str] = None,
-    token: Union[str, bool, None] = None,
-) -> list[str]:
-    """List files in a modelscope repo."""
-    from modelscope.hub.api import HubApi
-    api = HubApi()
-    api.login(token)
-    # same as huggingface_hub.list_repo_files
-    files = [
-        file['Path'] for file in api.get_model_files(
-            model_id=repo_id, revision=revision, recursive=True)
-        if file['Type'] == 'blob'
-    ]
-    return files
+# Disabling ModelScope due to national security concerns
+# def modelscope_list_repo_files(
+#     repo_id: str,
+#     revision: Optional[str] = None,
+#     token: Union[str, bool, None] = None,
+# ) -> list[str]:
+#     """List files in a modelscope repo."""
+#     from modelscope.hub.api import HubApi
+#     api = HubApi()
+#     api.login(token)
+#     # same as huggingface_hub.list_repo_files
+#     files = [
+#         file['Path'] for file in api.get_model_files(
+#             model_id=repo_id, revision=revision, recursive=True)
+#         if file['Type'] == 'blob'
+#     ]
+#     return files
 
 
 def _maybe_json_dict(path: Union[str, PathLike]) -> dict[str, str]:

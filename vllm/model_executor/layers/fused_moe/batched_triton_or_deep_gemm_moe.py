@@ -5,11 +5,11 @@ from typing import Optional
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    BatchedDeepGemmExperts)
+# from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+#     BatchedDeepGemmExperts)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
-    deep_gemm_block_shape)
+# from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+#     deep_gemm_block_shape)
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts)
 
@@ -31,15 +31,17 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             quant_config=self.quant_config,
         )
 
-        self.allow_deep_gemm = (allow_deep_gemm
-                                and self.quant_config.use_fp8_w8a8 and
-                                self.block_shape == deep_gemm_block_shape())
+        # self.allow_deep_gemm = (allow_deep_gemm
+        #                         and self.quant_config.use_fp8_w8a8 and
+        #                         self.block_shape == deep_gemm_block_shape())
 
-        self.batched_deep_gemm_experts = BatchedDeepGemmExperts(
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=num_dispatchers,
-            quant_config=self.quant_config,
-        ) if self.allow_deep_gemm else None
+        # self.batched_deep_gemm_experts = BatchedDeepGemmExperts(
+        #     max_num_tokens=max_num_tokens,
+        #     num_dispatchers=num_dispatchers,
+        #     quant_config=self.quant_config,
+        # ) if self.allow_deep_gemm else None
+        self.batched_deep_gemm_experts = None
+        self.allow_deep_gemm = False
 
         assert (self.batched_deep_gemm_experts is not None
                 or self.batched_triton_experts is not None)
@@ -104,10 +106,12 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
         if self.allow_deep_gemm:
-            assert self.batched_deep_gemm_experts is not None
-            return self.batched_deep_gemm_experts.workspace_shapes(
-                a, aq, M, N, K, topk, global_num_experts, local_num_experts,
-                expert_tokens_metadata)
+            # Disabling DeepGEMM for national security reasons
+            pass
+            # assert self.batched_deep_gemm_experts is not None
+            # return self.batched_deep_gemm_experts.workspace_shapes(
+            #     a, aq, M, N, K, topk, global_num_experts, local_num_experts,
+            #     expert_tokens_metadata)
         else:
             assert self.batched_triton_experts is not None
             return self.batched_triton_experts.workspace_shapes(

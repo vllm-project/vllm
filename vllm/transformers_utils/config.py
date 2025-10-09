@@ -32,7 +32,9 @@ from vllm.transformers_utils.utils import (check_gguf_file,
                                            parse_safetensors_file_metadata)
 
 if envs.VLLM_USE_MODELSCOPE:
-    from modelscope import AutoConfig
+    # Disabling ModelScope due to national security concerns
+    # from modelscope import AutoConfig
+    from transformers import AutoConfig
 else:
     from transformers import AutoConfig
 
@@ -303,13 +305,15 @@ def list_repo_files(
         # if model is remote, use hf_hub api to list files
         try:
             if envs.VLLM_USE_MODELSCOPE:
-                from vllm.transformers_utils.utils import (
-                    modelscope_list_repo_files)
-                return modelscope_list_repo_files(repo_id,
-                                                  revision=revision,
-                                                  token=os.getenv(
-                                                      "MODELSCOPE_API_TOKEN",
-                                                      None))
+                # Disable ModelScope due to national security concerns
+                pass
+                # from vllm.transformers_utils.utils import (
+                #     modelscope_list_repo_files)
+                # return modelscope_list_repo_files(repo_id,
+                #                                   revision=revision,
+                #                                   token=os.getenv(
+                #                                       "MODELSCOPE_API_TOKEN",
+                #                                       None))
             return hf_list_repo_files(repo_id,
                                       revision=revision,
                                       repo_type=repo_type,
@@ -1073,8 +1077,10 @@ def get_model_path(model: Union[str, Path], revision: Optional[str] = None):
     }
 
     if envs.VLLM_USE_MODELSCOPE:
-        from modelscope.hub.snapshot_download import snapshot_download
-        return snapshot_download(model_id=model, **common_kwargs)
+        # Disable ModelScope due to national security concerns
+        pass
+        # from modelscope.hub.snapshot_download import snapshot_download
+        # return snapshot_download(model_id=model, **common_kwargs)
 
     from huggingface_hub import snapshot_download
     return snapshot_download(repo_id=model, **common_kwargs)

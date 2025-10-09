@@ -154,26 +154,28 @@ def maybe_download_from_modelscope(
         Returns the path to the downloaded model, or None if the model is not
         downloaded from ModelScope."""
     if envs.VLLM_USE_MODELSCOPE:
+        # Disable ModelScope due to national security concerns
+        pass
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
         # pylint: disable=C.
-        from modelscope.hub.snapshot_download import snapshot_download
+        # from modelscope.hub.snapshot_download import snapshot_download
 
-        # Use file lock to prevent multiple processes from
-        # downloading the same model weights at the same time.
-        with get_lock(model, download_dir):
-            if not os.path.exists(model):
-                model_path = snapshot_download(
-                    model_id=model,
-                    cache_dir=download_dir,
-                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
-                    revision=revision,
-                    ignore_file_pattern=ignore_patterns,
-                    allow_patterns=allow_patterns,
-                )
-            else:
-                model_path = model
-        return model_path
+        # # Use file lock to prevent multiple processes from
+        # # downloading the same model weights at the same time.
+        # with get_lock(model, download_dir):
+        #     if not os.path.exists(model):
+        #         model_path = snapshot_download(
+        #             model_id=model,
+        #             cache_dir=download_dir,
+        #             local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+        #             revision=revision,
+        #             ignore_file_pattern=ignore_patterns,
+        #             allow_patterns=allow_patterns,
+        #         )
+        #     else:
+        #         model_path = model
+        # return model_path
     return None
 
 

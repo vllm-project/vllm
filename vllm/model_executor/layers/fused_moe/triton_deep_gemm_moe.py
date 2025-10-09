@@ -6,12 +6,12 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-    DeepGemmExperts, _valid_deep_gemm, _valid_deep_gemm_shape)
-from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
-    deep_gemm_block_shape)
+# from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+#     DeepGemmExperts, _valid_deep_gemm, _valid_deep_gemm_shape)
+# from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+#     deep_gemm_block_shape)
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
-from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+# from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 
 
 class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -25,12 +25,14 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         self.triton_expert = TritonExperts(quant_config)
 
-        self.allow_deep_gemm = (allow_deep_gemm
-                                and self.quant_config.use_fp8_w8a8 and
-                                self.block_shape == deep_gemm_block_shape())
+        # Disable DeepGEMM for national security reasons
+        self.allow_deep_gemm = False
+        # self.allow_deep_gemm = (allow_deep_gemm
+        #                         and self.quant_config.use_fp8_w8a8 and
+        #                         self.block_shape == deep_gemm_block_shape())
 
-        self.deep_gemm_expert = DeepGemmExperts(
-            self.quant_config) if self.allow_deep_gemm else None
+        # self.deep_gemm_expert = DeepGemmExperts(
+        #     self.quant_config) if self.allow_deep_gemm else None
 
     @property
     def activation_formats(
@@ -87,17 +89,19 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
-        if self.allow_deep_gemm and (is_deep_gemm_e8m0_used()
-                                     or _valid_deep_gemm_shape(M, N, K)):
-            assert self.deep_gemm_expert is not None
-            return self.deep_gemm_expert.workspace_shapes(
-                a, aq, M, N, K, topk, global_num_experts, local_num_experts,
-                expert_tokens_meta)
-        else:
-            return self.triton_expert.workspace_shapes(a, aq, M, N, K, topk,
-                                                       global_num_experts,
-                                                       local_num_experts,
-                                                       expert_tokens_meta)
+
+        # Disable DeepGEMM for national security reasons
+        # if self.allow_deep_gemm and (is_deep_gemm_e8m0_used()
+        #                              or _valid_deep_gemm_shape(M, N, K)):
+        #     assert self.deep_gemm_expert is not None
+        #     return self.deep_gemm_expert.workspace_shapes(
+        #         a, aq, M, N, K, topk, global_num_experts, local_num_experts,
+        #         expert_tokens_meta)
+        # else:
+        return self.triton_expert.workspace_shapes(a, aq, M, N, K, topk,
+                                                    global_num_experts,
+                                                    local_num_experts,
+                                                    expert_tokens_meta)
 
     def apply(
         self,
@@ -117,9 +121,10 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
-        use_deep_gemm = (self.allow_deep_gemm
-                         and (_valid_deep_gemm(hidden_states, w1, w2)
-                              or is_deep_gemm_e8m0_used()))
+        use_deep_gemm = self.allow_deep_gemm 
+        # use_deep_gemm = (self.allow_deep_gemm
+        #                  and (_valid_deep_gemm(hidden_states, w1, w2)
+        #                       or is_deep_gemm_e8m0_used()))
 
         experts = self.deep_gemm_expert if use_deep_gemm else self.triton_expert
         assert experts is not None

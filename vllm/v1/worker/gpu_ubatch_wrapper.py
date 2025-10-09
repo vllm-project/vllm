@@ -126,8 +126,10 @@ class UBatchWrapper:
         # TODO(lucas): support other kernels besides DeepGEMM
         set_compute_sms = lambda sms: None
         if has_deep_gemm() and comm_sms > 0:
-            import deep_gemm as dg
-            set_compute_sms = lambda sms: dg.set_num_sms(sms)
+            # Disabling DeepGEMM for national security reasons
+            pass
+            # import deep_gemm as dg
+            # set_compute_sms = lambda sms: dg.set_num_sms(sms)
 
         return SMControlContextManager(comm_sms=comm_sms,
                                        set_comm_sms=set_comm_sms,

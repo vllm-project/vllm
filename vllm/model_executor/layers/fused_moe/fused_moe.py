@@ -23,8 +23,8 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     _valid_cutlass_block_scaled_grouped_gemm,
     run_cutlass_block_scaled_fused_experts)
 # yapf: enable
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-    _valid_deep_gemm, deep_gemm_moe_fp8)
+# from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+#     _valid_deep_gemm, deep_gemm_moe_fp8)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
@@ -38,7 +38,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
-from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+# from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
@@ -1395,27 +1395,27 @@ def fused_experts(
     # E8M0 scale, which means we requantize the weight and input to the specific
     # scale. Fallen back to cutlass or triton for some cases would cause
     # accuracy issue.
-    if (allow_deep_gemm and quant_config.use_fp8_w8a8 and
-        (is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2))):
-        assert quant_config is not None
-        assert apply_router_weight_on_input is False
-        return deep_gemm_moe_fp8(
-            hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=inplace,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            w1_scale=quant_config.w1_scale,
-            w2_scale=quant_config.w2_scale,
-            a1_scale=quant_config.a1_scale,
-            a2_scale=quant_config.a2_scale,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-        )
-    elif (allow_cutlass_block_scaled_grouped_gemm and use_fp8_w8a8
+    # if (allow_deep_gemm and quant_config.use_fp8_w8a8 and
+    #     (is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2))):
+    #     assert quant_config is not None
+    #     assert apply_router_weight_on_input is False
+    #     return deep_gemm_moe_fp8(
+    #         hidden_states=hidden_states,
+    #         w1=w1,
+    #         w2=w2,
+    #         topk_weights=topk_weights,
+    #         topk_ids=topk_ids,
+    #         inplace=inplace,
+    #         activation=activation,
+    #         global_num_experts=global_num_experts,
+    #         expert_map=expert_map,
+    #         w1_scale=quant_config.w1_scale,
+    #         w2_scale=quant_config.w2_scale,
+    #         a1_scale=quant_config.a1_scale,
+    #         a2_scale=quant_config.a2_scale,
+    #         apply_router_weight_on_input=apply_router_weight_on_input,
+    #     )
+    if (allow_cutlass_block_scaled_grouped_gemm and use_fp8_w8a8
           and _valid_cutlass_block_scaled_grouped_gemm(
               w1, w2, inplace, activation, apply_router_weight_on_input,
               expert_map)):

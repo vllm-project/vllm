@@ -7,13 +7,13 @@ import torch
 
 # Fused experts and PrepareFinalize imports
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    BatchedDeepGemmExperts)
+# from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+#     BatchedDeepGemmExperts)
 from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
     BatchedTritonOrDeepGemmExperts)
 from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig,
                                                          FusedMoEQuantConfig)
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
+# from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts, NaiveBatchedExperts)
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoEMethodBase,
@@ -185,26 +185,28 @@ register_experts(
 
 # Disable on blackwell for now
 if has_deep_ep() and not current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
-        DeepEPHTPrepareAndFinalize)
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
-        DeepEPLLPrepareAndFinalize)
+    # Disable DeepEP due to national security concerns
+    pass
+    # from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (  # noqa: E501
+    #     DeepEPHTPrepareAndFinalize)
+    # from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (  # noqa: E501
+    #     DeepEPLLPrepareAndFinalize)
 
-    register_prepare_and_finalize(
-        DeepEPHTPrepareAndFinalize,
-        standard_format,
-        common_float_types,
-        blocked_quantization_support=True,
-        backend="deepep_high_throughput",
-    )
+    # register_prepare_and_finalize(
+    #     DeepEPHTPrepareAndFinalize,
+    #     standard_format,
+    #     common_float_types,
+    #     blocked_quantization_support=True,
+    #     backend="deepep_high_throughput",
+    # )
 
-    register_prepare_and_finalize(
-        DeepEPLLPrepareAndFinalize,
-        batched_format,
-        common_float_types,
-        blocked_quantization_support=True,
-        backend="deepep_low_latency",
-    )
+    # register_prepare_and_finalize(
+    #     DeepEPLLPrepareAndFinalize,
+    #     batched_format,
+    #     common_float_types,
+    #     blocked_quantization_support=True,
+    #     backend="deepep_low_latency",
+    # )
 
 if has_pplx():
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
@@ -248,26 +250,26 @@ else:
     FlashInferCutlassMoEPrepareAndFinalize = None
 
 if has_deep_gemm() and is_deep_gemm_supported():
-    register_experts(
-        BatchedDeepGemmExperts,
-        batched_format,
-        fp8_types,
-        blocked_quantization_support=True,
-        supports_chunking=False,
-        supports_expert_map=False,
-        needs_matching_quant=False,
-        needs_deep_gemm=True,
-    )
-    register_experts(
-        DeepGemmExperts,
-        standard_format,
-        fp8_types,
-        blocked_quantization_support=True,
-        supports_chunking=True,
-        supports_expert_map=True,
-        needs_matching_quant=False,
-        needs_deep_gemm=True,
-    ),
+    # register_experts(
+    #     BatchedDeepGemmExperts,
+    #     batched_format,
+    #     fp8_types,
+    #     blocked_quantization_support=True,
+    #     supports_chunking=False,
+    #     supports_expert_map=False,
+    #     needs_matching_quant=False,
+    #     needs_deep_gemm=True,
+    # )
+    # register_experts(
+    #     DeepGemmExperts,
+    #     standard_format,
+    #     fp8_types,
+    #     blocked_quantization_support=True,
+    #     supports_chunking=True,
+    #     supports_expert_map=True,
+    #     needs_matching_quant=False,
+    #     needs_deep_gemm=True,
+    # ),
     register_experts(
         BatchedTritonOrDeepGemmExperts,
         batched_format,
@@ -417,11 +419,11 @@ def make_fused_experts(
 
     torch.set_printoptions(threshold=0, edgeitems=0, linewidth=10000)
 
-    if fused_experts_type == BatchedDeepGemmExperts:
-        kwargs = batch_kwargs | quant_kwargs
-        print(f"Making BatchedDeepGemmExperts {kwargs} ...")
-        experts = BatchedDeepGemmExperts(**kwargs)
-    elif fused_experts_type == BatchedTritonExperts:
+    # if fused_experts_type == BatchedDeepGemmExperts:
+    #     kwargs = batch_kwargs | quant_kwargs
+    #     print(f"Making BatchedDeepGemmExperts {kwargs} ...")
+    #     experts = BatchedDeepGemmExperts(**kwargs)
+    if fused_experts_type == BatchedTritonExperts:
         kwargs = batch_kwargs | quant_kwargs
         print(f"Making BatchedTritonExperts {kwargs} ...")
         experts = BatchedTritonExperts(**kwargs)
@@ -429,9 +431,9 @@ def make_fused_experts(
         kwargs = batch_kwargs | quant_kwargs | deepgemm_kwargs
         print(f"Making BatchedTritonOrDeepGemmExperts {kwargs} ...")
         experts = BatchedTritonOrDeepGemmExperts(**kwargs)
-    elif fused_experts_type == DeepGemmExperts:
-        print("Making DeepGemmExperts {quant_config} ...")
-        experts = DeepGemmExperts(quant_config)
+    # elif fused_experts_type == DeepGemmExperts:
+    #     print("Making DeepGemmExperts {quant_config} ...")
+    #     experts = DeepGemmExperts(quant_config)
     elif fused_experts_type == TritonExperts:
         kwargs = quant_kwargs
         print(f"Making TritonExperts {kwargs} ...")

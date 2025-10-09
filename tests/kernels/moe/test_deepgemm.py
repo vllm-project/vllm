@@ -144,43 +144,43 @@ TOPKS = [2, 6]
 NUM_EXPERTS = [32]
 
 
-@pytest.mark.parametrize(("m", "n", "k"), MNKs)
-@pytest.mark.parametrize("topk", TOPKS)
-@pytest.mark.parametrize("num_experts", NUM_EXPERTS)
-@pytest.mark.skipif(not is_deep_gemm_supported(),
-                    reason="Requires deep_gemm kernels")
-def test_deepgemm_vs_triton(m, n, k, topk, num_experts, monkeypatch):
+# @pytest.mark.parametrize(("m", "n", "k"), MNKs)
+# @pytest.mark.parametrize("topk", TOPKS)
+# @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
+# @pytest.mark.skipif(not is_deep_gemm_supported(),
+#                     reason="Requires deep_gemm kernels")
+# def test_deepgemm_vs_triton(m, n, k, topk, num_experts, monkeypatch):
 
-    with monkeypatch.context() as mp:
-        mp.setenv("VLLM_USE_DEEP_GEMM", "1")
+#     with monkeypatch.context() as mp:
+#         mp.setenv("VLLM_USE_DEEP_GEMM", "1")
 
-        _fused_moe_mod = importlib.import_module(
-            "vllm.model_executor.layers.fused_moe.fused_moe")
+#         _fused_moe_mod = importlib.import_module(
+#             "vllm.model_executor.layers.fused_moe.fused_moe")
 
-        call_counter = {"cnt": 0}
+#         call_counter = {"cnt": 0}
 
-        orig_fn = _fused_moe_mod.deep_gemm_moe_fp8
+#         orig_fn = _fused_moe_mod.deep_gemm_moe_fp8
 
-        def _spy_deep_gemm_moe_fp8(*args, **kwargs):
-            call_counter["cnt"] += 1
-            return orig_fn(*args, **kwargs)
+#         def _spy_deep_gemm_moe_fp8(*args, **kwargs):
+#             call_counter["cnt"] += 1
+#             return orig_fn(*args, **kwargs)
 
-        monkeypatch.setattr(_fused_moe_mod, "deep_gemm_moe_fp8",
-                            _spy_deep_gemm_moe_fp8)
+#         monkeypatch.setattr(_fused_moe_mod, "deep_gemm_moe_fp8",
+#                             _spy_deep_gemm_moe_fp8)
 
-        if topk > num_experts:
-            pytest.skip(f"topk={topk} > num_experts={num_experts}")
+#         if topk > num_experts:
+#             pytest.skip(f"topk={topk} > num_experts={num_experts}")
 
-        run_single_case(
-            m=m,
-            n=n,
-            k=k,
-            topk=topk,
-            num_experts=num_experts,
-            block_size=BLOCK_SIZE,
-        )
+#         run_single_case(
+#             m=m,
+#             n=n,
+#             k=k,
+#             topk=topk,
+#             num_experts=num_experts,
+#             block_size=BLOCK_SIZE,
+#         )
 
-        # ensure that the DeepGEMM path was indeed taken.
-        assert call_counter["cnt"] == 1, \
-            f"DeepGEMM path was not executed during the test. " \
-            f"Call counter: {call_counter['cnt']}"
+#         # ensure that the DeepGEMM path was indeed taken.
+#         assert call_counter["cnt"] == 1, \
+#             f"DeepGEMM path was not executed during the test. " \
+#             f"Call counter: {call_counter['cnt']}"

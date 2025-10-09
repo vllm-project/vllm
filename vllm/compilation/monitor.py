@@ -20,12 +20,12 @@ def start_monitoring_torch_compile(vllm_config: VllmConfig):
     compilation_config: CompilationConfig = vllm_config.compilation_config
     if compilation_config.level == CompilationLevel.PIECEWISE and \
         compilation_config.debug_dump_path:
-        import depyf
+        # import depyf
         path = os.path.join(compilation_config.debug_dump_path,
                             f"rank_{vllm_config.parallel_config.rank}")
-        global context_manager
-        context_manager = depyf.prepare_debug(path)
-        context_manager.__enter__()
+        # global context_manager
+        # context_manager = depyf.prepare_debug(path)
+        # context_manager.__enter__()
 
 
 def end_monitoring_torch_compile(vllm_config: VllmConfig):

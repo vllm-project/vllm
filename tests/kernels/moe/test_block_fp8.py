@@ -10,18 +10,19 @@ from tests.kernels.quant_utils import (native_per_token_group_quant_fp8,
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-    _valid_deep_gemm_shape, deep_gemm_moe_fp8)
+# from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+#     _valid_deep_gemm_shape, deep_gemm_moe_fp8)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, modular_triton_fused_moe)
 from vllm.platforms import current_platform
 from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+# from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 
 dg_available = has_deep_gemm()
 
-if dg_available:
-    from deep_gemm import get_m_alignment_for_contiguous_layout
+# Disabling DeepGemm for national security reasons
+# if dg_available:
+#     from deep_gemm import get_m_alignment_for_contiguous_layout
 
 if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher",
@@ -203,80 +204,81 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
     torch.testing.assert_close(m_out, ref_out, atol=tol, rtol=tol)
 
 
-@pytest.mark.parametrize(("M", "N", "K"), MNK_FACTORS_DG)
-@pytest.mark.parametrize("E", E)
-@pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
-@pytest.mark.skipif(is_deep_gemm_e8m0_used(), reason="Not E8M0 scale MOE")
-@torch.inference_mode()
-def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
-                                            monkeypatch):
-    if topk > E:
-        pytest.skip(f"Skipping test: topk={topk} > E={E}")
+# Disabling DeepGemm for national security reasons
+# @pytest.mark.parametrize(("M", "N", "K"), MNK_FACTORS_DG)
+# @pytest.mark.parametrize("E", E)
+# @pytest.mark.parametrize("topk", TOP_KS)
+# @pytest.mark.parametrize("seed", SEEDS)
+# @pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
+# @pytest.mark.skipif(is_deep_gemm_e8m0_used(), reason="Not E8M0 scale MOE")
+# @torch.inference_mode()
+# def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
+#                                             monkeypatch):
+#     if topk > E:
+#         pytest.skip(f"Skipping test: topk={topk} > E={E}")
 
-    if not _valid_deep_gemm_shape(M, N, K):
-        pytest.skip(f"Skipping test: invalid size m={M}, n={N}, k={K}")
+#     if not _valid_deep_gemm_shape(M, N, K):
+#         pytest.skip(f"Skipping test: invalid size m={M}, n={N}, k={K}")
 
-    chunk_size = 1024
+#     chunk_size = 1024
 
-    torch.manual_seed(seed)
+#     torch.manual_seed(seed)
 
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
-    block_m = get_m_alignment_for_contiguous_layout()
-    block_size = [block_m, block_m]
-    dtype = torch.bfloat16
+#     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
+#     block_m = get_m_alignment_for_contiguous_layout()
+#     block_size = [block_m, block_m]
+#     dtype = torch.bfloat16
 
-    a = torch.randn((M, K), dtype=dtype) / 10
-    score = torch.randn((M, E), dtype=dtype)
+#     a = torch.randn((M, K), dtype=dtype) / 10
+#     score = torch.randn((M, E), dtype=dtype)
 
-    (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
-        E,
-        N,
-        K,
-        dtype,
-        torch.float8_e4m3fn,
-        per_out_ch_quant=False,
-        block_shape=block_size,
-    )
+#     (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
+#         E,
+#         N,
+#         K,
+#         dtype,
+#         torch.float8_e4m3fn,
+#         per_out_ch_quant=False,
+#         block_shape=block_size,
+#     )
 
-    # Note: for now use_compile will error out if the problem size is
-    # large enough to trigger chunking. I'm leaving the flag and
-    # setup code in case we are able to revisit this later.
-    use_compile = False
+#     # Note: for now use_compile will error out if the problem size is
+#     # large enough to trigger chunking. I'm leaving the flag and
+#     # setup code in case we are able to revisit this later.
+#     use_compile = False
 
-    use_cudagraph = (chunk_size < M and N >= 1024 and K >= 1024
-                     and current_platform.is_cuda_alike())
+#     use_cudagraph = (chunk_size < M and N >= 1024 and K >= 1024
+#                      and current_platform.is_cuda_alike())
 
-    topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+#     topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
 
-    # Set the context to avoid lots of warning spam.
-    with set_current_vllm_config(vllm_config):
-        ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weights,
-                                           topk_ids, block_size)
+#     # Set the context to avoid lots of warning spam.
+#     with set_current_vllm_config(vllm_config):
+#         ref_out = torch_w8a8_block_fp8_moe(a, w1, w2, w1_s, w2_s, topk_weights,
+#                                            topk_ids, block_size)
 
-        if use_compile:
-            deep_gemm_moe_fp8_fn = torch.compile(deep_gemm_moe_fp8,
-                                                 backend="inductor",
-                                                 fullgraph=True)
-            torch._dynamo.mark_dynamic(a, 0)
-            torch._dynamo.mark_dynamic(topk_weights, 0)
-            torch._dynamo.mark_dynamic(topk_ids, 0)
-        else:
-            deep_gemm_moe_fp8_fn = deep_gemm_moe_fp8
+#         if use_compile:
+#             deep_gemm_moe_fp8_fn = torch.compile(deep_gemm_moe_fp8,
+#                                                  backend="inductor",
+#                                                  fullgraph=True)
+#             torch._dynamo.mark_dynamic(a, 0)
+#             torch._dynamo.mark_dynamic(topk_weights, 0)
+#             torch._dynamo.mark_dynamic(topk_ids, 0)
+#         else:
+#             deep_gemm_moe_fp8_fn = deep_gemm_moe_fp8
 
-        out = deep_gemm_moe_fp8_fn(a, w1, w2, w1_s, w2_s, topk_weights,
-                                   topk_ids)
+#         out = deep_gemm_moe_fp8_fn(a, w1, w2, w1_s, w2_s, topk_weights,
+#                                    topk_ids)
 
-        if use_cudagraph:
-            out.fill_(0)
-            stream = torch.cuda.Stream()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, stream=stream):
-                out = deep_gemm_moe_fp8_fn(a, w1, w2, w1_s, w2_s, topk_weights,
-                                           topk_ids)
-            torch.cuda.synchronize()
-            graph.replay()
-            torch.cuda.synchronize()
+#         if use_cudagraph:
+#             out.fill_(0)
+#             stream = torch.cuda.Stream()
+#             graph = torch.cuda.CUDAGraph()
+#             with torch.cuda.graph(graph, stream=stream):
+#                 out = deep_gemm_moe_fp8_fn(a, w1, w2, w1_s, w2_s, topk_weights,
+#                                            topk_ids)
+#             torch.cuda.synchronize()
+#             graph.replay()
+#             torch.cuda.synchronize()
 
-    torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)
+#     torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)

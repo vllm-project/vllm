@@ -7,8 +7,8 @@ Users of vLLM should always import **only** these wrappers.
 from __future__ import annotations
 
 import functools
-import importlib
-import os
+# import importlib
+# import os
 from typing import Any, Callable, NoReturn
 
 import torch
@@ -94,29 +94,29 @@ def _lazy_init() -> None:
     if not has_deep_gemm():
         return
 
-    # Set up deep_gemm cache path
-    DEEP_GEMM_JIT_CACHE_ENV_NAME = 'DG_JIT_CACHE_DIR'
-    if not os.environ.get(DEEP_GEMM_JIT_CACHE_ENV_NAME, None):
-        os.environ[DEEP_GEMM_JIT_CACHE_ENV_NAME] = os.path.join(
-            envs.VLLM_CACHE_ROOT, "deep_gemm")
+    # # Set up deep_gemm cache path
+    # DEEP_GEMM_JIT_CACHE_ENV_NAME = 'DG_JIT_CACHE_DIR'
+    # if not os.environ.get(DEEP_GEMM_JIT_CACHE_ENV_NAME, None):
+    #     os.environ[DEEP_GEMM_JIT_CACHE_ENV_NAME] = os.path.join(
+    #         envs.VLLM_CACHE_ROOT, "deep_gemm")
 
-    _dg = importlib.import_module("deep_gemm")
+    # _dg = importlib.import_module("deep_gemm")
 
-    _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
-    _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
-    _grouped_masked_impl = getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
-    _fp8_mqa_logits_impl = getattr(_dg, "fp8_mqa_logits", None)
-    _fp8_paged_mqa_logits_impl = getattr(_dg, "fp8_paged_mqa_logits", None)
-    _get_paged_mqa_logits_metadata_impl = getattr(
-        _dg, "get_paged_mqa_logits_metadata", None)
-    _get_mn_major_tma_aligned_tensor_impl = getattr(
-        _dg, "get_mn_major_tma_aligned_tensor", None)
+    # _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
+    # _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
+    # _grouped_masked_impl = getattr(_dg, "fp8_m_grouped_gemm_nt_masked", None)
+    # _fp8_mqa_logits_impl = getattr(_dg, "fp8_mqa_logits", None)
+    # _fp8_paged_mqa_logits_impl = getattr(_dg, "fp8_paged_mqa_logits", None)
+    # _get_paged_mqa_logits_metadata_impl = getattr(
+    #     _dg, "get_paged_mqa_logits_metadata", None)
+    # _get_mn_major_tma_aligned_tensor_impl = getattr(
+    #     _dg, "get_mn_major_tma_aligned_tensor", None)
 
 
-def get_num_sms() -> int:
-    _lazy_init()
-    _dg = importlib.import_module("deep_gemm")
-    return int(_dg.get_num_sms())
+# def get_num_sms() -> int:
+#     _lazy_init()
+#     _dg = importlib.import_module("deep_gemm")
+#     return int(_dg.get_num_sms())
 
 
 def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
@@ -313,7 +313,7 @@ __all__ = [
     "per_block_cast_to_fp8",
     "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
-    "get_num_sms",
+    # "get_num_sms",
     "should_use_deepgemm_for_fp8_linear",
     "get_col_major_tma_aligned_tensor",
 ]

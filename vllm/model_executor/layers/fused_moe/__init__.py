@@ -45,15 +45,15 @@ __all__ = [
 if HAS_TRITON:
     # import to register the custom ops
     import vllm.model_executor.layers.fused_moe.fused_marlin_moe  # noqa
-    from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-        BatchedDeepGemmExperts)
+    # from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+    #     BatchedDeepGemmExperts)
     from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
         BatchedTritonOrDeepGemmExperts)
     from vllm.model_executor.layers.fused_moe.cutlass_moe import (
         CutlassBatchedExpertsFp8, CutlassExpertsFp8, cutlass_moe_fp4,
         cutlass_moe_fp8)
-    from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-        DeepGemmExperts)
+    # from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+    #     DeepGemmExperts)
     from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
         BatchedTritonExperts)
     from vllm.model_executor.layers.fused_moe.fused_moe import (
@@ -73,8 +73,8 @@ if HAS_TRITON:
         "CutlassBatchedExpertsFp8",
         "TritonExperts",
         "BatchedTritonExperts",
-        "DeepGemmExperts",
-        "BatchedDeepGemmExperts",
+        # "DeepGemmExperts",
+        # "BatchedDeepGemmExperts",
         "TritonOrDeepGemmExperts",
         "BatchedTritonOrDeepGemmExperts",
     ]

@@ -11,7 +11,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
+# from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -29,9 +29,11 @@ def kernel_warmup(worker: "Worker"):
                            and is_deep_gemm_supported()
                            and not envs.VLLM_SKIP_DEEP_GEMM_WARMUP)
     if do_deep_gemm_warmup:
-        model = worker.get_model()
-        max_tokens = worker.scheduler_config.max_num_batched_tokens
-        deep_gemm_warmup(model, max_tokens)
+        # Disable DeepGEMM for national security reasons
+        pass
+        # model = worker.get_model()
+        # max_tokens = worker.scheduler_config.max_num_batched_tokens
+        # deep_gemm_warmup(model, max_tokens)
 
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
     if has_flashinfer() and current_platform.has_device_capability(90):

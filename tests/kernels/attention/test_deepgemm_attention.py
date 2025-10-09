@@ -188,92 +188,92 @@ def _ref_fp8_paged_mqa_logits(
     return logits
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
-@pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
-@pytest.mark.skipif(not current_platform.has_device_capability(90),
-                    reason="SM90 and SM100 only")
-def test_deepgemm_fp8_paged_mqa_logits():
-    torch.manual_seed(0)
-    random.seed(0)
+# @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+# @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
+# @pytest.mark.skipif(not current_platform.has_device_capability(90),
+#                     reason="SM90 and SM100 only")
+# def test_deepgemm_fp8_paged_mqa_logits():
+#     torch.manual_seed(0)
+#     random.seed(0)
 
-    max_model_len = 4096
-    for batch_size, next_n in [(4, 1), (2, 2)]:
-        for heads, index_dim in [(32, 128)]:
-            for avg_kv in (2048, ):
-                num_blocks, blocksize = max_model_len * 2, 64
+#     max_model_len = 4096
+#     for batch_size, next_n in [(4, 1), (2, 2)]:
+#         for heads, index_dim in [(32, 128)]:
+#             for avg_kv in (2048, ):
+#                 num_blocks, blocksize = max_model_len * 2, 64
 
-                q = torch.randn(
-                    (batch_size, next_n, heads, index_dim),
-                    device="cuda",
-                    dtype=torch.bfloat16,
-                )
-                kv_cache = torch.randn(
-                    (num_blocks, blocksize, 1, index_dim),
-                    device="cuda",
-                    dtype=torch.bfloat16,
-                )
-                weights = torch.randn(
-                    (batch_size * next_n, heads),
-                    device="cuda",
-                    dtype=torch.float32,
-                )
+#                 q = torch.randn(
+#                     (batch_size, next_n, heads, index_dim),
+#                     device="cuda",
+#                     dtype=torch.bfloat16,
+#                 )
+#                 kv_cache = torch.randn(
+#                     (num_blocks, blocksize, 1, index_dim),
+#                     device="cuda",
+#                     dtype=torch.bfloat16,
+#                 )
+#                 weights = torch.randn(
+#                     (batch_size * next_n, heads),
+#                     device="cuda",
+#                     dtype=torch.float32,
+#                 )
 
-                context_lens = (torch.randint(int(0.8 * avg_kv),
-                                              int(1.2 * avg_kv),
-                                              (batch_size, )).cuda().to(
-                                                  torch.int32))
-                max_block_len = ((context_lens.max().item() + blocksize - 1) //
-                                 blocksize * blocksize)
-                block_tables = torch.zeros(
-                    (batch_size, max_block_len),
-                    device="cuda",
-                    dtype=torch.int32,
-                )
+#                 context_lens = (torch.randint(int(0.8 * avg_kv),
+#                                               int(1.2 * avg_kv),
+#                                               (batch_size, )).cuda().to(
+#                                                   torch.int32))
+#                 max_block_len = ((context_lens.max().item() + blocksize - 1) //
+#                                  blocksize * blocksize)
+#                 block_tables = torch.zeros(
+#                     (batch_size, max_block_len),
+#                     device="cuda",
+#                     dtype=torch.int32,
+#                 )
 
-                counter = 0
-                block_idx_pool = list(range(num_blocks))
-                random.shuffle(block_idx_pool)
-                for i in range(batch_size):
-                    ctx_len = int(context_lens[i].item())
-                    for j in range((ctx_len + blocksize - 1) // blocksize):
-                        block_tables[i][j] = block_idx_pool[counter]
-                        counter += 1
+#                 counter = 0
+#                 block_idx_pool = list(range(num_blocks))
+#                 random.shuffle(block_idx_pool)
+#                 for i in range(batch_size):
+#                     ctx_len = int(context_lens[i].item())
+#                     for j in range((ctx_len + blocksize - 1) // blocksize):
+#                         block_tables[i][j] = block_idx_pool[counter]
+#                         counter += 1
 
-                q_fp8 = q.to(torch.float8_e4m3fn)
-                kv_cache_fp8 = kv_cache_cast_to_fp8(kv_cache)
+#                 q_fp8 = q.to(torch.float8_e4m3fn)
+#                 kv_cache_fp8 = kv_cache_cast_to_fp8(kv_cache)
 
-                schedule_metadata = get_paged_mqa_logits_metadata(
-                    context_lens, blocksize, get_num_sms())
-                logits = fp8_paged_mqa_logits(
-                    q_fp8,
-                    kv_cache_fp8,
-                    weights,
-                    context_lens,
-                    block_tables,
-                    schedule_metadata,
-                    max_model_len,
-                )
+#                 schedule_metadata = get_paged_mqa_logits_metadata(
+#                     context_lens, blocksize, get_num_sms())
+#                 logits = fp8_paged_mqa_logits(
+#                     q_fp8,
+#                     kv_cache_fp8,
+#                     weights,
+#                     context_lens,
+#                     block_tables,
+#                     schedule_metadata,
+#                     max_model_len,
+#                 )
 
-                ref_logits = _ref_fp8_paged_mqa_logits(
-                    q,
-                    kv_cache,
-                    weights,
-                    context_lens,
-                    block_tables,
-                    max_model_len,
-                )
+#                 ref_logits = _ref_fp8_paged_mqa_logits(
+#                     q,
+#                     kv_cache,
+#                     weights,
+#                     context_lens,
+#                     block_tables,
+#                     max_model_len,
+#                 )
 
-                positions = (torch.arange(max_model_len,
-                                          device="cuda").unsqueeze(0).expand(
-                                              batch_size * next_n, -1))
-                row_indices = (
-                    torch.arange(batch_size * next_n, device="cuda") // next_n)
-                next_n_offset = (
-                    torch.arange(batch_size * next_n, device="cuda") % next_n)
-                mask = positions <= (context_lens[row_indices] - next_n +
-                                     next_n_offset).unsqueeze(1)
+#                 positions = (torch.arange(max_model_len,
+#                                           device="cuda").unsqueeze(0).expand(
+#                                               batch_size * next_n, -1))
+#                 row_indices = (
+#                     torch.arange(batch_size * next_n, device="cuda") // next_n)
+#                 next_n_offset = (
+#                     torch.arange(batch_size * next_n, device="cuda") % next_n)
+#                 mask = positions <= (context_lens[row_indices] - next_n +
+#                                      next_n_offset).unsqueeze(1)
 
-                logits = logits.masked_fill(~mask, 0)
-                ref_logits = ref_logits.masked_fill(~mask, 0)
-                diff = calc_diff(logits, ref_logits)
-                assert diff < 1e-3, f"{diff=}"
+#                 logits = logits.masked_fill(~mask, 0)
+#                 ref_logits = ref_logits.masked_fill(~mask, 0)
+#                 diff = calc_diff(logits, ref_logits)
+#                 assert diff < 1e-3, f"{diff=}"
