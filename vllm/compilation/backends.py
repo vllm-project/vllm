@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import logging
 import dataclasses
 import hashlib
 import json
@@ -562,9 +563,17 @@ class VllmBackend:
         config_hash = vllm_config.compute_hash()
         compiler_hash = self.compiler_manager.compute_hash(vllm_config)
         forward_code_files = list(sorted(self.compilation_config.traced_files))
+        class _LazyJoin:
+            def __init__(self, seq: list[str], sep: str = "\n"):
+                self.seq = seq
+                self.sep = sep
+
+            def __str__(self) -> str:
+                return self.sep.join(self.seq)
+
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",
-            "\n".join(forward_code_files),
+            _LazyJoin(forward_code_files),
         )
         hash_content = []
         for filepath in forward_code_files:
@@ -589,7 +598,7 @@ class VllmBackend:
             # graph.
             factors = [env_hash, config_hash, code_hash, compiler_hash]
             # Use SHA-256 for cache key hashing to be consistent across
-            # compute_hash functions. Truncate for a short, stable dir name.
+            # compute_hash functions. Truncate for a short cache dir name.
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()[:10]
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key
@@ -631,27 +640,36 @@ class VllmBackend:
 
         # Persist and log only hash-relevant factors together.
         try:
-            logger.debug(
-                "Compile env factors (raw):\n%s\nVllm config hash: %s",
-                pprint.pformat(env_factors, width=120),
-                config_hash,
-            )
-            meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
-            with open(meta_path, "w") as f:
-                json.dump(
-                    {
-                        "env": env_factors,  # raw factors used for env_hash
-                        "config_hash": config_hash,
-                        "code_hash": code_hash,
-                        "compiler_hash": compiler_hash,
-                    },
-                    f,
-                    indent=2,
-                    sort_keys=True,
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Compile env factors (raw):\n%s\nVllm config hash: %s",
+                    pprint.pformat(env_factors, width=120),
+                    config_hash,
                 )
+            meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
+            if not os.path.exists(meta_path):
+                with open(meta_path, "w") as f:
+                    json.dump(
+                        {
+                            "env": env_factors,  # raw factors used for env_hash
+                            "config_hash": config_hash,
+                            "code_hash": code_hash,
+                            "compiler_hash": compiler_hash,
+                        },
+                        f,
+                        indent=2,
+                        sort_keys=True,
+                    )
         except Exception:
             # Best-effort only; metadata write failures are non-fatal.
-            pass
+            logger.warning(
+                (
+                    "Could not write compile cache metadata at %s; continuing without "
+                    "metadata. Compiled cache remains valid; diagnostics may be limited."
+                ),
+                local_cache_dir,
+                exc_info=True,
+            )
 
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done

@@ -1408,9 +1408,10 @@ def set_vllm_use_v1(use_v1: bool):
 
 def compile_factors() -> dict[str, object]:
     """
-    Return raw env factors for compile hashing using the legacy opt-out
-    strategy: include all known env vars except a minimal set that clearly
-    does not affect compiled graph structure or kernel routing.
+    Return environment variables used to compute the compile cache key. 
+    This includes all known vLLM environment variables.
+    This then excludes variables that cannot affect graph structure, codegen, or kernel
+      selection (see ignored_factors)
     """
 
     ignored_factors: set[str] = {
@@ -1418,14 +1419,34 @@ def compile_factors() -> dict[str, object]:
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",
+        "VLLM_DEBUG_DUMP_PATH",
+        "VLLM_PORT",
+        "VLLM_CACHE_ROOT",
         "LD_LIBRARY_PATH",
-        "VLLM_PATTERN_MATCH_DEBUG",
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_CI_USE_S3",
         "VLLM_MODEL_REDIRECT_PATH",
+        "VLLM_HOST_IP",                    
+        "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_ENDPOINT_URL",  
+        "VLLM_USAGE_STATS_SERVER", "VLLM_NO_USAGE_STATS", "VLLM_DO_NOT_TRACK", 
+        "VLLM_LOGGING_LEVEL", "VLLM_LOGGING_PREFIX",
+        "VLLM_LOGGING_STREAM", "VLLM_LOGGING_CONFIG_PATH",
+        "VLLM_LOG_STATS_INTERVAL",         
+        "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
+        "VLLM_TUNED_CONFIG_FOLDER",        
+        "VLLM_ENGINE_ITERATION_TIMEOUT_S", 
+        "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
+        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
+        "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", 
+        "VLLM_SLEEP_WHEN_IDLE",            
+        "VLLM_IMAGE_FETCH_TIMEOUT", "VLLM_VIDEO_FETCH_TIMEOUT",
+        "VLLM_AUDIO_FETCH_TIMEOUT", "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
+        "VLLM_MEDIA_LOADING_THREAD_COUNT",
+        "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
+        "VLLM_VIDEO_LOADER_BACKEND", 
     }
 
     from vllm.config.utils import normalize_value

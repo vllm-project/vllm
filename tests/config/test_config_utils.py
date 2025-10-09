@@ -22,7 +22,7 @@ def _expected_path(p_str: str = ".") -> str:
     import pathlib
 
     p = pathlib.Path(p_str)
-    return str(p.expanduser().resolve())
+    return p.expanduser().resolve().as_posix()
 
 
 # Minimal dataclass to test get_hash_factors.
