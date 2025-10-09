@@ -9,6 +9,7 @@ import json
 import sys
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -385,6 +386,8 @@ class EngineArgs:
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
     eplb_log_balancedness: bool = EPLBConfig.log_balancedness
+    eplb_save_dir: Optional[Path] = EPLBConfig.eplb_save_dir
+    eplb_load_path: Optional[Path] = EPLBConfig.eplb_load_path
     max_parallel_loading_workers: Optional[int] = (
         ParallelConfig.max_parallel_loading_workers
     )
