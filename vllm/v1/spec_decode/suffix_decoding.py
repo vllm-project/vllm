@@ -5,6 +5,12 @@ from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
 class SuffixDecodingProposer:
+    """
+    Speculative decoding proposer for Suffix Decoding (https://arxiv.org/pdf/2411.04975).
+    This class imports and uses the official implementation from Arctic Inference
+    (https://github.com/snowflakedb/ArcticInference).
+    """
+
     def __init__(self, vllm_config: VllmConfig):
         config = vllm_config.speculative_config
         self.num_speculative_tokens = config.num_speculative_tokens
@@ -16,6 +22,8 @@ class SuffixDecodingProposer:
         # Lazy import to avoid error when Suffix Decoding is not used.
         from arctic_inference.suffix_decoding import SuffixDecodingCache
 
+        # Initialize and empty cache. This object will take care of caching request
+        # outputs, evicting old requests, and manages the per-prompt suffix trees.
         self.suffix_cache = SuffixDecodingCache(
             max_tree_depth=config.suffix_decoding_max_tree_depth,
             max_cached_requests=config.suffix_decoding_max_cached_requests,
@@ -26,12 +34,18 @@ class SuffixDecodingProposer:
         input_batch: InputBatch,
         sampled_token_ids: list[list[int]],
     ):
+        """
+        Update the suffix cache with the newly sampled token ids for each active request.
+        Assumes that any request id not in `input_batch.req_ids` is no longer active and
+        should be stopped (i.e. deletes the per-prompt tree for that request id).
+        """
         seen_req_ids = set()
         for i, sampled_ids in enumerate(sampled_token_ids):
             req_id = input_batch.req_ids[i]
             seen_req_ids.add(req_id)
 
             if not sampled_ids:
+                # No sampled ids for partial prefills.
                 continue
 
             index = input_batch.req_id_to_index[req_id]
@@ -42,11 +56,13 @@ class SuffixDecodingProposer:
                 num_prompt_tokens = input_batch.num_prompt_tokens[index]
                 prompt_token_ids = input_batch.token_ids_cpu[index, :num_prompt_tokens]
                 prompt_token_ids = prompt_token_ids.tolist()
+                # Start a new request, this will build the suffix tree for that prompt.
                 self.suffix_cache.start_request(req_id, prompt_token_ids)
 
+            # Append the newly sampled ids to the suffix cache for this request.
             self.suffix_cache.add_active_response(req_id, sampled_ids)
 
-        # Stop requests that are not seen
+        # Stop requests that are not seen in the input batch.
         for req_id in list(self.suffix_cache.active_requests):
             if req_id not in seen_req_ids:
                 self.suffix_cache.stop_request(req_id)
@@ -56,12 +72,17 @@ class SuffixDecodingProposer:
         input_batch: InputBatch,
         sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
+        """
+        Propose speculative tokens for each request in the input batch. Suffix Decoding
+        will speculate a dynamic number of tokens for each request at each decoding step,
+        so each entry in the returned list may have different lengths.
+        """
         req_ids = input_batch.req_ids
         draft_token_ids: list[list[int]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
-                # Skip speculative decoding.
+                # Skip speculative decoding for partial prefills.
                 draft_token_ids.append([])
                 continue
 

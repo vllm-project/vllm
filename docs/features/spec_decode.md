@@ -141,6 +141,9 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
 !!! tip "Install Arctic Inference"
     Suffix Decoding requires [Arctic Inference](https://github.com/snowflakedb/ArcticInference). You can install it with `pip install arctic-inference`.
 
+!!! tip "Suffix Decoding Speculative Tokens"
+    Suffix Decoding will speculate a dynamic number of tokens for each request at each decoding step, so the `num_speculative_tokens` configuration specifies the *maximum* number of speculative tokens. It is suggested to use a high number such as `16` or `32` (default).
+
 ??? code
 
     ```python
@@ -156,7 +159,7 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
         tensor_parallel_size=1,
         speculative_config={
             "method": "suffix",
-            "num_speculative_tokens": 16,
+            "num_speculative_tokens": 32,
         },
     )
     outputs = llm.generate(prompts, sampling_params)
