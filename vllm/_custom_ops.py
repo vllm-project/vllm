@@ -1724,7 +1724,7 @@ def selective_scan_fwd(
     ssm_states: torch.Tensor,
     pad_slot_id: int,
     intermediate_states: Optional[torch.Tensor] = None,
-    block_size: int = 256
+    block_size: int = 256,  # TODO(Josephasafg): Make this optional
 ):
     torch.ops._C.selective_scan_fwd(
         u,

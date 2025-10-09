@@ -255,7 +255,6 @@ class MambaMixer(MambaBase, CustomOp):
             has_initial_states_p = attn_metadata.has_initial_states_p
             num_padded_decodes = attn_metadata.num_padded_decodes
 
-
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
         hidden_states_BC, gate = projected_states.chunk(2, dim=-2)
@@ -350,13 +349,16 @@ class MambaMixer(MambaBase, CustomOp):
             if prefix_caching_enabled:
                 if has_initial_states_p is not None and has_initial_states_p.any():
                     kernel_ssm_indices = state_indices_tensor_p.gather(
-                        1, block_idx_last_computed_token_p.unsqueeze(1)).squeeze(1)
+                        1, block_idx_last_computed_token_p.unsqueeze(1)
+                    ).squeeze(1)
                     store_state_indices = state_indices_tensor_p.gather(
-                        1, block_idx_last_scheduled_token_p.unsqueeze(1)).squeeze(1)
+                        1, block_idx_last_scheduled_token_p.unsqueeze(1)
+                    ).squeeze(1)
                 else:
                     # Fresh request: both indices point to current_last_idx
                     kernel_ssm_indices = state_indices_tensor_p.gather(
-                        1, block_idx_last_scheduled_token_p.unsqueeze(1)).squeeze(1)
+                        1, block_idx_last_scheduled_token_p.unsqueeze(1)
+                    ).squeeze(1)
                     store_state_indices = kernel_ssm_indices
 
             scan_result = selective_scan_fn(
@@ -408,20 +410,26 @@ class MambaMixer(MambaBase, CustomOp):
 
                     # Copy the intermediate states to the appropriate cache blocks
                     ssm_state[cache_blocks_to_fill] = intermediate_states[
-                        seq_idx, :n_blocks_to_fill]
+                        seq_idx, :n_blocks_to_fill
+                    ]
 
                 # Store the final state from intermediate_states to ssm_state
                 # The kernel stores ALL blocks to intermediate_states at relative positions
-                relative_last_indices = block_idx_last_scheduled_token_p - block_idx_first_scheduled_token_p
-                batch_indices = torch.arange(num_prefills, device=relative_last_indices.device)
+                relative_last_indices = (
+                    block_idx_last_scheduled_token_p - block_idx_first_scheduled_token_p
+                )
+                batch_indices = torch.arange(
+                    num_prefills, device=relative_last_indices.device
+                )
 
                 # Use advanced indexing to store all final states at once
-                ssm_state[store_state_indices] = intermediate_states[batch_indices, relative_last_indices]
+                ssm_state[store_state_indices] = intermediate_states[
+                    batch_indices, relative_last_indices
+                ]
             else:
                 scan_out_p = scan_result
 
             ssm_outputs.append(scan_out_p)
-
 
         if has_decode:
             if prefix_caching_enabled:
@@ -444,7 +452,7 @@ class MambaMixer(MambaBase, CustomOp):
                 conv_state_indices=state_indices_tensor_d,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
                 initial_state_idx=block_idx_last_computed_token_d,
-                ).transpose(0, 1)
+            ).transpose(0, 1)
 
             # 3. State Space Model sequence transformation.
             discrete_time_step_d, B_d, C_d = self._ssm_transform(

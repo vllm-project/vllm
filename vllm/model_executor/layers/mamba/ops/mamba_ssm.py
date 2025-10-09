@@ -451,7 +451,7 @@ def selective_scan_fn(
         intermediate_states = torch.zeros(
             (batch_size, max_blocks, dim_size, dstate),
             dtype=ssm_states.dtype,
-            device=u.device
+            device=u.device,
         )
 
     ops.selective_scan_fwd(

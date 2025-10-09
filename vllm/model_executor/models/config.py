@@ -389,10 +389,11 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             if chunk_size is None:
                 # TODO(Josephasafg) Choose a more generic value
                 #  for the block size
-                attn_block_size = 256 * cdiv(attn_tokens_per_mamba_state, 256)
+                attn_block_size = 1024 * cdiv(attn_tokens_per_mamba_state, 1024)
             else:
-                attn_block_size = chunk_size * \
-                cdiv(attn_tokens_per_mamba_state, chunk_size)
+                attn_block_size = chunk_size * cdiv(
+                    attn_tokens_per_mamba_state, chunk_size
+                )
             cache_config.mamba_block_size = attn_block_size
         else:
             # Without prefix caching, select minimum valid attention block size
