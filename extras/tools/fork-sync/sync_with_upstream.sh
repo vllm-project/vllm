@@ -37,6 +37,28 @@ if git rev-parse --verify MERGE_HEAD >/dev/null 2>&1; then
   exit 1
 fi
 
+ensure_gitignore_secret_entry() {
+  local entry="extras/secrets/*.env"
+  if [ ! -f .gitignore ]; then
+    printf '%s\n' "$entry" > .gitignore
+    git add .gitignore
+    echo "[sync-extras] Added $entry to new .gitignore"
+    return
+  fi
+  if grep -Fxq "$entry" .gitignore; then
+    return
+  fi
+  if [ -s .gitignore ]; then
+    last_char=$(tail -c1 .gitignore 2>/dev/null || printf '')
+    if [ "$last_char" != "" ] && [ "$last_char" != $'\n' ]; then
+      printf '\n' >> .gitignore
+    fi
+  fi
+  printf '%s\n' "$entry" >> .gitignore
+  git add .gitignore
+  echo "[sync-extras] Ensured $entry is present in .gitignore"
+}
+
 echo "[sync-extras] Fetching ${REMOTE}/${BRANCH}"
 git fetch "$REMOTE" "$BRANCH" || true
 
@@ -96,5 +118,7 @@ if [ -n "$TMPDIR" ] && [ -d "$TMPDIR" ]; then
     git commit -m "Restore protected paths after upstream sync" || true
   fi
 fi
+
+ensure_gitignore_secret_entry
 
 echo "[sync-extras] Done. You may now push with: git push origin $(git rev-parse --abbrev-ref HEAD)"

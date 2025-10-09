@@ -46,6 +46,7 @@ RECREATE=0
 WORK_VOLUME=""
 WORK_DIR_HOST=""
 ENV_ENTRIES=()
+SECRET_ENV_FILES=()
 
 # Build/config placeholders (populated lazily)
 CUDA_VERSION=""
@@ -346,6 +347,19 @@ collect_fa3_envs() {
 	done < <(env)
 }
 
+collect_secret_env_files() {
+	local secrets_dir="$SOURCE_DIR/extras/secrets"
+	[[ -d "$secrets_dir" ]] || return
+	while IFS= read -r -d '' file; do
+		local native_path
+		native_path="$(convert_host_path "$file")"
+		SECRET_ENV_FILES+=("$native_path")
+		local display_name
+		display_name="${file##*/}"
+		echo "🔐 Detected secrets env file: $display_name" >&2
+	done < <(find "$secrets_dir" -maxdepth 1 -type f -name '*.env' ! -name '*.env.example' -print0 2>/dev/null)
+}
+
 prepare_run_args() {
 	RUN_ARGS=(run --rm --security-opt=label=disable)
 	if [[ -z "${VLLM_DISABLE_CDI:-}" ]]; then
@@ -403,6 +417,7 @@ prepare_run_args() {
 	done
 
 	collect_fa3_envs
+	collect_secret_env_files
 }
 
 command_for_gpu_check() {
@@ -420,6 +435,10 @@ command_for_setup() {
 finalize_and_run() {
 	for kv in "${ENV_VARS[@]}"; do
 		RUN_ARGS+=(--env "$kv")
+	done
+
+	for env_file in "${SECRET_ENV_FILES[@]}"; do
+		RUN_ARGS+=(--env-file "$env_file")
 	done
 
 	if [[ $GPU_CHECK -eq 1 ]]; then

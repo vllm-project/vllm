@@ -47,3 +47,36 @@ running on GitHub and the local steps you take before hacking on the codebase.
 
 By enforcing clean working trees after each automated step, the workflow mirrors what CI expects
 and keeps the Windows-mounted repository free of unexpected modifications.
+
+## 5. Handling secrets for local testing
+
+- Real API credentials live in `extras/secrets/*.env`. Copy the provided `*.env.example`
+  templates, fill in your personal tokens (for example, Hugging Face access keys), and keep them
+  next to the examples with a `.env` suffix.
+- The helpers now auto-discover every `extras/secrets/*.env` file (excluding `*.env.example`) and
+  forward them to `podman run` through `--env-file`, so everything inside the dev container can use
+  the same credentials without baking them into the image.
+- All `extras/secrets/*.env` files are ignored by Git; only the example templates belong in the
+  repository. Verify with `git status` before committing changes.
+
+## 6. GPU passthrough on Windows + WSL2 Podman
+
+1. Make sure your Windows host has the latest NVIDIA driver with WSL2 support and that `wsl --update`
+   has run recently.
+2. Initialize your Podman machine with the Fedora 42 image (`podman machine init --image-path fedora-42`)
+   if you have not done so already.
+3. From the repository root, run the helper script:
+
+  ```powershell
+  pwsh extras/tools/enable-podman-wsl-gpu.ps1
+  ```
+
+   Add `-MachineName <name>` if you use a non-default Podman machine or `-SkipReboot` when you prefer
+   to restart it manually later.
+
+4. After the script restarts the machine, launch `extras/podman/run.ps1 -GPUCheck` (or `run.sh --gpu-check`)
+   to confirm that `/dev/dxg` and the CUDA libraries are visible from inside the dev container.
+
+If the helper still reports missing `/dev/dxg`, open Podman Desktop, ensure GPU sharing is enabled for
+the selected machine, and rerun the script. When running on other distributions, replicate the script’s
+steps manually: install `nvidia-container-toolkit`, generate a CDI spec via `nvidia-ctk cdi generate`.
