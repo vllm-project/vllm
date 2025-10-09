@@ -117,10 +117,6 @@ class NoOpEliminationPass(VllmInductorPass):
         There are two cases in which the dimensions are equivalent:
         1. The dimensions are equal (both integers)
         2. The dimensions both correspond to the same SymInt
-
-        In case 2, the reshape dimension is a torch.fx.Node,
-        and its value is a SymInt. That value is equal to the
-        input dimension.
         """
         # Case 1
         if isinstance(i_dim, int) and isinstance(dim, int):
