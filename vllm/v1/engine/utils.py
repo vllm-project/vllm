@@ -372,7 +372,11 @@ class CoreEngineActorManager:
         strict_local_size = envs.VLLM_RAY_DP_PACK_STRATEGY == "strict"
 
         for node_resources in nodes:
-            node_ip_keys = [key for key in node_resources if key.startswith("node:")]
+            node_ip_keys = [
+                key
+                for key in node_resources
+                if key != "node:__internal_head__" and key.startswith("node:")
+            ]
             assert len(node_ip_keys) == 1, (
                 "Zero or multiple node IP keys found in node resources: %s",
                 node_ip_keys,
