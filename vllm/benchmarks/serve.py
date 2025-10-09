@@ -97,6 +97,7 @@ class BenchmarkMetrics:
 @dataclass
 class EmbedBenchmarkMetrics:
     completed: int
+    failed: int
     total_input: int
     request_throughput: float
     total_token_throughput: float
@@ -239,12 +240,15 @@ def calculate_metrics_for_embeddings(
     """
     total_input = 0
     completed = 0
+    failed = 0
     e2els: list[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             e2els.append(outputs[i].latency)
             completed += 1
             total_input += outputs[i].prompt_len
+        else:
+            failed += 1
 
     if completed == 0:
         warnings.warn(
@@ -254,6 +258,7 @@ def calculate_metrics_for_embeddings(
         )
     metrics = EmbedBenchmarkMetrics(
         completed=completed,
+        failed=failed,
         total_input=total_input,
         request_throughput=completed / dur_s,
         total_token_throughput=total_input / dur_s,
