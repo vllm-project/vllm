@@ -170,11 +170,11 @@ def coordinate_batch_across_dp(
         allow_dp_padding: If all DP ranks should be padded up to the same value
         parallel_config: The parallel config
         num_tokens_padded: Number of tokens including any non-DP padding (CUDA graphs,
-        TP, etc)
+            TP, etc)
         uniform_decode: Only used if allow_microbatching is True. True if the batch
-        only contains single token decodes
+            only contains single token decodes
         num_scheduled_tokens_per_request: Only used if allow_microbatching is True. The
-        number of tokens per request.
+            number of tokens per request.
 
     Returns: tuple[
         ubatch_slices: if this is set then all DP ranks have agreed to
