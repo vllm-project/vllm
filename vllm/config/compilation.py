@@ -182,7 +182,7 @@ class CompilationConfig:
     """The mode of compilation:
 
     - None: If None, we will select the default compilation mode.
-      For V1 engine this is 3, for V0 engine this is 0.
+      For V1 engine this is 3.
     - 0: NONE: no compilation
     - 1: STOCK_TORCH_COMPILE: just applying default torch.compile to model.
     - 2: DYNAMO_TRACE_ONCE: force a single Dynamo trace step by removing guards.
