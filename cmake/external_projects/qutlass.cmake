@@ -81,7 +81,7 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.8 AND QUTLASS_ARCHS)
     TARGET_CUDA_ARCH=${QUTLASS_TARGET_CC}
   )
 
-  target_compile_options(_C PRIVATE
+  set_property(SOURCE ${QUTLASS_SOURCES} APPEND PROPERTY COMPILE_OPTIONS
     $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --use_fast_math -O3>
   )
 
