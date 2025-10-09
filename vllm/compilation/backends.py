@@ -55,9 +55,14 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
             logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
     else:
-        assert compilation_config.backend == "eager", (
-            "Custom backends not supported with CompilationMode.VLLM_COMPILE"
-        )
+        if current_platform.is_tpu():
+            assert compilation_config.backend == "openxla", (
+                "TPU platform should use openxla as compiler backend."
+            )
+        else:
+            assert compilation_config.backend == "eager", (
+                "Custom backends not supported with CompilationMode.VLLM_COMPILE"
+            )
 
         logger.debug("Using EagerAdaptor")
         return EagerAdaptor()
