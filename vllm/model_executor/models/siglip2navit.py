@@ -592,8 +592,7 @@ class Siglip2Encoder(nn.Module):
             # for more information
             dtype=grid_thws.dtype if torch.jit.is_tracing() else torch.int32,
         )
-        zeros = torch.zeros(1, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
-        cu_seqlens = torch.cat([zeros, cu_seqlens])
+        cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
 
         reverse_indices = torch.argsort(window_index)
 
