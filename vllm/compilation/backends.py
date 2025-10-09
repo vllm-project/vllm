@@ -587,12 +587,10 @@ class VllmBackend:
             # that affects the compilation. if none of the factors change,
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
-
             factors = [env_hash, config_hash, code_hash, compiler_hash]
-            hash_key = hashlib.md5(
-                str(factors).encode(), usedforsecurity=False
-            ).hexdigest()[:10]
-
+            # Use SHA-256 for cache key hashing to be consistent across
+            # compute_hash functions. Truncate for a short, stable dir name.
+            hash_key = hashlib.sha256(str(factors).encode()).hexdigest()[:10]
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT, "torch_compile_cache", hash_key
             )
