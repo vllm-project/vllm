@@ -21,8 +21,6 @@ from vllm.config import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils import is_torch_equal_or_newer
 
-from ...utils import create_new_process_for_each_test
-
 # This import automatically registers `torch.ops.silly.attention`
 from ..silly_attention import get_global_counter, reset_global_counter
 
@@ -127,7 +125,6 @@ def _run_simple_model(
 
 @pytest.mark.parametrize("use_inductor", [True, False])
 @torch.inference_mode()
-@create_new_process_for_each_test()
 def test_simple_piecewise_compile(use_inductor):
     _run_simple_model(
         splitting_ops=["silly.attention"],
@@ -146,7 +143,6 @@ def test_simple_piecewise_compile(use_inductor):
 
 @torch.inference_mode()
 @pytest.mark.parametrize("splitting_ops", [["silly.attention"], []])
-@create_new_process_for_each_test()
 def test_simple_inductor_graph_partition(splitting_ops, monkeypatch):
     if not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
