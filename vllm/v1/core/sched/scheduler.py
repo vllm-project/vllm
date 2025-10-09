@@ -963,7 +963,12 @@ class Scheduler(SchedulerInterface):
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
             if scheduled_spec_token_ids:
-                num_draft_tokens = len(scheduled_spec_token_ids)
+                if model_runner_output.num_draft_tokens_per_seq:
+                    num_draft_tokens = (
+                        model_runner_output.num_draft_tokens_per_seq[req_index])
+                else:
+                    num_draft_tokens = len(scheduled_spec_token_ids)
+
                 num_accepted = len(generated_token_ids) - 1
                 num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
@@ -1270,8 +1275,31 @@ class Scheduler(SchedulerInterface):
     ) -> SpecDecodingStats | None:
         if not self.log_stats:
             return None
-        if spec_decoding_stats is None:
-            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
+        # Considering dynamic_spec_decode
+        capacity_needed = max(int(num_draft_tokens), int(num_accepted_tokens),
+                              int(self.num_spec_tokens))
+
+        # If the stats object does not exist or is too small, create a new
+        # one and copy over the old data.
+        if (spec_decoding_stats is None
+                or capacity_needed > spec_decoding_stats.num_spec_tokens):
+
+            new_stats = SpecDecodingStats.new(capacity_needed)
+
+            # If there was an old object, preserve its historical data.
+            if spec_decoding_stats is not None:
+                old_stats = spec_decoding_stats
+                new_stats.num_drafts = old_stats.num_drafts
+                new_stats.num_draft_tokens = old_stats.num_draft_tokens
+                new_stats.num_accepted_tokens = old_stats.num_accepted_tokens
+
+                # Use slicing for a more compact array copy.
+                len_to_copy = len(old_stats.num_accepted_tokens_per_pos)
+                new_stats.num_accepted_tokens_per_pos[:len_to_copy] = \
+                    old_stats.num_accepted_tokens_per_pos[:len_to_copy]
+
+            spec_decoding_stats = new_stats
+            
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
         )

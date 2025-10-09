@@ -130,6 +130,7 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
 
+    num_draft_tokens_per_seq: Optional[list[int]] = None
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):
