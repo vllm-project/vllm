@@ -471,6 +471,11 @@ main() {
   mkdir -p $RESULTS_FOLDER
   QUICK_BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
+  # dump vllm info via vllm collect-env
+  env_output=$(vllm collect-env)
+
+  echo "$env_output" >"$RESULTS_FOLDER/vllm_env.txt"
+
   # benchmarking
   run_serving_tests $QUICK_BENCHMARK_ROOT/tests/"${SERVING_JSON:-serving-tests$ARCH.json}"
   run_latency_tests $QUICK_BENCHMARK_ROOT/tests/"${LATENCY_JSON:-latency-tests$ARCH.json}"
