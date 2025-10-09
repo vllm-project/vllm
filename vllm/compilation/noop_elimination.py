@@ -81,44 +81,23 @@ class NoOpEliminationPass(VllmInductorPass):
                         graph.erase_node(input)
                         count += 1
 
-                # Case 2: remove this reshape if it produces the original shape
-                input, shape = node.args[:2]
-                input_shape = input.meta["val"].shape
-                if len(shape) != len(input_shape):
-                    # Reshape changing rank, skip
-                    continue
-
-                if shape.count(-1) > 1:
-                    # Invalid reshape args, skip
-                    continue
-
-                if self.all_dims_equivalent(shape, input_shape, infer_minus_one=True):
-                    node.replace_all_uses_with(input)
-                    graph.erase_node(node)
-                    count += 1
-
-            elif is_func(node, torch.ops.aten.slice.Tensor):
-                # python slicing semantics are different from reshape
-                # Don't treat -1 as inferred dimension
-                input, dim_index, start, end = node.args[:4]
+            # remove reshape/slice if it produces the original shape
+            if is_func(node, torch.ops.aten.reshape.default) or is_func(
+                node, torch.ops.aten.slice.Tensor
+            ):
+                input = node.args[0]
                 input_shape = input.meta["val"].shape
                 output_shape = node.meta["val"].shape
-
-                if self.all_dims_equivalent(
-                    output_shape, input_shape, infer_minus_one=False
-                ):
+                if self.all_dims_equivalent(input_shape, output_shape):
                     node.replace_all_uses_with(input)
                     graph.erase_node(node)
                     count += 1
-
             elif is_func(node, torch.ops.aten.slice_scatter.default):
                 base, view, dim_index, start, end = node.args[:5]
                 base_shape = base.meta["val"].shape
                 view_shape = view.meta["val"].shape
 
-                if self.all_dims_equivalent(
-                    base_shape, view_shape, infer_minus_one=False
-                ):
+                if self.all_dims_equivalent(base_shape, view_shape):
                     node.replace_all_uses_with(view)
                     graph.erase_node(node)
                     count += 1
@@ -127,34 +106,26 @@ class NoOpEliminationPass(VllmInductorPass):
 
     # ---------------------- Shape comparison helpers ----------------------
     def dims_equivalent(
-        self,
-        dim: Union[int, SymInt, torch.fx.Node],
-        i_dim: Union[int, SymInt],
-        infer_minus_one: bool = True,
+        self, dim: Union[int, SymInt, torch.fx.Node], i_dim: Union[int, SymInt]
     ) -> bool:
         """
         This function checks if two dimensions are equivalent.
         :param dim: The dimension arg to reshape/slice
         :param i_dim: The corresponding dimension in the input tensor
-        :param infer_minus_one: Treat -1 as inferred dimension or not
         :return: Are the dimensions equivalent?
 
-        There are three cases in which the dimensions are equivalent:
+        There are two cases in which the dimensions are equivalent:
         1. The dimensions are equal (both integers)
-        2. [Optional] The reshape dimension is -1 (i.e. inferred)
-        3. The dimensions both correspond to the same SymInt
+        2. The dimensions both correspond to the same SymInt
 
-        While case 2 does not guarantee the dimensions are equal,
-        they are equal if all other dimensions are equal.
-
-        In case 3, the reshape dimension is a torch.fx.Node,
+        In case 2, the reshape dimension is a torch.fx.Node,
         and its value is a SymInt. That value is equal to the
         input dimension.
         """
-        # Case 1 and 2
+        # Case 1
         if isinstance(i_dim, int) and isinstance(dim, int):
-            return dim == i_dim or (infer_minus_one and dim == -1)
-        # Case 3
+            return dim == i_dim
+        # Case 2
         if isinstance(i_dim, SymInt) and isinstance(dim, SymInt):
             return dim == i_dim
         if isinstance(dim, torch.fx.Node) and isinstance(i_dim, SymInt):
@@ -165,9 +136,10 @@ class NoOpEliminationPass(VllmInductorPass):
         self,
         dims: Iterable[Union[int, SymInt, torch.fx.Node]],
         i_dims: Iterable[Union[int, SymInt]],
-        infer_minus_one: bool = True,
     ) -> bool:
-        return all(
-            self.dims_equivalent(s, i_s, infer_minus_one)
-            for s, i_s in zip(dims, i_dims)
-        )
+        dims_ = list(dims)
+        i_dims_ = list(i_dims)
+        if len(dims_) != len(i_dims_):
+            # Different ranks can't be equivalent
+            return False
+        return all(self.dims_equivalent(s, i_s) for s, i_s in zip(dims, i_dims))
