@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only FlexOlmo model compatible with HuggingFace weights."""
+
 from typing import Optional
 
 import torch
@@ -24,26 +25,25 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.olmoe import OlmoeAttention, OlmoeForCausalLM
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.transformers_utils.configs import FlexOlmoConfig
 
 logger = init_logger(__name__)
 
 
 class FlexOlmoAttention(OlmoeAttention):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         hf_config = vllm_config.model_config.hf_config
         assert isinstance(hf_config, FlexOlmoConfig)
 
-        self.k_norm = RMSNorm(self.total_num_kv_heads * self.head_dim,
-                              eps=hf_config.rms_norm_eps)
-        self.q_norm = RMSNorm(self.total_num_heads * self.head_dim,
-                              eps=hf_config.rms_norm_eps)
+        self.k_norm = RMSNorm(
+            self.total_num_kv_heads * self.head_dim, eps=hf_config.rms_norm_eps
+        )
+        self.q_norm = RMSNorm(
+            self.total_num_heads * self.head_dim, eps=hf_config.rms_norm_eps
+        )
 
 
 class FlexOlmoMoE(nn.Module):
@@ -64,22 +64,26 @@ class FlexOlmoMoE(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
 
         # Gate always runs at half / full precision for now.
-        self.gate = ReplicatedLinear(hf_config.hidden_size,
-                                     hf_config.num_experts,
-                                     bias=False,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate")
+        self.gate = ReplicatedLinear(
+            hf_config.hidden_size,
+            hf_config.num_experts,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.gate",
+        )
 
         # Gate always runs at half / full precision for now.
-        self.experts = FusedMoE(num_experts=hf_config.num_experts,
-                                top_k=hf_config.num_experts_per_tok,
-                                hidden_size=hf_config.hidden_size,
-                                intermediate_size=hf_config.intermediate_size,
-                                reduce_results=True,
-                                renormalize=False,
-                                quant_config=None,
-                                tp_size=tp_size,
-                                prefix=f"{prefix}.experts")
+        self.experts = FusedMoE(
+            num_experts=hf_config.num_experts,
+            top_k=hf_config.num_experts_per_tok,
+            hidden_size=hf_config.hidden_size,
+            intermediate_size=hf_config.intermediate_size,
+            reduce_results=True,
+            renormalize=False,
+            quant_config=None,
+            tp_size=tp_size,
+            prefix=f"{prefix}.experts",
+        )
 
         self.top_k = hf_config.num_experts_per_tok
 
@@ -95,24 +99,27 @@ class FlexOlmoMoE(nn.Module):
         # basic things like the residual stream.
         final_hidden_states = self.experts(
             hidden_states=hidden_states.detach().clone(),
-            router_logits=router_logits.float())
+            router_logits=router_logits.float(),
+        )
 
         return final_hidden_states.view(orig_shape)
 
 
 class FlexOlmoDecoderLayer(nn.Module):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         hf_config = vllm_config.model_config.hf_config
         assert isinstance(hf_config, FlexOlmoConfig)
 
-        self.self_attn = FlexOlmoAttention(vllm_config=vllm_config,
-                                           prefix=f"{prefix}.self_attn")
-        self.post_attention_layernorm = RMSNorm(hf_config.hidden_size,
-                                                eps=hf_config.rms_norm_eps)
-        self.post_feedforward_layernorm = RMSNorm(hf_config.hidden_size,
-                                                  eps=hf_config.rms_norm_eps)
+        self.self_attn = FlexOlmoAttention(
+            vllm_config=vllm_config, prefix=f"{prefix}.self_attn"
+        )
+        self.post_attention_layernorm = RMSNorm(
+            hf_config.hidden_size, eps=hf_config.rms_norm_eps
+        )
+        self.post_feedforward_layernorm = RMSNorm(
+            hf_config.hidden_size, eps=hf_config.rms_norm_eps
+        )
 
         self.mlp = FlexOlmoMoE(vllm_config=vllm_config, prefix=f"{prefix}.mlp")
 
@@ -137,23 +144,13 @@ class FlexOlmoDecoderLayer(nn.Module):
 
 
 class FlexOlmoForCausalLM(OlmoeForCausalLM):
-
     fall_back_to_pt_during_load = False
 
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 prefix: str = "",
-                 layer_type: type[nn.Module] = FlexOlmoDecoderLayer):
-        super().__init__(vllm_config=vllm_config,
-                         prefix=prefix,
-                         layer_type=layer_type)
-        self.sampler = get_sampler()
-
-    def sample(
+    def __init__(
         self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        layer_type: type[nn.Module] = FlexOlmoDecoderLayer,
+    ):
+        super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
