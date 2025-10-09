@@ -705,7 +705,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         use_audio_in_video = False
         if "video" in mm_kwargs:
             for item in mm_kwargs["video"]:
-                if item.get("use_audio_in_video") and item["use_audio_in_video"].data:
+                if item and item["use_audio_in_video"].data:
                     use_audio_in_video = True
                 else:
                     use_audio_in_video = False
