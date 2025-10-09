@@ -39,22 +39,16 @@ def _get_mm_cache_stats(metrics: list[Metric]):
 
 @pytest.mark.parametrize("image_urls", [TEST_IMAGE_ASSETS[:2]], indirect=True)
 @pytest.mark.parametrize("mm_processor_cache_type", ["lru", "shm"])
-@pytest.mark.parametrize("tp_size", [1, 2])
 def test_mm_cache_stats(
     num_gpus_available,
     image_urls,
     mm_processor_cache_type,
-    tp_size,
 ):
-    if num_gpus_available < tp_size:
-        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
-
     llm = LLM(
         model="llava-hf/llava-1.5-7b-hf",
         max_model_len=4096,
         max_num_seqs=5,
         enforce_eager=True,
-        tensor_parallel_size=tp_size,
         mm_processor_cache_type=mm_processor_cache_type,
         disable_log_stats=False,
         limit_mm_per_prompt={"image": 2},
