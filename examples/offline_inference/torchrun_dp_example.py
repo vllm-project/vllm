@@ -4,6 +4,11 @@
 experimental support for data-parallel inference with torchrun
 Note the data load balancing and distribution is done out of the vllm engine,
 no internal lb supported in external_launcher mode.
+
+To run this example:
+```bash
+$ torchrun --nproc-per-node=2 examples/offline_inference/torchrun_dp_example.py
+```
 """
 
 from vllm import LLM, SamplingParams
@@ -14,7 +19,7 @@ prompts = [
     "The president of the United States is",
     "The capital of France is",
     "The future of AI is",
-] * 50
+]
 
 # Create sampling parameters, the same across all ranks
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
@@ -45,14 +50,13 @@ prompts = [
 
 outputs = llm.generate(prompts, sampling_params)
 
-
-# all ranks will have the same outputs
-print("-" * 50)
 for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}\n")
-    print("-" * 50)
+    print(
+        f"DP Rank: {dp_rank} Prompt: {prompt!r}\nGenerated text: {generated_text!r}\n"
+    )
+
 """
 Further tips:
 

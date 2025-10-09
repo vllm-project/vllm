@@ -50,9 +50,7 @@ class DistributionBasedRouting(RoutingStrategy):
     distributions for testing different routing patterns.
     """
 
-    def __init__(self,
-                 distribution: str = "uniform",
-                 **distribution_params: Any):
+    def __init__(self, distribution: str = "uniform", **distribution_params: Any):
         """
         Initialize distribution-based routing.
 
@@ -76,8 +74,10 @@ class DistributionBasedRouting(RoutingStrategy):
         valid_distributions = ["uniform", "normal"]
 
         if self.distribution not in valid_distributions:
-            raise ValueError(f"Unsupported distribution: {self.distribution}. "
-                             f"Supported distributions: {valid_distributions}")
+            raise ValueError(
+                f"Unsupported distribution: {self.distribution}. "
+                f"Supported distributions: {valid_distributions}"
+            )
 
         # Set default parameters if not provided
         if self.distribution == "normal":
@@ -112,12 +112,12 @@ class DistributionBasedRouting(RoutingStrategy):
             indices_type = torch.long
 
         # Generate expert IDs based on the specified distribution
-        topk_ids = self._sample_expert_ids(num_tokens, num_experts, top_k,
-                                           hidden_states.device, indices_type)
+        topk_ids = self._sample_expert_ids(
+            num_tokens, num_experts, top_k, hidden_states.device, indices_type
+        )
 
         # Generate weights based on the distribution
-        topk_weights = self._generate_weights(num_tokens, top_k,
-                                              hidden_states.device)
+        topk_weights = self._generate_weights(num_tokens, top_k, hidden_states.device)
 
         return topk_weights, topk_ids
 
@@ -145,7 +145,8 @@ class DistributionBasedRouting(RoutingStrategy):
             # For normal distribution, sample continuous values and map to
             # expert IDs
             continuous_samples = self._sample_continuous_distribution(
-                num_tokens, top_k, device)
+                num_tokens, top_k, device
+            )
 
             # Map continuous samples to expert indices
             # Normalize to [0, 1] range and scale to [0, num_experts)
@@ -158,8 +159,9 @@ class DistributionBasedRouting(RoutingStrategy):
         else:
             raise ValueError(f"Unsupported distribution: {self.distribution}")
 
-    def _sample_continuous_distribution(self, num_tokens: int, top_k: int,
-                                        device: torch.device) -> torch.Tensor:
+    def _sample_continuous_distribution(
+        self, num_tokens: int, top_k: int, device: torch.device
+    ) -> torch.Tensor:
         """Sample from continuous distributions."""
         shape = (num_tokens, top_k)
 
@@ -170,7 +172,8 @@ class DistributionBasedRouting(RoutingStrategy):
 
         else:
             raise ValueError(
-                f"Unsupported continuous distribution: {self.distribution}")
+                f"Unsupported continuous distribution: {self.distribution}"
+            )
 
     def _normalize_samples(self, samples: torch.Tensor) -> torch.Tensor:
         """Normalize samples to [0, 1] range."""
@@ -179,11 +182,13 @@ class DistributionBasedRouting(RoutingStrategy):
             return torch.sigmoid(samples)
 
         else:
-            raise ValueError(f"Unsupported distribution for normalization: "
-                             f"{self.distribution}")
+            raise ValueError(
+                f"Unsupported distribution for normalization: {self.distribution}"
+            )
 
-    def _generate_weights(self, num_tokens: int, top_k: int,
-                          device: torch.device) -> torch.Tensor:
+    def _generate_weights(
+        self, num_tokens: int, top_k: int, device: torch.device
+    ) -> torch.Tensor:
         """Generate weights based on the distribution."""
         if self.distribution == "uniform":
             # All-ones weights for uniform distribution
@@ -197,7 +202,8 @@ class DistributionBasedRouting(RoutingStrategy):
             # For normal distribution, generate weights from the same
             # distribution
             continuous_weights = self._sample_continuous_distribution(
-                num_tokens, top_k, device)
+                num_tokens, top_k, device
+            )
             # Normalize to positive values and sum to 1
             weights = torch.abs(continuous_weights)
             weights = weights / weights.sum(dim=-1, keepdim=True)
@@ -205,14 +211,14 @@ class DistributionBasedRouting(RoutingStrategy):
 
         else:
             raise ValueError(
-                f"Unsupported distribution for weight generation: "
-                f"{self.distribution}")
+                f"Unsupported distribution for weight generation: {self.distribution}"
+            )
 
     def get_distribution_info(self) -> dict:
         """Get information about the current distribution configuration."""
         return {
             "distribution": self.distribution,
-            "parameters": self.distribution_params.copy()
+            "parameters": self.distribution_params.copy(),
         }
 
 
@@ -228,10 +234,12 @@ class RoutingSimulator:
     # Class-level registry of routing strategies
     _routing_strategies: dict[str, RoutingStrategy] = {
         # Basic routing strategies
-        "uniform_random":
-        DistributionBasedRouting(distribution="uniform", mean=0.0, std=1.0),
-        "normal_routing":
-        DistributionBasedRouting(distribution="normal", mean=0.0, std=1.0),
+        "uniform_random": DistributionBasedRouting(
+            distribution="uniform", mean=0.0, std=1.0
+        ),
+        "normal_routing": DistributionBasedRouting(
+            distribution="normal", mean=0.0, std=1.0
+        ),
     }
 
     @classmethod
@@ -280,7 +288,8 @@ class RoutingSimulator:
             raise ValueError(
                 f"Unknown routing strategy: {strategy_name}. "
                 f"Available strategies: "
-                f"{list(RoutingSimulator._routing_strategies.keys())}")
+                f"{list(RoutingSimulator._routing_strategies.keys())}"
+            )
 
         strategy = RoutingSimulator._routing_strategies[strategy_name]
         return strategy.route_tokens(

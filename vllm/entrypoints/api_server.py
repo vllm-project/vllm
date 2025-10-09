@@ -7,6 +7,7 @@ For production use, we recommend using our OpenAI compatible server.
 We are also not going to accept PRs modifying this file, please
 change `vllm/entrypoints/openai/api_server.py` instead.
 """
+
 import asyncio
 import json
 import ssl
@@ -68,9 +69,7 @@ async def _generate(request_dict: dict, raw_request: Request) -> Response:
         async for request_output in results_generator:
             prompt = request_output.prompt
             assert prompt is not None
-            text_outputs = [
-                prompt + output.text for output in request_output.outputs
-            ]
+            text_outputs = [prompt + output.text for output in request_output.outputs]
             ret = {"text": text_outputs}
             yield (json.dumps(ret) + "\n").encode("utf-8")
 
@@ -109,16 +108,20 @@ async def init_app(
     global engine
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = (llm_engine
-              if llm_engine is not None else AsyncLLMEngine.from_engine_args(
-                  engine_args, usage_context=UsageContext.API_SERVER))
+    engine = (
+        llm_engine
+        if llm_engine is not None
+        else AsyncLLMEngine.from_engine_args(
+            engine_args, usage_context=UsageContext.API_SERVER
+        )
+    )
     app.state.engine_client = engine
     return app
 
 
-async def run_server(args: Namespace,
-                     llm_engine: Optional[AsyncLLMEngine] = None,
-                     **uvicorn_kwargs: Any) -> None:
+async def run_server(
+    args: Namespace, llm_engine: Optional[AsyncLLMEngine] = None, **uvicorn_kwargs: Any
+) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
 
@@ -151,26 +154,27 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=parser.check_port, default=8000)
     parser.add_argument("--ssl-keyfile", type=str, default=None)
     parser.add_argument("--ssl-certfile", type=str, default=None)
-    parser.add_argument("--ssl-ca-certs",
-                        type=str,
-                        default=None,
-                        help="The CA certificates file")
+    parser.add_argument(
+        "--ssl-ca-certs", type=str, default=None, help="The CA certificates file"
+    )
     parser.add_argument(
         "--enable-ssl-refresh",
         action="store_true",
         default=False,
-        help="Refresh SSL Context when SSL certificate files change")
+        help="Refresh SSL Context when SSL certificate files change",
+    )
     parser.add_argument(
         "--ssl-cert-reqs",
         type=int,
         default=int(ssl.CERT_NONE),
-        help="Whether client certificate is required (see stdlib ssl module's)"
+        help="Whether client certificate is required (see stdlib ssl module's)",
     )
     parser.add_argument(
         "--root-path",
         type=str,
         default=None,
-        help="FastAPI root_path when app is behind a path based routing proxy")
+        help="FastAPI root_path when app is behind a path based routing proxy",
+    )
     parser.add_argument("--log-level", type=str, default="debug")
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()

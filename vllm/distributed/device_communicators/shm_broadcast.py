@@ -14,14 +14,24 @@ import torch
 import torch.distributed as dist
 import zmq
 from torch.distributed import ProcessGroup
-from zmq import IPV6  # type: ignore
-from zmq import SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context  # type: ignore
+from zmq import (  # type: ignore
+    IPV6,  # type: ignore
+    SUB,
+    SUBSCRIBE,
+    XPUB,
+    XPUB_VERBOSE,
+    Context,
+)
 
 import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
-from vllm.utils import (get_ip, get_open_port, get_open_zmq_ipc_path,
-                        is_valid_ipv6_address)
+from vllm.utils import (
+    get_ip,
+    get_open_port,
+    get_open_zmq_ipc_path,
+    is_valid_ipv6_address,
+)
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
@@ -29,7 +39,6 @@ logger = init_logger(__name__)
 
 
 class SpinTimer:
-
     def record_activity(self):
         pass
 
@@ -66,12 +75,13 @@ class SpinSleepTimer(SpinTimer):
 
 
 class ShmRingBuffer:
-
-    def __init__(self,
-                 n_reader: int,
-                 max_chunk_bytes: int,
-                 max_chunks: int,
-                 name: Optional[str] = None):
+    def __init__(
+        self,
+        n_reader: int,
+        max_chunk_bytes: int,
+        max_chunks: int,
+        name: Optional[str] = None,
+    ):
         """
         A shared memory ring buffer implementation for broadcast communication.
         Essentially, it is a queue where only one will `enqueue` and multiple
@@ -120,13 +130,14 @@ class ShmRingBuffer:
         created object to other processes by pickling it. The other processes will
         get the name of the shared memory and open it, so that they can access the
         same shared memory buffer.
-        """# noqa
+        """  # noqa
         self.n_reader = n_reader
         self.metadata_size = 1 + n_reader
         self.max_chunk_bytes = max_chunk_bytes
         self.max_chunks = max_chunks
-        self.total_bytes_of_buffer = (self.max_chunk_bytes +
-                                      self.metadata_size) * self.max_chunks
+        self.total_bytes_of_buffer = (
+            self.max_chunk_bytes + self.metadata_size
+        ) * self.max_chunks
         self.data_offset = 0
         self.metadata_offset = self.max_chunk_bytes * self.max_chunks
 
@@ -134,10 +145,10 @@ class ShmRingBuffer:
             # we are creating a buffer
             self.is_creator = True
             self.shared_memory = shared_memory.SharedMemory(
-                create=True, size=self.total_bytes_of_buffer)
+                create=True, size=self.total_bytes_of_buffer
+            )
             # initialize the metadata section to 0
-            with self.shared_memory.buf[self.
-                                        metadata_offset:] as metadata_buffer:
+            with self.shared_memory.buf[self.metadata_offset :] as metadata_buffer:
                 torch.frombuffer(metadata_buffer, dtype=torch.uint8).fill_(0)
         else:
             # we are opening an existing buffer
@@ -145,8 +156,10 @@ class ShmRingBuffer:
             # fix to https://stackoverflow.com/q/62748654/9191338
             # Python incorrectly tracks shared memory even if it is not
             # created by the process. The following patch is a workaround.
-            with patch("multiprocessing.resource_tracker.register",
-                       lambda *args, **kwargs: None):
+            with patch(
+                "multiprocessing.resource_tracker.register",
+                lambda *args, **kwargs: None,
+            ):
                 try:
                     self.shared_memory = shared_memory.SharedMemory(name=name)
                     # See https://docs.python.org/3/library/multiprocessing.shared_memory.html # noqa
@@ -154,8 +167,7 @@ class ShmRingBuffer:
                     # so the shared memory block size may be larger or equal
                     # to the requested size. The size parameter is ignored
                     # when attaching to an existing block.
-                    assert (self.shared_memory.size
-                            >= self.total_bytes_of_buffer)
+                    assert self.shared_memory.size >= self.total_bytes_of_buffer
                 except FileNotFoundError:
                     # we might deserialize the object in a different node
                     # in this case, this object is not used,
@@ -163,8 +175,12 @@ class ShmRingBuffer:
                     pass
 
     def handle(self):
-        return (self.n_reader, self.max_chunk_bytes, self.max_chunks,
-                self.shared_memory.name)
+        return (
+            self.n_reader,
+            self.max_chunk_bytes,
+            self.max_chunks,
+            self.shared_memory.name,
+        )
 
     def __reduce__(self):
         return (
@@ -204,7 +220,6 @@ class Handle:
 
 
 class MessageQueue:
-
     def __init__(
         self,
         n_reader,  # number of all readers
@@ -228,8 +243,7 @@ class MessageQueue:
             # for local readers, we will:
             # 1. create a shared memory ring buffer to communicate small data
             # 2. create a publish-subscribe socket to communicate large data
-            self.buffer = ShmRingBuffer(n_local_reader, max_chunk_bytes,
-                                        max_chunks)
+            self.buffer = ShmRingBuffer(n_local_reader, max_chunk_bytes, max_chunks)
 
             # XPUB is very similar to PUB,
             # except that it can receive subscription messages
@@ -279,8 +293,7 @@ class MessageQueue:
 
         self.handle = Handle(
             local_reader_ranks=local_reader_ranks,
-            buffer_handle=self.buffer.handle()
-            if self.buffer is not None else None,
+            buffer_handle=self.buffer.handle() if self.buffer is not None else None,
             local_subscribe_addr=local_subscribe_addr,
             remote_subscribe_addr=remote_subscribe_addr,
             remote_addr_ipv6=remote_addr_ipv6,
@@ -315,8 +328,9 @@ class MessageQueue:
 
             self.remote_socket = None
 
-            self._read_spin_timer = SpinSleepTimer(
-            ) if envs.VLLM_SLEEP_WHEN_IDLE else SpinTimer()
+            self._read_spin_timer = (
+                SpinSleepTimer() if envs.VLLM_SLEEP_WHEN_IDLE else SpinTimer()
+            )
         else:
             self.buffer = None  # type: ignore
             self.current_idx = -1
@@ -399,7 +413,8 @@ class MessageQueue:
                             " in %s seconds. This typically happens when some"
                             " processes are hanging or doing some"
                             " time-consuming work (e.g. compilation)",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL)
+                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                        )
                         n_warning += 1
 
                     continue
@@ -423,15 +438,16 @@ class MessageQueue:
                     metadata_buffer[i] = 0
                 # mark the block as written
                 metadata_buffer[0] = 1
-                self.current_idx = (self.current_idx +
-                                    1) % self.buffer.max_chunks
+                self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
                 break
 
     @contextmanager
-    def acquire_read(self,
-                     timeout: Optional[float] = None,
-                     cancel: Optional[Event] = None,
-                     indefinite: bool = False):
+    def acquire_read(
+        self,
+        timeout: Optional[float] = None,
+        cancel: Optional[Event] = None,
+        indefinite: bool = False,
+    ):
         assert self._is_local_reader, "Only readers can acquire read"
         start_time = time.monotonic()
         n_warning = 1
@@ -460,15 +476,16 @@ class MessageQueue:
                         raise TimeoutError
 
                     # if we wait for a long time, log a message
-                    if not indefinite and (elapsed
-                                           > VLLM_RINGBUFFER_WARNING_INTERVAL *
-                                           n_warning):
+                    if not indefinite and (
+                        elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning
+                    ):
                         logger.info(
                             "No available shared memory broadcast block found"
                             " in %s seconds. This typically happens when some"
                             " processes are hanging or doing some"
                             " time-consuming work (e.g. compilation).",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL)
+                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                        )
                         n_warning += 1
 
                     continue
@@ -480,14 +497,13 @@ class MessageQueue:
                 # caller has read from the buffer
                 # set the read flag
                 metadata_buffer[self.local_reader_rank + 1] = 1
-                self.current_idx = (self.current_idx +
-                                    1) % self.buffer.max_chunks
+                self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
 
                 self._read_spin_timer.record_activity()
                 break
 
     def enqueue(self, obj, timeout: Optional[float] = None):
-        """ Write to message queue with optional timeout (in seconds) """
+        """Write to message queue with optional timeout (in seconds)"""
         assert self._is_writer, "Only writers can enqueue"
         serialized_obj = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
         if self.n_local_reader > 0:
@@ -498,15 +514,17 @@ class MessageQueue:
             else:
                 with self.acquire_write(timeout) as buf:
                     buf[0] = 0  # not overflow
-                    buf[1:len(serialized_obj) + 1] = serialized_obj
+                    buf[1 : len(serialized_obj) + 1] = serialized_obj
         if self.n_remote_reader > 0:
             self.remote_socket.send(serialized_obj)
 
-    def dequeue(self,
-                timeout: Optional[float] = None,
-                cancel: Optional[Event] = None,
-                indefinite: bool = False):
-        """ Read from message queue with optional timeout (in seconds) """
+    def dequeue(
+        self,
+        timeout: Optional[float] = None,
+        cancel: Optional[Event] = None,
+        indefinite: bool = False,
+    ):
+        """Read from message queue with optional timeout (in seconds)"""
         if self._is_local_reader:
             with self.acquire_read(timeout, cancel, indefinite) as buf:
                 overflow = buf[0] == 1
@@ -539,11 +557,12 @@ class MessageQueue:
             return self.dequeue()
 
     @staticmethod
-    def create_from_process_group(pg: Union[ProcessGroup,
-                                            StatelessProcessGroup],
-                                  max_chunk_bytes,
-                                  max_chunks,
-                                  writer_rank=0) -> "MessageQueue":
+    def create_from_process_group(
+        pg: Union[ProcessGroup, StatelessProcessGroup],
+        max_chunk_bytes,
+        max_chunks,
+        writer_rank=0,
+    ) -> "MessageQueue":
         if isinstance(pg, ProcessGroup):
             group_rank = dist.get_rank(pg)
             group_world_size = dist.get_world_size(pg)
@@ -554,6 +573,7 @@ class MessageQueue:
             global_ranks = list(range(pg.world_size))
 
         from vllm.distributed.parallel_state import in_the_same_node_as
+
         status = in_the_same_node_as(pg, source_rank=writer_rank)
         same_node_ranks = [i for i, s in enumerate(status) if s]
         n_reader = group_world_size - 1
@@ -570,17 +590,17 @@ class MessageQueue:
             )
             handle = buffer_io.export_handle()
             if isinstance(pg, ProcessGroup):
-                dist.broadcast_object_list([handle],
-                                           src=global_ranks[writer_rank],
-                                           group=pg)
+                dist.broadcast_object_list(
+                    [handle], src=global_ranks[writer_rank], group=pg
+                )
             else:
                 pg.broadcast_obj(handle, writer_rank)
         else:
             if isinstance(pg, ProcessGroup):
                 recv = [None]
-                dist.broadcast_object_list(recv,
-                                           src=global_ranks[writer_rank],
-                                           group=pg)
+                dist.broadcast_object_list(
+                    recv, src=global_ranks[writer_rank], group=pg
+                )
                 handle = recv[0]  # type: ignore
             else:
                 handle = pg.broadcast_obj(None, writer_rank)

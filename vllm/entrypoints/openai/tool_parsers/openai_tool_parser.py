@@ -7,12 +7,17 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.harmony_utils import parse_output_into_messages
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage,
-                                              ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    DeltaMessage,
+    ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
+)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser, ToolParserManager)
+    ToolParser,
+    ToolParserManager,
+)
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -23,7 +28,6 @@ logger = init_logger(__name__)
 
 @ToolParserManager.register_module("openai")
 class OpenAIToolParser(ToolParser):
-
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
 
@@ -57,7 +61,8 @@ class OpenAIToolParser(ToolParser):
                             tool_args = json.dumps(json.loads(msg_text))
                         except json.JSONDecodeError:
                             logger.exception(
-                                "Error decoding JSON tool call from response.")
+                                "Error decoding JSON tool call from response."
+                            )
                             tool_args = msg_text
                     else:
                         tool_args = msg_text
@@ -68,7 +73,8 @@ class OpenAIToolParser(ToolParser):
                                 name=msg.recipient.split("functions.")[1],
                                 arguments=tool_args,
                             ),
-                        ))
+                        )
+                    )
                 elif msg.channel == "final":
                     final_content = msg_text
 
