@@ -6,7 +6,7 @@ from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -286,6 +286,7 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
             ), {}
 
         return self.load_bytes(base64.b64decode(data))
+
     def load_file(
         self,
         filepath: Path,

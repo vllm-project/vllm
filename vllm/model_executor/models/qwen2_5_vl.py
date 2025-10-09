@@ -73,7 +73,7 @@ from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     PromptReplacement,
-    PromptUpdate
+    PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
@@ -995,8 +995,11 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        static_mm_processor_kwargs, _ = \
-        BaseMultiModalProcessor._split_static_dynamic_mm_kwargs(hf_processor_mm_kwargs)
+        static_mm_processor_kwargs, _ = (
+            BaseMultiModalProcessor._split_static_dynamic_mm_kwargs(
+                hf_processor_mm_kwargs
+            )
+        )
         hf_processor = self.info.get_hf_processor(**static_mm_processor_kwargs)
         image_processor = self.info.get_image_processor(**static_mm_processor_kwargs)
         tokenizer = self.info.get_tokenizer()
