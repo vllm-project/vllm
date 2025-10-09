@@ -459,7 +459,7 @@ class OpenAIServing:
         )
 
     async def reset_mm_cache(self) -> None:
-        self.processor.clear_cache()
+        self.processor.clear_mm_cache()
         await self.engine_client.reset_mm_cache()
 
     def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:

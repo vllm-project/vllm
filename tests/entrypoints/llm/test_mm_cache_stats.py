@@ -5,7 +5,6 @@ import pytest
 
 from vllm import LLM
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.utils import set_default_torch_num_threads
 from vllm.v1.metrics.reader import Counter, Metric
 
 from ..openai.test_vision import TEST_IMAGE_ASSETS
@@ -50,17 +49,16 @@ def test_mm_cache_stats(
     if num_gpus_available < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
-    with set_default_torch_num_threads(1):
-        llm = LLM(
-            model="HuggingFaceTB/SmolVLM-256M-Instruct",
-            max_model_len=4096,
-            max_num_seqs=5,
-            enforce_eager=True,
-            tensor_parallel_size=tp_size,
-            mm_processor_cache_type=mm_processor_cache_type,
-            disable_log_stats=False,
-            limit_mm_per_prompt={"image": 2},
-        )
+    llm = LLM(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_model_len=4096,
+        max_num_seqs=5,
+        enforce_eager=True,
+        tensor_parallel_size=tp_size,
+        mm_processor_cache_type=mm_processor_cache_type,
+        disable_log_stats=False,
+        limit_mm_per_prompt={"image": 2},
+    )
 
     llm.chat(_make_messages(image_urls[0]))
     assert _get_mm_cache_stats(llm.get_metrics()) == (1, 0)

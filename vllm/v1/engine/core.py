@@ -60,7 +60,7 @@ from vllm.v1.engine.utils import (
 )
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.stats import MultiModalCacheStats, SchedulerStats
+from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -159,7 +159,6 @@ class EngineCore:
         self.mm_receiver_cache = engine_receiver_cache_from_config(
             vllm_config, mm_registry
         )
-        self.mm_cache_stats = MultiModalCacheStats() if self.mm_receiver_cache else None
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -290,7 +289,7 @@ class EngineCore:
     ) -> ModelRunnerOutput:
         """Execute the model and log detailed info on failure."""
         try:
-            model_output = model_fn(scheduler_output)
+            return model_fn(scheduler_output)
         except Exception as err:
             # We do not want to catch BaseException here since we're only
             # interested in dumping info when the exception is due to an
@@ -301,12 +300,6 @@ class EngineCore:
                 self.vllm_config, scheduler_output, self.scheduler.make_stats()
             )
             raise err
-
-        if self.mm_cache_stats is not None:
-            model_output.mm_cache_stats = self.mm_cache_stats
-            self.mm_cache_stats = MultiModalCacheStats()
-
-        return model_output
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
@@ -417,9 +410,6 @@ class EngineCore:
         # The cache either exists in EngineCore or WorkerWrapperBase
         if self.mm_receiver_cache is not None:
             self.mm_receiver_cache.clear_cache()
-
-            if self.mm_cache_stats is not None:
-                self.mm_cache_stats.reset = True
         else:
             self.model_executor.reset_mm_cache()
 
@@ -490,11 +480,6 @@ class EngineCore:
             request.mm_features = self.mm_receiver_cache.get_and_update_features(
                 request.mm_features
             )
-
-            if self.mm_cache_stats is not None:
-                delta = self.mm_receiver_cache.make_stats(delta=True)
-                self.mm_cache_stats.queries += delta.total
-                self.mm_cache_stats.hits += delta.hits
 
         req = Request.from_engine_core_request(request, self.request_block_hasher)
         if req.use_structured_output:

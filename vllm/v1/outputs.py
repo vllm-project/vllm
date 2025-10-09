@@ -9,7 +9,6 @@ import torch
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
-    from vllm.v1.metrics.stats import MultiModalCacheStats
 
 
 class LogprobsLists(NamedTuple):
@@ -130,9 +129,6 @@ class ModelRunnerOutput:
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
-
-    # Set by WorkerWrapperBase
-    mm_cache_stats: Optional["MultiModalCacheStats"] = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

@@ -22,7 +22,6 @@ from vllm.utils import (
     warn_for_unimplemented_methods,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec
-from vllm.v1.metrics.stats import MultiModalCacheStats
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -310,8 +309,6 @@ class WorkerWrapperBase:
                 shared_worker_lock,
             )
 
-        self.mm_cache_stats = MultiModalCacheStats() if self.mm_receiver_cache else None
-
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
@@ -359,11 +356,6 @@ class WorkerWrapperBase:
                 req_data.mm_features
             )
 
-        if self.mm_cache_stats is not None:
-            delta = mm_cache.make_stats(delta=True)
-            self.mm_cache_stats.queries += delta.total
-            self.mm_cache_stats.hits += delta.hits
-
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
@@ -373,18 +365,9 @@ class WorkerWrapperBase:
         self._apply_mm_cache(scheduler_output)
 
         assert self.worker is not None
-        output = self.worker.execute_model(scheduler_output, *args, **kwargs)
-
-        if self.mm_cache_stats is not None:
-            output.mm_cache_stats = self.mm_cache_stats
-            self.mm_cache_stats = MultiModalCacheStats()
-
-        return output
+        return self.worker.execute_model(scheduler_output, *args, **kwargs)
 
     def reset_mm_cache(self) -> None:
         mm_receiver_cache = self.mm_receiver_cache
         if mm_receiver_cache is not None:
             mm_receiver_cache.clear_cache()
-
-        if self.mm_cache_stats is not None:
-            self.mm_cache_stats.reset = True

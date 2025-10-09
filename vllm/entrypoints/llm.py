@@ -356,7 +356,7 @@ class LLM:
             self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
     def reset_mm_cache(self) -> None:
-        self.processor.clear_cache()
+        self.processor.clear_mm_cache()
         self.llm_engine.reset_mm_cache()
 
     def get_default_sampling_params(self) -> SamplingParams:

@@ -511,7 +511,7 @@ class AsyncLLM(EngineClient):
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
-                            mm_cache_stats=outputs.mm_cache_stats,
+                            mm_cache_stats=self.processor.stat_mm_cache(),
                         )
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
@@ -661,7 +661,7 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
-        self.processor.clear_cache()
+        self.processor.clear_mm_cache()
         await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
