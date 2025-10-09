@@ -322,7 +322,7 @@ class SpeculativeConfig:
             if not has_arctic_inference():
                 raise ImportError(
                     "Arctic Inference is required for suffix decoding. "
-                    "Please install via `pip install arctic-inference`.")
+                    "Install via `pip install arctic-inference==0.0.9`.")
             if self.num_speculative_tokens is None:
                 self.num_speculative_tokens = 32
             # Validate values
@@ -648,9 +648,7 @@ class SpeculativeConfig:
 
     def __repr__(self) -> str:
         method = self.method
-        if method in ("ngram", "suffix"):
-            model = None
-        else:
-            model = self.draft_model_config.model
+        model = (None if method in ("ngram", "suffix")
+                 else self.draft_model_config.model)
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
