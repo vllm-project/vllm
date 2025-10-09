@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from vllm.config.parallel import EPLBPolicyType
+
 from .abstract_policy import EplbPolicy
 from .default_eplb_policy import DefaultEplb
-from vllm.config.parallel import EPLBPolicyType
+
 
 
 class PolicyFactory:
@@ -15,7 +17,7 @@ class PolicyFactory:
         Dynamic EPLB:  expert replacement with
         constrained number of expert shuffle
         """
-        
+
         policy: dict[EPLBPolicyType, type[EplbPolicy]] = {
             EPLBPolicyType.DEFAULT_EPLB: DefaultEplb,
         }
