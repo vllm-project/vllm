@@ -23,6 +23,7 @@ from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
     AttentionType,
+    MultipleOf,
 )
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
@@ -164,6 +165,13 @@ class FlashInferBackend(AttentionBackend):
     def get_supported_head_sizes(cls) -> list[int]:
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
         return [64, 128, 256]
+
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
+        # Note: Not sure for all platforms,
+        # but on Blackwell, only support a page size of
+        # 16, 32, 64
+        return [16, 32, 64]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
