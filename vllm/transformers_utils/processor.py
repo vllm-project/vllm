@@ -5,8 +5,12 @@ import copy
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
-from transformers import (AutoFeatureExtractor, AutoImageProcessor,
-                          AutoProcessor, AutoVideoProcessor)
+from transformers import (
+    AutoFeatureExtractor,
+    AutoImageProcessor,
+    AutoProcessor,
+    AutoVideoProcessor,
+)
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
 from transformers.processing_utils import ProcessorMixin
@@ -141,15 +145,18 @@ def get_processor(
                 "a custom processor not yet available in the HuggingFace "
                 "transformers library, consider setting "
                 "`trust_remote_code=True` in LLM or using the "
-                "`--trust-remote-code` flag in the CLI.")
+                "`--trust-remote-code` flag in the CLI."
+            )
             raise RuntimeError(err_msg) from e
         else:
             raise e
 
     if not isinstance(processor, processor_cls):
-        raise TypeError("Invalid type of HuggingFace processor. "
-                        f"Expected type: {processor_cls}, but "
-                        f"found type: {type(processor)}")
+        raise TypeError(
+            "Invalid type of HuggingFace processor. "
+            f"Expected type: {processor_cls}, but "
+            f"found type: {type(processor)}"
+        )
 
     return processor
 
@@ -198,7 +205,7 @@ def get_feature_extractor(
     trust_remote_code: bool = False,
     **kwargs: Any,
 ):
-    """Load an audio feature extractor for the given model name 
+    """Load an audio feature extractor for the given model name
     via HuggingFace."""
     try:
         feature_extractor = AutoFeatureExtractor.from_pretrained(
@@ -206,7 +213,8 @@ def get_feature_extractor(
             *args,
             revision=revision,
             trust_remote_code=trust_remote_code,
-            **kwargs)
+            **kwargs,
+        )
     except ValueError as e:
         # If the error pertains to the processor class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
@@ -217,7 +225,8 @@ def get_feature_extractor(
                 "extractor is a custom extractor not yet available in the "
                 "HuggingFace transformers library, consider setting "
                 "`trust_remote_code=True` in LLM or using the "
-                "`--trust-remote-code` flag in the CLI.")
+                "`--trust-remote-code` flag in the CLI."
+            )
             raise RuntimeError(err_msg) from e
         else:
             raise e
@@ -253,7 +262,8 @@ def get_image_processor(
             *args,
             revision=revision,
             trust_remote_code=trust_remote_code,
-            **kwargs)
+            **kwargs,
+        )
     except ValueError as e:
         # If the error pertains to the processor class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
@@ -264,7 +274,8 @@ def get_image_processor(
                 "a custom processor not yet available in the HuggingFace "
                 "transformers library, consider setting "
                 "`trust_remote_code=True` in LLM or using the "
-                "`--trust-remote-code` flag in the CLI.")
+                "`--trust-remote-code` flag in the CLI."
+            )
             raise RuntimeError(err_msg) from e
         else:
             raise e
@@ -303,7 +314,8 @@ def get_video_processor(
             *args,
             revision=revision,
             trust_remote_code=trust_remote_code,
-            **kwargs)
+            **kwargs,
+        )
     except ValueError as e:
         # If the error pertains to the processor class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
@@ -314,7 +326,8 @@ def get_video_processor(
                 "a custom processor not yet available in the HuggingFace "
                 "transformers library, consider setting "
                 "`trust_remote_code=True` in LLM or using the "
-                "`--trust-remote-code` flag in the CLI.")
+                "`--trust-remote-code` flag in the CLI."
+            )
             raise RuntimeError(err_msg) from e
         else:
             raise e
