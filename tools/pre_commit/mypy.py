@@ -45,7 +45,6 @@ SEPARATE_GROUPS = [
     "vllm/attention",
     "vllm/compilation",
     "vllm/distributed",
-    "vllm/engine",
     "vllm/executor",
     "vllm/inputs",
     "vllm/lora",
