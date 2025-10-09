@@ -1105,7 +1105,9 @@ def find_library(lib_name: str) -> str:
     # According to https://en.wikipedia.org/wiki/Filesystem_Hierarchy_Standard
     # `/sbin/ldconfig` should exist in all Linux systems.
     # `/sbin/ldconfig` searches the library in the system
-    libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode()
+    # errors="ignore" as is not guaranteed that there isn't going to be invalid
+    # byte sequences in the default encoding.
+    libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode(errors="ignore")
     # each line looks like the following:
     # libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1
     locs = [line.split()[-1] for line in libs.splitlines() if lib_name in line]
