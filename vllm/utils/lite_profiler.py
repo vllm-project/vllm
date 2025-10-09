@@ -3,39 +3,55 @@
 """Minimal helpers for opt-in lightweight timing collection."""
 from __future__ import annotations
 
-import atexit
-import logging
 import os
 import sys
+import threading
 import time
-from logging.handlers import MemoryHandler
 from types import TracebackType
 from typing import Optional
 
 import vllm.envs as envs
-from vllm.logger import init_logger
 
-logger = init_logger(__name__)
+_LOG_PATH = envs.VLLM_LITE_PROFILER_LOG_PATH
+_THREAD_LOCK = threading.Lock()
 
-# Setup buffered file logging using MemoryHandler
-_log_path = envs.VLLM_LITE_PROFILER_LOG_PATH
-if _log_path:
-    # Create file handler for the profiler output
-    file_handler = logging.FileHandler(_log_path, mode="w")
-    file_handler.setFormatter(logging.Formatter("%(message)s"))
 
-    # Create memory handler that buffers logs and flushes periodically
-    memory_handler = MemoryHandler(
-        capacity=1000,  # Buffer up to 1000 log entries
-        flushLevel=logging.CRITICAL,  # Don't auto-flush unless critical
-        target=file_handler,
-    )
+def _prepare_log_path(path: str) -> None:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
 
-    logger.addHandler(memory_handler)
-    logger.propagate = False
 
-    # Register cleanup to flush buffer on exit
-    atexit.register(memory_handler.flush)
+_PREPARED_LOGS: set[str] = set()
+
+
+def _get_process_rank() -> Optional[int]:
+    for env_name in ("VLLM_DP_RANK", "RANK", "LOCAL_RANK"):
+        value = os.environ.get(env_name)
+        if value is not None:
+            try:
+                return int(value)
+            except ValueError:
+                return None
+    return None
+
+
+_SHOULD_LOG = _LOG_PATH is not None and ((rank := _get_process_rank()) is None
+                                         or rank == 0)
+
+
+def _write_log_entry(name: str, elapsed_us: int) -> None:
+    if not _SHOULD_LOG or _LOG_PATH is None:
+        return
+
+    log_line = f"{name}|{elapsed_us}\n"
+    with _THREAD_LOCK:
+        if _LOG_PATH not in _PREPARED_LOGS:
+            _prepare_log_path(_LOG_PATH)
+            _PREPARED_LOGS.add(_LOG_PATH)
+        with open(_LOG_PATH, "a", buffering=50000) as log_file:
+            log_file.write(log_line)
+            log_file.flush()
 
 
 class LiteScope:
@@ -58,8 +74,7 @@ class LiteScope:
             elapsed_ns = time.perf_counter_ns() - self._start_time
             # Use integer microseconds for better performance
             elapsed_us = elapsed_ns // 1000
-            # Simple format: "<name>|<elapsed_time_us>"
-            logger.info("%s|%s", self._name, elapsed_us)
+            _write_log_entry(self._name, elapsed_us)
         return False
 
 
