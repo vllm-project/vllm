@@ -37,13 +37,8 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
-)
-from vllm.model_executor.layers.mla import (
-    MLAModules,
-    MultiHeadLatentAttention,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -206,131 +201,13 @@ class MiniCPM3Attention(nn.Module):
         return output
 
 
-class MiniCPM3MLAAttention(nn.Module):
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        hidden_size: int,
-        num_heads: int,
-        qk_nope_head_dim: int,
-        qk_rope_head_dim: int,
-        v_head_dim: int,
-        q_lora_rank: Optional[int],
-        kv_lora_rank: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
-        max_position_embeddings: int = 8192,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.num_heads = num_heads
-        tp_size = get_tensor_model_parallel_world_size()
-        self.num_local_heads = num_heads // tp_size
-        self.qk_nope_head_dim = qk_nope_head_dim
-        self.qk_rope_head_dim = qk_rope_head_dim
-        self.v_head_dim = v_head_dim
-        self.q_lora_rank = q_lora_rank
-        self.kv_lora_rank = kv_lora_rank
-        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-        self.scaling = self.qk_head_dim**-0.5
-
-        if self.q_lora_rank is not None:
-            self.fused_qkv_a_proj = MergedColumnParallelLinear(
-                self.hidden_size,
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                bias=False,
-                quant_config=quant_config,
-                disable_tp=True,
-            )
-            self.kv_a_proj_with_mqa = None
-            self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-            self.q_b_proj = ColumnParallelLinear(
-                self.q_lora_rank,
-                self.num_heads * self.qk_head_dim,
-                bias=False,
-                quant_config=quant_config,
-            )
-            self.q_proj = None
-        else:
-            self.fused_qkv_a_proj = None
-            self.kv_a_proj_with_mqa = ReplicatedLinear(
-                self.hidden_size,
-                self.kv_lora_rank + self.qk_rope_head_dim,
-                bias=False,
-                quant_config=quant_config,
-            )
-            self.q_a_layernorm = None
-            self.q_b_proj = None
-            self.q_proj = ColumnParallelLinear(
-                self.hidden_size,
-                self.num_heads * self.qk_head_dim,
-                bias=False,
-                quant_config=quant_config,
-            )
-
-        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
-        self.kv_b_proj = ColumnParallelLinear(
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-            bias=False,
-            quant_config=quant_config,
-        )
-        self.o_proj = RowParallelLinear(
-            self.num_heads * self.v_head_dim,
-            self.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-        )
-        self.rotary_emb = get_rope(
-            self.qk_rope_head_dim,
-            rotary_dim=self.qk_rope_head_dim,
-            max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
-        )
-        mla_modules = MLAModules(
-            kv_a_layernorm=self.kv_a_layernorm,
-            kv_b_proj=self.kv_b_proj,
-            rotary_emb=self.rotary_emb,
-            o_proj=self.o_proj,
-            fused_qkv_a_proj=self.fused_qkv_a_proj,
-            kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
-            q_a_layernorm=self.q_a_layernorm,
-            q_b_proj=self.q_b_proj,
-            q_proj=self.q_proj,
-        )
-        self.mla_attn = MultiHeadLatentAttention(
-            self.hidden_size,
-            self.num_local_heads,
-            self.scaling,
-            self.qk_nope_head_dim,
-            self.qk_rope_head_dim,
-            self.v_head_dim,
-            self.q_lora_rank,
-            self.kv_lora_rank,
-            mla_modules,
-            cache_config,
-            quant_config,
-        )
-
-    def forward(
-        self, positions: torch.Tensor, hidden_states: torch.Tensor
-    ) -> torch.Tensor:
-        return self.mla_attn(positions, hidden_states)
-
-
 class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
     def _init_attn_block(self):
         self.input_layernorm = RMSNorm(
             self.config.hidden_size, eps=self.config.rms_norm_eps
         )
 
-        use_mla = getattr(self.model_config, "use_mla", False)
-        attn_cls = MiniCPM3MLAAttention if use_mla else MiniCPM3Attention
-
-        self.self_attn = attn_cls(
+        self.self_attn = MiniCPM3Attention(
             config=self.config,
             hidden_size=self.hidden_size,
             num_heads=self.config.num_attention_heads,
@@ -370,10 +247,6 @@ class MiniCPM3ForCausalLM(MiniCPMForCausalLM):
         "gate_up_proj": [
             "gate_proj",
             "up_proj",
-        ],
-        "fused_qkv_a_proj": [
-            "q_a_proj",
-            "kv_a_proj_with_mqa",
         ],
     }
 
