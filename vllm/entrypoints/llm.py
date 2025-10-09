@@ -19,18 +19,18 @@ from vllm.beam_search import (
 )
 from vllm.config import (
     CompilationConfig,
-    ModelDType,
+    PoolerConfig,
     StructuredOutputsConfig,
-    TokenizerMode,
     is_init_field,
 )
-from vllm.engine.arg_utils import (
+from vllm.config.model import (
     ConvertOption,
-    EngineArgs,
     HfOverrides,
-    PoolerConfig,
+    ModelDType,
     RunnerOption,
+    TokenizerMode,
 )
+from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -143,7 +143,7 @@ class LLM:
             size based on gpu_memory_utilization. However, users may want to
             manually specify the kv cache memory size. kv_cache_memory_bytes
             allows more fine-grain control of how much memory gets used when
-            compared with using gpu_memory_memory_utilization. Note that
+            compared with using gpu_memory_utilization. Note that
             kv_cache_memory_bytes (when not-None) ignores
             gpu_memory_utilization
         swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
