@@ -9,8 +9,6 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Callable, NewType, Optional, Union
 
-from typing_extensions import TypeAlias
-
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -222,14 +220,6 @@ class KVCacheBlock:
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
-
-
-# Represents KVCacheBlocks associated with a request.
-# It could be represented as:
-# - list[KVCacheBlock] for more than one KVCacheBlock
-# - an empty tuple for requests without KVCacheBlock
-#   (a precomputed KVCacheBlocks is in KVCacheManager to avoid GC overhead)
-SingleTypeKVCacheBlocks: TypeAlias = Sequence[KVCacheBlock]
 
 
 class FreeKVCacheBlockQueue:
