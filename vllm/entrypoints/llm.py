@@ -9,7 +9,7 @@ import cloudpickle
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
-from typing_extensions import TypeVar
+from typing_extensions import TypeVar, deprecated
 
 from vllm.beam_search import (
     BeamSearchInstance,
@@ -19,18 +19,18 @@ from vllm.beam_search import (
 )
 from vllm.config import (
     CompilationConfig,
-    ModelDType,
+    PoolerConfig,
     StructuredOutputsConfig,
-    TokenizerMode,
     is_init_field,
 )
-from vllm.engine.arg_utils import (
+from vllm.config.model import (
     ConvertOption,
-    EngineArgs,
     HfOverrides,
-    PoolerConfig,
+    ModelDType,
     RunnerOption,
+    TokenizerMode,
 )
+from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -39,9 +39,6 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     resolve_chat_template_content_format,
 )
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.entrypoints.score_utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
@@ -50,8 +47,6 @@ from vllm.entrypoints.score_utils import (
     compress_token_type_ids,
     get_score_prompt,
 )
-
-# yapf: enable
 from vllm.entrypoints.utils import _validate_truncation_size, log_non_default_args
 from vllm.inputs import (
     DataPrompt,
@@ -79,7 +74,6 @@ from vllm.transformers_utils.tokenizer import (
     AnyTokenizer,
     MistralTokenizer,
     get_cached_tokenizer,
-    init_tokenizer_from_configs,
 )
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, Device, as_iter, is_list_of
@@ -149,7 +143,7 @@ class LLM:
             size based on gpu_memory_utilization. However, users may want to
             manually specify the kv cache memory size. kv_cache_memory_bytes
             allows more fine-grain control of how much memory gets used when
-            compared with using gpu_memory_memory_utilization. Note that
+            compared with using gpu_memory_utilization. Note that
             kv_cache_memory_bytes (when not-None) ignores
             gpu_memory_utilization
         swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
@@ -360,6 +354,7 @@ class LLM:
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer()
 
+    @deprecated("`set_tokenizer` is deprecated and will be removed in v0.13.")
     def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
         # While CachedTokenizer is dynamic, have no choice but
         # compare class name. Misjudgment will arise from
@@ -372,11 +367,8 @@ class LLM:
     def _get_processor(self) -> Processor:
         if not hasattr(self, "_processor"):
             vllm_config = self.llm_engine.vllm_config
-            if self.model_config.skip_tokenizer_init:
-                tokenizer = None
-            else:
-                tokenizer = init_tokenizer_from_configs(self.model_config)
-            self._processor = Processor(vllm_config, tokenizer)
+            self._processor = Processor(vllm_config)
+
         return self._processor
 
     def get_default_sampling_params(self) -> SamplingParams:
@@ -1023,10 +1015,7 @@ class LLM:
             pooling_task = "encode"
 
         if pooling_task is None:
-            if "embed" in self.supported_tasks:
-                pooling_task = "embed"
-            else:
-                pooling_task = "encode"
+            pooling_task = "embed" if "embed" in self.supported_tasks else "encode"
 
             logger.warning_once(
                 "`LLM.encode` is currently using `pooling_task = %s`.\n"

@@ -201,16 +201,16 @@ async def run_vllm_async(
         sampling_params: list[SamplingParams] = []
         lora_requests: list[Optional[LoRARequest]] = []
         for request in requests:
-            prompts.append(
-                TokensPrompt(
-                    prompt_token_ids=request.prompt["prompt_token_ids"],
-                    multi_modal_data=request.multi_modal_data,
-                )
+            prompt = (
+                TokensPrompt(prompt_token_ids=request.prompt["prompt_token_ids"])
                 if "prompt_token_ids" in request.prompt
-                else TextPrompt(
-                    prompt=request.prompt, multi_modal_data=request.multi_modal_data
-                )
+                else TextPrompt(prompt=request.prompt)
             )
+
+            if request.multi_modal_data:
+                assert isinstance(request.multi_modal_data, dict)
+                prompt["multi_modal_data"] = request.multi_modal_data
+
             sampling_params.append(
                 SamplingParams(
                     n=n,
@@ -459,14 +459,14 @@ def validate_args(args):
         ):
             assert args.backend == "vllm-chat", (
                 f"{args.dataset_path} needs to use vllm-chat as the backend."
-            )  # noqa: E501
+            )
         elif args.dataset_path in (
             InstructCoderDataset.SUPPORTED_DATASET_PATHS
             | AIMODataset.SUPPORTED_DATASET_PATHS
         ):
             assert args.backend == "vllm", (
                 f"{args.dataset_path} needs to use vllm as the backend."
-            )  # noqa: E501
+            )
         else:
             raise ValueError(f"{args.dataset_path} is not supported by hf dataset.")
 

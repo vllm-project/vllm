@@ -51,7 +51,6 @@ from collections.abc import (
     Hashable,
     Iterable,
     Iterator,
-    KeysView,
     Mapping,
     Sequence,
 )
@@ -60,25 +59,19 @@ from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from pathlib import Path
-from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
     Generic,
     Literal,
-    NamedTuple,
-    Optional,
     TextIO,
     TypeVar,
     Union,
-    cast,
-    overload,
 )
 from urllib.parse import urlparse
 from uuid import uuid4
 
-import cachetools
 import cbor2
 import cloudpickle
 import numpy as np
@@ -184,13 +177,6 @@ U = TypeVar("U")
 
 _K = TypeVar("_K", bound=Hashable)
 _V = TypeVar("_V")
-_T = TypeVar("_T")
-
-
-class _Sentinel: ...
-
-
-ALL_PINNED_SENTINEL = _Sentinel()
 
 
 class Device(enum.Enum):
@@ -214,245 +200,6 @@ class Counter:
 
     def reset(self) -> None:
         self.counter = 0
-
-
-class _MappingOrderCacheView(UserDict[_K, _V]):
-    def __init__(self, data: Mapping[_K, _V], ordered_keys: Mapping[_K, None]):
-        super().__init__(data)
-        self.ordered_keys = ordered_keys
-
-    def __iter__(self) -> Iterator[_K]:
-        return iter(self.ordered_keys)
-
-    def keys(self) -> KeysView[_K]:
-        return KeysView(self.ordered_keys)
-
-
-class CacheInfo(NamedTuple):
-    hits: int
-    total: int
-
-    @property
-    def hit_ratio(self) -> float:
-        if self.total == 0:
-            return 0
-
-        return self.hits / self.total
-
-    def __sub__(self, other: CacheInfo):
-        return CacheInfo(
-            hits=self.hits - other.hits,
-            total=self.total - other.total,
-        )
-
-
-class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
-    def __init__(
-        self, capacity: float, getsizeof: Optional[Callable[[_V], float]] = None
-    ):
-        super().__init__(capacity, getsizeof)
-
-        self.pinned_items = set[_K]()
-
-        self._hits = 0
-        self._total = 0
-        self._last_info = CacheInfo(hits=0, total=0)
-
-    def __getitem__(self, key: _K, *, update_info: bool = True) -> _V:
-        value = super().__getitem__(key)
-
-        if update_info:
-            self._hits += 1
-            self._total += 1
-
-        return value
-
-    def __delitem__(self, key: _K) -> None:
-        run_on_remove = key in self
-        value = self.__getitem__(key, update_info=False)  # type: ignore[call-arg]
-        super().__delitem__(key)
-        if key in self.pinned_items:
-            # Todo: add warning to inform that del pinned item
-            self._unpin(key)
-        if run_on_remove:
-            self._on_remove(key, value)
-
-    @property
-    def cache(self) -> Mapping[_K, _V]:
-        """Return the internal cache dictionary in order (read-only)."""
-        return _MappingOrderCacheView(
-            self._Cache__data,  # type: ignore
-            self.order,
-        )
-
-    @property
-    def order(self) -> Mapping[_K, None]:
-        """Return the internal order dictionary (read-only)."""
-        return MappingProxyType(self._LRUCache__order)  # type: ignore
-
-    @property
-    def capacity(self) -> float:
-        return self.maxsize
-
-    @property
-    def usage(self) -> float:
-        if self.maxsize == 0:
-            return 0
-
-        return self.currsize / self.maxsize
-
-    def stat(self, *, delta: bool = False) -> CacheInfo:
-        """
-        Gets the cumulative number of hits and queries against this cache.
-
-        If `delta=True`, instead gets these statistics
-        since the last call that also passed `delta=True`.
-        """
-        info = CacheInfo(hits=self._hits, total=self._total)
-
-        if delta:
-            info_delta = info - self._last_info
-            self._last_info = info
-            info = info_delta
-
-        return info
-
-    def touch(self, key: _K) -> None:
-        try:
-            self._LRUCache__order.move_to_end(key)  # type: ignore
-        except KeyError:
-            self._LRUCache__order[key] = None  # type: ignore
-
-    @overload
-    def get(self, key: _K, /) -> Optional[_V]: ...
-
-    @overload
-    def get(self, key: _K, /, default: Union[_V, _T]) -> Union[_V, _T]: ...
-
-    def get(
-        self, key: _K, /, default: Optional[Union[_V, _T]] = None
-    ) -> Optional[Union[_V, _T]]:
-        value: Optional[Union[_V, _T]]
-        if key in self:
-            value = self.__getitem__(key, update_info=False)  # type: ignore[call-arg]
-
-            self._hits += 1
-        else:
-            value = default
-
-        self._total += 1
-        return value
-
-    @overload
-    def pop(self, key: _K) -> _V: ...
-
-    @overload
-    def pop(self, key: _K, default: Union[_V, _T]) -> Union[_V, _T]: ...
-
-    def pop(
-        self, key: _K, default: Optional[Union[_V, _T]] = None
-    ) -> Optional[Union[_V, _T]]:
-        value: Optional[Union[_V, _T]]
-        if key not in self:
-            return default
-
-        value = self.__getitem__(key, update_info=False)  # type: ignore[call-arg]
-        self.__delitem__(key)
-        return value
-
-    def put(self, key: _K, value: _V) -> None:
-        self.__setitem__(key, value)
-
-    def pin(self, key: _K) -> None:
-        """
-        Pins a key in the cache preventing it from being
-        evicted in the LRU order.
-        """
-        if key not in self:
-            raise ValueError(f"Cannot pin key: {key} not in cache.")
-        self.pinned_items.add(key)
-
-    def _unpin(self, key: _K) -> None:
-        """
-        Unpins a key in the cache allowing it to be
-        evicted in the LRU order.
-        """
-        self.pinned_items.remove(key)
-
-    def _on_remove(self, key: _K, value: Optional[_V]) -> None:
-        pass
-
-    def remove_oldest(self, *, remove_pinned: bool = False) -> None:
-        if len(self) == 0:
-            return
-
-        self.popitem(remove_pinned=remove_pinned)
-
-    def _remove_old_if_needed(self) -> None:
-        while self.currsize > self.capacity:
-            self.remove_oldest()
-
-    def popitem(self, remove_pinned: bool = False):
-        """Remove and return the `(key, value)` pair least recently used."""
-        if not remove_pinned:
-            # pop the oldest item in the cache that is not pinned
-            lru_key = next(
-                (key for key in self.order if key not in self.pinned_items),
-                ALL_PINNED_SENTINEL,
-            )
-            if lru_key is ALL_PINNED_SENTINEL:
-                raise RuntimeError(
-                    "All items are pinned, cannot remove oldest from the cache."
-                )
-        else:
-            lru_key = next(iter(self.order))
-        value = self.pop(cast(_K, lru_key))
-        return (lru_key, value)
-
-    def clear(self) -> None:
-        while len(self) > 0:
-            self.remove_oldest(remove_pinned=True)
-
-        self._hits = 0
-        self._total = 0
-        self._last_info = CacheInfo(hits=0, total=0)
-
-
-class PyObjectCache:
-    """Used to cache python objects to avoid object allocations
-    across scheduler iterations.
-    """
-
-    def __init__(self, obj_builder):
-        self._obj_builder = obj_builder
-        self._index = 0
-
-        self._obj_cache = []
-        for _ in range(128):
-            self._obj_cache.append(self._obj_builder())
-
-    def _grow_cache(self):
-        # Double the size of the cache
-        num_objs = len(self._obj_cache)
-        for _ in range(num_objs):
-            self._obj_cache.append(self._obj_builder())
-
-    def get_object(self):
-        """Returns a pre-allocated cached object. If there is not enough
-        objects, then the cache size will double.
-        """
-        if self._index >= len(self._obj_cache):
-            self._grow_cache()
-            assert self._index < len(self._obj_cache)
-
-        obj = self._obj_cache[self._index]
-        self._index += 1
-
-        return obj
-
-    def reset(self):
-        """Makes all cached-objects available for the next scheduler iteration."""
-        self._index = 0
 
 
 @cache
@@ -705,7 +452,7 @@ def in_loop(event_loop: AbstractEventLoop) -> bool:
 
 
 def make_async(
-    func: Callable[P, T], executor: Optional[concurrent.futures.Executor] = None
+    func: Callable[P, T], executor: concurrent.futures.Executor | None = None
 ) -> Callable[P, Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
 
@@ -940,7 +687,7 @@ def _get_open_port() -> int:
             return s.getsockname()[1]
 
 
-def find_process_using_port(port: int) -> Optional[psutil.Process]:
+def find_process_using_port(port: int) -> psutil.Process | None:
     # TODO: We can not check for running processes with network
     # port on macOS. Therefore, we can not have a full graceful shutdown
     # of vLLM. For now, let's not look for processes in this case.
@@ -1025,8 +772,8 @@ def _generate_random_fp8(
 
 
 def get_kv_cache_torch_dtype(
-    cache_dtype: Optional[Union[str, torch.dtype]],
-    model_dtype: Optional[Union[str, torch.dtype]] = None,
+    cache_dtype: Union[str, torch.dtype] | None,
+    model_dtype: Union[str, torch.dtype] | None = None,
 ) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
@@ -1053,11 +800,11 @@ def create_kv_caches_with_random_flash(
     num_layers: int,
     num_heads: int,
     head_size: int,
-    cache_dtype: Optional[Union[str, torch.dtype]],
-    model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: Optional[int] = None,
-    device: Optional[str] = "cuda",
-    cache_layout: Optional[str] = "NHD",
+    cache_dtype: Union[str, torch.dtype] | None,
+    model_dtype: Union[str, torch.dtype] | None = None,
+    seed: int | None = None,
+    device: str | None = "cuda",
+    cache_layout: str | None = "NHD",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     from vllm.platforms import current_platform
 
@@ -1095,10 +842,10 @@ def create_kv_caches_with_random(
     num_layers: int,
     num_heads: int,
     head_size: int,
-    cache_dtype: Optional[Union[str, torch.dtype]],
-    model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: Optional[int] = None,
-    device: Optional[str] = "cuda",
+    cache_dtype: Union[str, torch.dtype] | None,
+    model_dtype: Union[str, torch.dtype] | None = None,
+    seed: int | None = None,
+    device: str | None = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     if cache_dtype == "fp8" and head_size % 16:
         raise ValueError(
@@ -1156,7 +903,7 @@ def is_uva_available() -> bool:
 
 
 class DeviceMemoryProfiler:
-    def __init__(self, device: Optional[torch.types.Device] = None):
+    def __init__(self, device: torch.types.Device | None = None):
         self.device = device
 
     def current_memory_usage(self) -> float:
@@ -1184,7 +931,7 @@ def make_ndarray_with_pad(
     pad: T,
     dtype: npt.DTypeLike,
     *,
-    max_len: Optional[int] = None,
+    max_len: int | None = None,
 ) -> npt.NDArray:
     """
     Make a padded array from 2D inputs.
@@ -1209,8 +956,8 @@ def make_tensor_with_pad(
     pad: T,
     dtype: torch.dtype,
     *,
-    max_len: Optional[int] = None,
-    device: Optional[Union[str, torch.device]] = None,
+    max_len: int | None = None,
+    device: Union[str, torch.device] | None = None,
     pin_memory: bool = False,
 ) -> torch.Tensor:
     """
@@ -1405,7 +1152,7 @@ def find_nccl_library() -> str:
     return so_file
 
 
-def find_nccl_include_paths() -> Optional[list[str]]:
+def find_nccl_include_paths() -> list[str] | None:
     """
     We either use the nccl.h specified by the `VLLM_NCCL_INCLUDE_PATH`
     environment variable, or we find the library file brought by
@@ -1525,7 +1272,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 def deprecate_args(
     start_index: int,
     is_deprecated: Union[bool, Callable[[], bool]] = True,
-    additional_message: Optional[str] = None,
+    additional_message: str | None = None,
 ) -> Callable[[F], F]:
     if not callable(is_deprecated):
         is_deprecated = partial(identity, is_deprecated)
@@ -1565,7 +1312,7 @@ def deprecate_args(
 def deprecate_kwargs(
     *kws: str,
     is_deprecated: Union[bool, Callable[[], bool]] = True,
-    additional_message: Optional[str] = None,
+    additional_message: str | None = None,
 ) -> Callable[[F], F]:
     deprecated_kws = set(kws)
 
@@ -1598,7 +1345,7 @@ def deprecate_kwargs(
 
 
 @lru_cache(maxsize=8)
-def _cuda_device_count_stateless(cuda_visible_devices: Optional[str] = None) -> int:
+def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
     # Note: cuda_visible_devices is not used, but we keep it as an argument for
     # LRU Cache purposes.
 
@@ -1746,7 +1493,7 @@ class FlexibleArgumentParser(ArgumentParser):
         '   --json-arg \'{"key4": ["value3", "value4", "value5"]}\'\n'
         "   --json-arg.key4+ value3 --json-arg.key4+='value4,value5'\n\n"
     )
-    _search_keyword: Optional[str] = None
+    _search_keyword: str | None = None
 
     def __init__(self, *args, **kwargs):
         # Set the default "formatter_class" to SortedHelpFormatter
@@ -2245,7 +1992,7 @@ def supports_kw(
 
 def get_allowed_kwarg_only_overrides(
     callable: Callable[..., object],
-    overrides: Optional[Mapping[str, object]],
+    overrides: Mapping[str, object] | None,
     *,
     requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
@@ -2695,10 +2442,10 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 def direct_register_custom_op(
     op_name: str,
     op_func: Callable,
-    mutates_args: Optional[list[str]] = None,
-    fake_impl: Optional[Callable] = None,
-    target_lib: Optional[Library] = None,
-    dispatch_key: Optional[str] = None,
+    mutates_args: list[str] | None = None,
+    fake_impl: Callable | None = None,
+    target_lib: Library | None = None,
+    dispatch_key: str | None = None,
     tags: tuple[torch.Tag, ...] = (),
 ):
     """
@@ -3016,7 +2763,7 @@ def split_zmq_path(path: str) -> tuple[str, str, str]:
     return scheme, host, port
 
 
-def make_zmq_path(scheme: str, host: str, port: Optional[int] = None) -> str:
+def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
     """Make a ZMQ path from its parts.
 
     Args:
@@ -3039,9 +2786,9 @@ def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
     path: str,
     socket_type: Any,
-    bind: Optional[bool] = None,
-    identity: Optional[bytes] = None,
-    linger: Optional[int] = None,
+    bind: bool | None = None,
+    identity: bytes | None = None,
+    linger: int | None = None,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
@@ -3055,10 +2802,7 @@ def make_zmq_socket(
     # - Set a large 0.5GB buffer to improve throughput
     # For systems with less memory:
     # - Use system default (-1) to avoid excessive memory consumption
-    if total_mem > 32 and available_mem > 16:
-        buf_size = int(0.5 * 1024**3)  # 0.5GB in bytes
-    else:
-        buf_size = -1  # Use system default buffer size
+    buf_size = int(0.5 * 1024**3) if total_mem > 32 and available_mem > 16 else -1
 
     if bind is None:
         bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
@@ -3098,9 +2842,9 @@ def make_zmq_socket(
 def zmq_socket_ctx(
     path: str,
     socket_type: Any,
-    bind: Optional[bool] = None,
+    bind: bool | None = None,
     linger: int = 0,
-    identity: Optional[bytes] = None,
+    identity: bytes | None = None,
 ) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
@@ -3163,7 +2907,7 @@ def get_mp_context():
 def bind_kv_cache(
     ctx: dict[str, Any],
     kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
-    shared_kv_cache_layers: Optional[dict[str, str]] = None,
+    shared_kv_cache_layers: dict[str, str] | None = None,
 ) -> None:
     # Bind the kv_cache tensor to Attention modules, similar to
     # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
@@ -3379,7 +3123,7 @@ def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
 
 
 @contextlib.contextmanager
-def cprofile_context(save_file: Optional[str] = None):
+def cprofile_context(save_file: str | None = None):
     """Run a cprofile
 
     Args:
@@ -3401,7 +3145,7 @@ def cprofile_context(save_file: Optional[str] = None):
             prof.print_stats(sort="cumtime")
 
 
-def cprofile(save_file: Optional[str] = None, enabled: bool = True):
+def cprofile(save_file: str | None = None, enabled: bool = True):
     """Decorator to profile a Python method using cProfile.
 
     Args:
@@ -3608,7 +3352,7 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     file.write = write_with_prefix  # type: ignore[method-assign]
 
 
-def decorate_logs(process_name: Optional[str] = None) -> None:
+def decorate_logs(process_name: str | None = None) -> None:
     """
     Adds a process-specific prefix to each line of output written to stdout and
     stderr.
@@ -3631,8 +3375,8 @@ def decorate_logs(process_name: Optional[str] = None) -> None:
 
 
 def length_from_prompt_token_ids_or_embeds(
-    prompt_token_ids: Optional[list[int]],
-    prompt_embeds: Optional[torch.Tensor],
+    prompt_token_ids: list[int] | None,
+    prompt_embeds: torch.Tensor | None,
 ) -> int:
     """Calculate the request length (in number of tokens) give either
     prompt_token_ids or prompt_embeds.

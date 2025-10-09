@@ -124,7 +124,7 @@ def make_feature_matrix(csv_file_path: str):
     results_df: Optional[pd.DataFrame] = None
     for m, k, n, e, topks, dtype, pf_type, experts_type, quant_config in tqdm(
         combinations
-    ):  # noqa: E501
+    ):
         config = Config(
             Ms=[m],
             K=k,
@@ -140,7 +140,7 @@ def make_feature_matrix(csv_file_path: str):
         )
 
         success = None
-        if config.is_valid():
+        if config.is_valid()[0]:
             print(f"Running config : {config.describe()} ...")
             try:
                 weights: WeightTensors = WeightTensors.make(config)

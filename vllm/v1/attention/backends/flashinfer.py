@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Union
+from typing import ClassVar, Union
 
 import numpy as np
 import torch
@@ -37,12 +37,8 @@ from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
     flashinfer_disable_q_quantization,
-    supports_trtllm_attention,
     use_trtllm_attention,
 )
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -52,8 +48,6 @@ from vllm.v1.attention.backends.utils import (
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
-
-# yapf: enable
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
@@ -259,12 +253,12 @@ class FlashInferMetadata:
     # For cascade attention (CPU for planning).
     use_cascade: bool
 
-    prefill_wrapper: Optional[BatchPrefillWithPagedKVCacheWrapper] = None
-    decode_wrapper: Optional[BatchDecodeWithPagedKVCacheWrapper] = None
-    cascade_wrapper: Optional[MultiLevelCascadeAttentionWrapper] = None
+    prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = None
+    decode_wrapper: BatchDecodeWithPagedKVCacheWrapper | None = None
+    cascade_wrapper: MultiLevelCascadeAttentionWrapper | None = None
 
-    qo_indptr_gpu: Optional[torch.Tensor] = None
-    paged_kv_indptr_gpu: Optional[torch.Tensor] = None
+    qo_indptr_gpu: torch.Tensor | None = None
+    paged_kv_indptr_gpu: torch.Tensor | None = None
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -328,15 +322,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION is set to 1. Otherwise, try to
         # use fp8 q if kv cache is fp8, and will fall back to model dtype
         # if TRTLLM attention kernel is not used when building attn metadata
-        if supports_trtllm_attention() and not flashinfer_disable_q_quantization():
+        can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
+        if can_use_trtllm and not flashinfer_disable_q_quantization():
             self.q_data_type = self.kv_cache_dtype
         else:
             self.q_data_type = self.model_config.dtype
 
-        supports_spec_as_decode = can_use_trtllm_attention(
-            self.num_qo_heads, self.num_kv_heads
-        )
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode)
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=can_use_trtllm)
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -349,7 +341,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.window_left = self.global_hyperparameters.window_left
         self.logits_soft_cap = self.global_hyperparameters.logits_soft_cap
         self.has_sinks = self.global_hyperparameters.has_sinks
-        if self.has_sinks and not supports_trtllm_attention():
+        if self.has_sinks and not can_use_trtllm:
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
                 "sinks, please use trtllm on blackwell or flash attention on "
@@ -553,16 +545,30 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
-        if self.has_sinks and not (prefill_use_trtllm and decode_use_trtllm):
-            raise NotImplementedError(
-                "FlashInfer backend currently does not support attention "
-                "sinks, please use trtllm on blackwell or flash attention on "
-                "earlier GPUs."
+
+        if not (prefill_use_trtllm and decode_use_trtllm):
+            if self.has_sinks:
+                raise NotImplementedError(
+                    "FlashInfer backend currently does not support attention "
+                    "sinks, please use trtllm on blackwell or flash attention "
+                    "on earlier GPUs."
+                )
+
+            if not self.global_hyperparameters.has_same_window_lefts:
+                raise ValueError(
+                    "Window left is not the same for all layers. "
+                    "One potential fix is to set disable_sliding_window=True"
+                )
+
+            assert self.global_hyperparameters.has_same_all_params, (
+                "FlashInfer backend currently only supports models in which "
+                "all layers share the same values for the following "
+                "hyperparameters: `window_left`, `logits_soft_cap`, "
+                "`sm_scale`."
             )
 
-        # If TRTLLM attention is not used, the q quantization is not supported.
-        # Fall back to use model dtype.
-        if not (prefill_use_trtllm and decode_use_trtllm):
+            # The q quantization is not supported for non-trtllm attention,
+            # fall back to model dtype.
             self.q_data_type = self.model_config.dtype
 
         attn_metadata = FlashInferMetadata(
@@ -607,8 +613,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         else:
             # Regular attention (common case).
-            # Decodes are at the front and prefills are at the back,
-            # according to reorder_batch()
+            # Decodes are at the front and prefills are at the back.
             num_prefills = attn_metadata.num_prefills
             num_decodes = attn_metadata.num_decodes
             if num_prefills > 0:
@@ -732,13 +737,13 @@ class FlashInferImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float] = None,
+        logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[int] = None,
-        sinks: Optional[torch.Tensor] = None,
+        kv_sharing_target_layer_name: int | None = None,
+        sinks: torch.Tensor | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -768,7 +773,7 @@ class FlashInferImpl(AttentionImpl):
                 "FlashInferImpl"
             )
 
-        self.sinks: Optional[torch.Tensor] = None
+        self.sinks: torch.Tensor | None = None
         if sinks is not None:
             if sinks.shape[0] != num_heads:
                 raise ValueError(
@@ -778,12 +783,10 @@ class FlashInferImpl(AttentionImpl):
                 )
             self.sinks = sinks
 
-        self.support_trtllm_attn = (
-            supports_trtllm_attention() and num_heads % num_kv_heads == 0
-        )
-        self.bmm1_scale: Optional[float] = None
-        self.bmm2_scale: Optional[float] = None
-        self.o_sf_scale: Optional[float] = None
+        self.support_trtllm_attn = can_use_trtllm_attention(num_heads, num_kv_heads)
+        self.bmm1_scale: float | None = None
+        self.bmm2_scale: float | None = None
+        self.o_sf_scale: float | None = None
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return (
@@ -800,9 +803,9 @@ class FlashInferImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with FlashInfer.
 
@@ -930,8 +933,7 @@ class FlashInferImpl(AttentionImpl):
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
         kv_cache_permute = kv_cache.permute(*stride_order)
         # Regular attention (common case).
-        # Decodes are at the front and prefills are at the back,
-        # according to reorder_batch()
+        # Decodes are at the front and prefills are at the back.
         if num_prefill_tokens > 0:
             prefill_wrapper = attn_metadata.prefill_wrapper
             prefill_query = query[num_decode_tokens:]
@@ -1098,13 +1100,13 @@ def fast_plan_decode(
     page_size: int,
     pos_encoding_mode: str = "NONE",
     window_left: int = -1,
-    logits_soft_cap: Optional[float] = None,
-    q_data_type: Optional[Union[str, torch.dtype]] = "float16",
-    kv_data_type: Optional[Union[str, torch.dtype]] = None,
-    data_type: Optional[Union[str, torch.dtype]] = None,
-    sm_scale: Optional[float] = None,
-    rope_scale: Optional[float] = None,
-    rope_theta: Optional[float] = None,
+    logits_soft_cap: float | None = None,
+    q_data_type: Union[str, torch.dtype] | None = "float16",
+    kv_data_type: Union[str, torch.dtype] | None = None,
+    data_type: Union[str, torch.dtype] | None = None,
+    sm_scale: float | None = None,
+    rope_scale: float | None = None,
+    rope_theta: float | None = None,
     non_blocking: bool = True,
 ) -> None:
     """
