@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock, SingleTypeKVCacheBlocks
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     FullAttentionManager,
@@ -53,7 +54,7 @@ class KVCacheCoordinator(ABC):
         self,
         request_id: str,
         num_tokens: int,
-        new_computed_blocks: tuple[SingleTypeKVCacheBlocks, ...],
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_encoder_tokens: int,
     ) -> int:
         """
@@ -86,7 +87,7 @@ class KVCacheCoordinator(ABC):
         return num_blocks_to_allocate
 
     def save_new_computed_blocks(
-        self, request_id: str, new_computed_blocks: tuple[SingleTypeKVCacheBlocks, ...]
+        self, request_id: str, new_computed_blocks: tuple[Sequence[KVCacheBlock], ...]
     ) -> None:
         """
         Add the new computed blocks to the request.

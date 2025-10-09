@@ -150,14 +150,6 @@ class KVCacheBlock:
         )
 
 
-# Represents KVCacheBlocks associated with a request.
-# It could be represented as:
-# - list[KVCacheBlock] for more than one KVCacheBlock
-# - an empty tuple for requests without KVCacheBlock
-#   (a precomputed KVCacheBlocks is in KVCacheManager to avoid GC overhead)
-SingleTypeKVCacheBlocks: TypeAlias = Sequence[KVCacheBlock]
-
-
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
     list of free blocks. We implement this class instead of using Python

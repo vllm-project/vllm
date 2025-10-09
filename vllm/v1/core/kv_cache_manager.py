@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
-from vllm.v1.core.kv_cache_utils import KVCacheBlock, SingleTypeKVCacheBlocks
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
@@ -24,7 +25,7 @@ class KVCacheBlocks:
     structure from the Scheduler.
     """
 
-    blocks: tuple[SingleTypeKVCacheBlocks, ...]
+    blocks: tuple[Sequence[KVCacheBlock], ...]
     """
     `blocks[i][j]` refers to the i-th kv_cache_group
     and the j-th block of tokens.We don't use block of
@@ -32,6 +33,11 @@ class KVCacheBlocks:
     kv_cache_groups have the same number of blocks, which is true for now but
     will be broken if we want to give different block_size to different
     kv_cache_groups in the future.
+
+    Each single type KVCacheBlocks could be represented as:
+    - list[KVCacheBlock] for more than one KVCacheBlock
+    - an empty tuple for requests without KVCacheBlock
+      (a precomputed KVCacheBlocks is in KVCacheManager to avoid GC overhead)
     """
 
     def __add__(self, other: "KVCacheBlocks") -> "KVCacheBlocks":
