@@ -5,10 +5,14 @@ import pytest
 import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
+
 # yapf: disable
 from vllm.model_executor.models.qwen2_vl import (
-    Qwen2VisionRotaryEmbedding, apply_rotary_pos_emb_vision,
-    apply_rotary_pos_emb_vision_2c)
+    Qwen2VisionRotaryEmbedding,
+    apply_rotary_pos_emb_vision,
+    apply_rotary_pos_emb_vision_2c,
+)
+
 # yapf: enable
 from vllm.platforms import current_platform
 
@@ -59,11 +63,15 @@ def test_vision_rotary(
     # 2c path: apply to q and k together
     out_q_2c, out_k_2c = apply_rotary_pos_emb_vision_2c(q, k, freqs)
 
-    torch.testing.assert_close(out_q_2c,
-                               out_q_1c,
-                               atol=get_default_atol(out_q_2c),
-                               rtol=get_default_rtol(out_q_2c))
-    torch.testing.assert_close(out_k_2c,
-                               out_k_1c,
-                               atol=get_default_atol(out_k_2c),
-                               rtol=get_default_rtol(out_k_2c))
+    torch.testing.assert_close(
+        out_q_2c,
+        out_q_1c,
+        atol=get_default_atol(out_q_2c),
+        rtol=get_default_rtol(out_q_2c),
+    )
+    torch.testing.assert_close(
+        out_k_2c,
+        out_k_1c,
+        atol=get_default_atol(out_k_2c),
+        rtol=get_default_rtol(out_k_2c),
+    )

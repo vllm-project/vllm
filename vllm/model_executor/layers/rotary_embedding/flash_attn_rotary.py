@@ -38,13 +38,21 @@ def _rotary_1c(
         # Load the 1st and 2nd halves of X, do calculation, then
         # store to 1st and 2nd halves of OUT
         rk_half = tl.max_contiguous(tl.multiple_of(rk_half, 4), 4)
-        X = X + (rh[:, None, None] * stride_nheads + rm[None, :, None] *
-                 stride_seqlen + rk_half[None, None, :] * stride_headdim)
-        OUT = OUT + (rh[:, None, None] * stride_out_nheads +
-                     rm[None, :, None] * stride_out_seqlen +
-                     rk_half[None, None, :] * stride_out_headdim)
-        mask = (rh[:, None, None] < nheads) & (rm[None, :, None] < seqlen) & (
-            rk_half[None, None, :] < ROTARY_DIM_HALF)
+        X = X + (
+            rh[:, None, None] * stride_nheads
+            + rm[None, :, None] * stride_seqlen
+            + rk_half[None, None, :] * stride_headdim
+        )
+        OUT = OUT + (
+            rh[:, None, None] * stride_out_nheads
+            + rm[None, :, None] * stride_out_seqlen
+            + rk_half[None, None, :] * stride_out_headdim
+        )
+        mask = (
+            (rh[:, None, None] < nheads)
+            & (rm[None, :, None] < seqlen)
+            & (rk_half[None, None, :] < ROTARY_DIM_HALF)
+        )
         x0 = tl.load(X, mask=mask, other=0.0).to(tl.float32)
         x1 = tl.load(
             X + ROTARY_DIM_HALF * stride_headdim,
@@ -57,13 +65,21 @@ def _rotary_1c(
         tl.store(OUT + ROTARY_DIM_HALF * stride_out_headdim, o1, mask=mask)
     else:
         rk = tl.arange(0, BLOCK_K)
-        X = X + (rh[:, None, None] * stride_nheads + rm[None, :, None] *
-                 stride_seqlen + rk[None, None, :] * stride_headdim)
-        OUT = OUT + (rh[:, None, None] * stride_out_nheads +
-                     rm[None, :, None] * stride_out_seqlen +
-                     rk[None, None, :] * stride_out_headdim)
-        mask = (rh[:, None, None] < nheads) & (rm[None, :, None] < seqlen) & (
-            rk[None, None, :] < ROTARY_DIM)
+        X = X + (
+            rh[:, None, None] * stride_nheads
+            + rm[None, :, None] * stride_seqlen
+            + rk[None, None, :] * stride_headdim
+        )
+        OUT = OUT + (
+            rh[:, None, None] * stride_out_nheads
+            + rm[None, :, None] * stride_out_seqlen
+            + rk[None, None, :] * stride_out_headdim
+        )
+        mask = (
+            (rh[:, None, None] < nheads)
+            & (rm[None, :, None] < seqlen)
+            & (rk[None, None, :] < ROTARY_DIM)
+        )
         x = tl.load(X, mask=mask, other=0.0).to(tl.float32)
         x0, x1 = tl.split(tl.reshape(x, [BLOCK_H, BLOCK_M, BLOCK_K // 2, 2]))
         o0 = x0 * cos - x1 * sin
@@ -146,8 +162,7 @@ def rotary_kernel(
 
     rk_half = tl.arange(0, BLOCK_K // 2)
     FREQS = FREQS + (rm_cs[:, None] * ROTARY_DIM_HALF + rk_half[None, :])
-    mask_cs = (rm_cs[:, None] < seqlen_ro) & (rk_half[None, :]
-                                              < ROTARY_DIM_HALF)
+    mask_cs = (rm_cs[:, None] < seqlen_ro) & (rk_half[None, :] < ROTARY_DIM_HALF)
     freqs = tl.load(FREQS, mask=mask_cs, other=0.0).to(tl.float32)
     cos = tl.cos(freqs)
     sin = tl.sin(freqs)
@@ -231,8 +246,9 @@ def apply_rotary_2c(
     if cu_seqlens is None:
         batch, seqlen, nheads, headdim = x.shape
     else:
-        assert max_seqlen is not None, "If cu_seqlens is passed in, " \
-            "then max_seqlen must be passed"
+        assert max_seqlen is not None, (
+            "If cu_seqlens is passed in, then max_seqlen must be passed"
+        )
         total_seqlen, nheads, headdim = x.shape
         batch_p_1 = cu_seqlens.shape[0]
         batch = batch_p_1 - 1
@@ -245,7 +261,7 @@ def apply_rotary_2c(
 
     freqs = freqs.contiguous()
     if isinstance(seqlen_offsets, torch.Tensor):
-        assert seqlen_offsets.shape == (batch, )
+        assert seqlen_offsets.shape == (batch,)
         assert seqlen_offsets.dtype in [torch.int32, torch.int64]
         seqlen_offsets = seqlen_offsets.contiguous()
     else:
@@ -257,8 +273,11 @@ def apply_rotary_2c(
         output_x[..., rotary_dim:].copy_(x[..., rotary_dim:])
         output_y[..., rotary_dim:].copy_(y[..., rotary_dim:])
 
-    grid = lambda META: (triton.cdiv(nheads, META["BLOCK_H"]),
-                         triton.cdiv(seqlen, META["BLOCK_M"]), batch)  # noqa
+    grid = lambda META: (
+        triton.cdiv(nheads, META["BLOCK_H"]),
+        triton.cdiv(seqlen, META["BLOCK_M"]),
+        batch,
+    )  # noqa
     BLOCK_M = 16 if rotary_dim <= 128 else 8
 
     # Need this, otherwise Triton tries to launch from cuda:0 and we get
@@ -277,22 +296,22 @@ def apply_rotary_2c(
             nheads,
             seqlen_ro,
             output_x.stride(0)
-            if not is_varlen else 0,  # batch_strides if not varlen else 0
+            if not is_varlen
+            else 0,  # batch_strides if not varlen else 0
             output_x.stride(-3),  # seqlen_stride or total_seqlen_stride
             output_x.stride(-2),  # nheads_stride
             output_x.stride(-1),  # headdim_stride
-            x.stride(0)
-            if not is_varlen else 0,  # batch_strides if not varlen else 0
+            x.stride(0) if not is_varlen else 0,  # batch_strides if not varlen else 0
             x.stride(-3),  # seqlen stride or total_seqlen_stride
             x.stride(-2),  # nheads stride
             x.stride(-1),  # headdim stride
             output_y.stride(0)
-            if not is_varlen else 0,  # batch_strides if not varlen else 0
+            if not is_varlen
+            else 0,  # batch_strides if not varlen else 0
             output_y.stride(-3),  # seqlen_stride or total_seqlen_stride
             output_y.stride(-2),  # nheads_stride
             output_y.stride(-1),  # headdim_stride
-            y.stride(0)
-            if not is_varlen else 0,  # batch_strides if not varlen else 0
+            y.stride(0) if not is_varlen else 0,  # batch_strides if not varlen else 0
             y.stride(-3),  # seqlen stride or total_seqlen_stride
             y.stride(-2),  # nheads stride
             y.stride(-1),  # headdim stride
