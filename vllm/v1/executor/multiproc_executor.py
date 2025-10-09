@@ -506,10 +506,11 @@ class WorkerProc:
     def wait_for_ready(
         unready_proc_handles: list[UnreadyWorkerProcHandle],
     ) -> list[WorkerProcHandle]:
-
-        err_msg = ("WorkerProc initialization failed due to "
-                   "an exception {}in a background process. "
-                   "See stack trace for root cause.")
+        err_msg = (
+            "WorkerProc initialization failed due to "
+            "an exception {}in a background process. "
+            "See stack trace for root cause."
+        )
 
         pipes = {handle.ready_pipe: handle for handle in unready_proc_handles}
         ready_proc_handles: list[Optional[WorkerProcHandle]] = [None] * len(
@@ -526,7 +527,8 @@ class WorkerProc:
                     status = response["status"]
                     if status == WorkerProc.FAILED_INIT_STR:
                         raise Exception(
-                            err_msg.format(f"(err: {response['error_msg']}) "))
+                            err_msg.format(f"(err: {response['error_msg']}) ")
+                        )
                     elif status != WorkerProc.READY_STR:
                         raise Exception(err_msg.format(""))
 
@@ -631,10 +633,12 @@ class WorkerProc:
             # TODO(rob): handle case where the MQ itself breaks.
 
             if ready_writer is not None:
-                ready_writer.send({
-                    "status": WorkerProc.FAILED_INIT_STR,
-                    "error_msg": str(e),
-                })
+                ready_writer.send(
+                    {
+                        "status": WorkerProc.FAILED_INIT_STR,
+                        "error_msg": str(e),
+                    }
+                )
                 logger.exception("WorkerProc failed to start.")
             elif shutdown_event.is_set():
                 logger.info("WorkerProc shutting down.")

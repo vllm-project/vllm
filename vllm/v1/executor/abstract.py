@@ -68,8 +68,10 @@ class Executor(ExecutorBase):
             raise ValueError(
                 f"Unknown distributed executor backend: {distributed_executor_backend}"
             )
-        logger.info(f"Using executor class: {executor_class.__name__} "
-                    f"for {distributed_executor_backend=}")
+        logger.info(
+            f"Using executor class: {executor_class.__name__} "
+            f"for {distributed_executor_backend=}"
+        )
         return executor_class
 
     def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:

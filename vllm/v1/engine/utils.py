@@ -825,15 +825,16 @@ def wait_for_engine_startup(
                     *start_pending,
                 )
             continue
-        if len(events) > 1 or (len(events) == 1
-                               and events[0][0] != handshake_socket):
+        if len(events) > 1 or (len(events) == 1 and events[0][0] != handshake_socket):
             # coord_process processes exited.
             finished = {}
             if coord_process is not None and coord_process.exitcode is not None:
                 finished[coord_process.name] = coord_process.exitcode
-            raise RuntimeError("Engine core initialization failed. "
-                               "See root cause above. "
-                               f"Failed core proc(s): {finished}")
+            raise RuntimeError(
+                "Engine core initialization failed. "
+                "See root cause above. "
+                f"Failed core proc(s): {finished}"
+            )
 
         # Receive HELLO and READY messages from the input socket.
         eng_identity, ready_msg_bytes = handshake_socket.recv_multipart()
@@ -928,11 +929,13 @@ def wait_for_engine_startup(
         elif status == "FAILED" and engine.state == CoreEngineState.CONNECTED:
             # One of the local core processes exited.
             finished = proc_manager.finished_procs() if proc_manager else {}
-            raise RuntimeError("Engine core initialization failed. "
-                               "See root cause above. "
-                               f"Failed core proc(s): {finished}. "
-                               "Recived error message from failed "
-                               f"engine {eng_index}: {msg['error_msg']}")
+            raise RuntimeError(
+                "Engine core initialization failed. "
+                "See root cause above. "
+                f"Failed core proc(s): {finished}. "
+                "Recived error message from failed "
+                f"engine {eng_index}: {msg['error_msg']}"
+            )
         else:
             raise RuntimeError(
                 f"Unexpected {status} message for "
@@ -943,9 +946,11 @@ def wait_for_engine_startup(
         if len(proc_manager_events) > 1:
             # One or more local core processes exited but we didn't receive any msg.
             finished = proc_manager.finished_procs() if proc_manager else {}
-            raise RuntimeError("Engine core initialization failed. "
-                               "See root cause above. "
-                               f"Failed core proc(s): {finished}")
+            raise RuntimeError(
+                "Engine core initialization failed. "
+                "See root cause above. "
+                f"Failed core proc(s): {finished}"
+            )
         logger.debug(
             "%s from %s core engine process %s.",
             status,
