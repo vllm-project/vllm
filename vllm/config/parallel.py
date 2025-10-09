@@ -152,6 +152,10 @@ class ParallelConfig:
     threshold, microbatching will be used. Otherwise, the request will be
     processed in a single batch."""
 
+    disable_nccl_for_dp_synchronization: bool = False
+    """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
+    to use Gloo instead of NCCL for its all reduce"""
+
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 
@@ -332,6 +336,9 @@ class ParallelConfig:
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
+
+        This hash is also used for DP worker configuration validation
+        to prevent hangs from mismatched collective communication patterns.
         """
         factors: list[Any] = []
         factors.append(self.pipeline_parallel_size)
@@ -339,6 +346,12 @@ class ParallelConfig:
         factors.append(self.enable_expert_parallel)
         factors.append(self.data_parallel_size)
         factors.append(envs.VLLM_ALL2ALL_BACKEND)
+        factors.append(self.enable_eplb)
+        if self.enable_eplb:
+            factors.append(self.eplb_config.log_balancedness)
+            factors.append(self.eplb_config.window_size)
+            factors.append(self.eplb_config.step_interval)
+            factors.append(self.eplb_config.num_redundant_experts)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:

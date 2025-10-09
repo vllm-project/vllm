@@ -26,6 +26,7 @@
 
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
+from itertools import islice
 from typing import Any, Callable, Optional, Union
 
 import numpy as np
@@ -1106,11 +1107,9 @@ class Qwen3LLMModel(Qwen3Model):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer_idx, layer in enumerate(
-            self.layers[self.start_layer : self.end_layer]
+        for layer_idx, layer in islice(
+            enumerate(self.layers), self.start_layer, self.end_layer
         ):
-            layer_idx = layer_idx + self.start_layer
-
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -1305,7 +1304,7 @@ class Qwen3VLForConditionalGeneration(
                     f"Got ndim: {mm_input.ndim} "
                     f"(shape={mm_input.shape})"
                 )
-            return torch.concat(list(mm_input))
+            return mm_input.reshape(-1, mm_input.shape[-1])
         else:
             return torch.concat(mm_input)
 

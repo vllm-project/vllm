@@ -62,10 +62,9 @@ class CachedRequestState:
                     "provided via prompt_embeds, and its ID is unknown."
                 )
             return self.prompt_token_ids[idx]
-        elif idx - self.num_prompt_tokens < len(self.output_token_ids):
+        if idx - self.num_prompt_tokens < len(self.output_token_ids):
             return self.output_token_ids[idx - self.num_prompt_tokens]
-        else:
-            return -1
+        return -1
 
 
 class InputBatch:
@@ -78,6 +77,7 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
+        kernel_block_sizes: list[int],
         logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
@@ -132,6 +132,7 @@ class InputBatch:
             pin_memory=pin_memory,
             device=device,
             block_sizes=block_sizes,
+            kernel_block_sizes=kernel_block_sizes,
             num_speculative_tokens=num_speculative_tokens,
         )
 
@@ -240,6 +241,9 @@ class InputBatch:
         # data structure
         self.logitsprocs = logitsprocs or LogitsProcessors()
 
+        # Store last speculative tokens for sampler.
+        self.spec_token_ids: list[Optional[list[int]]] = []
+
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
 
@@ -292,9 +296,11 @@ class InputBatch:
         if req_index == len(self._req_ids):
             self._req_ids.append(req_id)
             self.req_output_token_ids.append(request.output_token_ids)
+            self.spec_token_ids.append([])
         else:
             self._req_ids[req_index] = req_id
             self.req_output_token_ids[req_index] = request.output_token_ids
+            self.spec_token_ids[req_index] = []
 
         self.req_id_to_index[req_id] = req_index
 
@@ -443,6 +449,7 @@ class InputBatch:
         self.batch_update_builder.removed_append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
+        self.spec_token_ids[req_index] = None
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
@@ -485,6 +492,10 @@ class InputBatch:
         self.req_output_token_ids[i1], self.req_output_token_ids[i2] = (
             self.req_output_token_ids[i2],
             self.req_output_token_ids[i1],
+        )
+        self.spec_token_ids[i1], self.spec_token_ids[i2] = (
+            self.spec_token_ids[i2],
+            self.spec_token_ids[i1],
         )
         assert old_id_i1 is not None and old_id_i2 is not None
         self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] = (
@@ -601,6 +612,7 @@ class InputBatch:
             # The batched states are empty.
             self._req_ids.clear()
             self.req_output_token_ids.clear()
+            self.spec_token_ids.clear()
             return
 
         # NOTE(woosuk): This function assumes that the empty_req_indices
@@ -628,6 +640,10 @@ class InputBatch:
             self.req_output_token_ids[empty_index] = output_token_ids
             self.req_output_token_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
+
+            spec_token_ids = self.spec_token_ids[last_req_index]
+            self.spec_token_ids[empty_index] = spec_token_ids
+            self.spec_token_ids[last_req_index] = None
 
             num_tokens = self.num_tokens[last_req_index]
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
@@ -700,6 +716,7 @@ class InputBatch:
         # Trim lists to the batch size.
         del self._req_ids[num_reqs:]
         del self.req_output_token_ids[num_reqs:]
+        del self.spec_token_ids[num_reqs:]
 
     def refresh_metadata(self):
         """Apply any batch updates to sampling metadata."""
@@ -752,14 +769,13 @@ class InputBatch:
             not self.no_penalties
             or self.logits_processing_needs_token_ids[:num_reqs].any()
         )
-        if needs_prompt_token_ids:
-            # The prompt tokens are used only for applying penalties or
-            # step pooling during the sampling/pooling process.
-            # Hence copy these tensors only when there are requests which
-            # need penalties/step_pooler to be applied.
-            prompt_token_ids = self._make_prompt_token_ids_tensor()
-        else:
-            prompt_token_ids = None
+        # The prompt tokens are used only for applying penalties or
+        # step pooling during the sampling/pooling process.
+        # Hence copy these tensors only when there are requests which
+        # need penalties/step_pooler to be applied.
+        prompt_token_ids = (
+            self._make_prompt_token_ids_tensor() if needs_prompt_token_ids else None
+        )
 
         allowed_token_ids_mask: Optional[torch.Tensor] = None
         if not self.no_allowed_token_ids:
@@ -784,6 +800,7 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=cast(list[list[int]], self.req_output_token_ids),
+            spec_token_ids=cast(list[list[int]], self.spec_token_ids),
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
