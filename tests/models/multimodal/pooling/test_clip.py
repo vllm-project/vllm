@@ -45,14 +45,16 @@ def _run_test(
 
         all_outputs = []
         for inputs in all_inputs:
+            inputs = hf_model.wrap_device(inputs)
+
             if "pixel_values" in inputs:
-                inputs.pop("input_ids")
                 pooled_output = hf_model.model.get_image_features(
-                    **hf_model.wrap_device(inputs)
+                    pixel_values=inputs.pixel_values,
                 ).squeeze(0)
             else:
                 pooled_output = hf_model.model.get_text_features(
-                    **hf_model.wrap_device(inputs)
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
                 ).squeeze(0)
 
             all_outputs.append(pooled_output.tolist())
