@@ -13,7 +13,7 @@ from typing import Any, Callable, Optional
 import torch
 import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
-from torch._ops import lookup_op
+from torch._library.utils import lookup_op
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import pass_context
