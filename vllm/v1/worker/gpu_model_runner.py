@@ -90,7 +90,6 @@ from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
-    AttentionMetadataBuilder,
     CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
     reorder_batch_to_split_decodes_and_prefills,
@@ -1017,7 +1016,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _get_encoder_seq_lens(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduled_encoder_inputs: dict[str, list[int]],
         kv_cache_spec: KVCacheSpec,
         num_reqs: int,
     ) -> Optional[np.ndarray]:
@@ -1027,47 +1026,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Build encoder_seq_lens array mapping request indices to
         # encoder lengths for inputs scheduled in this batch
         encoder_seq_lens = np.zeros(num_reqs, dtype=np.int32)
-        for req_id in scheduler_output.scheduled_encoder_inputs:
+        for req_id in scheduled_encoder_inputs:
             req_index = self.input_batch.req_id_to_index[req_id]
             encoder_seq_lens[req_index] = self.max_encoder_len
 
         return encoder_seq_lens
 
     def _prepare_inputs(
-        self, scheduler_output: "SchedulerOutput"
-    ) -> tuple[
-        PerLayerAttnMetadata,
-        torch.Tensor,
-        Optional[SpecDecodeMetadata],
-        np.ndarray,
-        Optional[CommonAttentionMetadata],
-        int,
-        Optional[UBatchSlices],
-        Optional[torch.Tensor],
-        bool,
-    ]:
+        self,
+        scheduler_output: "SchedulerOutput",
+        num_scheduled_tokens: np.ndarray,
+        padded_num_reqs: Optional[int] = None,
+    ) -> tuple[torch.Tensor, Optional[SpecDecodeMetadata]]:
         """
-        :return: tuple[
-            attn_metadata: layer-to-attention_metadata mapping,
-            logits_indices, spec_decode_metadata,
-            num_scheduled_tokens, spec_decode_common_attn_metadata,
-            max_num_scheduled_tokens, use_cascade_attn
-        ]
+        Prepare inputs for model forward pass (tokens, positions, etc.)
+
+        :return: tuple[logits_indices, spec_decode_metadata]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
+
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
-
-        # Get the number of scheduled tokens for each request.
-        req_ids = self.input_batch.req_ids
-        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
-        num_scheduled_tokens = np.array(tokens, dtype=np.int32)
-        max_num_scheduled_tokens = max(tokens)
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -1167,29 +1151,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.query_start_loc.copy_to_gpu()
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
-        num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-        num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
-        uniform_decode = (
-            max_num_scheduled_tokens == self.uniform_decode_query_len
-        ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
-        ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
-            num_scheduled_tokens,
-            num_tokens_unpadded,
-            num_tokens_padded,
-            self.parallel_config,
-            True,
-            uniform_decode,
-        )
+        # Use provided padding values (already determined from coordination
+        # and cudagraph dispatch)
+        if padded_num_reqs is None:
+            padded_num_reqs = num_reqs
 
-        self.seq_lens.np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
-        )
+        num_computed_tokens = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+        self.seq_lens.np[:num_reqs] = num_computed_tokens + num_scheduled_tokens
         # Fill unused with 0 for full cuda graph mode.
         self.seq_lens.np[num_reqs:].fill(0)
         self.seq_lens.copy_to_gpu()
-        seq_lens = self.seq_lens.gpu[:num_reqs]
-        max_seq_len = self.seq_lens.np[:num_reqs].max().item()
-
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
@@ -1259,185 +1230,322 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
             self.num_decode_draft_tokens.copy_to_gpu()
 
+        # Hot-Swap lora model
+        if self.lora_config:
+            self.set_active_loras(self.input_batch, num_scheduled_tokens)
+
+        return logits_indices, spec_decode_metadata
+
+    def _build_attention_metadata(
+        self,
+        total_num_scheduled_tokens: int,
+        max_num_scheduled_tokens: int,
+        ubatch_slices: Optional[UBatchSlices],
+        padded_num_tokens: int,
+        padded_num_reqs: Optional[int] = None,
+        scheduled_encoder_inputs: Optional[dict[str, list[int]]] = None,
+        logits_indices: Optional[torch.Tensor] = None,
+        spec_decode_metadata: Optional[SpecDecodeMetadata] = None,
+        use_spec_decode: bool = False,
+        common_prefix_lens: Optional[list[int]] = None,
+        num_computed_tokens_cpu: Optional[torch.Tensor] = None,
+        for_cudagraph_capture: bool = False,
+    ) -> tuple[
+        PerLayerAttnMetadata,
+        Optional[SpecDecodeMetadata],
+        Optional[CommonAttentionMetadata],
+    ]:
+        """
+        Build attention metadata using pre-computed cascade attention prefix lengths.
+
+        Args:
+            total_num_scheduled_tokens: Total number of scheduled tokens
+            max_num_scheduled_tokens: Maximum number of scheduled tokens
+                per request
+            ubatch_slices: Microbatch slices for DP coordination
+            padded_num_tokens: Padded number of tokens (includes all padding)
+            padded_num_reqs: Padded number of requests
+            scheduled_encoder_inputs: Encoder inputs scheduled in this
+                batch (optional, defaults to {})
+            logits_indices: Indices of tokens to compute logits for
+                (optional, None for dummy runs)
+            spec_decode_metadata: Speculative decoding metadata
+                (optional, defaults to None)
+            use_spec_decode: Whether speculative decoding is enabled
+                (optional, defaults to False)
+            common_prefix_lens: Pre-computed common prefix lengths per
+                KV cache group (optional, None for dummy runs)
+            num_computed_tokens_cpu: Number of computed tokens per
+                request (optional, for dummy runs)
+            for_cudagraph_capture: Whether this is for cudagraph capture
+                (uses build_for_cudagraph_capture instead of build)
+
+        Returns:
+            tuple[attn_metadata, spec_decode_metadata, spec_decode_common_attn_metadata]
+        """
+        if scheduled_encoder_inputs is None:
+            scheduled_encoder_inputs = {}
+
+        num_reqs = self.input_batch.num_reqs
+
+        # Use provided padding values (already determined from coordination
+        # and cudagraph dispatch)
+        if padded_num_reqs is None:
+            padded_num_reqs = num_reqs
+
+        max_seq_len = self.seq_lens.np[:num_reqs].max().item()
+
+        # Get logits_indices_padded for KV sharing fast prefill if enabled
         logits_indices_padded = None
-        if self.cache_config.kv_sharing_fast_prefill:
+        if self.cache_config.kv_sharing_fast_prefill and logits_indices is not None:
             logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
                 logits_indices
             )
 
+        # Lift tensor slicing operations out of the loop
+        query_start_loc_gpu = self.query_start_loc.gpu[: padded_num_reqs + 1]
+        query_start_loc_cpu = self.query_start_loc.cpu[: padded_num_reqs + 1]
+        seq_lens_gpu = self.seq_lens.gpu[:padded_num_reqs]
+        seq_lens_cpu = self.seq_lens.cpu[:padded_num_reqs]
+        if num_computed_tokens_cpu is None:
+            num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+                :padded_num_reqs
+            ]
+
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
-        use_cascade_attn = False
 
-        # Used in the below loop.
-        query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs + 1]
-        seq_lens_cpu = self.seq_lens.cpu[:num_reqs]
-        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
-            :num_reqs
-        ]
         spec_decode_common_attn_metadata = None
+        num_accepted_tokens_gpu = None
+        num_decode_draft_tokens_cpu = None
         if use_spec_decode:
             self.num_accepted_tokens.np[:num_reqs] = (
                 self.input_batch.num_accepted_tokens_cpu[:num_reqs]
             )
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
+            num_accepted_tokens_gpu = self.num_accepted_tokens.gpu[:num_reqs]
+            num_decode_draft_tokens_cpu = self.num_decode_draft_tokens.cpu[:num_reqs]
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
-        for kv_cache_group_id, kv_cache_group_spec in enumerate(
-            self.kv_cache_config.kv_cache_groups
-        ):
-            encoder_seq_lens = self._get_encoder_seq_lens(
-                scheduler_output, kv_cache_group_spec.kv_cache_spec, num_reqs
-            )
-
-            if isinstance(kv_cache_group_spec.kv_cache_spec, EncoderOnlyAttentionSpec):
-                # Encoder-only layers do not have KV cache, so we need to
-                # create a dummy block table and slot mapping for them.
-                blk_table_tensor = torch.zeros(
-                    (num_reqs, 1),
-                    dtype=torch.int32,
-                    device=self.device,
+        if for_cudagraph_capture:
+            # CUDA graph capture path: use build_for_cudagraph_capture
+            for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                self.kv_cache_config.kv_cache_groups
+            ):
+                encoder_seq_lens = self._get_encoder_seq_lens(
+                    scheduled_encoder_inputs,
+                    kv_cache_group_spec.kv_cache_spec,
+                    padded_num_reqs,
                 )
-                slot_mapping = torch.zeros(
-                    (total_num_scheduled_tokens,),
-                    dtype=torch.int64,
-                    device=self.device,
-                )
-                num_common_prefix_blocks = 0
-            else:
-                blk_table = self.input_batch.block_table[kv_cache_group_id]
-                blk_table_tensor = blk_table.get_device_tensor(num_reqs)
-                slot_mapping = blk_table.slot_mapping.gpu[:total_num_scheduled_tokens]
 
-                # Fill unused with -1. Needed for reshape_and_cache in full cuda
-                # graph mode.
-                blk_table.slot_mapping.gpu[total_num_scheduled_tokens:].fill_(-1)
-                num_common_prefix_blocks = scheduler_output.num_common_prefix_blocks[
-                    kv_cache_group_id
-                ]
-
-            common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=query_start_loc,
-                query_start_loc_cpu=query_start_loc_cpu,
-                seq_lens=seq_lens,
-                seq_lens_cpu=seq_lens_cpu,
-                num_computed_tokens_cpu=num_computed_tokens_cpu,
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                max_seq_len=max_seq_len,
-                block_table_tensor=blk_table_tensor,
-                slot_mapping=slot_mapping,
-                logits_indices_padded=logits_indices_padded,
-                num_logits_indices=logits_indices.size(0),
-                causal=True,
-                encoder_seq_lens=encoder_seq_lens,
-            )
-
-            if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, EagleProposer):
-                    if (
-                        self.drafter.attn_layer_names[0]
-                        in kv_cache_group_spec.layer_names
-                    ):
-                        spec_decode_common_attn_metadata = common_attn_metadata
+                if isinstance(
+                    kv_cache_group_spec.kv_cache_spec, EncoderOnlyAttentionSpec
+                ):
+                    blk_table_tensor = torch.zeros(
+                        (padded_num_reqs, 1),
+                        dtype=torch.int32,
+                        device=self.device,
+                    )
+                    slot_mapping = torch.zeros(
+                        (padded_num_tokens,),
+                        dtype=torch.int64,
+                        device=self.device,
+                    )
                 else:
-                    spec_decode_common_attn_metadata = common_attn_metadata
+                    blk_table = self.input_batch.block_table[kv_cache_group_id]
+                    blk_table_tensor = blk_table.get_device_tensor(padded_num_reqs)
+                    slot_mapping = blk_table.slot_mapping.gpu[:padded_num_tokens]
+                    blk_table.slot_mapping.gpu[total_num_scheduled_tokens:].fill_(-1)
 
-            for attn_group in self.attn_groups[kv_cache_group_id]:
-                # Prepare for cascade attention if enabled & beneficial.
-                common_prefix_len = 0
-                builder = attn_group.get_metadata_builder()
-                if self.cascade_attn_enabled:
-                    common_prefix_len = self._compute_cascade_attn_prefix_len(
-                        num_scheduled_tokens,
-                        num_common_prefix_blocks,
-                        attn_group.kv_cache_spec,
-                        builder,
-                    )
+                common_attn_metadata = CommonAttentionMetadata(
+                    query_start_loc=query_start_loc_gpu,
+                    query_start_loc_cpu=query_start_loc_cpu,
+                    seq_lens=seq_lens_gpu,
+                    seq_lens_cpu=seq_lens_cpu,
+                    num_computed_tokens_cpu=num_computed_tokens_cpu,
+                    num_reqs=padded_num_reqs,
+                    num_actual_tokens=padded_num_tokens,
+                    max_query_len=max_num_scheduled_tokens,
+                    max_seq_len=max_seq_len,
+                    block_table_tensor=blk_table_tensor,
+                    slot_mapping=slot_mapping,
+                    logits_indices_padded=logits_indices_padded,
+                    num_logits_indices=(
+                        logits_indices.size(0) if logits_indices is not None else 0
+                    ),
+                    causal=True,
+                    encoder_seq_lens=encoder_seq_lens,
+                )
 
-                extra_attn_metadata_args = {}
-                if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
-                    extra_attn_metadata_args = dict(
-                        num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs],
-                        num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[
-                            :num_reqs
-                        ],
-                    )
+                if self.speculative_config and spec_decode_common_attn_metadata is None:
+                    if isinstance(self.drafter, EagleProposer):
+                        if (
+                            self.drafter.attn_layer_names[0]
+                            in kv_cache_group_spec.layer_names
+                        ):
+                            spec_decode_common_attn_metadata = common_attn_metadata
+                    else:
+                        spec_decode_common_attn_metadata = common_attn_metadata
 
-                if ubatch_slices is not None:
-                    common_attn_metadata_list = split_attn_metadata(
-                        ubatch_slices, common_attn_metadata
-                    )
-                    for ubid, common_attn_metadata in enumerate(
-                        common_attn_metadata_list
-                    ):
-                        attn_metadata_i = attn_group.get_metadata_builder(
-                            ubatch_id=ubid
-                        ).build(
-                            common_prefix_len=common_prefix_len,
+                for attn_group in self.attn_groups[kv_cache_group_id]:
+                    builder = attn_group.get_metadata_builder()
+
+                    if ubatch_slices is not None:
+                        common_attn_metadata_list = split_attn_metadata(
+                            ubatch_slices, common_attn_metadata
+                        )
+                        for ubid, common_attn_metadata_item in enumerate(
+                            common_attn_metadata_list
+                        ):
+                            ubatch_builder = attn_group.get_metadata_builder(
+                                ubatch_id=ubid
+                            )
+                            attn_metadata_i = (
+                                ubatch_builder.build_for_cudagraph_capture(
+                                    common_attn_metadata=common_attn_metadata_item,
+                                )
+                            )
+                            for layer_name in kv_cache_group_spec.layer_names:
+                                assert type(attn_metadata) is list
+                                attn_metadata[ubid][layer_name] = attn_metadata_i
+                    else:
+                        assert isinstance(attn_metadata, dict)
+                        attn_metadata_i = builder.build_for_cudagraph_capture(
                             common_attn_metadata=common_attn_metadata,
                         )
-                        for layer_name in kv_cache_group_spec.layer_names:
-                            assert type(attn_metadata) is list
-                            attn_metadata[ubid][layer_name] = attn_metadata_i
-                else:
-                    assert isinstance(attn_metadata, dict)
-                    attn_metadata_i = builder.build(
-                        common_prefix_len=common_prefix_len,
-                        common_attn_metadata=common_attn_metadata,
-                        **extra_attn_metadata_args,
+                        for layer_name in attn_group.layer_names:
+                            attn_metadata[layer_name] = attn_metadata_i
+        else:
+            # Regular path: use build with cascade attention support
+            for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                self.kv_cache_config.kv_cache_groups
+            ):
+                encoder_seq_lens = self._get_encoder_seq_lens(
+                    scheduled_encoder_inputs,
+                    kv_cache_group_spec.kv_cache_spec,
+                    padded_num_reqs,
+                )
+
+                if isinstance(
+                    kv_cache_group_spec.kv_cache_spec, EncoderOnlyAttentionSpec
+                ):
+                    blk_table_tensor = torch.zeros(
+                        (padded_num_reqs, 1),
+                        dtype=torch.int32,
+                        device=self.device,
                     )
-                    use_cascade_attn |= getattr(attn_metadata_i, "use_cascade", False)
-                    for layer_name in attn_group.layer_names:
-                        attn_metadata[layer_name] = attn_metadata_i
+                    slot_mapping = torch.zeros(
+                        (padded_num_tokens,),
+                        dtype=torch.int64,
+                        device=self.device,
+                    )
+                else:
+                    blk_table = self.input_batch.block_table[kv_cache_group_id]
+                    blk_table_tensor = blk_table.get_device_tensor(padded_num_reqs)
+                    slot_mapping = blk_table.slot_mapping.gpu[:padded_num_tokens]
+                    blk_table.slot_mapping.gpu[total_num_scheduled_tokens:].fill_(-1)
 
-        # disable cascade attention when DBO
-        if ubatch_slices is not None:
-            use_cascade_attn = False
+                common_attn_metadata = CommonAttentionMetadata(
+                    query_start_loc=query_start_loc_gpu,
+                    query_start_loc_cpu=query_start_loc_cpu,
+                    seq_lens=seq_lens_gpu,
+                    seq_lens_cpu=seq_lens_cpu,
+                    num_computed_tokens_cpu=num_computed_tokens_cpu,
+                    num_reqs=padded_num_reqs,
+                    num_actual_tokens=padded_num_tokens,
+                    max_query_len=max_num_scheduled_tokens,
+                    max_seq_len=max_seq_len,
+                    block_table_tensor=blk_table_tensor,
+                    slot_mapping=slot_mapping,
+                    logits_indices_padded=logits_indices_padded,
+                    num_logits_indices=(
+                        logits_indices.size(0) if logits_indices is not None else 0
+                    ),
+                    causal=True,
+                    encoder_seq_lens=encoder_seq_lens,
+                )
 
-        # Hot-Swap lora model
-        if self.lora_config:
-            self.set_active_loras(self.input_batch, num_scheduled_tokens)
+                if self.speculative_config and spec_decode_common_attn_metadata is None:
+                    if isinstance(self.drafter, EagleProposer):
+                        if (
+                            self.drafter.attn_layer_names[0]
+                            in kv_cache_group_spec.layer_names
+                        ):
+                            spec_decode_common_attn_metadata = common_attn_metadata
+                    else:
+                        spec_decode_common_attn_metadata = common_attn_metadata
 
-        return (
-            attn_metadata,
-            logits_indices,
-            spec_decode_metadata,
-            num_scheduled_tokens,
-            spec_decode_common_attn_metadata,
-            max_num_scheduled_tokens,
-            ubatch_slices,
-            num_tokens_across_dp,
-            use_cascade_attn,
-        )
+                for attn_group in self.attn_groups[kv_cache_group_id]:
+                    # Use pre-computed cascade attention prefix length
+                    common_prefix_len = (
+                        common_prefix_lens[kv_cache_group_id]
+                        if common_prefix_lens is not None
+                        else 0
+                    )
+                    builder = attn_group.get_metadata_builder()
+
+                    extra_attn_metadata_args = {}
+                    if use_spec_decode and isinstance(
+                        builder, GDNAttentionMetadataBuilder
+                    ):
+                        extra_attn_metadata_args = dict(
+                            num_accepted_tokens=num_accepted_tokens_gpu,
+                            num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+                        )
+
+                    if ubatch_slices is not None:
+                        common_attn_metadata_list = split_attn_metadata(
+                            ubatch_slices, common_attn_metadata
+                        )
+                        for ubid, common_attn_metadata_item in enumerate(
+                            common_attn_metadata_list
+                        ):
+                            ubatch_builder = attn_group.get_metadata_builder(
+                                ubatch_id=ubid
+                            )
+                            attn_metadata_i = ubatch_builder.build(
+                                common_prefix_len=common_prefix_len,
+                                common_attn_metadata=common_attn_metadata_item,
+                            )
+                            for layer_name in kv_cache_group_spec.layer_names:
+                                assert type(attn_metadata) is list
+                                attn_metadata[ubid][layer_name] = attn_metadata_i
+                    else:
+                        assert isinstance(attn_metadata, dict)
+                        attn_metadata_i = builder.build(
+                            common_prefix_len=common_prefix_len,
+                            common_attn_metadata=common_attn_metadata,
+                            **extra_attn_metadata_args,
+                        )
+                        for layer_name in attn_group.layer_names:
+                            attn_metadata[layer_name] = attn_metadata_i
+
+        return attn_metadata, spec_decode_metadata, spec_decode_common_attn_metadata
 
     def _compute_cascade_attn_prefix_len(
         self,
         num_scheduled_tokens: np.ndarray,
         num_common_prefix_blocks: int,
         kv_cache_spec: KVCacheSpec,
-        attn_metadata_builder: AttentionMetadataBuilder,
     ) -> int:
         """Compute the length of the common prefix for cascade attention.
 
         NOTE(woosuk): The common prefix length returned by this function
         represents the length used specifically for cascade attention, not the
-        actual number of tokens shared between requests. When cascade attention
-        is disabled (use_cascade=False), this function returns 0 even if
-        requests share common tokens. Additionally, the common prefix length is
-        truncated to a multiple of the block size and may be further truncated
-        due to implementation details explained below.
+        actual number of tokens shared between requests. Additionally, the
+        common prefix length is truncated to a multiple of the block size and
+        may be further truncated due to implementation details explained below.
 
         Args:
             num_scheduled_tokens: Number of tokens scheduled per request.
             num_common_prefix_blocks: Number of shared KV cache blocks.
+            kv_cache_spec: KV cache specification for this attention group.
 
         Returns:
-            int: Length of common prefix in tokens.
+            int: Length of common prefix in tokens (in blocks).
         """
         common_prefix_len = num_common_prefix_blocks * kv_cache_spec.block_size
         if common_prefix_len == 0:
@@ -1491,26 +1599,74 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         common_prefix_len = (
             common_prefix_len // kv_cache_spec.block_size * kv_cache_spec.block_size
         )
-        use_sliding_window = isinstance(kv_cache_spec, SlidingWindowSpec) or (
-            isinstance(kv_cache_spec, FullAttentionSpec)
-            and kv_cache_spec.sliding_window is not None
-        )
-        use_local_attention = isinstance(kv_cache_spec, ChunkedLocalAttentionSpec) or (
-            isinstance(kv_cache_spec, FullAttentionSpec)
-            and kv_cache_spec.attention_chunk_size is not None
-        )
-        assert isinstance(kv_cache_spec, AttentionSpec)
-        use_cascade = attn_metadata_builder.use_cascade_attention(
-            common_prefix_len=common_prefix_len,
-            query_lens=num_scheduled_tokens,
-            num_query_heads=self.num_query_heads,
-            num_kv_heads=kv_cache_spec.num_kv_heads,
-            use_alibi=self.use_alibi,
-            use_sliding_window=use_sliding_window,
-            use_local_attention=use_local_attention,
-            num_sms=self.num_sms,
-        )
-        return common_prefix_len if use_cascade else 0
+        return common_prefix_len
+
+    def _compute_cascade_attn_prefix_lens(
+        self,
+        num_scheduled_tokens_np: np.ndarray,
+        num_common_prefix_blocks: list[int],
+    ) -> tuple[list[int], bool]:
+        """
+        Compute cascade attention prefix lengths for all KV cache groups.
+
+        Args:
+            num_scheduled_tokens_np: Number of tokens scheduled per request.
+            num_common_prefix_blocks: Number of common prefix blocks per KV cache group.
+
+        Returns:
+            common_prefix_lens: list[int]
+                # per kv cache group common prefix lens in tokens
+            use_cascade_attn: bool
+                # whether to use cascade attention (i.e. at least one
+                # kv cache group has non-zero common prefix len)
+        """
+        use_cascade_attn = False
+        common_prefix_lens = [0] * len(self.kv_cache_config.kv_cache_groups)
+
+        for kv_cache_group_id, kv_cache_group_spec in enumerate(
+            self.kv_cache_config.kv_cache_groups
+        ):
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+            common_prefix_lens[kv_cache_group_id] = (
+                self._compute_cascade_attn_prefix_len(
+                    num_scheduled_tokens_np,
+                    num_common_prefix_blocks[kv_cache_group_id],
+                    kv_cache_spec,
+                )
+            )
+
+            use_sliding_window = isinstance(kv_cache_spec, SlidingWindowSpec) or (
+                isinstance(kv_cache_spec, FullAttentionSpec)
+                and kv_cache_spec.sliding_window is not None
+            )
+            use_local_attention = isinstance(
+                kv_cache_spec, ChunkedLocalAttentionSpec
+            ) or (
+                isinstance(kv_cache_spec, FullAttentionSpec)
+                and kv_cache_spec.attention_chunk_size is not None
+            )
+            assert isinstance(kv_cache_spec, AttentionSpec)
+
+            group_use_cascade_attn = False
+            for attn_group in self.attn_groups[kv_cache_group_id]:
+                builder = attn_group.get_metadata_builder()
+
+                group_use_cascade_attn |= builder.use_cascade_attention(
+                    common_prefix_len=common_prefix_lens[kv_cache_group_id],
+                    query_lens=num_scheduled_tokens_np,
+                    num_query_heads=self.num_query_heads,
+                    num_kv_heads=kv_cache_spec.num_kv_heads,
+                    use_alibi=self.use_alibi,
+                    use_sliding_window=use_sliding_window,
+                    use_local_attention=use_local_attention,
+                    num_sms=self.num_sms,
+                )
+
+            if not group_use_cascade_attn:
+                common_prefix_lens[kv_cache_group_id] = 0
+            use_cascade_attn |= group_use_cascade_attn
+
+        return common_prefix_lens, use_cascade_attn
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         mrope_pos_ptr = 0
@@ -2049,19 +2205,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=pooler_output,
         )
 
-    def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
-        if (
-            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and not envs.VLLM_DISABLE_PAD_FOR_CUDAGRAPH
-            and hasattr(self, "cudagraph_batch_sizes")
-            and self.cudagraph_batch_sizes
-            and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]
-        ):
-            # Use CUDA graphs.
-            # Add padding to the batch size.
-            return self.vllm_config.pad_for_cudagraph(num_scheduled_tokens)
-
-        # Eager mode.
+    def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
+        """
+        Apply sequence parallelism padding only.
+        CUDA graph padding is handled separately via _maybe_dispatch_cudagraph.
+        """
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
@@ -2403,6 +2551,68 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 
+            # Get the number of scheduled tokens for each request.
+            req_ids = self.input_batch.req_ids
+            tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+            num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+            max_num_scheduled_tokens = max(num_scheduled_tokens_np)
+            total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+            # Compute cascade attention decision before cudagraph dispatch
+            common_prefix_lens = [0] * len(self.kv_cache_config.kv_cache_groups)
+            use_cascade_attn = False
+            if self.cascade_attn_enabled:
+                common_prefix_lens, use_cascade_attn = (
+                    self._compute_cascade_attn_prefix_lens(
+                        num_scheduled_tokens_np,
+                        scheduler_output.num_common_prefix_blocks,
+                    )
+                )
+
+            # Padding order:
+            # 1. Pad for sequence parallelism (TP-related padding)
+            # 2. Pad for DP (done by `coordinate_batch_across_dp`)
+            # 3. Maybe pad for cudagraphs
+            #    (pad to `cudagraph_batch_descriptor` if not None)
+
+            padded_num_tokens = self._pad_for_sequence_parallelism(
+                total_num_scheduled_tokens
+            )
+
+            ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
+                num_scheduled_tokens_np,
+                total_num_scheduled_tokens,
+                padded_num_tokens,
+                self.parallel_config,
+                True,
+                self._is_uniform_decode(
+                    max_num_scheduled_tokens,
+                    total_num_scheduled_tokens,
+                    self.input_batch.num_reqs,
+                ),
+            )
+            if num_tokens_across_dp is not None:
+                padded_num_tokens = int(num_tokens_across_dp[0].item())
+
+            cudagraph_runtime_mode, cudagraph_batch_descriptor = (
+                self._maybe_dispatch_cudagraph(
+                    unpadded_num_tokens=total_num_scheduled_tokens,
+                    padded_num_tokens=padded_num_tokens,
+                    num_reqs=self.input_batch.num_reqs,
+                    max_num_scheduled_tokens=max_num_scheduled_tokens,
+                    use_cascade_attn=use_cascade_attn,
+                )
+            )
+            padded_num_reqs = None
+            if cudagraph_batch_descriptor is not None:
+                padded_num_tokens = cudagraph_batch_descriptor.num_tokens
+                padded_num_reqs = cudagraph_batch_descriptor.num_reqs
+
+            # Default padded_num_reqs to num_reqs if not set by cudagraph
+            if padded_num_reqs is None:
+                padded_num_reqs = self.input_batch.num_reqs
+
+            try:
                 if not scheduler_output.total_num_scheduled_tokens:
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
@@ -2417,18 +2627,40 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         "it when the requests need prompt logprobs"
                     )
 
-                # Prepare the decoder inputs.
+                # Prepare the decoder inputs (all padding and coordination done above)
+                logits_indices, spec_decode_metadata = self._prepare_inputs(
+                    scheduler_output,
+                    num_scheduled_tokens_np,
+                    padded_num_reqs,
+                )
+
+                use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+
+                # Disable cascade attention when DBO (microbatching)
+                if ubatch_slices is not None:
+                    common_prefix_lens = [0] * len(self.kv_cache_config.kv_cache_groups)
+
+                # Build attention metadata using pre-computed cascade attention decision
                 (
                     attn_metadata,
+                    spec_decode_metadata,
+                    spec_decode_common_attn_metadata,
+                ) = self._build_attention_metadata(
+                    total_num_scheduled_tokens,
+                    max_num_scheduled_tokens,
+                    ubatch_slices,
+                    padded_num_tokens,
+                    padded_num_reqs,
+                    scheduler_output.scheduled_encoder_inputs,
                     logits_indices,
                     spec_decode_metadata,
-                    num_scheduled_tokens_np,
-                    spec_decode_common_attn_metadata,
-                    max_query_len,
-                    ubatch_slices,
-                    num_tokens_across_dp,
-                    use_cascade_attn,
-                ) = self._prepare_inputs(scheduler_output)
+                    use_spec_decode,
+                    common_prefix_lens,
+                )
+
+            finally:
+                if self.prepare_inputs_event is not None:
+                    self.prepare_inputs_event.record()
 
             if ubatch_slices:
                 assert num_tokens_across_dp is not None
@@ -2437,7 +2669,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             elif num_tokens_across_dp is not None:
                 num_input_tokens = int(num_tokens_across_dp[0].item())
             else:
-                num_input_tokens = self._get_num_input_tokens(
+                num_input_tokens = self._pad_for_sequence_parallelism(
                     scheduler_output.total_num_scheduled_tokens
                 )
 
@@ -2452,16 +2684,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 scheduler_output, num_input_tokens, intermediate_tensors
             )
 
-            uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
-                num_scheduled_tokens == self.input_batch.num_reqs * max_query_len
-            )
-            batch_descriptor = BatchDescriptor(
-                num_tokens=num_input_tokens, uniform_decode=uniform_decode
-            )
-            cudagraph_runtime_mode, batch_descriptor = (
-                self.cudagraph_dispatcher.dispatch(batch_descriptor, use_cascade_attn)
-            )
-
         # Set cudagraph mode to none if calc_kv_scales is true.
         if attn_metadata is not None:
             metadata_list = (
@@ -2474,6 +2696,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ):
                 cudagraph_runtime_mode = CUDAGraphMode.NONE
 
+        # This is currently to get around the assert in the DPMetadata
+        # where it wants `num_tokens_across_dp` to align with `num_tokens`
+        if ubatch_slices is not None:
+            num_input_tokens = ubatch_slices[0].num_tokens
+
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with (
@@ -2483,7 +2710,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
-                batch_descriptor=batch_descriptor,
+                batch_descriptor=cudagraph_batch_descriptor,
                 ubatch_slices=ubatch_slices,
             ),
             record_function_or_nullcontext("Forward"),
@@ -3161,6 +3388,43 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
         )
 
+    def _is_uniform_decode(
+        self,
+        max_num_scheduled_tokens: int,
+        total_num_scheduled_tokens: int,
+        num_reqs: int,
+    ) -> bool:
+        return max_num_scheduled_tokens == self.uniform_decode_query_len and (
+            total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens
+        )
+
+    def _maybe_dispatch_cudagraph(
+        self,
+        unpadded_num_tokens: int,
+        padded_num_tokens: int,
+        num_reqs: int,
+        max_num_scheduled_tokens: int,
+        use_cascade_attn: bool = False,
+        # allow overriding for uniform decode for piecewise cudagraph capture
+        uniform_decode: Optional[bool] = None,
+    ) -> tuple[CUDAGraphMode, Optional[BatchDescriptor]]:
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+            return CUDAGraphMode.NONE, None
+
+        batch_descriptor = BatchDescriptor(
+            num_tokens=padded_num_tokens,
+            num_reqs=num_reqs,
+            uniform_decode=uniform_decode
+            if uniform_decode is not None
+            else self._is_uniform_decode(
+                max_num_scheduled_tokens, unpadded_num_tokens, num_reqs
+            ),
+        )
+
+        return self.cudagraph_dispatcher.dispatch(
+            batch_descriptor, use_cascade_attn=use_cascade_attn
+        )
+
     @torch.inference_mode()
     def _dummy_run(
         self,
@@ -3201,21 +3465,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             or cudagraph_runtime_mode.valid_runtime_modes()
         )
 
-        # If cudagraph_mode.decode_mode() == FULL and
-        # cudagraph_mode.separate_routine(). This means that we are using
-        # different graphs and/or modes for mixed prefill-decode batches vs.
-        # uniform decode batches. A uniform decode batch means that all
-        # requests have identical query length, except a potential virtual
-        # request (shorter) in the batch account for padding.
-        # Uniform decode batch could either be common pure decode, where
-        # max_query_len == 1, or speculative decode, where
-        # max_query_len == 1 + num_spec_decode_tokens.
-
-        # When setting max_query_len = 1, we switch to and capture the optimized
-        # routine of FA2 for pure decode, i.e., Flashdecode + an optimization
-        # for GQA/MQA.
-        max_query_len = self.uniform_decode_query_len if uniform_decode else num_tokens
-
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
@@ -3231,9 +3480,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # Create decode requests (1 token each) followed by prefill request
             num_scheduled_tokens_list = [1] * num_decode_tokens + [num_prefill_tokens]
-            # Note: Overriding max_query_len to be the prefill tokens
-            max_query_len = num_prefill_tokens
         elif uniform_decode:
+            # A uniform decode batch means that all requests have identical
+            # query length, except a potential virtual request (shorter) in
+            # the batch account for padding.
+            # Uniform decode batch could either be common pure decode, where
+            # max_query_len == 1, or speculative decode, where
+            # max_query_len == 1 + num_spec_decode_tokens.
+            max_query_len = self.uniform_decode_query_len
+
             assert not create_mixed_batch
             num_reqs = min(max_num_reqs, cdiv(num_tokens, max_query_len))
             num_scheduled_tokens_list = [max_query_len] * num_reqs
@@ -3249,37 +3504,75 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
         total_num_scheduled_tokens = int(num_scheduled_tokens.sum())
+        max_num_scheduled_tokens = int(num_scheduled_tokens.max())
 
-        # We currently only microbatch if the number of tokens is
-        # over a certain threshold.
+        # Step 1: Pad for sequence parallelism (TP-related padding)
+        padded_num_tokens = self._pad_for_sequence_parallelism(
+            total_num_scheduled_tokens
+        )
+
+        # Step 2: Coordinate microbatching across DP ranks (can add padding)
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
             num_scheduled_tokens,
             total_num_scheduled_tokens,
-            total_num_scheduled_tokens,
+            padded_num_tokens,
             self.vllm_config.parallel_config,
             allow_microbatching,
             uniform_decode,
         )
-        num_tokens_after_padding = num_tokens
         if num_tokens_across_dp is not None:
-            num_tokens_after_padding = int(num_tokens_across_dp[0])
+            padded_num_tokens = int(num_tokens_across_dp[0])
+
+        # Step 3: Dispatch CUDA graph (can add padding)
+        padded_num_reqs = num_reqs
+        if (
+            cudagraph_runtime_mode is None
+            or cudagraph_runtime_mode != CUDAGraphMode.NONE
+        ):
+            cg_mode, cudagraph_batch_descriptor = self._maybe_dispatch_cudagraph(
+                unpadded_num_tokens=total_num_scheduled_tokens,
+                padded_num_tokens=padded_num_tokens,
+                num_reqs=num_reqs,
+                max_num_scheduled_tokens=max_num_scheduled_tokens,
+                uniform_decode=uniform_decode,
+            )
+
+            # If mode was explicitly set, validate it matches dispatch result
+            if cudagraph_runtime_mode is not None:
+                assert cudagraph_runtime_mode == cg_mode, (
+                    f"Cudagraph runtime mode mismatch at dummy_run. "
+                    f"Expected {cudagraph_runtime_mode}, but got {cg_mode}."
+                )
+                # If we are forcing the cudagraph runtime mode, we are
+                # capturing a cudagraph so this should match exactly what
+                # the dispatcher expects.
+                assert cudagraph_batch_descriptor is not None
+                assert (
+                    cudagraph_batch_descriptor.num_reqs is None
+                    or cudagraph_batch_descriptor.num_reqs == num_reqs
+                )
+                assert cudagraph_batch_descriptor.num_tokens == padded_num_tokens
+            else:
+                cudagraph_runtime_mode = cg_mode
+
+            if cudagraph_batch_descriptor is not None:
+                padded_num_tokens = cudagraph_batch_descriptor.num_tokens
+                if cudagraph_batch_descriptor.num_reqs is not None:
+                    padded_num_reqs = cudagraph_batch_descriptor.num_reqs
+        else:
+            cudagraph_batch_descriptor = None
 
         attn_metadata: Optional[PerLayerAttnMetadata] = None
 
         # If force_attention is True, we always capture attention. Otherwise,
         # it only happens for cudagraph_runtime_mode=FULL.
         if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            attn_metadata = {}
-            if ubatch_slices is not None:
-                attn_metadata = [dict() for _ in range(len(ubatch_slices))]
-
+            seq_lens: Union[list[int], int] = max_num_scheduled_tokens
             if create_mixed_batch:
                 # In the mixed batch mode (used for FI warmup), we use
                 # shorter sequence lengths to run faster.
                 # TODO(luka) better system for describing dummy batches
                 seq_lens = [1] * num_decode_tokens + [num_prefill_tokens + 1]
-            else:
-                seq_lens = max_query_len
             self.seq_lens.np[:num_reqs] = seq_lens
             self.seq_lens.np[num_reqs:] = 0
             self.seq_lens.copy_to_gpu()
@@ -3288,78 +3581,49 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
 
-            for kv_cache_group_id, kv_cache_group_spec in enumerate(
-                self.kv_cache_config.kv_cache_groups
-            ):
-                common_attn_metadata = CommonAttentionMetadata(
-                    query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
-                    query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
-                    seq_lens=self.seq_lens.gpu[:num_reqs],
-                    seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
-                    num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[
-                        :num_reqs
-                    ],
-                    num_reqs=num_reqs,
-                    num_actual_tokens=num_tokens,
-                    max_query_len=max_query_len,
-                    max_seq_len=self.max_model_len,
-                    block_table_tensor=self.input_batch.block_table[
-                        kv_cache_group_id
-                    ].get_device_tensor(num_reqs),
-                    slot_mapping=self.input_batch.block_table[
-                        kv_cache_group_id
-                    ].slot_mapping.gpu[:num_tokens],
-                    causal=True,
-                )
-                for attn_group in self.attn_groups[kv_cache_group_id]:
-                    if ubatch_slices is not None:
-                        common_attn_metadata_list = split_attn_metadata(
-                            ubatch_slices, common_attn_metadata
-                        )
-                        for ubid, common_attn_metadata in enumerate(
-                            common_attn_metadata_list
-                        ):
-                            assert common_attn_metadata.max_query_len == 1
-                            attn_metadata_i = attn_group.get_metadata_builder(
-                                ubatch_id=ubid
-                            ).build_for_cudagraph_capture(common_attn_metadata)
-                            for layer_name in attn_group.layer_names:
-                                assert type(attn_metadata) is list
-                                attn_metadata[ubid][layer_name] = attn_metadata_i
-                    else:
-                        assert type(attn_metadata) is dict
-                        metadata_builder = attn_group.get_metadata_builder()
-                        attn_metadata_i = metadata_builder.build_for_cudagraph_capture(
-                            common_attn_metadata
-                        )
-                        for layer_name in attn_group.layer_names:
-                            attn_metadata[layer_name] = attn_metadata_i
+            # Create dummy num_computed_tokens_cpu for attention metadata
+            # For dummy runs, all tokens are new (nothing computed yet)
+            dummy_num_computed_tokens_cpu = torch.zeros(
+                (padded_num_reqs,),
+                device="cpu",
+                dtype=torch.int32,
+            )
+
+            attn_metadata, _, _ = self._build_attention_metadata(
+                total_num_scheduled_tokens=total_num_scheduled_tokens,
+                max_num_scheduled_tokens=max_num_scheduled_tokens,
+                ubatch_slices=ubatch_slices,
+                padded_num_tokens=padded_num_tokens,
+                padded_num_reqs=padded_num_reqs,
+                num_computed_tokens_cpu=dummy_num_computed_tokens_cpu,
+                for_cudagraph_capture=True,
+            )
 
         with self.maybe_dummy_run_with_lora(
             self.lora_config, num_scheduled_tokens, remove_lora
         ):
             # Make sure padding doesn't exceed max_num_tokens
-            assert num_tokens_after_padding <= self.max_num_tokens
-            model_kwargs = self._init_model_kwargs(num_tokens_after_padding)
+            assert padded_num_tokens <= self.max_num_tokens
+            model_kwargs = self._init_model_kwargs(padded_num_tokens)
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
                 input_ids = None
-                inputs_embeds = self.inputs_embeds.gpu[:num_tokens_after_padding]
+                inputs_embeds = self.inputs_embeds.gpu[:padded_num_tokens]
                 model_kwargs = {
                     **model_kwargs,
                     **self._dummy_mm_kwargs(num_reqs),
                 }
             elif self.enable_prompt_embeds:
                 input_ids = None
-                inputs_embeds = self.inputs_embeds.gpu[:num_tokens_after_padding]
-                model_kwargs = self._init_model_kwargs(num_tokens_after_padding)
+                inputs_embeds = self.inputs_embeds.gpu[:padded_num_tokens]
+                model_kwargs = self._init_model_kwargs(padded_num_tokens)
             else:
-                input_ids = self.input_ids.gpu[:num_tokens_after_padding]
+                input_ids = self.input_ids.gpu[:padded_num_tokens]
                 inputs_embeds = None
 
             if self.uses_mrope:
-                positions = self.mrope_positions.gpu[:, :num_tokens_after_padding]
+                positions = self.mrope_positions.gpu[:, :padded_num_tokens]
             else:
-                positions = self.positions.gpu[:num_tokens_after_padding]
+                positions = self.positions.gpu[:padded_num_tokens]
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
@@ -3374,50 +3638,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     )
 
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
-                    num_tokens_after_padding, None, False
+                    padded_num_tokens, None, False
                 )
-
-            # filter out the valid batch descriptor
-            _cg_mode, batch_descriptor = (
-                self.cudagraph_dispatcher.dispatch(
-                    BatchDescriptor(
-                        num_tokens=num_tokens_after_padding,
-                        uniform_decode=uniform_decode,
-                    )
-                )
-                if not is_profile
-                else (CUDAGraphMode.NONE, None)
-            )
-            if cudagraph_runtime_mode is not None:
-                # we allow forcing NONE when the dispatcher disagrees to support
-                # warm ups for cudagraph capture
-                assert (
-                    cudagraph_runtime_mode == CUDAGraphMode.NONE
-                    or cudagraph_runtime_mode == _cg_mode
-                ), (
-                    f"Cudagraph runtime mode mismatch at dummy_run. "
-                    f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}."
-                )
-            else:
-                cudagraph_runtime_mode = _cg_mode
 
             if ubatch_slices is not None:
                 # Adjust values to reflect a single ubatch.
                 # TODO(sage,lucas): this is cruft that should be addressed in
                 #  the padding refactor.
-                num_tokens_after_padding = ubatch_slices[0].num_tokens
+                padded_num_tokens = ubatch_slices[0].num_tokens
                 if num_tokens_across_dp is not None:
-                    num_tokens_across_dp[:] = num_tokens_after_padding
+                    num_tokens_across_dp[:] = padded_num_tokens
 
             with (
                 self.maybe_randomize_inputs(input_ids),
                 set_forward_context(
                     attn_metadata,
                     self.vllm_config,
-                    num_tokens=num_tokens_after_padding,
+                    num_tokens=padded_num_tokens,
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    batch_descriptor=batch_descriptor,
+                    batch_descriptor=cudagraph_batch_descriptor,
                     ubatch_slices=ubatch_slices,
                 ),
             ):
