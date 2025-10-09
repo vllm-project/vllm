@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-
+from typing import Optional
 from abc import ABC,abstractmethod
 
 
