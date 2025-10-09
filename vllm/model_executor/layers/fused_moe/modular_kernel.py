@@ -717,10 +717,13 @@ class FusedMoEModularKernel(torch.nn.Module):
         get num_chunks == 1. Take max(M, 1) to avoid divide by zero.
         If there are no tokens to process, the number of chunks will be zero.
         """
-        CHUNK_SIZE = (
-            max(M, 1)
-            if not self.fused_experts.supports_chunking()
-            else min(M, envs.VLLM_FUSED_MOE_CHUNK_SIZE)
+        CHUNK_SIZE = max(
+            1,
+            (
+                M
+                if not self.fused_experts.supports_chunking()
+                else min(M, envs.VLLM_FUSED_MOE_CHUNK_SIZE)
+            ),
         )
         num_chunks = cdiv(M, CHUNK_SIZE)
         # If there are no tokens, then there should be no loop iterations.
