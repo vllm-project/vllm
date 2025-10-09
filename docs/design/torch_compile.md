@@ -21,7 +21,6 @@ vLLM will take all the available factors into consideration, and decide a direct
 
 When multiple vLLM processes start simultaneously with the same configuration, vLLM automatically coordinates their access to the compilation cache using file locks. The first process to start will compile and hold a lock, while other processes wait for compilation to complete. Once the first process finishes and marks the cache as ready (with a `.cache_ready` marker file), subsequent processes can load the cache without any locks, enabling zero-contention reads.
 
-
 The factors considered include:
 
 - All the related configs (see the `compute_hash` functions in their respective configs in the [config folder](gh-file:vllm/config))
