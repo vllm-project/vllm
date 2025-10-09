@@ -186,7 +186,7 @@ async def run_vllm_async(
         engine_args,
         disable_frontend_multiprocessing=disable_frontend_multiprocessing,
     ) as llm:
-        model_config = await llm.get_model_config()
+        model_config = llm.model_config
         assert all(
             model_config.max_model_len
             >= (request.prompt_len + request.expected_output_len)
