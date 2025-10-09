@@ -29,26 +29,24 @@ from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.plugin_launcher import PluginLauncher
 
-# Third Party
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
 )
-from vllm.distributed.parallel_state import get_tensor_model_parallel_rank, get_tp_group
-from vllm.sampling_params import SamplingParams
-from vllm.utils import cdiv, get_kv_cache_torch_dtype
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.version import __version__ as VLLM_VERSION
-
-from .utils import (
+from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
     extract_mm_features,
     lmcache_get_or_create_config,
     mla_enabled,
 )
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank, get_tp_group
+from vllm.sampling_params import SamplingParams
+from vllm.utils import cdiv, get_kv_cache_torch_dtype
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -340,7 +338,7 @@ class ReqMeta:
                 "tracker got mm_hashes but no mm_positions"
             )
             apply_mm_hashes_to_token_ids(
-                token_ids, tracker.mm_hashes, tracker.mm_positions
+                token_ids_tensor, tracker.mm_hashes, tracker.mm_positions
             )
             token_ids = token_ids_tensor.tolist()
 

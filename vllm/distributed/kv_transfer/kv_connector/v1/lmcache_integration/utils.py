@@ -141,6 +141,11 @@ def create_lmcache_metadata(
         parallel_cfg = vllm_config.parallel_config
         cache_cfg = vllm_config.cache_config
     else:
+        if model_config is None or parallel_config is None or cache_config is None:
+            raise ValueError(
+                "Either vllm_config must be provided, or all of "
+                "model_config, parallel_config, and cache_config must be provided."
+            )
         model_cfg = model_config
         parallel_cfg = parallel_config
         cache_cfg = cache_config

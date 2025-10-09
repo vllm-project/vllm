@@ -13,12 +13,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
+    vllm_v1_adapter as _adapter,
+)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
-
-from .lmcache_integration.vllm_v1_adapter import (
-    LMCacheConnectorV1Impl as LMCacheConnectorUpstreamImpl,  # yapf: disable
-)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -37,7 +36,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         )
         if use_native:
             logger.info("Initializing native LMCache connector")
-            cls = LMCacheConnectorUpstreamImpl
+            cls = _adapter.LMCacheConnectorV1Impl
         else:
             logger.info("Initializing latest dev LMCache connector")
             cls = LMCacheConnectorLatestImpl
