@@ -502,9 +502,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 # Copy over any remaining requirements files
-COPY requirements/dev.txt requirements/dev.txt
-COPY requirements/lint.txt requirements/lint.txt
-COPY requirements/test.txt requirements/test.txt
+COPY requirements/ requirements/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
