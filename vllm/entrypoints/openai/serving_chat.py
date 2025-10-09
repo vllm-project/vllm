@@ -915,37 +915,37 @@ class OpenAIServingChat(OpenAIServing):
                         fn_name_returned = function_name_returned[i]
                         output_token_ids = as_list(output.token_ids)
 
-                        if self.reasoning_parser is not None and \
-                                not reasoning_end_arr[i] and \
-                                res.prompt_token_ids and \
-                                reasoning_parser.is_reasoning_end(res.prompt_token_ids):
+                        if (
+                            self.reasoning_parser is not None
+                            and not reasoning_end_arr[i]
+                            and res.prompt_token_ids
+                            and reasoning_parser.is_reasoning_end(res.prompt_token_ids)
+                        ):
                             reasoning_end_arr[i] = True
 
                         if self.reasoning_parser and not reasoning_end_arr[i]:
                             delta_message = (
-                                reasoning_parser.
-                                extract_reasoning_content_streaming(
+                                reasoning_parser.extract_reasoning_content_streaming(
                                     previous_text,
                                     current_text,
                                     delta_text,
                                     previous_token_ids,
                                     current_token_ids,
                                     output_token_ids,
-                                ))
-                            if reasoning_parser.is_reasoning_end(
-                                    output_token_ids):
+                                )
+                            )
+                            if reasoning_parser.is_reasoning_end(output_token_ids):
                                 reasoning_end_arr[i] = True
                                 if delta_message and delta_message.content:
                                     current_text = delta_message.content
                                     delta_message.content = None
                                 else:
-                                    #reasoning ended
+                                    # reasoning ended
                                     current_text = ""
 
                         else:
-                            #either finished reasoning or no reasoning at all
+                            # either finished reasoning or no reasoning at all
                             content = current_text
-
 
                             delta_message, function_name_returned[i] = (
                                 self.extract_tool_call_required_streaming(
@@ -953,13 +953,16 @@ class OpenAIServingChat(OpenAIServing):
                                     current_text=content,
                                     delta_text=delta_text,
                                     function_name_returned=fn_name_returned,
-                                    tool_call_idx=history_tool_call_cnt))
-                            if (delta_message and delta_message.tool_calls
-                                    and delta_message.tool_calls[0].id
-                                    is not None):
+                                    tool_call_idx=history_tool_call_cnt,
+                                )
+                            )
+                            if (
+                                delta_message
+                                and delta_message.tool_calls
+                                and delta_message.tool_calls[0].id is not None
+                            ):
                                 history_tool_call_cnt += 1
                                 tools_streamed[i] = True
-
 
                     # handle streaming deltas for tools with "auto" tool choice
                     # and reasoning parser

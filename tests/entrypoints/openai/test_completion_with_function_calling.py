@@ -198,9 +198,9 @@ async def test_function_tool_use(
         reasoning = []
         async for chunk in output_stream:
             if chunk.choices:
-                if enable_thinking and\
-                        getattr(chunk.choices[0].delta,\
-                            "reasoning_content", None):
+                if enable_thinking and getattr(
+                    chunk.choices[0].delta, "reasoning_content", None
+                ):
                     reasoning.append(chunk.choices[0].delta.reasoning_content)
                 if chunk.choices[0].delta.tool_calls:
                     output.extend(chunk.choices[0].delta.tool_calls)
