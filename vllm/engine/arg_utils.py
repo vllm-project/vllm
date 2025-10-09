@@ -27,6 +27,7 @@ import huggingface_hub
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
+from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
@@ -209,6 +210,13 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Get the default value of the field
         if field.default is not MISSING:
             default = field.default
+            # Handle pydantic.Field defaults
+            if isinstance(default, FieldInfo):
+                default = (
+                    default.default
+                    if default.default_factory is None
+                    else default.default_factory()
+                )
         elif field.default_factory is not MISSING:
             default = field.default_factory()
 
@@ -444,7 +452,7 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[int] = CacheConfig.num_gpu_blocks_override
     num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
-    ignore_patterns: Optional[Union[str, list[str]]] = LoadConfig.ignore_patterns
+    ignore_patterns: Union[str, list[str]] = get_field(LoadConfig, "ignore_patterns")
 
     enable_chunked_prefill: Optional[bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
@@ -1319,7 +1327,13 @@ class EngineArgs:
             import ray
 
             ray_runtime_env = ray.get_runtime_context().runtime_env
-            logger.info("Using ray runtime env: %s", ray_runtime_env)
+            # Avoid logging sensitive environment variables
+            sanitized_env = ray_runtime_env.to_dict() if ray_runtime_env else {}
+            if "env_vars" in sanitized_env:
+                sanitized_env["env_vars"] = {
+                    k: "***" for k in sanitized_env["env_vars"]
+                }
+            logger.info("Using ray runtime env (env vars redacted): %s", sanitized_env)
 
         # Get the current placement group if Ray is initialized and
         # we are in a Ray actor. If so, then the placement group will be
