@@ -199,6 +199,7 @@ __global__ void concat_and_cache_mla_rope_fused_kernel(
 
 // Executes RoPE on q_pe and k_pe, then writes k_pe and kv_c in the kv cache.
 // q_pe and k_pe are modified in place.
+// Replaces DeepseekScalingRotaryEmbedding.self.rotary_emb and concat_and_cache_mla.
 void concat_and_cache_mla_rope_fused(
     torch::Tensor& positions,           // [num_tokens]
     torch::Tensor& q_pe,                // [num_tokens, num_q_heads, rot_dim]
