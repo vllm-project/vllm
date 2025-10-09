@@ -759,8 +759,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 reqs_to_add.append(req_state)
                 continue
 
-            assert not resumed_from_preemption
-
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = num_computed_tokens
             if new_block_ids is not None:
