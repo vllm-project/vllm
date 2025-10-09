@@ -499,11 +499,11 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
         thinker_config = self.info.get_hf_config()
 
-        def get_replacement_qwen2_use_audio_in_video(item_idx: int, modality: str):
+        def get_replacement_qwen2_use_audio_in_video(item_idx: int):
             """
-            Get shared placeholder for both audio and video when
-            use_audio_in_video=True.
-            Uses select_token_id to differentiate which tokens belong to each modality.
+            Generate interleaved placeholder for video when use_audio_in_video=True.
+            Audio placeholders will be derived from video in
+            _derive_audio_from_video_placeholders().
             """
             nonlocal audio_in_video_item_idx
 
@@ -511,10 +511,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 audio_in_video_item_idx + item_idx
             ]
             video_grid_thw = out_mm_data["video_grid_thw"][item_idx]
-
-            if modality == "video":
-                # Only increment when processing video (not when processing audio)
-                audio_in_video_item_idx += 1
+            audio_in_video_item_idx += 1
 
             second_per_grid_ts = hf_processor_mm_kwargs.get("second_per_grid_ts", None)
             if second_per_grid_ts:
@@ -522,7 +519,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             else:
                 video_second_per_grid_t = 1.0
 
-            # Get the shared placeholder sequence (interleaved audio and video tokens)
+            # Generate interleaved audio and video token sequence
             placeholder = MRotaryEmbedding.omni_get_updates_use_audio_in_video(
                 thinker_config=thinker_config,
                 audio_len=audio_num_features,
@@ -530,20 +527,16 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 video_second_per_grid_t=video_second_per_grid_t,
             )
 
-            # Use select_token_id to mark which positions belong to this modality
-            mm_id = audio_token_id if modality == "audio" else video_token_id
+            # Mark video token positions with is_embed mask
             return PromptUpdateDetails.select_token_id(
-                placeholder, embed_token_id=mm_id
+                placeholder, embed_token_id=video_token_id
             )
 
-        # Set up replacement functions for audio and video
-        audio_replacement_fn = (
-            partial(get_replacement_qwen2_use_audio_in_video, modality="audio")
-            if use_audio_in_video
-            else get_replacement_qwen2_audio
-        )
+        # Set up replacement functions
+        # Note: In use_audio_in_video mode, audio updates are filtered out before
+        # replacement, so audio_replacement_fn won't be called
         video_replacement_fn = (
-            partial(get_replacement_qwen2_use_audio_in_video, modality="video")
+            get_replacement_qwen2_use_audio_in_video
             if use_audio_in_video
             else partial(get_replacement_qwen2_vision, modality="video")
         )
@@ -552,7 +545,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             PromptReplacement(
                 modality="audio",
                 target=audio_token,
-                replacement=audio_replacement_fn,
+                replacement=get_replacement_qwen2_audio,
             ),
             PromptReplacement(
                 modality="image",
