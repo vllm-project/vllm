@@ -123,14 +123,6 @@ class FlexAttentionBackend(AttentionBackend):
     def is_mla(cls) -> bool:
         return False
 
-    @classmethod
-    def get_min_compute_capability(cls) -> Optional[int]:
-        return None
-
-    @classmethod
-    def get_max_compute_capability(cls) -> Optional[int]:
-        return None
-
 
 # @torch.compile(fullgraph=True, mode="reduce-overhead")
 def physical_to_logical_mapping(

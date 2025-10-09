@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Quant,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.flashinfer import (
@@ -227,12 +228,12 @@ class FlashInferBackend(AttentionBackend):
         return False
 
     @classmethod
-    def get_min_compute_capability(cls) -> int | None:
-        return 100
+    def get_min_compute_capability(cls) -> DeviceCapability | None:
+        return DeviceCapability(10, 0)
 
     @classmethod
-    def get_max_compute_capability(cls) -> int | None:
-        return 109
+    def get_max_compute_capability(cls) -> DeviceCapability | None:
+        return DeviceCapability(10, 9)
 
 
 @dataclass

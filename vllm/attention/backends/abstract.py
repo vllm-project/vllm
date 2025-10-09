@@ -8,6 +8,7 @@ import torch
 
 from vllm.config.cache import BlockSize
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.platforms.interface import DeviceCapability
 
 
 class AttentionType:
@@ -142,15 +143,15 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
-    def get_min_compute_capability(cls) -> Optional[int]:
+    def get_min_compute_capability(cls) -> Optional[DeviceCapability]:
         return None
 
     @classmethod
-    def get_max_compute_capability(cls) -> Optional[int]:
+    def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
         return None
 
     @classmethod
-    def supports_compute_capability(cls, capability: int) -> bool:
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         min_capability = cls.get_min_compute_capability()
         max_capability = cls.get_max_compute_capability()
         return ((min_capability is None) or (capability >= min_capability)) and (
@@ -167,7 +168,7 @@ class AttentionBackend(ABC):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
-        device_capability: int,
+        device_capability: DeviceCapability,
     ) -> Optional[str]:
         return None
 
@@ -181,7 +182,7 @@ class AttentionBackend(ABC):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
-        device_capability: int,
+        device_capability: DeviceCapability,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):

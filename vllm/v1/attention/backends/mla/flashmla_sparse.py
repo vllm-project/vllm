@@ -22,6 +22,7 @@ from vllm.config import VllmConfig
 from vllm.config.cache import BlockSize
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
@@ -87,12 +88,12 @@ class FlashMLASparseBackend(AttentionBackend):
         return True
 
     @classmethod
-    def get_min_compute_capability(cls) -> Optional[int]:
-        return 100
+    def get_min_compute_capability(cls) -> Optional[DeviceCapability]:
+        return DeviceCapability(10, 0)
 
     @classmethod
-    def get_max_compute_capability(cls) -> Optional[int]:
-        return 109
+    def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
+        return DeviceCapability(10, 9)
 
     @staticmethod
     def get_kv_cache_shape(

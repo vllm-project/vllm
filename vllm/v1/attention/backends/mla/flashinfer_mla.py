@@ -9,6 +9,7 @@ from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 from vllm.attention.backends.abstract import AttentionLayer, AttentionType
 from vllm.config.cache import BlockSize
 from vllm.logger import init_logger
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonImpl,
@@ -56,12 +57,12 @@ class FlashInferMLABackend(MLACommonBackend):
         return [32, 64]
 
     @classmethod
-    def get_min_compute_capability(cls) -> Optional[int]:
-        return 100
+    def get_min_compute_capability(cls) -> Optional[DeviceCapability]:
+        return DeviceCapability(10, 0)
 
     @classmethod
-    def get_max_compute_capability(cls) -> Optional[int]:
-        return 109
+    def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
+        return DeviceCapability(10, 9)
 
 
 g_fi_workspace = torch.zeros(

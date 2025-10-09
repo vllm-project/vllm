@@ -236,7 +236,7 @@ class CudaPlatformBase(Platform):
         use_mla,
         has_sink,
         use_sparse,
-        device_capability_int,
+        device_capability,
     ) -> tuple[list[tuple["_Backend", int]], dict["_Backend", list[str]]]:
         valid_backends_priorities = []
         invalid_reasons = {}
@@ -257,7 +257,7 @@ class CudaPlatformBase(Platform):
                     use_mla,
                     has_sink,
                     use_sparse,
-                    device_capability_int,
+                    device_capability,
                 )
             except ImportError:
                 invalid_reasons_i = ["ImportError"]
@@ -290,9 +290,6 @@ class CudaPlatformBase(Platform):
         from vllm.attention.backends.registry import _Backend, backend_to_class_str
 
         device_capability = cls.get_device_capability()
-        device_capability_int = (
-            device_capability.to_int() if device_capability is not None else None
-        )
 
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
@@ -307,7 +304,7 @@ class CudaPlatformBase(Platform):
                     use_mla,
                     has_sink,
                     use_sparse,
-                    device_capability_int,
+                    device_capability,
                 )
             except ImportError:
                 invalid_reasons = ["ImportError"]
@@ -335,7 +332,7 @@ class CudaPlatformBase(Platform):
             use_mla,
             has_sink,
             use_sparse,
-            device_capability_int,
+            device_capability,
         )
 
         if len(valid_backends_priorities) == 0:

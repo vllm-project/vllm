@@ -20,6 +20,7 @@ from vllm.config import VllmConfig
 from vllm.config.cache import BlockSize
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -64,12 +65,12 @@ class FlashAttnMLABackend(MLACommonBackend):
         return []
 
     @classmethod
-    def get_min_compute_capability(cls) -> Optional[int]:
-        return 90
+    def get_min_compute_capability(cls) -> Optional[DeviceCapability]:
+        return DeviceCapability(9, 0)
 
     @classmethod
-    def get_max_compute_capability(cls) -> Optional[int]:
-        return 90
+    def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
+        return DeviceCapability(9, 0)
 
     @classmethod
     def supports_combination(

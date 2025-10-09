@@ -14,6 +14,7 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.config.cache import BlockSize
 from vllm.logger import init_logger
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonImpl,
@@ -58,12 +59,12 @@ class CutlassMLABackend(MLACommonBackend):
         return [128]
 
     @classmethod
-    def get_min_compute_capability(cls) -> Optional[int]:
-        return 100
+    def get_min_compute_capability(cls) -> Optional[DeviceCapability]:
+        return DeviceCapability(10, 0)
 
     @classmethod
-    def get_max_compute_capability(cls) -> Optional[int]:
-        return 109
+    def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
+        return DeviceCapability(10, 3)
 
 
 class SM100Workspace:

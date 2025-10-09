@@ -16,6 +16,7 @@ from vllm.attention.ops.triton_flash_attention import triton_attention
 from vllm.config.cache import BlockSize
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
@@ -48,11 +49,11 @@ class TritonMLABackend(MLACommonBackend):
         return []
 
     @classmethod
-    def get_min_compute_capability(cls) -> Optional[int]:
+    def get_min_compute_capability(cls) -> Optional[DeviceCapability]:
         return None
 
     @classmethod
-    def get_max_compute_capability(cls) -> Optional[int]:
+    def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
         return None
 
 

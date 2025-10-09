@@ -33,6 +33,7 @@ if is_flash_attn_varlen_func_available():
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
@@ -120,11 +121,11 @@ class FlashAttentionBackend(AttentionBackend):
         return False
 
     @classmethod
-    def get_min_compute_capability(cls) -> Optional[int]:
-        return 80
+    def get_min_compute_capability(cls) -> Optional[DeviceCapability]:
+        return DeviceCapability(8, 0)
 
     @classmethod
-    def get_max_compute_capability(cls) -> Optional[int]:
+    def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
         return None
 
     @classmethod

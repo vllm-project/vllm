@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -214,11 +215,11 @@ class TritonAttentionBackend(AttentionBackend):
         return False
 
     @classmethod
-    def get_min_compute_capability(cls) -> Optional[int]:
+    def get_min_compute_capability(cls) -> Optional[DeviceCapability]:
         return None
 
     @classmethod
-    def get_max_compute_capability(cls) -> Optional[int]:
+    def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
         return None
 
 
