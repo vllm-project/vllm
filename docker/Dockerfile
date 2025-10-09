@@ -501,8 +501,12 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
-# install development dependencies (for testing)
+# Copy over any remaining requirements files
 COPY requirements/dev.txt requirements/dev.txt
+COPY requirements/lint.txt requirements/lint.txt
+COPY requirements/test.txt requirements/test.txt
+
+# install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
