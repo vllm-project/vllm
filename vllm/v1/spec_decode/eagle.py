@@ -87,7 +87,7 @@ class EagleProposer:
             and not self.speculative_config.enforce_eager
         )
         self.cudagraph_batch_sizes = (
-            list(reversed(self.vllm_config.compilation_config.cudagraph_capture_sizes))
+            (sorted(self.vllm_config.compilation_config.cudagraph_capture_sizes))
             if self.use_cuda_graph
             else []
         )

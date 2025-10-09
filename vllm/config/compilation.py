@@ -140,6 +140,8 @@ class CompilationConfig:
         - [`cudagraph_mode`][vllm.config.CompilationConfig.cudagraph_mode]
         - [`cudagraph_capture_sizes`]
         [vllm.config.CompilationConfig.cudagraph_capture_sizes]
+        - [`max_cudagraph_capture_size`]
+        [vllm.config.CompilationConfig.max_cudagraph_capture_size]
         - [`cudagraph_num_of_warmups`]
         [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
         - [`cudagraph_copy_inputs`]
@@ -272,11 +274,13 @@ class CompilationConfig:
     more modes may be added.
     """
     use_cudagraph: bool = True
-    """Whether to use cudagraph inside compilation.
-    - False: cudagraph inside compilation is not used.
+    """Whether to use cudagraph inside compilation:
+
+    - False: cudagraph inside compilation is not used.\n
     - True: cudagraph inside compilation is used. It requires
         that all input buffers have fixed addresses, and all
         splitting ops write their outputs to input buffers.
+
     In the vLLM V1 Engine, this flag only applies for
     CompilationLevel.PIECEWISE (aka -O3).
     Note that this is orthogonal to the cudagraph capture logic
@@ -291,8 +295,9 @@ class CompilationConfig:
     Only after that, the execution will be recorded, and the recorded
     cudagraph will be used for subsequent runs."""
     cudagraph_capture_sizes: Optional[list[int]] = None
-    """Sizes to capture cudagraph.
-    - None (default): capture sizes are inferred from vllm config.
+    """Sizes to capture cudagraph:
+
+    - None (default): capture sizes are inferred from vllm config.\n
     - list[int]: capture sizes are specified as given."""
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for
@@ -335,8 +340,22 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    max_capture_size: int = field(default=None, init=False)  # type: ignore
-    """not configurable, computed after init"""
+    max_cudagraph_capture_size: Optional[int] = None
+    """The maximum cudagraph capture size.
+    
+    If cudagraph_capture_sizes is specified, this will be set to the largest 
+    size in that list (or checked for consistency if specified). If
+    cudagraph_capture_sizes is not specified, the list of sizes is generated
+    automatically following the pattern:
+
+        [1, 2, 4] + list(range(8, 256, 8)) + list(
+        range(256, max_cudagraph_capture_size + 1, 16))
+
+    If not specified, max_cudagraph_capture_size is set to min(max_num_seqs*2,
+    512) by default. This voids OOM in tight memory scenarios with small 
+    max_num_seqs, and prevents capture of many large graphs (>512) that would
+    greatly increase startup time with limited performance benefit.
+    """
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
     bs_to_padded_graph_size: list[int] = field(
@@ -345,7 +364,7 @@ class CompilationConfig:
     )
     """optimization:
     Intuitively, bs_to_padded_graph_size should be dict[int, int].
-    since we know all keys are in a range [0, max_capture_size],
+    since we know all keys are in a range [0, max_cudagraph_capture_size],
     we can optimize it to list[int] for better lookup performance."""
 
     # keep track of enabled and disabled custom ops
@@ -583,23 +602,33 @@ class CompilationConfig:
                     computed_compile_sizes.append(x)
         self.compile_sizes = computed_compile_sizes  # type: ignore
 
-        # sort to make sure cudagraph capture sizes are in descending order
-        self.cudagraph_capture_sizes.sort(reverse=True)
-        self.max_capture_size = (
-            self.cudagraph_capture_sizes[0] if self.cudagraph_capture_sizes else 0
+        # sort to make sure cudagraph capture sizes are in ascending order
+        self.cudagraph_capture_sizes.sort()
+        max_cudagraph_capture_size = (
+            self.cudagraph_capture_sizes[-1] if self.cudagraph_capture_sizes else 0
         )
+        if self.max_cudagraph_capture_size is not None:
+            assert self.max_cudagraph_capture_size == max_cudagraph_capture_size, (
+                f"max_cudagraph_capture_size:{self.max_cudagraph_capture_size}"
+                " should be consistent with the max value of "
+                f"cudagraph_capture_sizes:{max_cudagraph_capture_size}"
+            )
+        else:
+            self.max_cudagraph_capture_size = max_cudagraph_capture_size
 
         # pre-compute the mapping from batch size to padded graph size
-        self.bs_to_padded_graph_size = [0 for i in range(self.max_capture_size + 1)]
+        self.bs_to_padded_graph_size = [
+            0 for i in range(self.max_cudagraph_capture_size + 1)
+        ]
         for end, start in zip(
-            self.cudagraph_capture_sizes, self.cudagraph_capture_sizes[1:] + [0]
+            self.cudagraph_capture_sizes + [self.max_cudagraph_capture_size + 1],
+            [0] + self.cudagraph_capture_sizes,
         ):
             for bs in range(start, end):
                 if bs == start:
                     self.bs_to_padded_graph_size[bs] = start
                 else:
                     self.bs_to_padded_graph_size[bs] = end
-        self.bs_to_padded_graph_size[self.max_capture_size] = self.max_capture_size
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called only when level is

@@ -377,15 +377,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
-        # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
-        # The batch sizes in the config are in descending order.
         if (
             self.compilation_config.cudagraph_capture_sizes
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
-            self.cudagraph_batch_sizes = list(
-                reversed(self.compilation_config.cudagraph_capture_sizes)
+            self.cudagraph_batch_sizes = sorted(
+                self.compilation_config.cudagraph_capture_sizes
             )
 
         # Cache the device properties.
@@ -3732,8 +3730,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert cudagraph_mode is not None
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
-
-                compilation_cases = list(reversed(self.cudagraph_batch_sizes))
+                # make sure we capture the largest batch size first
+                compilation_cases = sorted(self.cudagraph_batch_sizes, reverse=True)
                 self._capture_cudagraphs(
                     compilation_cases,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
@@ -3754,7 +3752,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     for x in self.cudagraph_batch_sizes
                     if max_num_tokens >= x >= self.uniform_decode_query_len
                 ]
-                compilation_cases_decode = list(reversed(decode_cudagraph_batch_sizes))
+                compilation_cases_decode = sorted(
+                    decode_cudagraph_batch_sizes, reverse=True
+                )
                 self._capture_cudagraphs(
                     compilation_cases=compilation_cases_decode,
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
