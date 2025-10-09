@@ -16,55 +16,29 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _resolve_operator_overload(op_name: str) -> torch._ops.OpOverload:
-    """Resolve operator name to torch.ops OpOverload.
+def resolve_defined_ops(op_names: list[str]) -> list[torch._ops.OpOverload]:
+    """Resolve operator names to OpOverload objects.
 
-    Uses PyTorch's lookup_op utility.
+    Skips operators that fail to resolve (e.g., operators not registered or
+    model-specific operators not present in the current model).
 
-    Args:
-        op_name (str): Operator name in PyTorch format "namespace::name.overload"
-            Example: "aten::addmm.default"
-
-    Returns:
-        torch._ops.OpOverload: The resolved operator overload object
-    """
-    try:
-        return lookup_op(op_name)
-    except Exception as exc:
-        raise ValueError(f"Failed to resolve operator '{op_name}'") from exc
-
-
-def _resolve_operators_safely(op_names: list[str]) -> list[torch._ops.OpOverload]:
-    """Safely resolve operator names to OpOverload objects.
-
-    Filters out built-in PyTorch operators (aten::*, torch::*) and only resolves
-    vLLM custom operators (vllm::*). Skips operators that fail to resolve.
-
-    Built-in PyTorch operators are filtered because they are often decomposed,
-    fused, or transformed during Inductor's compilation passes (lowering, fusion,
-    decomposition). This makes them unreliable for Inductor partition rules, as
-    the scheduler may fail to find corresponding FX nodes after transformations.
+    Note: Users should inspect the operator graph before lowering and ensure
+    the specified operators are present in the final graph. Built-in PyTorch
+    operators (aten::*, torch::*) may be decomposed, fused, or transformed
+    during Inductor's compilation passes, so use them with caution.
 
     Args:
         op_names: List of operator names in PyTorch format
             (e.g., "vllm::unified_attention")
 
     Returns:
-        List of successfully resolved vLLM custom operator overloads
+        List of successfully resolved operator overloads
     """
     resolved = []
     for op_name in op_names:
-        # Only register vLLM custom operators for Inductor partitioning
-        # Skip aten/torch operators as they may be decomposed/fused
-        if not op_name.startswith("vllm::"):
-            logger.debug(
-                "Skipping non-vLLM operator for Inductor partition: %s", op_name
-            )
-            continue
-
         try:
-            resolved.append(_resolve_operator_overload(op_name))
-        except ValueError:
+            resolved.append(lookup_op(op_name))
+        except Exception:
             # Skip operators that don't exist (e.g., model-specific ops)
             logger.warning(
                 "Failed to resolve operator for Inductor partition: %s", op_name
@@ -75,23 +49,20 @@ def _resolve_operators_safely(op_names: list[str]) -> list[torch._ops.OpOverload
 
 
 @contextlib.contextmanager
-def inductor_partition_rule_context(op_names: list[str]):
+def inductor_partition_rule_context(overloads: list[torch._ops.OpOverload]):
     """Context manager to temporarily register Inductor partition rules.
 
     Registers custom partition rules for specified operators, forcing the
     Inductor scheduler to partition the graph at these operators. The rules
     are automatically restored to their previous state on exit.
 
-    Note: Only vLLM custom operators (vllm::*) are registered. Built-in
-    PyTorch operators (aten::*, torch::*) are filtered out because they may
-    be decomposed, fused, or transformed during Inductor compilation, which
-    can cause the scheduler to fail when looking up FX nodes.
+    Note: Callers should use resolve_defined_ops() to convert operator names
+    to OpOverload objects before calling this function.
 
     Args:
-        op_names (list[str]): List of operator names in PyTorch format
-            (e.g., ["aten::addmm.default", "vllm::unified_attention"]).
+        overloads: List of resolved operator overload objects.
     """
-    if not op_names:
+    if not overloads:
         logger.debug("No partition ops provided; skipping rule registration.")
         yield
         return
@@ -100,14 +71,6 @@ def inductor_partition_rule_context(op_names: list[str]):
         _custom_should_partition_fns,
         register_should_partition_rule,
     )
-
-    # Safely resolve and filter operators
-    overloads = _resolve_operators_safely(op_names)
-
-    if not overloads:
-        logger.debug("No valid vLLM operators to register for Inductor partition.")
-        yield
-        return
 
     def _always_partition(*_args, **_kwargs):
         return True
@@ -121,9 +84,7 @@ def inductor_partition_rule_context(op_names: list[str]):
             _always_partition,
         )
 
-    logger.debug(
-        "Registered inductor partition rules for %d vLLM operators", len(overloads)
-    )
+    logger.debug("Registered inductor partition rules for %d operators", len(overloads))
 
     try:
         yield

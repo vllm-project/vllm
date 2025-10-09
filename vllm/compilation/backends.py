@@ -13,11 +13,13 @@ from typing import Any, Callable, Optional
 import torch
 import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
-from torch._library.utils import lookup_op
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import pass_context
-from vllm.compilation.partition_rules import inductor_partition_rule_context
+from vllm.compilation.partition_rules import (
+    inductor_partition_rule_context,
+    resolve_defined_ops,
+)
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -86,7 +88,9 @@ class CompilerManager:
         compilation (e.g. partition rules, pass context)."""
         with pass_context(runtime_shape):
             if self.compilation_config.use_inductor_graph_partition:
-                inductor_partition_ops = self.compilation_config.splitting_ops or []
+                inductor_partition_ops = resolve_defined_ops(
+                    self.compilation_config.splitting_ops
+                )
                 with inductor_partition_rule_context(inductor_partition_ops):
                     yield
             else:
@@ -280,18 +284,9 @@ class SplitItem:
 
 
 def split_graph(
-    graph: fx.GraphModule, ops: list[str]
+    graph: fx.GraphModule, resolved_ops: list[torch._ops.OpOverload]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
     # split graph by ops
-    # Resolve operator overloads for direct comparison with node.target
-    resolved_ops = []
-    for op_name in ops:
-        try:
-            resolved_ops.append(lookup_op(op_name))
-        except Exception:
-            # If resolution fails, skip this operator
-            logger.warning("Failed to resolve operator: %s", op_name)
-
     subgraph_id = 0
     node_to_subgraph_id = {}
     split_op_graphs = []
@@ -652,7 +647,8 @@ class VllmBackend:
         else:
             fx_split_ops = self.compilation_config.splitting_ops or []
 
-        self.split_gm, self.piecewise_graphs = split_graph(graph, fx_split_ops)
+        resolved_split_ops = resolve_defined_ops(fx_split_ops)
+        self.split_gm, self.piecewise_graphs = split_graph(graph, resolved_split_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
 
