@@ -353,6 +353,7 @@ class CoreEngineActorManager:
             "The DP master node (ip: %s) is missing or dead",
             dp_master_ip,
         )
+        device_str = current_platform.ray_device_key
 
         if envs.VLLM_RAY_DP_PACK_STRATEGY == "strict":
             logger.info(
@@ -385,7 +386,7 @@ class CoreEngineActorManager:
             )
             node_ip_key = node_ip_keys[0]
             node_ip = node_ip_key.split(":")[1]
-            dp_size_available = int(node_resources["GPU"]) // world_size
+            dp_size_available = int(node_resources[device_str]) // world_size
             if strict_local_size:
                 if dp_size_available < dp_size_local:
                     if node_ip == dp_master_ip:
@@ -412,7 +413,7 @@ class CoreEngineActorManager:
                 dp_size_to_allocate = dp_size_available
 
             for i in range(dp_size_to_allocate):
-                bundles = [{"GPU": 1.0, "node:" + node_ip: 0.001}] * world_size + [
+                bundles = [{device_str: 1.0, "node:" + node_ip: 0.001}] * world_size + [
                     {"CPU": 1.0}
                 ]
                 pg = ray.util.placement_group(
