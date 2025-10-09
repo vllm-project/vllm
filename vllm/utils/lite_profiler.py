@@ -3,26 +3,18 @@
 """Minimal helpers for opt-in lightweight timing collection."""
 from __future__ import annotations
 
+import atexit
 import os
 import sys
 import threading
 import time
 from types import TracebackType
-from typing import Optional
+from typing import Optional, TextIO
 
 import vllm.envs as envs
 
 _LOG_PATH = envs.VLLM_LITE_PROFILER_LOG_PATH
 _THREAD_LOCK = threading.Lock()
-
-
-def _prepare_log_path(path: str) -> None:
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-
-
-_PREPARED_LOGS: set[str] = set()
 
 
 def _get_process_rank() -> Optional[int]:
@@ -39,6 +31,9 @@ def _get_process_rank() -> Optional[int]:
 _SHOULD_LOG = _LOG_PATH is not None and ((rank := _get_process_rank()) is None
                                          or rank == 0)
 
+# Cache for log file handles
+_log_file_cache: dict[str, TextIO] = {}
+
 
 def _write_log_entry(name: str, elapsed_us: int) -> None:
     if not _SHOULD_LOG or _LOG_PATH is None:
@@ -46,12 +41,17 @@ def _write_log_entry(name: str, elapsed_us: int) -> None:
 
     log_line = f"{name}|{elapsed_us}\n"
     with _THREAD_LOCK:
-        if _LOG_PATH not in _PREPARED_LOGS:
-            _prepare_log_path(_LOG_PATH)
-            _PREPARED_LOGS.add(_LOG_PATH)
-        with open(_LOG_PATH, "a", buffering=50000) as log_file:
-            log_file.write(log_line)
-            log_file.flush()
+        log_file = _log_file_cache.get(_LOG_PATH)
+        if log_file is None:
+            directory = os.path.dirname(_LOG_PATH)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(_LOG_PATH, "a", buffering=50000) as log_file:
+                _log_file_cache[_LOG_PATH] = log_file
+                atexit.register(log_file.close)
+
+        log_file.write(log_line)
+        log_file.flush()
 
 
 class LiteScope:
