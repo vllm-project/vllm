@@ -708,7 +708,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # because there's no direct communication between the first-
                 # stage worker and the last-stage worker.
                 new_token_ids = req_data.new_token_ids[i]
-                assert new_token_ids is not None
                 # Add the sampled token(s) from the previous step (if any).
                 # This doesn't include "unverified" tokens like spec tokens.
                 num_new_tokens = (
@@ -719,30 +718,27 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     req_state.output_token_ids.append(new_token_ids[-1])
                 elif num_new_tokens > 0:
                     req_state.output_token_ids.extend(new_token_ids[-num_new_tokens:])
-            elif req_data.new_token_ids:
-                new_token_ids = req_data.new_token_ids[i]
-                if new_token_ids is not None:
-                    # This is a resumed request during async scheduling. We must
-                    # recover the output token ids.
+            else:
+                if num_output_tokens < len(req_state.output_token_ids):
+                    # Some output tokens were discarded due to a sync-KV-load
+                    # failure. Align the cached state.
+                    del req_state.output_token_ids[num_output_tokens:]
+
+                    if req_index is not None:
+                        end_idx = (
+                            self.input_batch.num_prompt_tokens[req_index]
+                            + num_output_tokens
+                        )
+                        self.input_batch.num_tokens[req_index] = end_idx
+                        self.input_batch.num_tokens_no_spec[req_index] = end_idx
+
+                if resumed_from_preemption and self.use_async_scheduling:
+                    # We must recover the output token ids for resumed requests in the
+                    # async scheduling case, so that correct input_ids are obtained.
                     assert req_index is None
-                    req_state.output_token_ids = new_token_ids
-
-            if is_last_rank and num_output_tokens < len(req_state.output_token_ids):
-                # Some output tokens were discarded due to a sync-KV-load
-                # failure. Align the cached state.
-                del req_state.output_token_ids[num_output_tokens:]
-
-                if req_index is not None:
-                    old_end_idx = self.input_batch.num_tokens_no_spec[req_index]
-                    end_idx = (
-                        self.input_batch.num_prompt_tokens[req_index]
-                        + num_output_tokens
-                    )
-                    self.input_batch.num_tokens[req_index] = end_idx
-                    self.input_batch.num_tokens_no_spec[req_index] = end_idx
-                    self.input_batch.is_token_ids[req_index, end_idx:old_end_idx] = (
-                        False
-                    )
+                    resumed_token_ids = req_data.resumed_req_token_ids[i]
+                    assert resumed_token_ids is not None
+                    req_state.output_token_ids = resumed_token_ids[:num_output_tokens]
 
             # Update the block IDs.
             if not resumed_from_preemption:
@@ -775,7 +771,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if not is_last_rank:
                 # Add new_token_ids to token_ids_cpu.
                 start_token_index = num_computed_tokens
-                assert new_token_ids is not None
                 end_token_index = num_computed_tokens + len(new_token_ids)
                 self.input_batch.token_ids_cpu[
                     req_index, start_token_index:end_token_index

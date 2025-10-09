@@ -115,6 +115,7 @@ class CachedRequestData:
             req_ids=[],
             resumed_from_preemption=[],
             new_token_ids=[],
+            resumed_req_token_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
