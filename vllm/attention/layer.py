@@ -104,7 +104,9 @@ def maybe_get_vit_flash_attn_backend(
             if use_upstream_fa:
                 from flash_attn import flash_attn_varlen_func
             else:
-                from vllm.vllm_flash_attn import flash_attn_varlen_func
+                from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+                    flash_attn_varlen_func,
+                )
     else:
         flash_attn_varlen_func = None
 

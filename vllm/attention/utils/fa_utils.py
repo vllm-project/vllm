@@ -12,7 +12,10 @@ if current_platform.is_cuda():
     from vllm import _custom_ops
 
     reshape_and_cache_flash = _custom_ops.reshape_and_cache_flash
-    from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
+    from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+        flash_attn_varlen_func,
+        get_scheduler_metadata,
+    )
 elif current_platform.is_xpu():
     from vllm._ipex_ops import ipex_ops
 
