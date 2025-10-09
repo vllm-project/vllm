@@ -68,6 +68,7 @@ class FlexOlmoMoE(nn.Module):
             hf_config.hidden_size,
             hf_config.num_experts,
             bias=False,
+            return_bias=False,
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
@@ -94,7 +95,7 @@ class FlexOlmoMoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
+        router_logits = self.gate(hidden_states)
         # Warning: The experts mutate the hidden state input! This messes up
         # basic things like the residual stream.
         final_hidden_states = self.experts(
