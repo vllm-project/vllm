@@ -37,6 +37,7 @@ class Processor:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        tokenizer: Optional[AnyTokenizer],
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         self.vllm_config = vllm_config
@@ -52,6 +53,7 @@ class Processor:
 
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
+            tokenizer,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
