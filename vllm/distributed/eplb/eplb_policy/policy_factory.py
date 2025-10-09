@@ -7,7 +7,6 @@ from .abstract_policy import EplbPolicy
 from .default_eplb_policy import DefaultEplb
 
 
-
 class PolicyFactory:
     @staticmethod
     def generate_policy(policy_type: EPLBPolicyType) -> EplbPolicy:
