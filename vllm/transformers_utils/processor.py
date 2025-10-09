@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 _V = TypeVar("_V", bound=BaseVideoProcessor, default=BaseVideoProcessor)
 
+DYNAMIC_KEYS = {"fps"}
+
 
 class HashableDict(dict):
     """

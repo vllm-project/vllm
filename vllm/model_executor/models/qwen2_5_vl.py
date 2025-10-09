@@ -70,7 +70,11 @@ from vllm.multimodal.evs import (
 )
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.processing import (
+    BaseMultiModalProcessor,
+    PromptReplacement,
+    PromptUpdate,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -991,8 +995,13 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        static_mm_processor_kwargs, _ = (
+            BaseMultiModalProcessor._split_static_dynamic_mm_kwargs(
+                hf_processor_mm_kwargs
+            )
+        )
+        hf_processor = self.info.get_hf_processor(**static_mm_processor_kwargs)
+        image_processor = self.info.get_image_processor(**static_mm_processor_kwargs)
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
