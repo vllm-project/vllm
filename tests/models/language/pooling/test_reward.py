@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 
 import pytest
 import torch
@@ -17,10 +16,8 @@ from ...utils import check_transformers_version
 def math_step_prompts():
     # ruff: noqa: E501
     data = {
-        "system":
-        "Please reason step by step, and put your final answer within \\boxed{}. ",
-        "query":
-        "Sue lives in a fun neighborhood.  One weekend, the neighbors decided to play a prank on Sue.  On Friday morning, the neighbors placed 18 pink plastic flamingos out on Sue's front yard.  On Saturday morning, the neighbors took back one third of the flamingos, painted them white, and put these newly painted white flamingos back out on Sue's front yard.  Then, on Sunday morning, they added another 18 pink plastic flamingos to the collection. At noon on Sunday, how many more pink plastic flamingos were out than white plastic flamingos?",
+        "system": "Please reason step by step, and put your final answer within \\boxed{}. ",
+        "query": "Sue lives in a fun neighborhood.  One weekend, the neighbors decided to play a prank on Sue.  On Friday morning, the neighbors placed 18 pink plastic flamingos out on Sue's front yard.  On Saturday morning, the neighbors took back one third of the flamingos, painted them white, and put these newly painted white flamingos back out on Sue's front yard.  Then, on Sunday morning, they added another 18 pink plastic flamingos to the collection. At noon on Sunday, how many more pink plastic flamingos were out than white plastic flamingos?",
         "response": [
             "To find out how many more pink plastic flamingos were out than white plastic flamingos at noon on Sunday, we can break down the problem into steps. First, on Friday, the neighbors start with 18 pink plastic flamingos.",
             "On Saturday, they take back one third of the flamingos. Since there were 18 flamingos, (1/3 \\times 18 = 6) flamingos are taken back. So, they have (18 - 6 = 12) flamingos left in their possession. Then, they paint these 6 flamingos white and put them back out on Sue's front yard. Now, Sue has the original 12 pink flamingos plus the 6 new white ones. Thus, by the end of Saturday, Sue has (12 + 6 = 18) pink flamingos and 6 white flamingos.",
@@ -28,16 +25,16 @@ def math_step_prompts():
             "To find the difference, subtract the number of white flamingos from the number of pink flamingos: (36 - 6 = 30). Therefore, at noon on Sunday, there were 30 more pink plastic flamingos out than white plastic flamingos. The answer is (\\boxed{30}).",
         ],
     }
-    answer = "<extra_0>".join(data['response']) + "<extra_0>"
+    answer = "<extra_0>".join(data["response"]) + "<extra_0>"
     prompt = f"<im_start>system\n{data['system']}<im_end>\n<im_start>user\n{data['query']}<im_end>\n<im_start>assistant\n{answer}<im_end><|endoftext|>"
     return [prompt]
 
 
 def step_reward_patch_hf_model(hf_model: HfRunner):
-
     # Patch the hf_runner to use the step reward function
-    def make_step_rewards(logits: torch.Tensor,
-                          token_masks: torch.Tensor) -> list[list[float]]:
+    def make_step_rewards(
+        logits: torch.Tensor, token_masks: torch.Tensor
+    ) -> list[list[float]]:
         probabilities = F.softmax(logits, dim=-1)
         probabilities = probabilities * token_masks.unsqueeze(-1)
 
@@ -55,7 +52,7 @@ def step_reward_patch_hf_model(hf_model: HfRunner):
         outputs = hf_model.model(input_ids=input_ids)
 
         step_sep_id = hf_model.tokenizer.encode("<extra_0>")[0]
-        token_masks = (input_ids == step_sep_id)
+        token_masks = input_ids == step_sep_id
         return make_step_rewards(outputs[0], token_masks)
 
     hf_model.reward = reward  # type: ignore[attr-defined]
@@ -66,8 +63,10 @@ def step_reward_patch_hf_model(hf_model: HfRunner):
 @pytest.mark.parametrize(
     "model",
     [
-        pytest.param("Qwen/Qwen2.5-Math-PRM-7B",
-                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+        pytest.param(
+            "Qwen/Qwen2.5-Math-PRM-7B",
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
@@ -79,10 +78,11 @@ def test_prm_models(
     dtype: str,
     monkeypatch,
 ) -> None:
-    check_transformers_version("Qwen/Qwen2.5-Math-PRM-7B",
-                               max_transformers_version="4.53.2")
+    check_transformers_version(
+        "Qwen/Qwen2.5-Math-PRM-7B", max_transformers_version="4.53.2"
+    )
 
-    if current_platform.is_cpu() and os.environ.get("VLLM_USE_V1", "0") == "0":
+    if current_platform.is_cpu():
         pytest.skip("CPU only supports V1")
 
     if current_platform.is_rocm():

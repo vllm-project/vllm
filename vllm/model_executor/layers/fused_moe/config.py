@@ -9,15 +9,24 @@ import vllm.envs as envs
 from vllm.config import ParallelConfig
 from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape)
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    OCP_MX_DTYPES,
+    OCP_MX_Scheme,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.utils import cdiv, has_triton_kernels
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
-if has_triton_kernels():
-    from triton_kernels.matmul_ogs import PrecisionConfig
-
 logger = init_logger(__name__)
+
+if has_triton_kernels():
+    try:
+        from triton_kernels.matmul_ogs import PrecisionConfig
+    except ImportError:
+        logger.error(
+            "Failed to import Triton kernels. Please make sure your triton "
+            "version is compatible."
+        )
 
 
 def _get_config_dtype_str(
@@ -25,7 +34,7 @@ def _get_config_dtype_str(
     use_fp8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     use_int4_w4a16: bool = False,
-    use_mxfp4_w4a4: bool = False,
+    ocp_mx_scheme: Optional[str] = None,
 ) -> Optional[str]:
     """
     Return a string used to construct the filename that contains the
@@ -38,8 +47,11 @@ def _get_config_dtype_str(
         return "int8_w8a16"
     elif use_int4_w4a16:
         return "int4_w4a16"
-    elif use_mxfp4_w4a4:
-        return "mxfp4_w4a4"
+    elif ocp_mx_scheme is not None:
+        # The output of this function is passed to `try_get_optimal_moe_config`,
+        # and as we only simulate OCP MX execution in fused_moe for now,
+        # we will NOT look for `*,dtype=w_mxfp4_a_mxfp4.json` for now.
+        return None
     elif dtype == torch.float:
         # avoiding cases where kernel fails when float32 MoE
         # use fp16/bfloat16 configs
@@ -158,8 +170,9 @@ class FusedMoEQuantConfig:
     _w2: FusedMoEQuantDesc
 
     def __post_init__(self):
-        assert (not self.per_act_token_quant
-                or self.block_shape is None), "illegal quantization"
+        assert not self.per_act_token_quant or self.block_shape is None, (
+            "illegal quantization"
+        )
 
     #
     # Convenience accessors for various properties.
@@ -191,9 +204,11 @@ class FusedMoEQuantConfig:
 
     @property
     def block_shape(self) -> Optional[list[int]]:
-        if (self._a1.shape is not None
-                and self._a1.shape != GroupShape.PER_TENSOR
-                and self._a1.shape != GroupShape.PER_TOKEN):
+        if (
+            self._a1.shape is not None
+            and self._a1.shape != GroupShape.PER_TENSOR
+            and self._a1.shape != GroupShape.PER_TOKEN
+        ):
             return [self._a1.shape.row, self._a1.shape.col]
         else:
             return None
@@ -204,8 +219,7 @@ class FusedMoEQuantConfig:
 
     @property
     def a1_scale(self) -> Optional[torch.Tensor]:
-        assert self._a1.scale is None or isinstance(self._a1.scale,
-                                                    torch.Tensor)
+        assert self._a1.scale is None or isinstance(self._a1.scale, torch.Tensor)
         return self._a1.scale
 
     @property
@@ -214,8 +228,7 @@ class FusedMoEQuantConfig:
 
     @property
     def a2_scale(self) -> Optional[torch.Tensor]:
-        assert self._a2.scale is None or isinstance(self._a2.scale,
-                                                    torch.Tensor)
+        assert self._a2.scale is None or isinstance(self._a2.scale, torch.Tensor)
         return self._a2.scale
 
     @property
@@ -224,8 +237,7 @@ class FusedMoEQuantConfig:
 
     @property
     def w1_scale(self) -> Optional[torch.Tensor]:
-        assert self._w1.scale is None or isinstance(self._w1.scale,
-                                                    torch.Tensor)
+        assert self._w1.scale is None or isinstance(self._w1.scale, torch.Tensor)
         return self._w1.scale
 
     @property
@@ -238,8 +250,7 @@ class FusedMoEQuantConfig:
 
     @property
     def w1_precision(self) -> Optional["PrecisionConfig"]:
-        assert self._w1.scale is None or isinstance(self._w1.scale,
-                                                    PrecisionConfig)
+        assert self._w1.scale is None or isinstance(self._w1.scale, PrecisionConfig)
         return self._w1.scale
 
     @property
@@ -248,8 +259,7 @@ class FusedMoEQuantConfig:
 
     @property
     def w2_scale(self) -> Optional[torch.Tensor]:
-        assert self._w2.scale is None or isinstance(self._w2.scale,
-                                                    torch.Tensor)
+        assert self._w2.scale is None or isinstance(self._w2.scale, torch.Tensor)
         return self._w2.scale
 
     @property
@@ -262,8 +272,7 @@ class FusedMoEQuantConfig:
 
     @property
     def w2_precision(self) -> Optional["PrecisionConfig"]:
-        assert self._w2.scale is None or isinstance(self._w2.scale,
-                                                    PrecisionConfig)
+        assert self._w2.scale is None or isinstance(self._w2.scale, PrecisionConfig)
         return self._w2.scale
 
     @property
@@ -280,15 +289,34 @@ class FusedMoEQuantConfig:
 
     @property
     def use_int8_w8a16(self) -> bool:
-        return (self._a1.dtype is None and self._w1.dtype == torch.int8)
+        return self._a1.dtype is None and self._w1.dtype == torch.int8
 
     @property
     def use_int4_w4a16(self) -> bool:
-        return (self._a1.dtype is None and self._w1.dtype == "int4")
+        return self._a1.dtype is None and self._w1.dtype == "int4"
 
     @property
-    def use_mxfp4_w4a4(self) -> bool:
-        return self.quant_dtype == "mxfp4"
+    def ocp_mx_scheme(self) -> Union[str, None]:
+        if not hasattr(self, "_ocp_mx_scheme"):
+            if (self._a1.dtype is not None and not isinstance(self._a1.dtype, str)) or (
+                self._w1.dtype is not None and not isinstance(self._w1.dtype, str)
+            ):
+                self._ocp_mx_scheme = None
+            else:
+                ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
+                    self._a1.dtype, self._w1.dtype
+                )
+
+                if ocp_mx_scheme is not None:
+                    ocp_mx_scheme = ocp_mx_scheme.value
+
+                self._ocp_mx_scheme = ocp_mx_scheme
+
+        return self._ocp_mx_scheme
+
+    @property
+    def use_mxfp4_w4a16(self) -> bool:
+        return self._a1.dtype is None and self._w1.dtype == "mxfp4"
 
     @property
     def use_nvfp4_w4a4(self) -> bool:
@@ -304,7 +332,7 @@ class FusedMoEQuantConfig:
             use_fp8_w8a8=self.use_fp8_w8a8,
             use_int8_w8a16=self.use_int8_w8a16,
             use_int4_w4a16=self.use_int4_w4a16,
-            use_mxfp4_w4a4=self.use_mxfp4_w4a4,
+            ocp_mx_scheme=self.ocp_mx_scheme,
             dtype=dtype,
         )
 
@@ -365,12 +393,14 @@ class FusedMoEQuantConfig:
         w2_bias: Optional[torch.Tensor] = None,
         w1_zp: Optional[torch.Tensor] = None,
         w2_zp: Optional[torch.Tensor] = None,
+        weight_dtype: Union[torch.dtype, str, None] = None,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
         - quant_dtype: Optional quantization type. None if activations are
-          unquantized or quantized prior to calling.  Note: "nvfp4" and
-          "mxfp4" are the only valid string values for quant_dtype.
+          unquantized or quantized prior to calling.  Note: "nvfp4", "mxfp4",
+          "mxfp6_e3m2", "mxfp6_e2m3" are the only valid string values
+          for quant_dtype.
         - per_act_token_quant: Activations have per token quantization.
         - per_out_ch_quant: Outputs have per channel quantization. (only
           for cutlass).
@@ -389,19 +419,34 @@ class FusedMoEQuantConfig:
         - w1_zp: Optional w1 zero points for int4/int8 quantization.
         - w2_zp: Optional w2 zero points for int4/int8 quantization.
         """
-        assert (not isinstance(quant_dtype, str) or quant_dtype == "nvfp4"
-                or quant_dtype == "mxfp4")
-        a_shape, w_shape = _quant_flags_to_group_shape(quant_dtype,
-                                                       per_act_token_quant,
-                                                       per_out_ch_quant,
-                                                       block_shape)
+        assert not isinstance(quant_dtype, str) or quant_dtype in {
+            "nvfp4",
+            "mxfp4",
+            "mxfp6_e3m2",
+            "mxfp6_e2m3",
+        }
+        assert not isinstance(weight_dtype, str) or weight_dtype in {
+            "nvfp4",
+            "mxfp4",
+            "mxfp6_e3m2",
+            "mxfp6_e2m3",
+        }
+
+        if weight_dtype is None:
+            weight_dtype = quant_dtype
+
+        a_shape, w_shape = _quant_flags_to_group_shape(
+            quant_dtype, per_act_token_quant, per_out_ch_quant, block_shape
+        )
         quant_config = FusedMoEQuantConfig(
             _a1=FusedMoEQuantDesc(quant_dtype, a_shape, a1_scale, a1_gscale),
             _a2=FusedMoEQuantDesc(quant_dtype, a_shape, a2_scale, a2_gscale),
-            _w1=FusedMoEQuantDesc(quant_dtype, w_shape, w1_scale, g1_alphas,
-                                  w1_zp, w1_bias),
-            _w2=FusedMoEQuantDesc(quant_dtype, w_shape, w2_scale, g2_alphas,
-                                  w2_zp, w2_bias),
+            _w1=FusedMoEQuantDesc(
+                weight_dtype, w_shape, w1_scale, g1_alphas, w1_zp, w1_bias
+            ),
+            _w2=FusedMoEQuantDesc(
+                weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
+            ),
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant
@@ -421,14 +466,16 @@ def fp8_w8a8_moe_quant_config(
     """
     Construct a quant config for fp8 activations and fp8 weights.
     """
-    return FusedMoEQuantConfig.make(torch.float8_e4m3fn,
-                                    w1_scale=w1_scale,
-                                    w2_scale=w2_scale,
-                                    a1_scale=a1_scale,
-                                    a2_scale=a2_scale,
-                                    per_act_token_quant=per_act_token_quant,
-                                    per_out_ch_quant=per_out_ch_quant,
-                                    block_shape=block_shape)
+    return FusedMoEQuantConfig.make(
+        torch.float8_e4m3fn,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_out_ch_quant,
+        block_shape=block_shape,
+    )
 
 
 def int8_w8a8_moe_quant_config(
@@ -453,9 +500,28 @@ def int8_w8a8_moe_quant_config(
     )
 
 
-def mxfp4_w4a4_moe_quant_config(
+def mxfp4_w4a16_moe_quant_config(
     w1_scale: Union[torch.Tensor, "PrecisionConfig"],
     w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w1_bias: Optional[torch.Tensor] = None,
+    w2_bias: Optional[torch.Tensor] = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for unquantized activations and mxfp4 weights.
+    """
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc(),
+        _a2=FusedMoEQuantDesc(),
+        _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
+        _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
+    )
+
+
+def ocp_mx_moe_quant_config(
+    quant_dtype: str,
+    w1_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    weight_dtype: Optional[str] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     w1_bias: Optional[torch.Tensor] = None,
@@ -465,8 +531,10 @@ def mxfp4_w4a4_moe_quant_config(
     """
     Construct a quant config for mxfp4 activations and mxfp4 weights.
     """
+    assert quant_dtype in OCP_MX_DTYPES
     return FusedMoEQuantConfig.make(
-        "mxfp4",
+        quant_dtype=quant_dtype,
+        weight_dtype=weight_dtype,
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         a1_scale=a1_scale,
@@ -580,22 +648,26 @@ class FusedMoEParallelConfig:
 
     @property
     def use_pplx_kernels(self):
-        return (self.use_all2all_kernels
-                and envs.VLLM_ALL2ALL_BACKEND == "pplx")
+        return self.use_all2all_kernels and envs.VLLM_ALL2ALL_BACKEND == "pplx"
 
     @property
     def use_deepep_ht_kernels(self):
-        return (self.use_all2all_kernels
-                and envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput")
+        return (
+            self.use_all2all_kernels
+            and envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
+        )
 
     @property
     def use_deepep_ll_kernels(self):
-        return (self.use_all2all_kernels
-                and envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency")
+        return (
+            self.use_all2all_kernels
+            and envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency"
+        )
 
     @staticmethod
-    def make(tp_size_: int, dp_size_: int,
-             vllm_parallel_config: ParallelConfig) -> "FusedMoEParallelConfig":
+    def make(
+        tp_size_: int, dp_size_: int, vllm_parallel_config: ParallelConfig
+    ) -> "FusedMoEParallelConfig":
         """
         Determine MoE parallel configuration. Based on the input `tp_size_`,
         `dp_size_` and vllm's parallel config, determine what
@@ -675,34 +747,37 @@ class FusedMoEParallelConfig:
             tp_rank = dp_rank * tp_size_ + tp_rank
             return tp_size, tp_rank
 
-        use_ep = (dp_size_ * tp_size_ > 1
-                  and vllm_parallel_config.enable_expert_parallel)
+        use_ep = dp_size_ * tp_size_ > 1 and vllm_parallel_config.enable_expert_parallel
 
         dp_size = dp_size_
         dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
         tp_size, tp_rank = flatten_tp_across_dp(dp_rank)
 
         if not use_ep:
-            return FusedMoEParallelConfig(tp_size=tp_size,
-                                          tp_rank=tp_rank,
-                                          dp_size=dp_size,
-                                          dp_rank=dp_rank,
-                                          ep_size=1,
-                                          ep_rank=0,
-                                          use_ep=False)
+            return FusedMoEParallelConfig(
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                dp_size=dp_size,
+                dp_rank=dp_rank,
+                ep_size=1,
+                ep_rank=0,
+                use_ep=False,
+            )
         # DP + EP / TP + EP / DP + TP + EP
         assert use_ep
         # In EP, each device owns a set of experts fully. There is no tensor
         # parallel update tp_size, tp_rank, ep_size and ep_rank to reflect that.
         ep_size = tp_size
         ep_rank = tp_rank
-        return FusedMoEParallelConfig(tp_size=1,
-                                      tp_rank=0,
-                                      dp_size=dp_size,
-                                      dp_rank=dp_rank,
-                                      ep_size=ep_size,
-                                      ep_rank=ep_rank,
-                                      use_ep=True)
+        return FusedMoEParallelConfig(
+            tp_size=1,
+            tp_rank=0,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
+            ep_size=ep_size,
+            ep_rank=ep_rank,
+            use_ep=True,
+        )
 
 
 # Adapted from pplx-kernels tests/all_to_all_utils.py
@@ -724,8 +799,9 @@ class FusedMoEConfig:
 
     def __post_init__(self):
         if self.dp_size > 1:
-            logger.debug_once("Using FusedMoEConfig::max_num_tokens=%d",
-                              self.max_num_tokens)
+            logger.debug_once(
+                "Using FusedMoEConfig::max_num_tokens=%d", self.max_num_tokens
+            )
 
         assert self.max_num_tokens > 0
 
@@ -774,6 +850,8 @@ class FusedMoEConfig:
         """
         Whether to use FlashInfer cutlass kernels for NVFP4 MoE.
         """
-        return (envs.VLLM_USE_FLASHINFER_MOE_FP4
-                and has_flashinfer_cutlass_fused_moe()
-                and envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput")
+        return (
+            envs.VLLM_USE_FLASHINFER_MOE_FP4
+            and has_flashinfer_cutlass_fused_moe()
+            and envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput"
+        )

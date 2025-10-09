@@ -126,6 +126,23 @@ def run_chameleon(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Dots-OCR
+def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    prompts = [f"<|img|><|imgpad|><|endofimg|>{question}" for question in questions]
+    engine_args = EngineArgs(
+        model="rednote-hilab/dots.ocr",
+        limit_mm_per_prompt={modality: 1},
+        trust_remote_code=True,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 def run_command_a_vision(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
@@ -559,7 +576,7 @@ def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
 
 # Intern-S1
 def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "internlm/Intern-S1"
+    model_name = "internlm/Intern-S1-mini"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -1123,14 +1140,10 @@ def run_ovis2_5(questions: list[str], modality: str) -> ModelRequestData:
     elif modality == "video":
         placeholder = "<video>"
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    messages = [
-        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+    prompts = [
+        f"<|im_start|>user\n\n{placeholder}\n{question}<|im_end|>\n<|im_start|>assistant\n"
         for question in questions
     ]
-    prompts = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -1676,6 +1689,7 @@ model_example_map = {
     "aya_vision": run_aya_vision,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
+    "dots_ocr": run_dots_ocr,
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
     "ernie45_vl": run_ernie45_vl,
