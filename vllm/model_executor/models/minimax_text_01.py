@@ -156,7 +156,6 @@ class MiniMaxText01MoE(nn.Module):
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size * self.tp_size,
             params_dtype=self.params_dtype,
-            reduce_results=True,
             renormalize=True,
             quant_config=self.quant_config,
             tp_size=self.tp_size,

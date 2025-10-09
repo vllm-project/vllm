@@ -40,7 +40,6 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
@@ -294,6 +293,8 @@ class BailingMoE(nn.Module):
 
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_experts,
+            fused_output_scaling_factor=self.routed_scaling_factor,
+            shared_output_scaling_factor=1.0,
             num_experts=self.num_experts,
             top_k=self.top_k,
             hidden_size=self.hidden_size,
@@ -321,18 +322,6 @@ class BailingMoE(nn.Module):
             hidden_states=hidden_states, router_logits=router_logits
         )
 
-        if self.shared_experts is not None:
-            shared_output, final_hidden_states = final_hidden_states
-        else:
-            shared_output = None
-
-        final_hidden_states *= self.routed_scaling_factor
-
-        if shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
-
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
