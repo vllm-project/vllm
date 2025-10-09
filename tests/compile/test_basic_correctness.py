@@ -109,39 +109,45 @@ def test_compile_correctness(
     with monkeypatch.context() as m:
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
         final_args = [
-            "--enforce-eager",
             *model_args,
             "-pp",
             str(pp_size),
             "-tp",
             str(tp_size),
+            "--compilation-config",
+            '{"backend": "inductor", "cudagraph_mode": "none"}',
         ]
 
         all_args: list[list[str]] = []
         all_envs: list[dict[str, str] | None] = []
 
-        for level in [
-            CompilationLevel.NO_COMPILATION,
+        for comp_level in [
+            CompilationLevel.DYNAMO_AS_IS,
+            CompilationLevel.DYNAMO_ONCE,
             CompilationLevel.PIECEWISE,
         ]:
-            all_args.append(final_args + [f"-O{level}"])
-            all_envs.append({})
+            for level in [CompilationLevel.NO_COMPILATION, comp_level]:
+                all_args.append(final_args + [f"-O{level}"])
+                all_envs.append({})
 
-        # inductor will change the output, so we only compare if the output
-        # is close, not exactly the same.
-        compare_all_settings(
-            model,
-            all_args,
-            all_envs,
-            method=method if method != "generate" else "generate_close",
-        )
-        all_envs.clear()
-        all_args.clear()
+            # inductor will change the output, so we only compare if the output
+            # is close, not exactly the same.
+            compare_all_settings(
+                model,
+                all_args,
+                all_envs,
+                method=method if method != "generate" else "generate_close",
+            )
+            all_envs.clear()
+            all_args.clear()
+
+        final_args[-1] = '{"backend": "eager", "cudagraph_mode": "none"}'
 
         for level in [
             CompilationLevel.NO_COMPILATION,
             CompilationLevel.DYNAMO_AS_IS,
             CompilationLevel.DYNAMO_ONCE,
+            CompilationLevel.PIECEWISE,
         ]:
             all_args.append(final_args + [f"-O{level}"])
             all_envs.append({})
