@@ -47,6 +47,8 @@ This guide will help you quickly get started with vLLM to perform:
     vLLM with all its dependences have been installed.
     
     ```bash
+    docker pull rocm/vllm-dev:nightly # to get the latest image
+
     docker run -it \
     --network=host \
     --group-add=video \
