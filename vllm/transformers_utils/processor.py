@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import copy
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
@@ -164,32 +163,13 @@ def get_processor(
 cached_get_processor = lru_cache(get_processor)
 
 
-@lru_cache
-def cached_static_processor(
-    processor_name: str,
-    *args: Any,
-    revision: Optional[str] = None,
-    trust_remote_code: bool = False,
-    processor_cls: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
-    **kwargs: Any,
-):
-    return get_processor(
-        processor_name,
-        *args,
-        revision=revision,
-        trust_remote_code=trust_remote_code,
-        processor_cls=processor_cls,
-        **kwargs,
-    )
-
-
 def cached_processor_from_config(
     model_config: "ModelConfig",
     processor_cls: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
 
-    return cached_static_processor(
+    return cached_get_processor(
         model_config.model,
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,

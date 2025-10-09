@@ -285,19 +285,15 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
                 [np.asarray(load_frame(frame_data)) for frame_data in data.split(",")]
             ), {}
 
-        return self.load_bytes(base64.b64decode(data),
-                               request_overrides=request_overrides)
-
+        return self.load_bytes(base64.b64decode(data))
     def load_file(
         self,
         filepath: Path,
-        *,
-        request_overrides: Optional[dict[str, Any]] = None
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         with filepath.open("rb") as f:
             data = f.read()
 
-        return self.load_bytes(data, request_overrides=request_overrides)
+        return self.load_bytes(data)
 
     def encode_base64(
         self,

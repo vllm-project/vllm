@@ -5,7 +5,6 @@ import asyncio
 import atexit
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union

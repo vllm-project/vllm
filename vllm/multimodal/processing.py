@@ -24,8 +24,7 @@ import torch
 from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.processor import (DYNAMIC_KEYS,
-                                               cached_processor_from_config)
+from vllm.transformers_utils.processor import DYNAMIC_KEYS, cached_processor_from_config
 from vllm.transformers_utils.tokenizer import AnyTokenizer, decode_tokens, encode_tokens
 from vllm.utils import flatten_2d_lists, full_groupby, get_allowed_kwarg_only_overrides
 from vllm.utils.jsontree import JSONTree, json_map_leaves
@@ -1419,13 +1418,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Supports splitting static (cache-affecting) vs
         dynamic (per-request) kwargs.
         """
-        static_mm_processor_kwargs, dynamic_mm_processor_kwargs = \
+        static_mm_processor_kwargs, dynamic_mm_processor_kwargs = (
             self._split_static_dynamic_mm_kwargs(mm_kwargs)
+        )
         # use static kwargs to get (and possibly cache) the processor
         hf_processor = self.info.get_hf_processor(**static_mm_processor_kwargs)
         # merge static and dynamic kwargs(such as fps) for actual call
-        merge_mm_kwargs = {**static_mm_processor_kwargs,
-                           **tok_kwargs}
+        merge_mm_kwargs = {**static_mm_processor_kwargs, **tok_kwargs}
         if dynamic_mm_processor_kwargs:
             merge_mm_kwargs.update(dynamic_mm_processor_kwargs)
 
@@ -1815,7 +1814,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
         """
-        logger.warning(f"MM_HASH_KWARGS={hf_processor_mm_kwargs}, cache={self.cache}")
         cache = self.cache
 
         _, passthrough_data = self._get_hf_mm_data(mm_data_items)
