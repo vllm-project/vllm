@@ -334,10 +334,7 @@ class VllmConfig:
             + self.compilation_config.custom_ops.count("all")
             == 0
         ):
-            if (
-                self.compilation_config.level > 0
-                and self.compilation_config.backend != "eager"
-            ):
+            if self.compilation_config.backend == "inductor":
                 self.compilation_config.custom_ops.append("none")
             else:
                 self.compilation_config.custom_ops.append("all")
