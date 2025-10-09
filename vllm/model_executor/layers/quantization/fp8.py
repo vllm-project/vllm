@@ -741,6 +741,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
+        self.rocm_aiter_moe_enabled = False
+
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (

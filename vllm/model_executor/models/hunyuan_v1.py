@@ -44,7 +44,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -415,19 +415,6 @@ class HunYuanSparseMoeBlock(nn.Module):
             self.physical_expert_start + self.n_local_physical_experts
         )
 
-        self.experts = FusedMoE(
-            num_experts=self.n_routed_experts,
-            top_k=top_k,
-            hidden_size=config.hidden_size,
-            intermediate_size=intermediate_size,
-            reduce_results=False,
-            renormalize=top_k > 1,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
-            enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.n_redundant_experts,
-        )
-
         self.gate = ReplicatedLinear(
             config.hidden_size,
             config.num_experts,
@@ -455,22 +442,34 @@ class HunYuanSparseMoeBlock(nn.Module):
         else:
             self.shared_mlp = None
 
+        self.experts = SharedFusedMoE(
+            shared_experts=self.shared_mlp,
+            num_experts=self.n_routed_experts,
+            top_k=top_k,
+            hidden_size=config.hidden_size,
+            intermediate_size=intermediate_size,
+            reduce_results=False,
+            renormalize=top_k > 1,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
+        )
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
-        shared_output = None
-        if self.shared_mlp is not None:
-            shared_output = self.shared_mlp(hidden_states)
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-        if shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
+        if self.shared_mlp is not None:
+            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
+
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
@@ -724,7 +723,7 @@ class HunYuanModel(nn.Module):
         if _is_moe(self.config):
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
-            return FusedMoE.make_expert_params_mapping(
+            return SharedFusedMoE.make_expert_params_mapping(
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="up_proj",
@@ -1008,7 +1007,7 @@ class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
         # Set MoE hyperparameters
         self.expert_weights = []
         self.num_expert_groups = 1
-        self.moe_layers: list[FusedMoE] = []
+        self.moe_layers: list[SharedFusedMoE] = []
         example_layer = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
