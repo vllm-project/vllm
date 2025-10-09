@@ -486,7 +486,7 @@ async def merge_async_iterators(
 
     loop = asyncio.get_running_loop()
 
-    awaits = {loop.create_task(anext(pair[1])): pair for pair in enumerate(iterators)}
+    awaits = {loop.create_task(anext(it)): (i, it) for i, it in enumerate(iterators)}
     try:
         while awaits:
             done, _ = await asyncio.wait(awaits.keys(), return_when=FIRST_COMPLETED)
