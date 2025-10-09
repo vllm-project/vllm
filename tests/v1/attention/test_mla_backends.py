@@ -353,6 +353,8 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
        simulated paged KV cache.
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
     """
+    from vllm.v1.attention.backends.mla.common import QueryLenSupport
+
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")
     spec_decode_backends = {_Backend.FLASH_ATTN_MLA, _Backend.FLASHMLA}
@@ -459,16 +461,12 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         for backend_idx, backend in enumerate(BACKENDS_TO_TEST):
             builder_cls, _ = try_get_attention_backend(backend)
             if is_spec_decode_test:
-                from vllm.v1.attention.backends.mla.common import QueryLenSupport
-
                 query_len_support = getattr(
                     builder_cls, "query_len_support", QueryLenSupport.SINGLE_ONLY
                 )
                 supports_spec = query_len_support != QueryLenSupport.SINGLE_ONLY
                 is_decode.append(supports_spec)
             else:
-                from vllm.v1.attention.backends.mla.common import QueryLenSupport
-
                 threshold = getattr(builder_cls, "reorder_batch_threshold", None)
                 query_len_support = getattr(
                     builder_cls, "query_len_support", QueryLenSupport.SINGLE_ONLY
