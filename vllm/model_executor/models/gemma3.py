@@ -44,7 +44,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from ...attention.layers.encoder_only_attention import EncoderOnlyAttention
@@ -373,6 +372,7 @@ class Gemma3Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
             prefix=f"{prefix}.embed_tokens",
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -443,19 +443,14 @@ class Gemma3Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            # Apply GGUF-specific RMSNorm weight correction for Gemma3
-            # This must happen BEFORE any transformations (transpose, etc.)
-            # GemmaRMSNorm computes: output = x * (1 + weight)
-            # GGUF stores full weight values (for standard x * weight)
-            # but vLLM's GemmaRMSNorm expects (weight - 1) since it adds 1
-            # during the forward pass.
+            # Revert +1 during llama.cpp conversion
+            # see: https://github.com/ggml-org/llama.cpp/blob/be7c3034108473beda214fd1d7c98fd6a7a3bdf5/convert_hf_to_gguf.py#L3397-L3400
             if (
-                self.quant_config is not None
+                self.quant_config
                 and self.quant_config.get_name() == "gguf"
-                and "norm" in name
-                and len(loaded_weight.shape) == 1
+                and name.endswith("norm.weight")
             ):
-                loaded_weight = loaded_weight - 1.0
+                loaded_weight -= 1
 
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
@@ -500,20 +495,6 @@ class Gemma3Model(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                # Skip GGUF qweight_type metadata for layers that don't have it
-                # (e.g., embedding layers). These are handled by GGUF
-                # quantization layers.
-                if name.endswith(".qweight_type") and name not in params_dict:
-                    continue
-
-                # Handle GGUF qweight for embedding and other non-merged layers
-                # GGUF uses .qweight for quantized weights, but some layers
-                # (like VocabParallelEmbedding) expect .weight
-                if name.endswith(".qweight") and name not in params_dict:
-                    # Try to load as regular weight instead
-                    name = name.replace(".qweight", ".weight")
-                    if name not in params_dict:
-                        continue
 
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
@@ -549,8 +530,6 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         del lora_config  # Unused.
         super().__init__()
         self.config = config
-        # Store model config for quantization access
-        self.model_config = vllm_config.model_config
         # currently all existing Gemma models have `tie_word_embeddings` enabled
         assert config.tie_word_embeddings
         self.quant_config = quant_config
@@ -583,11 +562,8 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(
-            self.model.embed_tokens, hidden_states, sampling_metadata
-        )
+        logits = self.logits_processor(self.model.embed_tokens, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
