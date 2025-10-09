@@ -340,17 +340,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
     """
     batch_spec = BATCH_SPECS[batch_spec_name]
-
-    # First create config with a default to get the actual block_size
-    # (some backends override it)
-    temp_config = create_vllm_config(
-        model_name=model,
-        max_model_len=max(batch_spec.seq_lens),
-        num_gpu_blocks=1000,  # Temporary value
-    )
-    block_size = temp_config.cache_config.block_size
-
-    # Now calculate the actual required blocks based on the block_size
+    block_size = 16
     required_blocks = sum(
         (seq_len + block_size - 1) // block_size for seq_len in batch_spec.seq_lens
     )
@@ -361,6 +351,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         model_name=model,
         max_model_len=max(batch_spec.seq_lens),
         num_gpu_blocks=num_gpu_blocks,
+        block_size=block_size,
     )
     device = torch.device("cuda:0")
 
