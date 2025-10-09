@@ -106,7 +106,7 @@ class NoOpEliminationPass(VllmInductorPass):
 
     # ---------------------- Shape comparison helpers ----------------------
     def dims_equivalent(
-        self, dim: Union[int, SymInt, torch.fx.Node], i_dim: Union[int, SymInt]
+        self, dim: Union[int, SymInt], i_dim: Union[int, SymInt]
     ) -> bool:
         """
         This function checks if two dimensions are equivalent.
@@ -128,14 +128,10 @@ class NoOpEliminationPass(VllmInductorPass):
         # Case 2
         if isinstance(i_dim, SymInt) and isinstance(dim, SymInt):
             return dim == i_dim
-        if isinstance(dim, torch.fx.Node) and isinstance(i_dim, SymInt):
-            return isinstance(dim.meta["val"], SymInt) and dim.meta["val"] == i_dim
         return False
 
     def all_dims_equivalent(
-        self,
-        dims: Iterable[Union[int, SymInt, torch.fx.Node]],
-        i_dims: Iterable[Union[int, SymInt]],
+        self, dims: Iterable[Union[int, SymInt]], i_dims: Iterable[Union[int, SymInt]]
     ) -> bool:
         dims_ = list(dims)
         i_dims_ = list(i_dims)
