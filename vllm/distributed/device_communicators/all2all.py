@@ -482,7 +482,6 @@ class MoriAll2AllManager(All2AllManagerBase):
         super().__init__(cpu_group)
         self.handle_cache = Cache()
         self.config = None
-        self._op_handles = {}  # Cache for EpDispatchCombineOp instances
         self._shmem_initialized = False
         # Delay mori shmem initialization until first use
         logger.debug("[rank %s] MoriAll2AllManager created", self.rank)
@@ -555,19 +554,11 @@ class MoriAll2AllManager(All2AllManagerBase):
         scale_dim: int,
         scale_type_size: int,
         data_type: torch.dtype = torch.bfloat16,
-        quant_dtype: torch.dtype = None,
+        quant_dtype: Optional[torch.dtype] = None,
     ):
         """Create mori EpDispatchCombineConfig"""
         import mori.ops.dispatch_combine as mori_ops
         from mori.ops.dispatch_combine import EpDispatchCombineKernelType
-
-        # Determine data type size
-        dtype_to_size = {
-            torch.float32: 4,
-            torch.bfloat16: 2,
-            torch.float16: 2,
-        }
-        max_token_type_size = dtype_to_size.get(data_type, 2)
 
         config = mori_ops.EpDispatchCombineConfig(
             data_type=data_type if quant_dtype is None else quant_dtype,
@@ -580,7 +571,7 @@ class MoriAll2AllManager(All2AllManagerBase):
             # Performance tuning parameters
             # warp_num_per_block=8,
             # block_num=80,
-            max_token_type_size=max_token_type_size,
+            max_token_type_size=data_type.itemsize,
             # Quantization support
             scale_dim=scale_dim,
             scale_type_size=scale_type_size,
@@ -608,70 +599,41 @@ class MoriAll2AllManager(All2AllManagerBase):
         # Ensure shmem is initialized before creating handles
         self._ensure_shmem_initialized()
 
-        import mori.ops.dispatch_combine as mori_ops
+        def create_mori_handle(
+            max_num_tokens: int,
+            num_local_experts: int,
+            experts_per_token: int,
+            hidden_dim: int,
+            scale_dim: int,
+            scale_type_size: int,
+            data_type: torch.dtype = torch.bfloat16,
+            quant_dtype: Optional[torch.dtype] = None,
+        ):
+            import mori
 
-        # Extract parameters
-        max_num_tokens = kwargs.get("max_num_tokens")
-        num_local_experts = kwargs.get("num_local_experts")
-        experts_per_token = kwargs.get("experts_per_token")
-        hidden_dim = kwargs.get("hidden_dim")
-        data_type = kwargs.get("data_type", torch.bfloat16)
-        scale_dim = kwargs.get("scale_dim")
-        scale_type_size = kwargs.get("scale_type_size")
-
-        # Validate required parameters
-        if any(
-            param is None
-            for param in [
+            config = self._make_mori_config(
+                max_num_tokens=max_num_tokens,
+                num_local_experts=num_local_experts,
+                experts_per_token=experts_per_token,
+                hidden_dim=hidden_dim,
+                scale_dim=scale_dim,
+                scale_type_size=scale_type_size,
+                data_type=data_type,
+                quant_dtype=quant_dtype,
+            )
+            op = mori.ops.EpDispatchCombineOp(config)
+            logger.debug(
+                "[rank %s] Created mori handle with config: tokens=%d, experts=%d,"
+                " topk=%d, hidden_dim=%d",
+                self.dp_rank,
                 max_num_tokens,
                 num_local_experts,
                 experts_per_token,
                 hidden_dim,
-            ]
-        ):
-            raise ValueError("Require more parameters for mori handle init")
+            )
+            return op
 
-        # Create cache key
-        cache_key = (
-            max_num_tokens,
-            num_local_experts,
-            experts_per_token,
-            hidden_dim,
-            data_type,
-        )
-
-        # Check cache first
-        if cache_key in self._op_handles:
-            return self._op_handles[cache_key]
-
-        # Create new mori configuration and operation
-        config = self._make_mori_config(
-            max_num_tokens=max_num_tokens,
-            num_local_experts=num_local_experts,
-            experts_per_token=experts_per_token,
-            hidden_dim=hidden_dim,
-            data_type=data_type,
-            scale_dim=scale_dim,
-            scale_type_size=scale_type_size,
-        )
-
-        # Create operation handle
-        op = mori_ops.EpDispatchCombineOp(config)
-
-        # Cache the handle
-        self._op_handles[cache_key] = op
-
-        logger.debug(
-            "[rank %s] Created mori handle with config: tokens=%d, experts=%d,"
-            " topk=%d, hidden_dim=%d",
-            self.dp_rank,
-            max_num_tokens,
-            num_local_experts,
-            experts_per_token,
-            hidden_dim,
-        )
-
-        return op
+        return self.handle_cache.get_or_create(kwargs, create_mori_handle)
 
     def dispatch(
         self,

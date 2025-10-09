@@ -60,8 +60,6 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
@@ -73,12 +71,10 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         Aiter kernels manage memory internally, so minimal workspace is needed.
         """
-        # Return minimal shapes since Aiter handles memory internally
+        workspace1 = (M, K)
         workspace2 = (0,)  # No intermediate workspace needed
-        output_shape = aq.shape
-        workspace13 = output_shape
-        workspace_dtype = a.dtype
-        return (workspace13, workspace2, output_shape)
+        output_shape = (M, K)
+        return (workspace1, workspace2, output_shape)
 
     def apply(
         self,
