@@ -517,10 +517,6 @@ class MoriAll2AllManager(All2AllManagerBase):
 
                 import torch._C._distributed_c10d as c10d
 
-                # Try to unregister first in case it exists
-                with contextlib.suppress(RuntimeError):
-                    c10d._unregister_process_group(group_name)
-
                 # Register the current process group
                 c10d._register_process_group(group_name, current_group)
                 logger.debug(

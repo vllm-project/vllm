@@ -1001,13 +1001,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         assert self.moe_quant_config is not None
 
-        if self.moe.use_mori_kernels and is_rocm_aiter_moe_enabled():
-            logger.debug("AiterExperts for Mori integration %s", self.moe)
-            return AiterExperts(
-                max_num_tokens=self.moe.max_num_tokens,
-                quant_config=self.moe_quant_config,
-            )
-        elif (
+        if (
             prepare_finalize.activation_format
             == FusedMoEActivationFormat.BatchedExperts
         ):
@@ -1026,6 +1020,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 num_dispatchers=prepare_finalize.num_dispatchers(),
                 quant_config=self.moe_quant_config,
                 allow_deep_gemm=self.allow_deep_gemm,
+            )
+        elif self.moe.use_mori_kernels and is_rocm_aiter_moe_enabled():
+            logger.debug("AiterExperts for Mori integration %s", self.moe)
+            return AiterExperts(
+                max_num_tokens=self.moe.max_num_tokens,
+                quant_config=self.moe_quant_config,
             )
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             experts = select_cutlass_fp8_gemm_impl(
@@ -1179,26 +1179,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # can override fused_experts or cutlass but not rocm or marlin.
         #
         topk_weights, topk_ids, zero_expert_result = select_result
-        if self.moe.use_mori_kernels and self.fused_experts:
-            common_kwargs = dict(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=False,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
-            return self.fused_experts(**common_kwargs)
-        elif self.rocm_aiter_moe_enabled:
+        if self.rocm_aiter_moe_enabled and self.fused_experts is None:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
                 rocm_aiter_fused_experts,
             )
 
-            assert self.fused_experts is None
             result = rocm_aiter_fused_experts(
                 x,
                 layer.w13_weight,
@@ -1237,7 +1222,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                inplace=True,
+                inplace=False if self.moe.use_mori_kernels else True,
                 activation=activation,
                 global_num_experts=global_num_experts,
                 apply_router_weight_on_input=apply_router_weight_on_input,
