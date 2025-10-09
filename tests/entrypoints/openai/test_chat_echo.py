@@ -107,6 +107,7 @@ async def test_top_logprobs(client: openai.AsyncOpenAI):
     completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
+        max_tokens=1,
         extra_body={
             "top_logprobs": -1,
             "logprobs": "true",
@@ -115,3 +116,4 @@ async def test_top_logprobs(client: openai.AsyncOpenAI):
     assert completion.choices[0].logprobs is not None
     assert completion.choices[0].logprobs.content is not None
     assert len(completion.choices[0].logprobs.content) > 0
+    assert len(completion.choices[0].logprobs.content[0].top_logprobs) > 0
