@@ -310,7 +310,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
         is_float_type = (
             weight_quant.type == QuantizationType.FLOAT
-            and input_quant.type == QuantizationType.FLOAT.value
+            and input_quant.type == QuantizationType.FLOAT
         )
         is_4_bits = weight_quant.num_bits == 4 and input_quant.num_bits == 4
 
