@@ -8,6 +8,7 @@ import os
 import sys
 import threading
 import time
+from contextlib import suppress
 from types import TracebackType
 from typing import TextIO
 
@@ -74,7 +75,7 @@ def _write_log_entry(name: str, elapsed_us: int) -> None:
             _log_file_cache[_LOG_PATH] = log_file
             atexit.register(log_file.close)
 
-        log_file.write(log_line)
+        log_file.write(log_line)  # Ensure data is written immediately
 
 
 class LiteScope:
@@ -104,6 +105,33 @@ class LiteScope:
             elapsed_us = elapsed_ns // 1000
             _write_log_entry(self._name, elapsed_us)
         return False
+
+
+def clear_profiler_log() -> None:
+    """Clear the profiler log file to start fresh for a new benchmark run.
+
+    This function truncates the existing log file (if any) and removes any
+    cached file handles to ensure a clean state. This is typically called at
+    the beginning of benchmark runs to avoid accumulating data from previous
+    runs.
+    """
+    if not _LOG_PATH:
+        return
+
+    with _THREAD_LOCK:
+        # Close and remove any existing cached file handle
+        if _LOG_PATH in _log_file_cache:
+            with suppress(OSError):
+                _log_file_cache[_LOG_PATH].close()
+            del _log_file_cache[_LOG_PATH]
+
+        # Truncate the log file by opening in write mode
+        with suppress(OSError):
+            directory = os.path.dirname(_LOG_PATH)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(_LOG_PATH, 'w'):
+                pass
 
 
 def maybe_emit_lite_profiler_report() -> None:

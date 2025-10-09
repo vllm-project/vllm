@@ -31,7 +31,8 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import merge_async_iterators
-from vllm.utils.lite_profiler import maybe_emit_lite_profiler_report
+from vllm.utils.lite_profiler import (clear_profiler_log,
+                                      maybe_emit_lite_profiler_report)
 
 
 def run_vllm(
@@ -633,6 +634,10 @@ def main(args: argparse.Namespace):
     if args.seed is None:
         args.seed = 0
     random.seed(args.seed)
+
+    # Clear lite-profiler log at the beginning of benchmark run to start fresh
+    clear_profiler_log()
+
     # Sample the requests.
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code)

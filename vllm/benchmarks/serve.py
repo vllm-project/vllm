@@ -45,7 +45,8 @@ from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
                                        write_to_json)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils.lite_profiler import maybe_emit_lite_profiler_report
+from vllm.utils.lite_profiler import (clear_profiler_log,
+                                      maybe_emit_lite_profiler_report)
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -1145,6 +1146,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
+
+    # Clear lite-profiler log at the beginning of benchmark run to start fresh
+    clear_profiler_log()
 
     # Validate ramp-up arguments
     if args.ramp_up_strategy is not None:
