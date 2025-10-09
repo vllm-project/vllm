@@ -15,7 +15,6 @@ from fastapi import Request
 from openai_harmony import Message as OpenAIMessage
 from pydantic import TypeAdapter
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -81,7 +80,6 @@ class OpenAIServingChat(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         response_role: str,
         *,
@@ -101,7 +99,6 @@ class OpenAIServingChat(OpenAIServing):
     ) -> None:
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
@@ -138,7 +135,7 @@ class OpenAIServingChat(OpenAIServing):
         self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
         if self.enable_auto_tools:
             try:
-                if tool_parser == "pythonic" and model_config.model.startswith(
+                if tool_parser == "pythonic" and self.model_config.model.startswith(
                     "meta-llama/Llama-3.2"
                 ):
                     logger.warning(
@@ -169,7 +166,7 @@ class OpenAIServingChat(OpenAIServing):
         else:
             self.tool_call_id_type = "random"
 
-        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
+        self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
                 self.default_sampling_params["stop_token_ids"] = []
@@ -338,7 +335,7 @@ class OpenAIServingChat(OpenAIServing):
                 )
 
                 if isinstance(sampling_params, BeamSearchParams):
-                    generator = self.engine_client.beam_search(
+                    generator = self.beam_search(
                         prompt=engine_prompt,
                         request_id=request_id,
                         params=sampling_params,

@@ -5,7 +5,6 @@ from typing import Optional, Union
 
 from fastapi import Request
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
@@ -34,7 +33,6 @@ class OpenAIServingTranscription(OpenAISpeechToText):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -43,7 +41,6 @@ class OpenAIServingTranscription(OpenAISpeechToText):
     ):
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
@@ -95,7 +92,6 @@ class OpenAIServingTranslation(OpenAISpeechToText):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -104,7 +100,6 @@ class OpenAIServingTranslation(OpenAISpeechToText):
     ):
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,

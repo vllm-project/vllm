@@ -12,7 +12,6 @@ import numpy as np
 from fastapi import Request
 
 import vllm.envs as envs
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
@@ -53,7 +52,6 @@ class OpenAISpeechToText(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -63,7 +61,6 @@ class OpenAISpeechToText(OpenAIServing):
     ):
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
@@ -74,7 +71,7 @@ class OpenAISpeechToText(OpenAIServing):
         self.task_type = task_type
 
         self.asr_config = self.model_cls.get_speech_to_text_config(
-            model_config, task_type
+            self.model_config, task_type
         )
 
         self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
