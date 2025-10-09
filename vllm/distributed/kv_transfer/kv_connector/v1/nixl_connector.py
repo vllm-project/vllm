@@ -60,29 +60,14 @@ logger = init_logger(__name__)
 # Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
 try:
     from nixl._api import nixl_agent as NixlWrapper
-    from nixl._bindings import (
-        nixlCancelledError,
-        nixlRemoteDisconnectError,
-        nixlUnknownError,
-        nixlXferTelemetry,
-    )
+    from nixl._bindings import nixlXferTelemetry
 
     logger.info("NIXL is available")
-
 except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
     nixlXferTelemetry = None
-    nixlRemoteDisconnectError = None
-    nixlUnknownError = None
-    nixlCancelledError = None
 
-nixlExceptions = (
-    RuntimeError,
-    nixlRemoteDisconnectError,
-    nixlUnknownError,
-    nixlCancelledError,
-)
 
 try:
     from nixl._api import nixl_agent_config
@@ -637,6 +622,8 @@ class NixlConnectorWorker:
 
         # invalid blocks from failed NIXL operations
         self._invalid_block_ids: set[int] = set()
+        # requests that skipped transfer (failures or prefix cache hits)
+        self._skipped_transfer: set[ReqId] = set()
 
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
@@ -834,7 +821,7 @@ class NixlConnectorWorker:
                 )
                 if req_meta := self._recving_metadata.get(req_id):
                     self._invalid_block_ids.update(req_meta.local_block_ids)
-                self._recving_transfers[req_id] = []
+                self._skipped_transfer.add(req_id)
 
         fut.add_done_callback(request_ready)
 
@@ -1242,6 +1229,10 @@ class NixlConnectorWorker:
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
+        # add requests that skipped transfer to done_recving
+        done_recving.update(self._skipped_transfer)
+        self._skipped_transfer.clear()
+
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
@@ -1445,7 +1436,7 @@ class NixlConnectorWorker:
             agent_name = self._remote_agents[dst_engine_id][remote_rank]
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
-            except nixlExceptions:
+            except Exception:
                 logger.exception(
                     "NIXL send_notif failed for request %s: "
                     "P worker blocks will be freed after timeout. "
@@ -1453,7 +1444,6 @@ class NixlConnectorWorker:
                     request_id,
                 )
                 self.xfer_stats.record_failed_notification()
-            self._recving_transfers[request_id] = []
             return
 
         # Partial prefix cache hit: just read uncomputed blocks.
@@ -1531,7 +1521,7 @@ class NixlConnectorWorker:
 
             # Use handle to check completion in future step().
             self._recving_transfers[request_id].append((handle, time.perf_counter()))
-        except nixlExceptions:
+        except Exception:
             logger.exception(
                 "NIXL transfer setup/initiation failed for request %s. "
                 "Marking blocks as invalid.",
@@ -1543,7 +1533,7 @@ class NixlConnectorWorker:
             self.xfer_stats.record_failed_transfer()
             if handle is not None:
                 self.nixl_wrapper.release_xfer_handle(handle)
-            self._recving_transfers[request_id] = []
+            self._skipped_transfer.add(request_id)
 
     def _get_block_descs_ids(
         self, engine_id: str, block_ids: list[int], layer_idx: int | None = None
@@ -1608,9 +1598,9 @@ class NixlConnectorWorker:
         This is called by the scheduler to identify blocks that need
         to be retried after a NIXL transfer failure.
         """
-        invalid_blocks = self._invalid_block_ids
+        result = self._invalid_block_ids
         self._invalid_block_ids = set()
-        return invalid_blocks
+        return result
 
     def shutdown(self):
         """Shutdown the connector worker."""
