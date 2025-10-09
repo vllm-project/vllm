@@ -11,6 +11,7 @@ from torch import nn
 from transformers.activations import ACT2FN
 
 from vllm.attention import Attention, AttentionBackend, AttentionMetadata
+from vllm.attention.selector import get_mamba_attn_backend
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -219,9 +220,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         return "linear_attention"
 
     def get_attn_backend(self) -> type["AttentionBackend"]:
-        from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
-
-        return GDNAttentionBackend
+        return self.mamba_attn_backend
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
@@ -363,6 +362,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+        self.mamba_attn_backend = get_mamba_attn_backend(
+            self.mamba_type, "vllm.v1.attention.backends.gdn_attn.GDNAttentionBackend"
+        )
 
     def fix_query_key_value_ordering(
         self,

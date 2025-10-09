@@ -228,6 +228,32 @@ class Platform:
         return ""
 
     @classmethod
+    def get_mamba_attn_backend_cls(
+        cls,
+        mamba_type: str = "",
+        selected_backend: Optional[str] = None,
+    ) -> str:
+        """Get mamba attention backend class of a device."""
+
+        # Get selected_backend for specific model, e.g., GDNAttentionBackend
+        # for Qwen3-Next.
+        if selected_backend is not None:
+            return selected_backend
+
+        # Get default mamba_attn_backend according to mamba_type.
+        mamba_type_to_backend_map = {
+            "linear_attention": "vllm.v1.attention.backends.linear_attn.LinearAttentionBackend",  # noqa
+            "mamba1": "vllm.v1.attention.backends.mamba1_attn.Mamba1AttentionBackend",  # noqa
+            "mamba2": "vllm.v1.attention.backends.mamba2_attn.Mamba2AttentionBackend",  # noqa
+            "short_conv": "vllm.v1.attention.backends.short_conv_attn.ShortConvAttentionBackend",  # noqa
+        }
+        if mamba_type not in mamba_type_to_backend_map:
+            raise ValueError(
+                f"Invalid mamba type ({mamba_type}) for {cls.device_name}."
+            )
+        return mamba_type_to_backend_map[mamba_type]
+
+    @classmethod
     def get_device_capability(
         cls,
         device_id: int = 0,
