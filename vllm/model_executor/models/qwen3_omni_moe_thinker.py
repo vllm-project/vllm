@@ -1209,13 +1209,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
-        if is_multimodal is None:
-            raise ValueError(
-                "`get_input_embeddings` now requires `is_multimodal` arg, "
-                "please update your model runner according to "
-                "https://github.com/vllm-project/vllm/pull/16229."
-            )
-
         deepstack_input_embeds = None
         # TODO (ywang96): support overlapping modalitiy embeddings so that
         # `use_audio_in_video` will work on V1.
