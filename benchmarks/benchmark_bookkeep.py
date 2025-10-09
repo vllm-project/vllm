@@ -25,8 +25,10 @@ def update_one_by_one(
 ) -> None:
     for i in range(len(update_values)):
         if update_tags[i]:
+            # Access a single value from numpy array
             start_idx = num_tokens_no_spec_np[i]
             end_idx = start_idx + update_values[i]
+            # Update a single value to 2 numpy arrays
             num_tokens_no_spec_np[i] = end_idx
             num_tokens_np[i] = end_idx
 
@@ -37,6 +39,7 @@ def update_by_batch(
     update_tags: list[bool],
     update_values: list[int],
 ) -> None:
+    # Convert numpy array to list once before for loop
     num_tokens_no_spec = num_tokens_no_spec_np.tolist()
     num_tokens_indices_to_update: list[int] = []
     num_tokens_values_to_update: list[int] = []
@@ -46,6 +49,7 @@ def update_by_batch(
             end_idx = start_idx + update_values[i]
             num_tokens_indices_to_update.append(i)
             num_tokens_values_to_update.append(end_idx)
+    # Batch update numpy arrays after for loop
     if num_tokens_indices_to_update:
         num_tokens_no_spec_np[num_tokens_indices_to_update] = (
             num_tokens_values_to_update
