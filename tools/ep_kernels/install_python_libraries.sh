@@ -23,11 +23,31 @@ CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 $PIP_CMD install cmake torch ninja
 
 # fetch nvshmem
-curl -LO https://developer.download.nvidia.com/compute/nvshmem/redist/libnvshmem/linux-x86_64/libnvshmem-linux-x86_64-${NVSHMEM_VER}_cuda12-archive.tar.xz
-tar -xf libnvshmem-linux-x86_64-${NVSHMEM_VER}_cuda12-archive.tar.xz
-mv libnvshmem-linux-x86_64-${NVSHMEM_VER}_cuda12-archive nvshmem
-rm -rf nvshmem/lib/bin
-rm -rf nvshmem/lib/share
+ARCH=$(uname -m)
+case "${ARCH,,}" in
+  x86_64|amd64)
+    NVSHMEM_SUBDIR="linux-x86_64"
+    NVSHMEM_FILE="libnvshmem-linux-x86_64-${NVSHMEM_VER}_cuda12-archive.tar.xz"
+    ;;
+  aarch64|arm64)
+    NVSHMEM_SUBDIR="linux-sbsa"
+    NVSHMEM_FILE="libnvshmem-linux-sbsa-${NVSHMEM_VER}_cuda12-archive.tar.xz"
+    ;;
+  *)
+    echo "Unsupported architecture: ${ARCH}" >&2
+    exit 1
+    ;;
+esac
+
+NVSHMEM_URL="https://developer.download.nvidia.com/compute/nvshmem/redist/libnvshmem/${NVSHMEM_SUBDIR}/${NVSHMEM_FILE}"
+
+pushd "$WORKSPACE"
+echo "Downloading NVSHMEM ${NVSHMEM_VER} for ${NVSHMEM_SUBDIR} ..."
+curl -fSL "${NVSHMEM_URL}" -o "${NVSHMEM_FILE}"
+tar -xf "${NVSHMEM_FILE}"
+mv "${NVSHMEM_FILE%.tar.xz}" nvshmem
+rm -f "${NVSHMEM_FILE}"
+rm -rf nvshmem/lib/bin nvshmem/lib/share
 popd
 
 export CMAKE_PREFIX_PATH=$WORKSPACE/nvshmem/lib/cmake:$CMAKE_PREFIX_PATH
