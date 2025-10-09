@@ -1220,39 +1220,57 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         # TODO (ywang96): support overlapping modalitiy embeddings so that
         # `use_audio_in_video` will work on V1.
         # split the feat dim to obtain multi-scale visual feature
-        if self.visual.deepstack_visual_indexes is not None:
+        has_vision_embeddings = [
+            embeddings.shape[-1] != self.config.text_config.hidden_size
+            for embeddings in multimodal_embeddings
+        ]
+        if self.visual.deepstack_visual_indexes is not None and any(
+            has_vision_embeddings
+        ):
             multiscale_len = len(self.visual.deepstack_visual_indexes)
             multimodal_embeddings_multiscale = []
+            is_vision = torch.zeros_like(is_multimodal)
+            mm_positions = torch.nonzero(is_multimodal, as_tuple=True)[0]
+            mm_position_idx = 0
             for index, embeddings in enumerate(multimodal_embeddings):
+                num_tokens = embeddings.shape[0]
+                current_positions = mm_positions[
+                    mm_position_idx : mm_position_idx + num_tokens
+                ]
+
+                # Vision embeddings
                 if embeddings.shape[-1] != self.config.text_config.hidden_size:
                     visual_dim = embeddings.shape[-1] // (multiscale_len + 1)
-                    main_dim = visual_dim
                     multi_dim = visual_dim * multiscale_len
                     embeddings_main, embeddings_multiscale = torch.split(
-                        embeddings, [main_dim, multi_dim], dim=-1
+                        embeddings, [visual_dim, multi_dim], dim=-1
                     )
                     multimodal_embeddings[index] = embeddings_main
                     multimodal_embeddings_multiscale.append(embeddings_multiscale)
+                    is_vision[current_positions] = True
 
-            # NOTE: This branch should only be triggered for image/video,
-            # but not audio-only inputs
-            if len(multimodal_embeddings_multiscale) > 0:
-                deepstack_input_embeds = inputs_embeds.new_zeros(
-                    inputs_embeds.size(0), multiscale_len * inputs_embeds.size(1)
+                # Audio embeddings
+                else:
+                    is_vision[current_positions] = False
+
+                mm_position_idx += num_tokens
+
+            deepstack_input_embeds = inputs_embeds.new_zeros(
+                inputs_embeds.size(0), multiscale_len * inputs_embeds.size(1)
+            )
+            deepstack_input_embeds = _merge_multimodal_embeddings(
+                inputs_embeds=deepstack_input_embeds,
+                multimodal_embeddings=multimodal_embeddings_multiscale,
+                is_multimodal=is_vision,
+            )
+            deepstack_input_embeds = (
+                deepstack_input_embeds.view(
+                    inputs_embeds.shape[0], multiscale_len, visual_dim
                 )
-                deepstack_input_embeds = _merge_multimodal_embeddings(
-                    inputs_embeds=deepstack_input_embeds,
-                    multimodal_embeddings=multimodal_embeddings_multiscale,
-                    is_multimodal=is_multimodal,
-                )
-                deepstack_input_embeds = (
-                    deepstack_input_embeds.view(
-                        inputs_embeds.shape[0], multiscale_len, visual_dim
-                    )
-                    .permute(1, 0, 2)
-                    .contiguous()
-                )
-                self._set_deepstack_input_embeds(deepstack_input_embeds)
+                .permute(1, 0, 2)
+                .contiguous()
+            )
+            self._set_deepstack_input_embeds(deepstack_input_embeds)
 
         inputs_embeds = _merge_multimodal_embeddings(
             inputs_embeds=inputs_embeds,
