@@ -532,8 +532,9 @@ class Qwen3_VisionTransformer(nn.Module):
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
         hidden_states = hidden_states + pos_embeds
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
+        rotary_pos_emb = rotary_pos_emb.to(hidden_states.device, non_blocking=True)
 
-        grid_thw_tensor = torch.tensor(grid_thw, device=self.device, dtype=torch.int32)
+        grid_thw_tensor = torch.tensor(grid_thw, dtype=torch.int32)
 
         cu_seqlens = torch.repeat_interleave(
             grid_thw_tensor[:, 1] * grid_thw_tensor[:, 2], grid_thw_tensor[:, 0]
@@ -544,8 +545,8 @@ class Qwen3_VisionTransformer(nn.Module):
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         hidden_states = hidden_states.unsqueeze(1)
-        rotary_pos_emb = rotary_pos_emb.to(hidden_states.device, non_blocking=True)
         max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
+        cu_seqlens.to(self.device, non_blocking=True)
 
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
