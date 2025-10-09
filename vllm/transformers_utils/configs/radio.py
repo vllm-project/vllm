@@ -81,11 +81,11 @@ class RadioConfig(PretrainedConfig):
         self.initializer_factor = initializer_factor
         self.hidden_act = hidden_act
         self.max_img_size = max_img_size
-        self.norm_mean = list(norm_mean) if isinstance(norm_mean,
-                                                       (tuple,
-                                                        list)) else norm_mean
-        self.norm_std = list(norm_std) if isinstance(norm_std,
-                                                     (tuple,
-                                                      list)) else norm_std
+        self.norm_mean = (
+            list(norm_mean) if isinstance(norm_mean, (tuple, list)) else norm_mean
+        )
+        self.norm_std = (
+            list(norm_std) if isinstance(norm_std, (tuple, list)) else norm_std
+        )
         self.reg_tokens = reg_tokens
         super().__init__(**kwargs)

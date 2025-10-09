@@ -11,7 +11,7 @@ import regex as re
 logger = logging.getLogger("mkdocs")
 
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
-ROOT_DIR_RELATIVE = '../../../../..'
+ROOT_DIR_RELATIVE = "../../../../.."
 EXAMPLE_DIR = ROOT_DIR / "examples"
 EXAMPLE_DOC_DIR = ROOT_DIR / "docs/examples"
 
@@ -36,7 +36,7 @@ def fix_case(text: str) -> str:
         r"int\d+": lambda x: x.group(0).upper(),  # e.g. int8, int16
     }
     for pattern, repl in subs.items():
-        text = re.sub(rf'\b{pattern}\b', repl, text, flags=re.IGNORECASE)
+        text = re.sub(rf"\b{pattern}\b", repl, text, flags=re.IGNORECASE)
     return text
 
 
@@ -58,7 +58,8 @@ class Example:
         determine_other_files() -> list[Path]: Determines other files in the directory excluding the main file.
         determine_title() -> str: Determines the title of the document.
         generate() -> str: Generates the documentation content.
-    """ # noqa: E501
+    """  # noqa: E501
+
     path: Path
     category: str = None
     main_file: Path = field(init=False)
@@ -84,9 +85,8 @@ class Example:
             Markdown file found in the directory.
         Raises:
             IndexError: If no Markdown files are found in the directory.
-        """ # noqa: E501
-        return self.path if self.path.is_file() else list(
-            self.path.glob("*.md")).pop()
+        """  # noqa: E501
+        return self.path if self.path.is_file() else list(self.path.glob("*.md")).pop()
 
     def determine_other_files(self) -> list[Path]:
         """
@@ -98,7 +98,7 @@ class Example:
 
         Returns:
             list[Path]: A list of Path objects representing the other files in the directory.
-        """ # noqa: E501
+        """  # noqa: E501
         if self.path.is_file():
             return []
         is_other_file = lambda file: file.is_file() and file != self.main_file
@@ -109,25 +109,25 @@ class Example:
             # Specify encoding for building on Windows
             with open(self.main_file, encoding="utf-8") as f:
                 first_line = f.readline().strip()
-            match = re.match(r'^#\s+(?P<title>.+)$', first_line)
+            match = re.match(r"^#\s+(?P<title>.+)$", first_line)
             if match:
-                return match.group('title')
+                return match.group("title")
         return fix_case(self.path.stem.replace("_", " ").title())
 
     def fix_relative_links(self, content: str) -> str:
         """
         Fix relative links in markdown content by converting them to gh-file
         format.
-        
+
         Args:
             content (str): The markdown content to process
-            
+
         Returns:
             str: Content with relative links converted to gh-file format
         """
         # Regex to match markdown links [text](relative_path)
         # This matches links that don't start with http, https, ftp, or #
-        link_pattern = r'\[([^\]]*)\]\((?!(?:https?|ftp)://|#)([^)]+)\)'
+        link_pattern = r"\[([^\]]*)\]\((?!(?:https?|ftp)://|#)([^)]+)\)"
 
         def replace_link(match):
             link_text = match.group(1)
@@ -137,7 +137,7 @@ class Example:
             gh_file = (self.main_file.parent / relative_path).resolve()
             gh_file = gh_file.relative_to(ROOT_DIR)
 
-            return f'[{link_text}](gh-file:{gh_file})'
+            return f"[{link_text}](gh-file:{gh_file})"
 
         return re.sub(link_pattern, replace_link, content)
 
@@ -150,9 +150,11 @@ class Example:
         code_fence = "``````"
 
         if self.is_code:
-            content += (f"{code_fence}{self.main_file.suffix[1:]}\n"
-                        f'--8<-- "{self.main_file}"\n'
-                        f"{code_fence}\n")
+            content += (
+                f"{code_fence}{self.main_file.suffix[1:]}\n"
+                f'--8<-- "{self.main_file}"\n'
+                f"{code_fence}\n"
+            )
         else:
             with open(self.main_file) as f:
                 # Skip the title from md snippets as it's been included above

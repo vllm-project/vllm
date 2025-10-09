@@ -12,12 +12,13 @@ from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
 class EAGLEConfig(PretrainedConfig):
     model_type = "eagle"
 
-    def __init__(self,
-                 model: Union[PretrainedConfig, dict, None] = None,
-                 truncated_vocab_size: Optional[int] = None,
-                 method: Optional[str] = 'eagle',
-                 **kwargs):
-
+    def __init__(
+        self,
+        model: Union[PretrainedConfig, dict, None] = None,
+        truncated_vocab_size: Optional[int] = None,
+        method: Optional[str] = "eagle",
+        **kwargs,
+    ):
         model_config: Union[PretrainedConfig, DeepseekV2Config, None]
         if isinstance(model, dict):
             archs = model.get("architectures", [])
@@ -31,8 +32,7 @@ class EAGLEConfig(PretrainedConfig):
             model_config = model
 
         for k, v in kwargs.items():
-            if k != "architectures" and k != "model_type" and hasattr(
-                    model_config, k):
+            if k != "architectures" and k != "model_type" and hasattr(model_config, k):
                 setattr(model_config, k, v)
 
         self.model = model_config
@@ -40,31 +40,39 @@ class EAGLEConfig(PretrainedConfig):
         if self.model is None:
             self.truncated_vocab_size = None
         else:
-            self.truncated_vocab_size = self.model.vocab_size if \
-                truncated_vocab_size is None else truncated_vocab_size
+            self.truncated_vocab_size = (
+                self.model.vocab_size
+                if truncated_vocab_size is None
+                else truncated_vocab_size
+            )
 
         # Eagle model name should follow naming convention of
         # LlamaForCausalLM -> EagleLlamaForCausalLM
         # LlamaForCausalLM -> Eagle3LlamaForCausalLM
         # LlamaForCausalLMEagle3 -> LlamaForCausalLMEagle3
         if method == "eagle":
-            assert self.model is not None, \
+            assert self.model is not None, (
                 "model should not be None when method is eagle"
+            )
             kwargs["architectures"] = [
-                f"Eagle{arch}" if not arch.startswith("Eagle") \
-                    else arch for arch in self.model.architectures
+                f"Eagle{arch}" if not arch.startswith("Eagle") else arch
+                for arch in self.model.architectures
             ]
 
         elif method == "eagle3":
-            assert self.model is not None, \
+            assert self.model is not None, (
                 "model should not be None when method is eagle3"
+            )
             kwargs["architectures"] = [
-                arch if arch.startswith("Eagle3") or arch.endswith("Eagle3")
-                else f"Eagle3{arch}" for arch in self.model.architectures
+                arch
+                if arch.startswith("Eagle3") or arch.endswith("Eagle3")
+                else f"Eagle3{arch}"
+                for arch in self.model.architectures
             ]
         else:
-            raise ValueError(f"Invalid method {method}. "
-                             "Supported methods are eagle and eagle3.")
+            raise ValueError(
+                f"Invalid method {method}. Supported methods are eagle and eagle3."
+            )
 
         super().__init__(**kwargs)
 
@@ -80,5 +88,6 @@ class EAGLEConfig(PretrainedConfig):
         **kwargs,
     ) -> "EAGLEConfig":
         config_dict, kwargs = cls.get_config_dict(
-            pretrained_model_name_or_path, **kwargs)
+            pretrained_model_name_or_path, **kwargs
+        )
         return cls.from_dict(config_dict, **kwargs)
