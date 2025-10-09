@@ -153,7 +153,7 @@ def _silu_mul_fp8_quant_deep_gemm(
         tl.store(y_s_ptr + base_ys_offset + t * stride_ys_t, y_s)
 
 
-def silu_mul_fp8_quant_deep_gemm_cuda(
+def persistent_masked_m_silu_mul_quant(
     y: torch.Tensor,  # (E, T, 2*H)
     tokens_per_expert: torch.Tensor,  # (E,) number of valid tokens per expert
     num_parallel_tokens=16,
@@ -197,7 +197,7 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
     ).to_int()
 
     if cuda_arch >= 80:
-        torch.ops._C.silu_mul_fp8_quant_deep_gemm_cuda(
+        torch.ops._C.persistent_masked_m_silu_mul_quant(
             y, tokens_per_expert, y_q, y_s, use_ue8m0
         )
     else:
@@ -352,7 +352,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             expected_m,
         )
 
-        a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm_cuda(
+        a2q, a2q_scale = persistent_masked_m_silu_mul_quant(
             workspace1, expert_num_tokens
         )
 

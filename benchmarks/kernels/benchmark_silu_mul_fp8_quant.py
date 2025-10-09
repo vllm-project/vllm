@@ -22,7 +22,7 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    silu_mul_fp8_quant_deep_gemm_cuda,
+    persistent_masked_m_silu_mul_quant,
     silu_v1,
 )
 from vllm.platforms import current_platform
@@ -565,7 +565,7 @@ for id, strategy in enumerate(strategies):
 
             # SiLU V2 (CUDA kernel) results
             time_ms_silu_v2, gflops, gbps, perc = benchmark(
-                silu_mul_fp8_quant_deep_gemm_cuda,
+                persistent_masked_m_silu_mul_quant,
                 E,
                 T,
                 H,

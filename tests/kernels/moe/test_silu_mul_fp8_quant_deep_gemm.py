@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    silu_mul_fp8_quant_deep_gemm_cuda,
+    persistent_masked_m_silu_mul_quant,
 )
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
@@ -58,7 +58,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, fp8_type):
     )
 
     # Run the SiLU V2 kernel
-    y_q, y_s = silu_mul_fp8_quant_deep_gemm_cuda(
+    y_q, y_s = persistent_masked_m_silu_mul_quant(
         y, tokens_per_expert, group_size=group_size
     )
 

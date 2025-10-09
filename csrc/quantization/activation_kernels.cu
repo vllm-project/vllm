@@ -901,7 +901,7 @@ void silu_v1_cuda(const at::Tensor& input,   // (E, T, 2*H)
 #endif
 }
 
-void silu_mul_fp8_quant_deep_gemm_cuda(
+void persistent_masked_m_silu_mul_quant(
     const at::Tensor& input,              // (E, T, 2*H)
     const at::Tensor& tokens_per_expert,  // (E)
     at::Tensor& y_q,                      // (E, T, H) [OUT]
