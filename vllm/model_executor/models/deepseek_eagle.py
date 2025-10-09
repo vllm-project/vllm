@@ -14,19 +14,23 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.models.deepseek_v2 import (DeepseekV2DecoderLayer,
-                                                    DeepseekV3ForCausalLM)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
+from vllm.model_executor.models.deepseek_v2 import (
+    DeepseekV2DecoderLayer,
+    DeepseekV3ForCausalLM,
+)
 
 from .utils import AutoWeightsLoader, maybe_prefix
 
 
 @support_torch_compile
 class DeepseekV2Model(nn.Module):
-
     def __init__(
         self,
         *,
@@ -35,8 +39,7 @@ class DeepseekV2Model(nn.Module):
         start_layer_id: int = 0,
     ) -> None:
         super().__init__()
-        self.config = vllm_config. \
-            speculative_config.draft_model_config.hf_config
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
         quant_config = vllm_config.quant_config
         self.vocab_size = self.config.vocab_size
 
@@ -47,12 +50,16 @@ class DeepseekV2Model(nn.Module):
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
-        self.layers = nn.ModuleList([
-            DeepseekV2DecoderLayer(
-                vllm_config,
-                prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
-            ) for i in range(self.config.num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                DeepseekV2DecoderLayer(
+                    vllm_config,
+                    prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                    config=self.config,
+                )
+                for i in range(self.config.num_hidden_layers)
+            ]
+        )
 
         self.fc = nn.Linear(
             self.config.model.hidden_size * 2,
@@ -60,12 +67,12 @@ class DeepseekV2Model(nn.Module):
             bias=False,
         )
 
-        self.enorm = RMSNorm(self.config.hidden_size,
-                             eps=self.config.rms_norm_eps)
-        self.hnorm = RMSNorm(self.config.hidden_size,
-                             eps=self.config.rms_norm_eps)
-        self.norm = RMSNorm(self.config.hidden_size,
-                            eps=self.config.rms_norm_eps)
+        self.enorm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+        self.hnorm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+        self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
     def forward(
         self,
@@ -76,8 +83,8 @@ class DeepseekV2Model(nn.Module):
         input_embeds = self.embed_tokens(input_ids)
 
         inputs = torch.cat(
-            [self.enorm(input_embeds),
-             self.hnorm(hidden_states)], dim=-1)
+            [self.enorm(input_embeds), self.hnorm(hidden_states)], dim=-1
+        )
         hidden_states = self.fc(inputs)
         residual = None
         for layer in self.layers:
@@ -89,8 +96,7 @@ class DeepseekV2Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states, hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -105,7 +111,8 @@ class DeepseekV2Model(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts)
+            num_experts=self.config.n_routed_experts,
+        )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -130,8 +137,9 @@ class DeepseekV2Model(nn.Module):
                 # QKV fusion is optional, fall back to normal
                 # weight loading if it's not enabled
                 # if go with fusion option, then update name
-                if ((param_name == "fused_qkv_a_proj")
-                        and name_mapped not in params_dict):
+                if (
+                    param_name == "fused_qkv_a_proj"
+                ) and name_mapped not in params_dict:
                     continue
                 else:
                     name = name_mapped
@@ -163,8 +171,7 @@ class DeepseekV2Model(nn.Module):
                     break
                 else:
                     # if PP disabled then draft will share embed with target
-                    if get_pp_group().world_size == 1 and \
-                            "embed_tokens." in name:
+                    if get_pp_group().world_size == 1 and "embed_tokens." in name:
                         continue
 
                     # Skip loading extra bias for GPTQ models.
@@ -177,33 +184,40 @@ class DeepseekV2Model(nn.Module):
                         continue
 
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
 
 class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.config = vllm_config. \
-            speculative_config.draft_model_config.hf_config
+        self.config = vllm_config.speculative_config.draft_model_config.hf_config
         quant_config = vllm_config.quant_config
         target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config)
-        self.model = DeepseekV2Model(vllm_config=vllm_config,
-                                     prefix="model",
-                                     start_layer_id=target_layer_num)
+            vllm_config.parallel_config
+        )
+        self.model = DeepseekV2Model(
+            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
+        )
 
-        self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                      self.config.hidden_size,
-                                      quant_config=quant_config)
+        self.lm_head = ParallelLMHead(
+            self.config.vocab_size,
+            self.config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(self.config.vocab_size,
-                                                scale=logit_scale)
+        self.logits_processor = LogitsProcessor(
+            self.config.vocab_size, scale=logit_scale
+        )
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -221,21 +235,19 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        def transform(inputs):
+            name, loaded_weight = inputs
+            if "lm_head" not in name:
+                name = "model." + name
+            return name, loaded_weight
+
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=None,
         )
-
-        model_weights = {}
-        for name, loaded_weight in weights:
-            if "lm_head" not in name:
-                name = "model." + name
-            model_weights[name] = loaded_weight
-        loader.load_weights(model_weights.items())
+        loader.load_weights(map(transform, weights))

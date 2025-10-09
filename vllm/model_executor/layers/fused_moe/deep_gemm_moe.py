@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
 from typing import Optional
 
 import torch
@@ -9,28 +8,30 @@ from tqdm import tqdm
 import vllm.envs as env
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+    fp8_w8a8_moe_quant_config,
+)
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
-    compute_aligned_M, deepgemm_moe_permute, deepgemm_unpermute_and_reduce)
+    compute_aligned_M,
+    deep_gemm_block_shape,
+    deepgemm_moe_permute,
+    deepgemm_unpermute_and_reduce,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP)
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceNoOP)
+    TopKWeightAndReduceNoOP,
+)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8)
+    per_token_group_quant_fp8,
+)
 from vllm.utils import has_deep_gemm, run_once
 from vllm.utils.deep_gemm import m_grouped_fp8_gemm_nt_contiguous
 
 logger = init_logger(__name__)
-
-
-@functools.cache
-def deep_gemm_block_shape() -> list[int]:
-    # Lazy import to avoid CUDA initialization problems.
-    import deep_gemm as dg
-    block = dg.get_m_alignment_for_contiguous_layout()
-    return [block, block]
 
 
 def _valid_deep_gemm_shape(M: int, N: int, K: int) -> bool:
@@ -38,8 +39,9 @@ def _valid_deep_gemm_shape(M: int, N: int, K: int) -> bool:
     return align <= M and N % align == 0 and K % align == 0
 
 
-def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
-                     w2: torch.Tensor) -> bool:
+def _valid_deep_gemm(
+    hidden_states: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor
+) -> bool:
     """
     Check if the given problem size is supported by the DeepGemm grouped
     gemm kernel.  All of M, N, K and the quantization block_shape must be
@@ -78,17 +80,19 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
         )
         return False
 
-    if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):
+    if w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn:
         logger.debug_once(
-            "DeepGemm disabled: invalid weight dtype(s). "
-            "w1.dtype: %s, w2.dtype: %s",
+            "DeepGemm disabled: invalid weight dtype(s). w1.dtype: %s, w2.dtype: %s",
             w1.dtype,
             w2.dtype,
         )
         return False
 
-    if (not hidden_states.is_contiguous() or not w1.is_contiguous()
-            or not w2.is_contiguous()):
+    if (
+        not hidden_states.is_contiguous()
+        or not w1.is_contiguous()
+        or not w2.is_contiguous()
+    ):
         logger.debug_once(
             "DeepGemm disabled: weights or activations not contiguous. "
             "hidden_states.is_contiguous(): %s, w1.is_contiguous(): %s, "
@@ -103,10 +107,13 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
 
 
 @run_once
-def warmup_deepgemm_gg_contiguous_kernels(w1: torch.Tensor, w2: torch.Tensor,
-                                          w1_scale: torch.Tensor,
-                                          w2_scale: torch.Tensor,
-                                          num_topk: int):
+def warmup_deepgemm_gg_contiguous_kernels(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    num_topk: int,
+):
     """
     DeepGemm JITs the grouped-gemm kernels. The JIT'ing happens based on the
     input tensor shapes. In this function, we construct all possible input
@@ -115,8 +122,7 @@ def warmup_deepgemm_gg_contiguous_kernels(w1: torch.Tensor, w2: torch.Tensor,
     call and not during actual model inference.
     """
 
-    assert w1.size(0) == w2.size(0), (
-        "w1 and w2 must have the same number of experts")
+    assert w1.size(0) == w2.size(0), "w1 and w2 must have the same number of experts"
 
     block_m = deep_gemm_block_shape()[0]
     num_experts = w1.size(0)
@@ -124,36 +130,39 @@ def warmup_deepgemm_gg_contiguous_kernels(w1: torch.Tensor, w2: torch.Tensor,
 
     # This is the maximum GroupedGemm M size that we expect to run
     # the grouped_gemm with.
-    MAX_M = compute_aligned_M(env.VLLM_FUSED_MOE_CHUNK_SIZE,
-                              num_topk,
-                              num_experts,
-                              block_m,
-                              expert_tokens_meta=None)
+    MAX_M = compute_aligned_M(
+        env.VLLM_FUSED_MOE_CHUNK_SIZE,
+        num_topk,
+        num_experts,
+        block_m,
+        expert_tokens_meta=None,
+    )
     # Distribute expert-ids evenly.
     MAX_BLOCKS = MAX_M // block_m
-    expert_ids_block = torch.randint(low=0,
-                                     high=num_experts,
-                                     size=(MAX_BLOCKS, ),
-                                     device=device,
-                                     dtype=torch.int32)
+    expert_ids_block = torch.randint(
+        low=0, high=num_experts, size=(MAX_BLOCKS,), device=device, dtype=torch.int32
+    )
     expert_ids = torch.repeat_interleave(expert_ids_block, block_m, dim=0)
 
     def _warmup(w: torch.Tensor, w_scale: torch.Tensor):
-
         _, n, k = w.size()
         a1q = torch.empty((MAX_M, k), device=device).to(torch.float8_e4m3fn)
-        a1q_scales = torch.empty((MAX_M, k // block_m),
-                                 device=device,
-                                 dtype=torch.float32)
+        a1q_scales = torch.empty(
+            (MAX_M, k // block_m), device=device, dtype=torch.float32
+        )
         out = torch.empty((MAX_M, n), device=device, dtype=torch.bfloat16)
 
-        pbar = tqdm(total=MAX_BLOCKS,
-                    desc=f"DeepGemmExperts GEMM warmup (MAX_M={MAX_M})")
+        pbar = tqdm(
+            total=MAX_BLOCKS, desc=f"DeepGemmExperts GEMM warmup (MAX_M={MAX_M})"
+        )
         num_tokens = MAX_M
         while num_tokens > 0:
             m_grouped_fp8_gemm_nt_contiguous(
-                (a1q[:num_tokens], a1q_scales[:num_tokens]), (w, w_scale),
-                out[:num_tokens], expert_ids[:num_tokens])
+                (a1q[:num_tokens], a1q_scales[:num_tokens]),
+                (w, w_scale),
+                out[:num_tokens],
+                expert_ids[:num_tokens],
+            )
             pbar.update(1)
             num_tokens = num_tokens - block_m
 
@@ -162,21 +171,21 @@ def warmup_deepgemm_gg_contiguous_kernels(w1: torch.Tensor, w2: torch.Tensor,
 
 
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
-
-    def __init__(self):
-        super().__init__(
-            FusedMoEQuantConfig(
-                quant_dtype=torch.float8_e4m3fn,
-                per_act_token_quant=False,
-                block_shape=deep_gemm_block_shape(),
-            ))
+    def __init__(self, quant_config: FusedMoEQuantConfig):
+        super().__init__(quant_config)
+        assert quant_config.block_shape == deep_gemm_block_shape()
+        assert quant_config.quant_dtype == torch.float8_e4m3fn
+        assert not quant_config.per_act_token_quant
+        assert not quant_config.per_out_ch_quant
 
     @property
     def activation_formats(
-        self
+        self,
     ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (mk.FusedMoEActivationFormat.Standard,
-                mk.FusedMoEActivationFormat.Standard)
+        return (
+            mk.FusedMoEActivationFormat.Standard,
+            mk.FusedMoEActivationFormat.Standard,
+        )
 
     def supports_chunking(self) -> bool:
         return True
@@ -189,8 +198,6 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
@@ -198,17 +205,18 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         assert self.block_shape is not None
         block_m = self.block_shape[0]
-        M_sum = compute_aligned_M(M, topk, local_num_experts, block_m,
-                                  expert_tokens_meta)
+        M_sum = compute_aligned_M(
+            M, topk, local_num_experts, block_m, expert_tokens_meta
+        )
         assert M_sum % block_m == 0
 
         workspace1 = (M_sum, max(N, K))
         workspace2 = (M_sum, max(N // 2, K))
         output = (M, K)
-        return (workspace1, workspace2, output, a.dtype)
+        return (workspace1, workspace2, output)
 
     def apply(
         self,
@@ -221,10 +229,6 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         workspace13: torch.Tensor,
@@ -232,10 +236,11 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
-        assert self.block_shape is not None
         assert a1q_scale is not None
-        assert w1_scale is not None
-        assert w2_scale is not None
+        assert a2_scale is None
+        assert self.block_shape is not None
+        assert self.w1_scale is not None
+        assert self.w2_scale is not None
 
         a1q = hidden_states
         _, N, K = w1.size()
@@ -246,18 +251,20 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         assert w2.size(1) == K
 
-        M_sum = compute_aligned_M(M=topk_ids.size(0),
-                                  num_topk=topk_ids.size(1),
-                                  local_num_experts=local_num_experts,
-                                  alignment=deep_gemm_block_shape()[0],
-                                  expert_tokens_meta=expert_tokens_meta)
+        M_sum = compute_aligned_M(
+            M=topk_ids.size(0),
+            num_topk=topk_ids.size(1),
+            local_num_experts=local_num_experts,
+            alignment=deep_gemm_block_shape()[0],
+            expert_tokens_meta=expert_tokens_meta,
+        )
 
-        a1q_perm = _resize_cache(workspace2.view(dtype=torch.float8_e4m3fn),
-                                 (M_sum, K))
+        a1q_perm = _resize_cache(workspace2.view(dtype=torch.float8_e4m3fn), (M_sum, K))
         mm1_out = _resize_cache(workspace13, (M_sum, N))
         act_out = _resize_cache(workspace2, (M_sum, N // 2))
-        quant_out = _resize_cache(workspace13.view(dtype=torch.float8_e4m3fn),
-                                  (M_sum, N // 2))
+        quant_out = _resize_cache(
+            workspace13.view(dtype=torch.float8_e4m3fn), (M_sum, N // 2)
+        )
         mm2_out = _resize_cache(workspace2, (M_sum, K))
 
         a1q, a1q_scale, expert_ids, inv_perm = deepgemm_moe_permute(
@@ -267,32 +274,36 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             local_num_experts=local_num_experts,
             expert_map=expert_map,
             expert_tokens_meta=expert_tokens_meta,
-            aq_out=a1q_perm)
+            aq_out=a1q_perm,
+        )
         assert a1q.size(0) == M_sum
 
-        m_grouped_fp8_gemm_nt_contiguous((a1q, a1q_scale), (w1, w1_scale),
-                                         mm1_out, expert_ids)
+        m_grouped_fp8_gemm_nt_contiguous(
+            (a1q, a1q_scale), (w1, self.w1_scale), mm1_out, expert_ids
+        )
 
         self.activation(activation, act_out, mm1_out.view(-1, N))
 
         a2q_scale: Optional[torch.Tensor] = None
-        a2q, a2q_scale = per_token_group_quant_fp8(act_out,
-                                                   self.block_shape[1],
-                                                   column_major_scales=True,
-                                                   out_q=quant_out)
+        a2q, a2q_scale = per_token_group_quant_fp8(
+            act_out, self.block_shape[1], column_major_scales=True, out_q=quant_out
+        )
 
-        m_grouped_fp8_gemm_nt_contiguous((a2q, a2q_scale), (w2, w2_scale),
-                                         mm2_out, expert_ids)
+        m_grouped_fp8_gemm_nt_contiguous(
+            (a2q, a2q_scale), (w2, self.w2_scale), mm2_out, expert_ids
+        )
 
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        deepgemm_unpermute_and_reduce(a=mm2_out,
-                                      topk_ids=topk_ids,
-                                      topk_weights=topk_weights,
-                                      inv_perm=inv_perm,
-                                      expert_map=expert_map,
-                                      output=output)
+        deepgemm_unpermute_and_reduce(
+            a=mm2_out,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            inv_perm=inv_perm,
+            expert_map=expert_map,
+            output=output,
+        )
 
 
 def deep_gemm_moe_fp8(
@@ -348,9 +359,17 @@ def deep_gemm_moe_fp8(
     Returns:
     - torch.Tensor: The bfloat16 output tensor after applying the MoE layer.
     """
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        block_shape=deep_gemm_block_shape(),
+    )
+
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        DeepGemmExperts(),
+        DeepGemmExperts(quant_config),
     )
     return fn(
         hidden_states,
@@ -358,13 +377,9 @@ def deep_gemm_moe_fp8(
         w2,
         topk_weights,
         topk_ids,
-        inplace,
-        activation,
-        global_num_experts,
-        expert_map,
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        a1_scale=a1_scale,
-        a2_scale=a2_scale,
+        inplace=inplace,
+        activation=activation,
+        global_num_experts=global_num_experts,
+        expert_map=expert_map,
         apply_router_weight_on_input=apply_router_weight_on_input,
     )
