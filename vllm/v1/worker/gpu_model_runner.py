@@ -19,7 +19,8 @@ from typing_extensions import TypeAlias
 
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend, MultipleOf
+from vllm.attention.layer import MLAAttention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
@@ -358,6 +359,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
+            kernel_block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
             logitsprocs=build_logitsprocs(
                 self.vllm_config,
@@ -4049,6 +4051,86 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     self.reorder_batch_threshold = reorder_batch_threshold_i
 
+    def _find_compatible_block_sizes(
+        self,
+        kv_manager_block_size: int,
+        backend_cls: type[AttentionBackend],
+        return_all: bool = False,
+    ) -> list[int]:
+        """
+        Find compatible block sizes for a backend.
+
+        Args:
+            kv_manager_block_size: Physical block size of KV cache
+            backend_cls: Attention backend class
+            return_all: Return all compatible sizes if True, max size if False
+
+        Returns:
+            Compatible block size(s) based on return_all parameter
+
+        Raises:
+            ValueError: If no compatible block size found
+        """
+        supported_block_size = backend_cls.get_supported_kernel_block_size()
+        compatible_sizes = []
+
+        for block_size in supported_block_size:
+            if isinstance(block_size, int):
+                if kv_manager_block_size % block_size == 0:
+                    compatible_sizes.append(block_size)
+            elif (
+                isinstance(block_size, MultipleOf)
+                and kv_manager_block_size % block_size.base == 0
+            ):
+                compatible_sizes.append(kv_manager_block_size)
+
+        if not compatible_sizes:
+            raise ValueError(f"No compatible block size for {kv_manager_block_size}")
+
+        return compatible_sizes if return_all else [max(compatible_sizes)]
+
+    def _select_common_block_size(
+        self, kv_manager_block_size: int, attn_groups: list[AttentionGroup]
+    ) -> int:
+        """
+        Select common block size for all backends.
+
+        Args:
+            kv_manager_block_size: Block size of KV cache
+            attn_groups: List of attention groups
+
+        Returns:
+            Block size supported by all backends,
+            prioritizing cache_config.block_size
+
+        Raises:
+            ValueError: If no common block size found
+        """
+        all_backend_supports = []
+
+        for attn_group in attn_groups:
+            compatible_sizes = self._find_compatible_block_sizes(
+                kv_manager_block_size, attn_group.backend, return_all=True
+            )
+            supported_sizes = sorted(list(set(compatible_sizes)), reverse=True)
+            all_backend_supports.append(set(supported_sizes))
+
+        common_supported_sizes = set.intersection(*all_backend_supports)
+
+        if not common_supported_sizes:
+            error_msg = f"No common block size for {kv_manager_block_size}. "
+            for i, attn_group in enumerate(attn_groups):
+                supported = all_backend_supports[i]
+                error_msg += (
+                    f"Backend {attn_group.backend} supports: {sorted(supported)}. "
+                )
+            raise ValueError(error_msg)
+
+        if self.cache_config.block_size in common_supported_sizes:
+            return self.cache_config.block_size
+
+        return max(common_supported_sizes)
+
     def may_reinitialize_input_batch(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Re-initialize the input batch if the block sizes are different from
@@ -4061,8 +4143,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         block_sizes = [
             kv_cache_group.kv_cache_spec.block_size
             for kv_cache_group in kv_cache_config.kv_cache_groups
+            if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec)
         ]
-        if block_sizes != [self.cache_config.block_size]:
+
+        # Generate kernel_block_sizes that matches each block_size
+        kernel_block_sizes = self._prepare_kernel_block_sizes(kv_cache_config)
+
+        if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [
+            self.cache_config.block_size
+        ]:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
@@ -4076,6 +4165,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 pin_memory=self.pin_memory,
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
+                kernel_block_sizes=kernel_block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
                 is_pooling_model=self.is_pooling_model,
@@ -4127,6 +4217,46 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for attn_groups in self.attn_groups:
             yield from attn_groups
 
+    def _prepare_kernel_block_sizes(self, kv_cache_config: KVCacheConfig) -> list[int]:
+        """
+        Generate kernel_block_sizes that matches each block_size.
+
+        For attention backends that support virtual block splitting,
+        use the supported block sizes from the backend.
+        For other backends (like Mamba), use the same block size (no splitting).
+
+        Args:
+            kv_cache_config: The KV cache configuration.
+
+        Returns:
+            list[int]: List of kernel block sizes for each cache group.
+        """
+        kernel_block_sizes = []
+        for kv_cache_group_id, kv_cache_group in enumerate(
+            kv_cache_config.kv_cache_groups
+        ):
+            if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
+                continue
+            elif isinstance(kv_cache_group.kv_cache_spec, AttentionSpec):
+                # This is an attention backend that supports virtual
+                # block splitting. Get the supported block sizes from
+                # all backends in the group.
+                attn_groups = self.attn_groups[kv_cache_group_id]
+                kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
+                selected_kernel_size = self._select_common_block_size(
+                    kv_manager_block_size, attn_groups
+                )
+                kernel_block_sizes.append(selected_kernel_size)
+            elif isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
+                # This is likely Mamba or other non-attention cache,
+                # no splitting.
+                kernel_block_sizes.append(kv_cache_group.kv_cache_spec.block_size)
+            else:
+                raise NotImplementedError(
+                    f"unknown kv cache spec {kv_cache_group.kv_cache_spec}"
+                )
+        return kernel_block_sizes
+
     def _reshape_kv_cache_tensors(
         self,
         kv_cache_config: KVCacheConfig,
@@ -4156,16 +4286,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
+                    kv_manager_block_size = kv_cache_spec.block_size
+                    kernel_size_list = self._find_compatible_block_sizes(
+                        kv_manager_block_size, attn_backend, return_all=False
+                    )
+                    kernel_size = kernel_size_list[0]
+                    num_blocks_per_kv_block = kv_manager_block_size // kernel_size
+                    kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        num_blocks,
-                        kv_cache_spec.block_size,
+                        kernel_num_blocks,
+                        kernel_size,
                         kv_cache_spec.num_kv_heads,
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,
                     )
                     dtype = kv_cache_spec.dtype
                     try:
-                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()  # noqa: E501
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
@@ -4319,10 +4457,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
-        self.may_reinitialize_input_batch(kv_cache_config)
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
+        # Reinitialize need to after initialize_attn_backend
+        self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
         if self.speculative_config and self.speculative_config.use_eagle():
@@ -4388,98 +4527,100 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         use_mla = self.vllm_config.model_config.use_mla
         cache_dtype_str = self.vllm_config.cache_config.cache_dtype
         kv_cache_spec: dict[str, KVCacheSpec] = {}
-        attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         for layer_name, attn_module in attn_layers.items():
-            if (kv_tgt_layer := attn_module.kv_sharing_target_layer_name) is not None:
-                # The layer doesn't need its own KV cache and will use that of
-                # the target layer. We skip creating a KVCacheSpec for it, so
-                # that KV cache management logic will act as this layer does
-                # not exist, and doesn't allocate KV cache for the layer. This
-                # enables the memory saving of cross-layer kv sharing, allowing
-                # a given amount of memory to accommodate longer context lengths
-                # or enable more requests to be processed simultaneously.
-                self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
-                continue
+            if isinstance(attn_module, Attention):
+                if (
+                    kv_tgt_layer := attn_module.kv_sharing_target_layer_name
+                ) is not None:
+                    # The layer doesn't need its own KV cache and will use that of
+                    # the target layer. We skip creating a KVCacheSpec for it, so
+                    # that KV cache management logic will act as this layer does
+                    # not exist, and doesn't allocate KV cache for the layer. This
+                    # enables the memory saving of cross-layer kv sharing, allowing
+                    # a given amount of memory to accommodate longer context lengths
+                    # or enable more requests to be processed simultaneously.
+                    self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
+                    continue
 
-            # TODO(lucas): move the attention specs into the model layers like
-            # the attention backends
-            if attn_module.attn_type == AttentionType.DECODER:
-                if attn_module.sliding_window is not None:
-                    assert not use_mla, "MLA is not supported for slidingwindow"
-                    kv_cache_spec[layer_name] = SlidingWindowSpec(
+                # TODO(lucas): move the attention specs into the model layers like
+                # the attention backends
+                if attn_module.attn_type == AttentionType.DECODER:
+                    if attn_module.sliding_window is not None:
+                        assert not use_mla, "MLA is not supported for slidingwindow"
+                        kv_cache_spec[layer_name] = SlidingWindowSpec(
+                            block_size=block_size,
+                            num_kv_heads=attn_module.num_kv_heads,
+                            head_size=attn_module.head_size,
+                            dtype=self.kv_cache_dtype,
+                            sliding_window=attn_module.sliding_window,
+                        )
+                    elif self.attention_chunk_size is not None and isinstance(
+                        attn_module, ChunkedLocalAttention
+                    ):
+                        kv_cache_spec[layer_name] = ChunkedLocalAttentionSpec(
+                            block_size=block_size,
+                            num_kv_heads=attn_module.num_kv_heads,
+                            head_size=attn_module.head_size,
+                            dtype=self.kv_cache_dtype,
+                            attention_chunk_size=self.attention_chunk_size,
+                        )
+                    else:
+                        kv_cache_spec[layer_name] = FullAttentionSpec(
+                            block_size=block_size,
+                            num_kv_heads=attn_module.num_kv_heads,
+                            head_size=attn_module.head_size,
+                            dtype=self.kv_cache_dtype,
+                        )
+                elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
+                    kv_cache_spec[layer_name] = CrossAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
-                        sliding_window=attn_module.sliding_window,
                     )
-                elif use_mla:
-                    kv_cache_spec[layer_name] = MLAAttentionSpec(
-                        block_size=block_size,
-                        num_kv_heads=attn_module.num_kv_heads,
-                        head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
-                        cache_dtype_str=cache_dtype_str,
-                    )
-                elif self.attention_chunk_size is not None and isinstance(
-                    attn_module, ChunkedLocalAttention
+                elif attn_module.attn_type in (
+                    AttentionType.ENCODER,
+                    AttentionType.ENCODER_ONLY,
                 ):
-                    kv_cache_spec[layer_name] = ChunkedLocalAttentionSpec(
-                        block_size=block_size,
-                        num_kv_heads=attn_module.num_kv_heads,
-                        head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
-                        attention_chunk_size=self.attention_chunk_size,
-                    )
+                    # encoder-only attention does not need KV cache.
+                    continue
                 else:
-                    kv_cache_spec[layer_name] = FullAttentionSpec(
-                        block_size=block_size,
-                        num_kv_heads=attn_module.num_kv_heads,
-                        head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
-                    )
-            elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
-                kv_cache_spec[layer_name] = CrossAttentionSpec(
+                    raise ValueError(f"Unknown attention type: {attn_module.attn_type}")
+
+            elif isinstance(attn_module, MLAAttention):
+                kv_cache_spec[layer_name] = MLAAttentionSpec(
                     block_size=block_size,
-                    num_kv_heads=attn_module.num_kv_heads,
+                    num_kv_heads=1,
                     head_size=attn_module.head_size,
                     dtype=self.kv_cache_dtype,
+                    cache_dtype_str=cache_dtype_str,
                 )
-            elif attn_module.attn_type in (
-                AttentionType.ENCODER,
-                AttentionType.ENCODER_ONLY,
-            ):
-                # encoder-only attention does not need KV cache.
-                continue
-            else:
-                raise ValueError(f"Unknown attention type: {attn_module.attn_type}")
 
-        mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
-        if len(mamba_layers) > 0:
-            if (
-                self.vllm_config.speculative_config is not None
-                and self.vllm_config.model_config.hf_config.model_type
-                not in ["qwen3_next"]
-            ):
-                raise NotImplementedError(
-                    "Mamba with speculative decoding is not supported yet."
-                )
-            mamba_block_size = self.vllm_config.cache_config.mamba_block_size
-            page_size_padded = self.vllm_config.cache_config.mamba_page_size_padded
-
-            for layer_name, mamba_module in mamba_layers.items():
+            elif isinstance(attn_module, MambaBase):
+                if (
+                    self.vllm_config.speculative_config is not None
+                    and self.vllm_config.model_config.hf_config.model_type
+                    not in ["qwen3_next"]
+                ):
+                    raise NotImplementedError(
+                        "Mamba with speculative decoding is not supported yet."
+                    )
+                mamba_block_size = self.vllm_config.cache_config.mamba_block_size
+                page_size_padded = self.vllm_config.cache_config.mamba_page_size_padded
                 kv_cache_spec[layer_name] = MambaSpec(
-                    shapes=mamba_module.get_state_shape(),
-                    dtypes=mamba_module.get_state_dtype(),
+                    shapes=attn_module.get_state_shape(),
+                    dtypes=attn_module.get_state_dtype(),
                     block_size=mamba_block_size,
                     page_size_padded=page_size_padded,
-                    mamba_type=mamba_module.mamba_type,
+                    mamba_type=attn_module.mamba_type,
                     num_speculative_blocks=(
                         self.speculative_config.num_speculative_tokens
                         if self.speculative_config
                         else 0
                     ),
                 )
+
         ds_indexer_layers = get_layers_from_vllm_config(
             self.vllm_config, DeepseekV32IndexerCache
         )
