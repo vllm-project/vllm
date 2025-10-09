@@ -260,35 +260,6 @@ class InputBatch:
         self.sampled_token_ids_cpu: Optional[torch.Tensor] = None
         self.async_copy_ready_event: Optional[torch.cuda.Event] = None
 
-    def set_async_sampled_token_ids(
-        self,
-        sampled_token_ids_cpu: torch.Tensor,
-        async_copy_ready_event: torch.cuda.Event,
-    ) -> None:
-        if self.sampling_metadata.output_token_ids:
-            self.sampled_token_ids_cpu = sampled_token_ids_cpu
-            self.async_copy_ready_event = async_copy_ready_event
-        else:
-            self.sampled_token_ids_cpu = None
-            self.async_copy_ready_event = None
-
-    def update_async_output_token_ids(self) -> None:
-        output_token_ids = self.sampling_metadata.output_token_ids
-        if self.sampled_token_ids_cpu is None or not output_token_ids:
-            return
-
-        assert self.prev_req_id_to_index is not None
-        sampled_token_ids = None
-        for index, req_id in enumerate(self.req_ids):
-            prev_index = self.prev_req_id_to_index.get(req_id)
-            if prev_index is None:
-                continue
-            if sampled_token_ids is None:
-                assert self.async_copy_ready_event is not None
-                self.async_copy_ready_event.synchronize()
-                sampled_token_ids = self.sampled_token_ids_cpu.squeeze().tolist()
-            output_token_ids[index][-1] = sampled_token_ids[prev_index]
-
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
@@ -907,6 +878,47 @@ class InputBatch:
         )
 
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+
+    def set_async_sampled_token_ids(
+        self,
+        sampled_token_ids_cpu: torch.Tensor,
+        async_copy_ready_event: torch.cuda.Event,
+    ) -> None:
+        """
+        In async scheduling case, store ref to sampled_token_ids_cpu
+        tensor and corresponding copy-ready event. Used to repair
+        output_token_ids prior to sampling, if needed by logits processors.
+        """
+        if self.sampling_metadata.output_token_ids:
+            self.sampled_token_ids_cpu = sampled_token_ids_cpu
+            self.async_copy_ready_event = async_copy_ready_event
+        else:
+            self.sampled_token_ids_cpu = None
+            self.async_copy_ready_event = None
+
+    def update_async_output_token_ids(self) -> None:
+        """
+        In async scheduling case, update output_token_ids in sampling metadata
+        from prior steps sampled token ids once they've finished copying to CPU.
+        This is called right before they are needed by the logits processors.
+        """
+        output_token_ids = self.sampling_metadata.output_token_ids
+        if self.sampled_token_ids_cpu is None or not output_token_ids:
+            # Output token ids not needed or not async scheduling.
+            return
+
+        assert self.prev_req_id_to_index is not None
+        sampled_token_ids = None
+        for index, req_id in enumerate(self.req_ids):
+            prev_index = self.prev_req_id_to_index.get(req_id)
+            if prev_index is None:
+                continue
+            if sampled_token_ids is None:
+                assert self.async_copy_ready_event is not None
+                self.async_copy_ready_event.synchronize()
+                sampled_token_ids = self.sampled_token_ids_cpu.squeeze().tolist()
+            # Replace placeholder token id with actual sampled id.
+            output_token_ids[index][-1] = sampled_token_ids[prev_index]
 
     @property
     def num_reqs(self) -> int:
