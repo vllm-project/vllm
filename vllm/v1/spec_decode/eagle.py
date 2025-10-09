@@ -67,7 +67,11 @@ class SpecDecodeBaseProposer:
         self.max_model_len = vllm_config.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
-        self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        # The drafter can get longer sequences than the target model.
+        max_batch_size = vllm_config.scheduler_config.max_num_seqs
+        self.max_num_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens + max_batch_size
+        )
         self.token_arange_np = np.arange(self.max_num_tokens)
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
@@ -118,7 +122,6 @@ class SpecDecodeBaseProposer:
 
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
-        max_batch_size = vllm_config.scheduler_config.max_num_seqs
         max_num_slots_for_arange = max(max_batch_size + 1, self.max_num_tokens)
         self.arange = torch.arange(
             max_num_slots_for_arange, device=device, dtype=torch.int32
