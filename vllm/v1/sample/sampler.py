@@ -71,16 +71,18 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         predict_bonus_token: bool = False,
+        logprobs_mode_override: Optional[LogprobsMode] = None,
     ) -> SamplerOutput:
+        logprobs_mode = logprobs_mode_override or self.logprobs_mode
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.
         # This is different from the V0 sampler, which uses the logits that
         # is used for sampling (after penalties and temperature scaling).
         num_logprobs = sampling_metadata.max_num_logprobs
         if num_logprobs is not None:
-            if self.logprobs_mode == "raw_logprobs":
+            if logprobs_mode == "raw_logprobs":
                 raw_logprobs = self.compute_logprobs(logits)
-            elif self.logprobs_mode == "raw_logits":
+            elif logprobs_mode == "raw_logits":
                 raw_logprobs = logits.clone()
 
         # Use float32 for the logits.
@@ -99,13 +101,20 @@ class Sampler(nn.Module):
         # return int32 (while PyTorch argmax and topk return int64).
         sampled = sampled.long()
 
-        # Gather the logprobs of the topk and sampled token (if requested).
-        # Get logprobs and rank tensors (if requested)
-        logprobs_tensors = (
-            None
-            if num_logprobs is None
-            else self.gather_logprobs(raw_logprobs, num_logprobs, token_ids=sampled)
-        )
+        if num_logprobs is None:
+            logprobs_tensors = None
+        elif num_logprobs == -1:
+            # Return the full logprobs.
+            logprobs_tensors = LogprobsTensors(
+                torch.empty(0),
+                raw_logprobs,
+                torch.empty(0),
+            )
+        else:
+            # Gather the logprobs and ranks of the topk and sampled token.
+            logprobs_tensors = self.gather_logprobs(
+                raw_logprobs, num_logprobs, token_ids=sampled
+            )
 
         # Use int32 to reduce the tensor size.
         sampled = sampled.to(torch.int32)
@@ -139,6 +148,7 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        logprobs_mode_override: Optional[LogprobsMode] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Sample logits based on sampling metadata.
 
@@ -146,6 +156,7 @@ class Sampler(nn.Module):
         may update the logits tensor in-place.
         """
 
+        logprobs_mode = logprobs_mode_override or self.logprobs_mode
         assert not (sampling_metadata.all_greedy and sampling_metadata.all_random)
         if sampling_metadata.all_random:
             greedy_sampled = None
@@ -154,9 +165,9 @@ class Sampler(nn.Module):
             if sampling_metadata.all_greedy:
                 processed_logprobs = None
                 if sampling_metadata.max_num_logprobs is not None:
-                    if self.logprobs_mode == "processed_logits":
+                    if logprobs_mode == "processed_logits":
                         processed_logprobs = logits
-                    elif self.logprobs_mode == "processed_logprobs":
+                    elif logprobs_mode == "processed_logprobs":
                         processed_logprobs = self.compute_logprobs(logits)
                 return greedy_sampled, processed_logprobs
 
