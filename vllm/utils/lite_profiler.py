@@ -29,10 +29,9 @@ def _get_process_rank() -> int | None:
     This function checks common environment variables used by different
     frameworks:
     - VLLM_DP_RANK: vLLM's data parallel rank
-    - RANK: Standard distributed training rank
     - LOCAL_RANK: Local rank within a single node
     """
-    for env_name in ("VLLM_DP_RANK", "RANK", "LOCAL_RANK"):
+    for env_name in ("VLLM_DP_RANK", "LOCAL_RANK"):
         value = os.environ.get(env_name)
         if value is not None:
             try:
