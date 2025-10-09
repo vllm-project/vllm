@@ -1501,8 +1501,9 @@ class MRotaryEmbedding(RotaryEmbedding):
                 audio_lengths_tensor = torch.as_tensor(
                     audio_lengths_tensor, dtype=torch.long
                 )
-            if second_per_grid_ts:
-                second_per_grids_tensor = torch.tensor(second_per_grid_ts)
+            second_per_grids_tensor = (
+                torch.tensor(second_per_grid_ts) if second_per_grid_ts else None
+            )
 
             llm_positions, mrope_position_delta = cls._omni3_get_input_positions_tensor(  # noqa: E501
                 thinker_config,
