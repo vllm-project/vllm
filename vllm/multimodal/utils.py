@@ -92,7 +92,6 @@ class MediaConnector:
         self,
         url_spec: ParseResult,
         media_io: MediaIO[_M],
-        request_overrides: Optional[dict[str, Any]] = None,
     ) -> _M:  # type: ignore[type-var]
         data_spec, data = url_spec.path.split(",", 1)
         media_type, data_type = data_spec.split(";", 1)
@@ -101,15 +100,12 @@ class MediaConnector:
             msg = "Only base64 data URLs are supported for now."
             raise NotImplementedError(msg)
 
-        return media_io.load_base64(media_type,
-                                    data,
-                                    request_overrides=request_overrides)
+        return media_io.load_base64(media_type, data)
 
     def _load_file_url(
         self,
         url_spec: ParseResult,
         media_io: MediaIO[_M],
-        request_overrides: Optional[dict[str, Any]] = None,
     ) -> _M:  # type: ignore[type-var]
         allowed_local_media_path = self.allowed_local_media_path
         if allowed_local_media_path is None:
@@ -122,8 +118,7 @@ class MediaConnector:
                 f"The file path {filepath} must be a subpath "
                 f"of `--allowed-local-media-path` {allowed_local_media_path}.")
 
-        return media_io.load_file(filepath,
-                                  request_overrides=request_overrides)
+        return media_io.load_file(filepath)
 
     def _assert_url_in_allowed_media_domains(self, url_spec) -> None:
         if self.allowed_media_domains and url_spec.hostname not in \
@@ -139,7 +134,6 @@ class MediaConnector:
         media_io: MediaIO[_M],
         *,
         fetch_timeout: Optional[int] = None,
-        request_overrides: Optional[dict[str, Any]] = None,
     ) -> _M:  # type: ignore[type-var]
         url_spec = urlparse(url)
 
@@ -149,18 +143,13 @@ class MediaConnector:
             connection = self.connection
             data = connection.get_bytes(url, timeout=fetch_timeout)
 
-            return media_io.load_bytes(data) if not request_overrides else \
-                media_io.load_bytes(data, request_overrides=request_overrides)
+            return media_io.load_bytes(data)
 
         if url_spec.scheme == "data":
-            return self._load_data_url(url_spec,
-                                       media_io,
-                                       request_overrides=request_overrides)
+            return self._load_data_url(url_spec, media_io)
 
         if url_spec.scheme == "file":
-            return self._load_file_url(url_spec,
-                                       media_io,
-                                       request_overrides=request_overrides)
+            return self._load_file_url(url_spec, media_io)
 
         msg = "The URL must be either a HTTP, data or file URL."
         raise ValueError(msg)
@@ -171,7 +160,6 @@ class MediaConnector:
         media_io: MediaIO[_M],
         *,
         fetch_timeout: Optional[int] = None,
-        request_overrides: Optional[dict[str, Any]] = None,
     ) -> _M:
         url_spec = urlparse(url)
         loop = asyncio.get_running_loop()
@@ -181,29 +169,19 @@ class MediaConnector:
 
             connection = self.connection
             data = await connection.async_get_bytes(url, timeout=fetch_timeout)
-            future = loop.run_in_executor(
-                global_thread_pool,
-                partial(media_io.load_bytes,
-                        data,
-                        request_overrides=request_overrides))
+            future = loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
             return await future
 
         if url_spec.scheme == "data":
             future = loop.run_in_executor(
-                global_thread_pool,
-                partial(self._load_data_url,
-                        url_spec,
-                        media_io,
-                        request_overrides=request_overrides))
+                global_thread_pool, self._load_data_url, url_spec, media_io
+            )
             return await future
 
         if url_spec.scheme == "file":
             future = loop.run_in_executor(
-                global_thread_pool,
-                partial(self._load_file_url,
-                        url_spec,
-                        media_io,
-                        request_overrides=request_overrides))
+                global_thread_pool, self._load_file_url, url_spec, media_io
+            )
             return await future
         msg = "The URL must be either a HTTP, data or file URL."
         raise ValueError(msg)
@@ -291,7 +269,6 @@ class MediaConnector:
         video_url: str,
         *,
         image_mode: str = "RGB",
-        request_overrides: Optional[dict[str, Any]] = None,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Load video from an HTTP or base64 data URL.
@@ -305,7 +282,6 @@ class MediaConnector:
             video_url,
             video_io,
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
-            request_overrides=request_overrides,
         )
 
     async def fetch_video_async(
@@ -313,7 +289,6 @@ class MediaConnector:
         video_url: str,
         *,
         image_mode: str = "RGB",
-        request_overrides: Optional[dict[str, Any]] = None,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Asynchronously load video from an HTTP or base64 data URL.
@@ -329,7 +304,6 @@ class MediaConnector:
             video_url,
             video_io,
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
-            request_overrides=request_overrides,
         )
 
     def fetch_image_embedding(

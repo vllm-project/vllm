@@ -889,7 +889,6 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
         return self.ctx.get_hf_config(Qwen2_5_VLConfig)
 
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5_VLProcessor:
-        logger.warning("[DEBUG get_hf_processor] kwargs =", kwargs)
         return self.ctx.get_hf_processor(
             Qwen2_5_VLProcessor,
             use_fast=kwargs.pop("use_fast", True),
