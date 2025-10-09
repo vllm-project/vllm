@@ -667,14 +667,13 @@ class InputPreprocessor:
 
         return self._build_decoder_only_llm_inputs(prompt_comps)
 
-    def preprocess(
+    def _preprocess(
         self,
         prompt: PromptType,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         *,
         mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> ProcessorInputs:
-        """Preprocess the input prompt."""
         if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder.
@@ -697,14 +696,32 @@ class InputPreprocessor:
             mm_uuids=mm_uuids,
         )
 
+    def preprocess(
+        self,
+        prompt: PromptType,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        *,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
+    ) -> ProcessorInputs:
+        """Preprocess the input prompt."""
+        res = self._preprocess(
+            prompt,
+            tokenization_kwargs,
+            mm_uuids=mm_uuids,
+        )
+
+        if self.mm_processor_cache and self.mm_cache_stats is not None:
+            delta = self.mm_processor_cache.make_stats(delta=True)
+            self.mm_cache_stats.requests += 1
+            self.mm_cache_stats.queries += delta.total
+            self.mm_cache_stats.hits += delta.hits
+
+        return res
+
     def stat_mm_cache(self) -> Optional[MultiModalCacheStats]:
         mm_cache_stats = self.mm_cache_stats
-        if mm_cache_stats is None or self.mm_processor_cache is None:
+        if mm_cache_stats is None:
             return None
-
-        delta = self.mm_processor_cache.make_stats(delta=True)
-        mm_cache_stats.queries += delta.total
-        mm_cache_stats.hits += delta.hits
 
         self.mm_cache_stats = MultiModalCacheStats()
 
