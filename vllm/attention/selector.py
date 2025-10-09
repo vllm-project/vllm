@@ -166,11 +166,8 @@ def _cached_get_attn_backend(
     #
     # THIS SELECTION OVERRIDES THE VLLM_ATTENTION_BACKEND
     # ENVIRONMENT VARIABLE.
-    selected_backend = None
-    backend_by_global_setting: Optional[_Backend] = get_global_forced_attn_backend()
-    if backend_by_global_setting is not None:
-        selected_backend = backend_by_global_setting
-    else:
+    selected_backend = get_global_forced_attn_backend()
+    if selected_backend is None:
         # Check the environment variable and override if specified
         backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
         if backend_by_env_var is not None:

@@ -30,7 +30,7 @@ class VllmInductorPass(InductorPass):
     def __init__(self, config: VllmConfig):
         self.pass_config = config.compilation_config.pass_config
         self.model_dtype = config.model_config.dtype if config.model_config else None
-        self.device = config.device_config.device if config.device_config else None
+        self.device = config.device_config.device
         self.pass_name = self.__class__.__name__
 
     @staticmethod

@@ -27,6 +27,8 @@ import regex as re
 FILES = [
     "vllm/*.py",
     "vllm/assets",
+    "vllm/attention",
+    "vllm/compilation",
     "vllm/entrypoints",
     "vllm/inputs",
     "vllm/logging_utils",
@@ -41,8 +43,6 @@ FILES = [
 # from "skip" to "silent", move the following directories to FILES
 SEPARATE_GROUPS = [
     "tests",
-    "vllm/attention",
-    "vllm/compilation",
     "vllm/distributed",
     "vllm/engine",
     "vllm/executor",

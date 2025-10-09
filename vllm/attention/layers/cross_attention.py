@@ -81,7 +81,7 @@ def _get_cross_slot_mapping(
 
 @functools.lru_cache
 def create_cross_attention_backend(
-    underlying_attn_backend: AttentionBackend,
+    underlying_attn_backend: type[AttentionBackend],
 ) -> type[AttentionBackend]:
     prefix = "CrossAttention_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
