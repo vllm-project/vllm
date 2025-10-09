@@ -47,11 +47,6 @@ class ECConnectorModelRunnerMixin:
         connector.save_caches(encoder_cache=encoder_cache,mm_hash=mm_hash)
 
     @staticmethod
-    def maybe_wait_for_ec_save() -> None:
-        if has_ec_transfer():
-            get_ec_transfer().wait_for_save()
-
-    @staticmethod
     def get_finished_ec_transfers(
         scheduler_output: "SchedulerOutput",
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
@@ -74,7 +69,6 @@ class ECConnectorModelRunnerMixin:
     @contextmanager
     def _get_ec_connector_output(
         scheduler_output: "SchedulerOutput",
-        wait_for_save: bool = True,
         **kwargs,
     ) -> Generator[ECConnectorOutput, None, None]:
         output = ECConnectorOutput()
@@ -91,9 +85,6 @@ class ECConnectorModelRunnerMixin:
         try:
             yield output
         finally:
-            if wait_for_save:
-                ec_connector.wait_for_save()
-
             output.finished_sending, output.finished_recving = (
                 ec_connector.get_finished(scheduler_output.finished_req_ids))
 

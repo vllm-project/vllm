@@ -136,17 +136,12 @@ class ECConnectorBase(ABC):
         pass
 
     @abstractmethod
-    def save_caches(self, **kwargs) -> None:
+    def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
         """
         Save caches into connector
-        For EC the encoder_cache and mm_hash is store in kwargs
-        """
-        pass
-
-    @abstractmethod
-    def wait_for_save(self):
-        """
-        Block until all the save operations is done. 
+        Args:
+            encoder_cache: Reference to encoder cache storage inside worker
+            mm_hash: Hash of the multimodal data
         """
         pass
 
@@ -173,7 +168,7 @@ class ECConnectorBase(ABC):
     # ==============================
 
     @abstractmethod
-    def check_caches_exist(
+    def has_caches(
         self,
         request: "Request",
     ) -> list[bool]:

@@ -86,7 +86,7 @@ class ECSharedStorageConnector(ECConnectorBase):
             encoder_cache[mm_data.mm_hash] = ec_cache
             logger.debug(f"Success load encoder cache for hash {mm_data.mm_hash}")
 
-    def save_caches(self, **kwargs) -> None:
+    def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
         """Start saving the EC cache for each mm_datas from encoder cache
 
         Args:
@@ -95,20 +95,13 @@ class ECSharedStorageConnector(ECConnectorBase):
         # Return if it is PD Instance
         if not self.is_producer:
             return
-        encoder_cache = kwargs.get("encoder_cache") 
-        mm_hash = kwargs.get("mm_hash")
-        assert encoder_cache is not None
-        assert mm_hash is not None
         filename = self._generate_filename_debug(mm_hash)
         ec_cache = encoder_cache[mm_hash]
         tensors = {"ec_cache": ec_cache.detach().cpu()}
         safetensors.torch.save_file(tensors, filename)
         logger.debug(f"Save cache successful for mm_hash {mm_hash}")
-    
-    def wait_for_save(self):
-        return
 
-    def check_caches_exist(
+    def has_caches(
         self,
         request: "Request",
     ) -> list[bool]:

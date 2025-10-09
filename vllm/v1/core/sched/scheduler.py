@@ -746,7 +746,7 @@ class Scheduler(SchedulerInterface):
 
         # Check remote cache first
         if self.ec_connector is not None:
-            remote_cache_bools = self.ec_connector.check_caches_exist(request)
+            remote_cache_has_item = self.ec_connector.has_caches(request)
         # NOTE: since scheduler operates on the request level (possibly with
         # multiple encoder inputs per request), we need to create temporary
         # trackers for accounting at the encoder input level.
@@ -822,7 +822,7 @@ class Scheduler(SchedulerInterface):
                 break
 
             if self.ec_connector is not None:
-                if remote_cache_bools[i]:
+                if remote_cache_has_item[i]:
                     mm_hashes_to_schedule.add(request.mm_hashes[i])
                     external_load_encoder_input.append(i)
                     continue
