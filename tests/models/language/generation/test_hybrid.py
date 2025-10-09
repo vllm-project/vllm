@@ -624,7 +624,9 @@ def test_apc_multiple_prompts_block_align_alignment(
     # Sample prompts. This custom prompt is used, as it causes the most issues
     prompt_text = "The president of the United States is "
     prompt_offsets = [0, 3, 7, 13, 17, 22, 25, 31]
-    generated_prompts = [prompt_text[offset:] * APC_MULTIPLY_BY for offset in prompt_offsets]
+    generated_prompts = [
+        prompt_text[offset:] * APC_MULTIPLY_BY for offset in prompt_offsets
+    ]
 
     max_model_len = max(len(prompt) + max_tokens for prompt in generated_prompts)
     vllm_runner_kwargs = _get_vllm_runner_params(

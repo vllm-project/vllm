@@ -407,16 +407,18 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 return a * b // gcd(a, b)
 
             base_chunk_size = model_config.get_mamba_chunk_size()
-            chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
-
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
 
-            if chunk_size is None:
+            # Mamba1 does not have a chunk notion
+            if base_chunk_size is None:
                 # TODO(Josephasafg) Choose a more generic value
                 #  for the block size
                 attn_block_size = 1024 * cdiv(attn_tokens_per_mamba_state, 1024)
             else:
-                attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
+                chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
+                attn_block_size = chunk_size * cdiv(
+                    attn_tokens_per_mamba_state, chunk_size
+                )
 
             cache_config.mamba_block_size = attn_block_size
         else:
