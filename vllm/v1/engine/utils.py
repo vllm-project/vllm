@@ -386,28 +386,36 @@ class CoreEngineActorManager:
             )
             node_ip_key = node_ip_keys[0]
             node_ip = node_ip_key.split(":")[1]
-            dp_size_available = int(node_resources[device_str]) // world_size
-            if strict_local_size:
+
+            # For now, each DP rank can only be assigned to one node
+            # TODO(rui): support allocating a single DP rank
+            # to multiple nodes
+            dp_size_available = (
+                int(node_resources[device_str]) // world_size
+                if device_str in node_resources
+                else 0
+            )
+
+            if node_ip == dp_master_ip:
                 if dp_size_available < dp_size_local:
-                    if node_ip == dp_master_ip:
-                        raise ValueError(
-                            "Not enough resources to allocate %s DP ranks "
-                            "on DP master node %s, possible to fit %s DP ranks",
-                            dp_size_local,
-                            dp_master_ip,
-                            dp_size_available,
-                        )
-                    else:
-                        logger.info(
-                            "Skipping node %s as %s DP ranks could not fit, "
-                            "possible to fit %s DP ranks",
-                            node_ip,
-                            dp_size_local,
-                            dp_size_available,
-                        )
-                        continue
+                    raise ValueError(
+                        "Not enough resources to allocate %s DP ranks "
+                        "on DP master node %s, possible to fit %s DP ranks",
+                        dp_size_local,
+                        dp_master_ip,
+                        dp_size_available,
+                    )
                 dp_size_to_allocate = dp_size_local
-            elif node_ip == dp_master_ip:
+            elif strict_local_size:
+                if dp_size_available < dp_size_local:
+                    logger.info(
+                        "Skipping node %s as %s DP ranks could not fit, "
+                        "possible to fit %s DP ranks",
+                        node_ip,
+                        dp_size_local,
+                        dp_size_available,
+                    )
+                    continue
                 dp_size_to_allocate = dp_size_local
             else:
                 dp_size_to_allocate = dp_size_available

@@ -133,7 +133,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
-    VLLM_RAY_DP_PACK_STRATEGY: str = "fill"
+    VLLM_RAY_DP_PACK_STRATEGY: str = "strict"
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MXFP4_USE_MARLIN: Optional[bool] = None
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
@@ -1010,7 +1010,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "strict":
     #   allocate exactly data-parallel-size-local DP ranks to each picked node;
     # This environment variable is ignored if data-parallel-backend is not Ray.
-    "VLLM_RAY_DP_PACK_STRATEGY": lambda: os.getenv("VLLM_RAY_DP_PACK_STRATEGY", "fill"),
+    "VLLM_RAY_DP_PACK_STRATEGY": lambda: os.getenv(
+        "VLLM_RAY_DP_PACK_STRATEGY", "strict"
+    ),
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3": lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
     # Use model_redirect to redirect the model name to a local folder.
