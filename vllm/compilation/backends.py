@@ -13,12 +13,12 @@ from typing import Any, Callable, Optional
 import torch
 import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
+from torch._ops import lookup_op
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import pass_context
 from vllm.compilation.partition_rules import inductor_partition_rule_context
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
-from vllm.config.compilation import convert_to_dot_format
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
@@ -283,9 +283,14 @@ def split_graph(
     graph: fx.GraphModule, ops: list[str]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
     # split graph by ops
-    # Convert :: format to . format for matching str(node.target)
-    # str(torch.ops.namespace.op) returns "namespace.op"
-    ops_dot_format = convert_to_dot_format(ops)
+    # Resolve operator overloads for direct comparison with node.target
+    resolved_ops = []
+    for op_name in ops:
+        try:
+            resolved_ops.append(lookup_op(op_name))
+        except Exception:
+            # If resolution fails, skip this operator
+            logger.warning("Failed to resolve operator: %s", op_name)
 
     subgraph_id = 0
     node_to_subgraph_id = {}
@@ -293,7 +298,7 @@ def split_graph(
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
             continue
-        if node.op == "call_function" and str(node.target) in ops_dot_format:
+        if node.op == "call_function" and node.target in resolved_ops:
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             split_op_graphs.append(subgraph_id)
