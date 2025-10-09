@@ -21,7 +21,11 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonMetadata,
     MLACommonMetadataBuilder,
 )
-from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.v1.attention.backends.utils import (
+    AttentionCGSupport,
+    reshape_attn_output_for_spec_decode,
+    reshape_query_for_spec_decode,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -62,6 +66,7 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    supports_uniform_spec_as_decode: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -97,6 +102,11 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
                 device=self.device,
                 dtype=torch.int32,
             )
+
+        supports_spec_as_decode = self.supports_uniform_spec_as_decode
+        self._init_reorder_batch_threshold(
+            self.reorder_batch_threshold, supports_spec_as_decode
+        )
 
     def _build_decode(
         self,
@@ -216,8 +226,12 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             q = torch.cat(q, dim=-1)
 
         assert isinstance(q, torch.Tensor)
+
+        num_decodes = attn_metadata.num_decodes
+        q = reshape_query_for_spec_decode(q, num_decodes)
+
         o, lse = flash_mla_with_kvcache(
-            q=q.unsqueeze(1),  # Add seqlen dim of 1 (decode)
+            q=q,
             k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
             block_table=attn_metadata.decode.block_table,
             cache_seqlens=attn_metadata.decode.seq_lens,
@@ -229,5 +243,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             descale_q=layer._q_scale.reshape(1),
             descale_k=layer._k_scale.reshape(1),
         )
+
+        o = reshape_attn_output_for_spec_decode(o)
 
         return o, lse

@@ -68,6 +68,12 @@ BATCH_SPECS = {
     "large_prefill": BatchSpec(seq_lens=[4096] * 8, query_lens=[32] * 8),
     "single_decode": BatchSpec(seq_lens=[1024], query_lens=[1]),
     "single_prefill": BatchSpec(seq_lens=[1024], query_lens=[64]),
+    "spec_decode_small": BatchSpec(
+        seq_lens=[128, 256, 512, 1024], query_lens=[4, 4, 4, 4]
+    ),
+    "spec_decode_medium": BatchSpec(
+        seq_lens=[512, 1024, 2048, 512, 1024, 2048], query_lens=[8, 8, 8, 8, 8, 8]
+    ),
 }
 
 
@@ -311,6 +317,8 @@ def run_attention_backend(
         "large_prefill",
         "single_decode",
         "single_prefill",
+        "spec_decode_small",
+        "spec_decode_medium",
     ],
 )
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-V2-Lite-Chat"])
@@ -331,6 +339,9 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
     """
     batch_spec = BATCH_SPECS[batch_spec_name]
+    is_spec_decode_test = batch_spec_name.startswith("spec_decode")
+    spec_decode_backends = {_Backend.FLASH_ATTN_MLA, _Backend.FLASHMLA}
+
     vllm_config = create_vllm_config(
         model_name=model, max_model_len=max(batch_spec.seq_lens), num_gpu_blocks=2048
     )
@@ -398,10 +409,23 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         k_pe_full = torch.randn(s_len, 1, qk_rope_head_dim, dtype=dtype, device=device)
 
         # Determine if this is decode or prefill
+        # NOTE: For spec decode tests with uniform query_len > 1, backends that
+        # support uniform spec decode (FLASH_ATTN_MLA, FLASHMLA) will use the
+        # decode path (MQA-style), while others will use prefill path (MHA-style).
+        # This ensures the reference implementation matches each backend's actual path.
         is_decode = []
         for i, backend in enumerate(BACKENDS_TO_TEST):
             builder_cls, _ = try_get_attention_backend(backend)
-            is_decode.append(q_len <= builder_cls.reorder_batch_threshold)
+            # For spec decode tests, check if backend supports uniform spec decode
+            if is_spec_decode_test:
+                supports_spec = getattr(
+                    builder_cls, "supports_uniform_spec_as_decode", False
+                )
+                is_decode.append(supports_spec)
+            else:
+                # For non-spec-decode tests, use the class-level threshold
+                threshold = getattr(builder_cls, "reorder_batch_threshold", None)
+                is_decode.append(q_len <= threshold if threshold else False)
 
         # Split q into nope and rope components
         q_nope, q_pe = q_c.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
@@ -540,6 +564,10 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
 
     # 4. Run vLLM backends and compare
     for i, backend_name in enumerate(BACKENDS_TO_TEST):
+        # Skip backends that don't support spec decode for spec decode tests
+        if is_spec_decode_test and backend_name not in spec_decode_backends:
+            continue
+
         backend_output = run_attention_backend(
             backend_name,
             kv_cache_spec,
