@@ -95,10 +95,12 @@ class CachedRequestData:
     # the request's block IDs. If True, new_block_ids will be used as the
     # request's block IDs instead of appending to the existing block IDs.
     resumed_from_preemption: list[bool]
-    # NOTE(woosuk): new_token_ids is only used for pipeline parallelism
-    # and async scheduled resumptions.
-    # When PP and async scheduling aren't used, new_token_ids will be empty.
-    new_token_ids: list[list[int] | None]
+    # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
+    # When PP is not used, new_token_ids will be empty.
+    new_token_ids: list[list[int]]
+    # If resumed_from_preemption is True, propogate the token ids to the
+    # connector, otherwise will be empty.
+    resumed_req_token_ids: list[list[int] | None]
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
