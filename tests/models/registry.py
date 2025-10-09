@@ -172,9 +172,8 @@ class _HfExamplesInfo:
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
     "ApertusForCausalLM": _HfExamplesInfo(
-        "swiss-ai/Apertus-8B-2509",
+        "swiss-ai/Apertus-8B-Instruct-2509",
         min_transformers_version="4.56.0",
-        trust_remote_code=True,
     ),
     "AquilaModel": _HfExamplesInfo("BAAI/AquilaChat-7B", trust_remote_code=True),
     "AquilaForCausalLM": _HfExamplesInfo("BAAI/AquilaChat2-7B", trust_remote_code=True),
