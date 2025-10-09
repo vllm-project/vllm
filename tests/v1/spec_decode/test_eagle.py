@@ -251,18 +251,22 @@ def test_prepare_inputs():
 
 def test_prepare_inputs_padded():
     """
-    Input scenario is 3 requests with num_speculative_tokens == 2 and:
-    - Request 1: query_len = 3, rejected = 1
-    - Request 2: query_len = 3, rejected = 0
-    - Request 3: query_len = 3, rejected = 2
+    Input scenario is 4 requests with num_speculative_tokens == 2 and:
+    - Request 1: draft_len = 3, query_len = 3, rejected = 1
+    - Request 2: draft_len = 3, query_len = 3, rejected = 0
+    - Request 3: draft_len = 3, query_len = 3, rejected = 2
+    - Request 4: draft_len = 0, query_len = 5, rejected = 0 (prefill)
+    - Request 5: draft_len = 0, query_len = 4, rejected = 0 (prefill)
 
     Expected outputs:
     token_indices: [0, 1, 2,
                     3, 4, 5,
-                    6, 7, 8]
+                    6, 7, 8,
+                    9, 10, 11, 12, 13,
+                    14, 15, 16, 17]
     Reason: Deferred computation should not disturb the original indices.
 
-    token_indices_to_sample: [1, 5, 6]
+    token_indices_to_sample: [1, 5, 6, 13, 17]
     Reason: After accounting for rejections, these are the valid token positions
             from the original indices to sample from.
     """
@@ -270,16 +274,42 @@ def test_prepare_inputs_padded():
     device = torch.device(current_platform.device_type)
 
     expected_token_indices = torch.tensor(
-        [0, 1, 2, 3, 4, 5, 6, 7, 8], dtype=torch.int32, device=device
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+        dtype=torch.int32,
+        device=device,
     )
     expected_token_indices_to_sample = torch.tensor(
-        [1, 5, 6], dtype=torch.int32, device=device
+        [1, 5, 6, 13, 17], dtype=torch.int32, device=device
+    )
+    expected_rejected_token_indices_mask = torch.tensor(
+        [
+            False,
+            False,
+            True,
+            False,
+            False,
+            False,
+            False,
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ],
+        dtype=torch.bool,
+        device=device,
     )
 
     num_speculative_tokens = 2
     batch_spec = BatchSpec(
-        seq_lens=[3, 3, 3],
-        query_lens=[3, 3, 3],
+        seq_lens=[3, 3, 3, 5, 4],
+        query_lens=[3, 3, 3, 5, 4],
     )
 
     common_attn_metadata = create_common_attn_metadata(
@@ -288,34 +318,43 @@ def test_prepare_inputs_padded():
         device=device,
     )
 
-    # Needed for cu_num_draft_tokens, which is expected to be [3, 6, 9]
+    print(common_attn_metadata.query_start_loc)
+    print(common_attn_metadata)
+
+    # Needed for cu_num_draft_tokens
     expected_query_start_loc = torch.tensor(
-        [0, 3, 6, 9], dtype=torch.int32, device=device
+        [0, 3, 6, 9, 14, 18], dtype=torch.int32, device=device
     )
     spec_decode_metadata = SpecDecodeMetadata.make_dummy(
-        draft_token_ids=[[0] * num_speculative_tokens] * 3,
+        draft_token_ids=[[0] * num_speculative_tokens] * 3 + [[]] * 2,
         device=device,
     )
 
-    # num_rejected_tokens = [1, 0, 2]
-    # num_draft_tokens = [2, 2, 2]
+    # num_rejected_tokens = [1, 0, 2, 0, 0]
+    # num_draft_tokens = [2, 2, 2, 0, 0]
     # valid_sampled_tokens_count = num_draft_tokens + 1 - num_rejected_tokens
     valid_sampled_tokens_count = torch.tensor(
-        [2, 3, 1], dtype=torch.int32, device=device
+        [2, 3, 1, 1, 1], dtype=torch.int32, device=device
     )
 
     proposer = _create_proposer("eagle", num_speculative_tokens)
 
-    output_metadata, token_indices, token_indices_to_sample = (
-        proposer.prepare_inputs_padded(
-            common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
-        )
+    (
+        output_metadata,
+        token_indices,
+        token_indices_to_sample,
+        rejected_token_indices_mask,
+    ) = proposer.prepare_inputs_padded(
+        common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
     )
 
-    assert output_metadata.max_query_len == 3
+    assert output_metadata.max_query_len == 5
     assert torch.equal(output_metadata.query_start_loc, expected_query_start_loc)
     assert torch.equal(token_indices, expected_token_indices)
     assert torch.equal(token_indices_to_sample, expected_token_indices_to_sample)
+    assert torch.equal(
+        rejected_token_indices_mask, expected_rejected_token_indices_mask
+    )
 
 
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])

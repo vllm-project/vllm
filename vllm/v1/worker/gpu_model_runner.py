@@ -2761,21 +2761,29 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 if self.speculative_config.disable_padded_drafter_batch:
                     token_indices_to_sample = None
+                    invalid_tokens_mask = None
                     common_attn_metadata, token_indices = self.drafter.prepare_inputs(
                         common_attn_metadata,
                         sampled_token_ids,
                         spec_decode_metadata.num_draft_tokens,
                     )
                 else:
-                    common_attn_metadata, token_indices, token_indices_to_sample = (
-                        self.drafter.prepare_inputs_padded(
-                            common_attn_metadata,
-                            spec_decode_metadata,
-                            valid_sampled_tokens_count,
-                        )
+                    (
+                        common_attn_metadata,
+                        token_indices,
+                        token_indices_to_sample,
+                        invalid_tokens_mask,
+                    ) = self.drafter.prepare_inputs_padded(
+                        common_attn_metadata,
+                        spec_decode_metadata,
+                        valid_sampled_tokens_count,
                     )
 
                 target_token_ids = self.input_ids.gpu[token_indices]
+
+                if invalid_tokens_mask is not None:
+                    positions_ref = self._get_positions(invalid_tokens_mask.shape[0])
+                    positions_ref[invalid_tokens_mask] = 0
                 target_positions = self._get_positions(token_indices)
                 if self.use_aux_hidden_state_outputs:
                     assert aux_hidden_states is not None

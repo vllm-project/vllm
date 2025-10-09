@@ -554,7 +554,7 @@ class EagleProposer:
         common_attn_metadata: CommonAttentionMetadata,
         spec_decode_metadata: SpecDecodeMetadata,
         valid_sampled_tokens_count: torch.Tensor,
-    ) -> tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
+    ) -> tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding
         It updates the common_attn_metadata for speculative decoding,
@@ -563,6 +563,8 @@ class EagleProposer:
         used as padding and filtered out later by `token_indices_to_sample`.
         No blocking CPU operations should be introduced in this function.
         """
+        device = valid_sampled_tokens_count.device
+
         num_draft_tokens_gpu = torch.cat(
             [
                 spec_decode_metadata.cu_num_draft_tokens[0:1],
@@ -578,32 +580,60 @@ class EagleProposer:
         )
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        query_start_loc = common_attn_metadata.query_start_loc
 
-        new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        new_query_len_per_req_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        new_query_len_per_req = query_start_loc[1:] - query_start_loc[:-1]
 
         total_num_tokens = query_start_loc_cpu[-1].item()
         token_indices = self.arange[:total_num_tokens]
 
         spec_common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=common_attn_metadata.query_start_loc,
+            query_start_loc=query_start_loc,
             seq_lens=common_attn_metadata.seq_lens,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=common_attn_metadata.seq_lens_cpu,
             num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
-            max_query_len=new_query_len_per_req.max().item(),
+            max_query_len=new_query_len_per_req_cpu.max().item(),
             max_seq_len=common_attn_metadata.seq_lens_cpu.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
         )
 
-        token_indices_to_sample = (
-            common_attn_metadata.query_start_loc[1:] - 1 - num_rejected_tokens_gpu
+        token_indices_to_sample = query_start_loc[1:] - 1 - num_rejected_tokens_gpu
+
+        # calculate a mask of token indices that correspond to rejected tokens
+        # so that we can zero out the padding positions
+        start_indices = query_start_loc[:-1]
+        local_offsets = start_indices + (
+            new_query_len_per_req - num_rejected_tokens_gpu
+        ).clamp(min=0)
+
+        # use a cumsum on an auxiliary array that marks the start and end of valid
+        # token indices to generate the mask. This is more efficient than
+        # constructing the mask directly. Example:
+        # [1, 0, 0, -1, 0, 1, 0, -1, 0, 0, 0] -> cumsum ->
+        # [1, 1, 1,  0, 0, 1, 1,  0, 0, 0, 0] -> bool() ->
+        # [T, T, T,  F, F, T, T,  F, F, F, F]
+        marker = torch.zeros(total_num_tokens + 1, device=device, dtype=torch.int64)
+        marker.scatter_add_(
+            0, start_indices, torch.ones_like(start_indices, dtype=torch.int64)
+        )
+        marker.scatter_add_(
+            0, local_offsets, -torch.ones_like(local_offsets, dtype=torch.int64)
         )
 
-        return spec_common_attn_metadata, token_indices, token_indices_to_sample
+        is_rejected_token_index_mask = ~((torch.cumsum(marker, dim=0)[:-1]).bool())
+
+        return (
+            spec_common_attn_metadata,
+            token_indices,
+            token_indices_to_sample,
+            is_rejected_token_index_mask,
+        )
 
     def propose_tree(
         self,
