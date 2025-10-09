@@ -65,7 +65,7 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
                                 lora_a, non_blocking=True)
         self._label_slot[index] = lora_a.shape[0]
 
-    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_: torch.Tensor, **kwargs) -> torch.Tensor:
         """Forward of ClassifierWithLoRA
 
         Args:
@@ -73,14 +73,18 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
 
         Returns:
             - output
-    
+
         """
+        lora_id = kwargs.get("activate_lora_id", [0])
         bias = (self.base_layer.bias
                 if not self.base_layer.skip_bias_add else None)
-
-        org_output = self.base_layer.quant_method.apply(
-            self.base_layer, input_, bias)
-
+        # 0 denotes non lora request
+        all_no_lora = all(x == 0 for x in lora_id)
+        if all_no_lora:
+            
+            return self.base_layer.quant_method.apply(self.base_layer, input_,
+                                                      bias)
+        assert input_.size(0) == len(lora_id)
         y = torch.zeros(input_.size(0),
                         self.max_class_label,
                         device=input_.device)
@@ -90,9 +94,9 @@ class ClassifierWithLoRA(BaseLayerWithLoRA):
                                        input_,
                                        lora_weight,
                                        scale=1.0)
-        #TODO Cast y using self._label_slot
+        # TODO Cast y using self._label_slot
         # Keep consistent with the base_layer output
-        return org_output, None
+        return None
 
     # ReplicatedLinear should always be replaced, regardless of the fully
     # sharded LoRAs setting, because it is, by definition, copied per GPU.

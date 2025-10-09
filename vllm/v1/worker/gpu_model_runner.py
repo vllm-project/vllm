@@ -1931,7 +1931,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         " a batch must be pooling request"
 
         hidden_states = hidden_states[:num_scheduled_tokens]
-        pooling_metadata = self.input_batch.get_pooling_metadata()
+        pooling_metadata = self.input_batch.get_pooling_metadata(
+            enable_lora=self.lora_config is not None)
         pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(),
                                               device=hidden_states.device)
         seq_lens_cpu = self.seq_lens.cpu[:self.input_batch.num_reqs]
@@ -3351,6 +3352,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             prompt_lens=dummy_prompt_lens,
             prompt_token_ids=dummy_token_ids,
             pooling_params=[dummy_pooling_params] * num_reqs,
+            activate_loras=[1] *
+            num_reqs if self.lora_config is not None else None,
         )
 
         dummy_metadata.build_pooling_cursor(num_scheduled_tokens_list,

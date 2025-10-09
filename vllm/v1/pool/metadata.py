@@ -36,10 +36,12 @@ class PoolingCursor:
 @dataclass
 class PoolingMetadata:
     """Tensors for pooling."""
+
     prompt_lens: torch.Tensor  # CPU Tensor
     prompt_token_ids: Optional[torch.Tensor]
     pooling_params: list[PoolingParams]
     pooling_cursor: Optional[PoolingCursor] = None
+    activate_loras: Optional[list[int]] = None
 
     def __getitem__(self, indices: slice):
         return PoolingMetadata(
@@ -49,6 +51,8 @@ class PoolingMetadata:
             pooling_params=self.pooling_params[indices],
             pooling_cursor=None
             if self.pooling_cursor is None else self.pooling_cursor[indices],
+            activate_loras=list(self.activate_loras[indices])
+            if self.activate_loras is not None else None,
         )
 
     def build_pooling_cursor(self, num_scheduled_tokens: list[int],
