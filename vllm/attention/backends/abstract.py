@@ -6,6 +6,7 @@ from typing import Generic, Optional, Protocol, TypeVar
 
 import torch
 
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
@@ -184,6 +185,31 @@ class AttentionImpl(ABC, Generic[T]):
 
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
+    @abstractmethod
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: Optional[list[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        logits_soft_cap: Optional[float],
+        attn_type: str,
+        kv_sharing_target_layer_name: Optional[str],
+        # MLA Specific Arguments
+        q_lora_rank: Optional[int],
+        kv_lora_rank: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        qk_head_dim: int,
+        v_head_dim: int,
+        kv_b_proj: ColumnParallelLinear,
+        indexer: Optional[object] = None,
+    ) -> None:
+        raise NotImplementedError
+
     @abstractmethod
     def forward(
         self,
