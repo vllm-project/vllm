@@ -75,6 +75,7 @@ function Get-OsRelease {
 
 function Install-NvidiaToolkit {
     $remoteScript = @'
+#!/usr/bin/env bash
 set -euo pipefail
 
 REPO_FILE="/etc/yum.repos.d/nvidia-container-toolkit.repo"
@@ -96,14 +97,33 @@ else
 fi
 
 if command -v nvidia-ctk >/dev/null 2>&1; then
-    sudo mkdir -p /var/cdi
-    sudo nvidia-ctk cdi generate --output=/var/cdi/nvidia.yaml --mode=wsl || true
+    sudo mkdir -p /etc/cdi /var/cdi
+    sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml --mode=wsl || true
+    sudo cp -f /etc/cdi/nvidia.yaml /var/cdi/nvidia.yaml || true
 fi
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    true
+elif [ -x /usr/lib/wsl/drivers/nvidia-smi ]; then
+    sudo ln -sf /usr/lib/wsl/drivers/nvidia-smi /usr/local/bin/nvidia-smi
+elif [ -x /usr/lib/wsl/lib/nvidia-smi ]; then
+    sudo ln -sf /usr/lib/wsl/lib/nvidia-smi /usr/local/bin/nvidia-smi
+fi
+
+sudo mkdir -p /usr/lib/wsl
+if [ ! -e /usr/lib/wsl/lib ] && [ -d /mnt/c/Windows/System32/nvidia-cuda ]; then
+    sudo ln -sf /mnt/c/Windows/System32/nvidia-cuda /usr/lib/wsl/lib
+fi
+if [ ! -e /usr/lib/wsl/drivers ] && [ -d /mnt/c/Windows/System32/DriverStore/FileRepository ]; then
+    sudo ln -sf /mnt/c/Windows/System32/DriverStore/FileRepository /usr/lib/wsl/drivers
+fi
+
 sudo udevadm control --reload || true
 exit 0
 '@
 
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remoteScript))
+    $remoteScriptLf = $remoteScript -replace "`r", ""
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remoteScriptLf))
     $sshArgs = @('machine','ssh',$MachineName,'--','bash','-lc',"set -euo pipefail; echo $encoded | base64 -d >/tmp/configure-gpu.sh; chmod +x /tmp/configure-gpu.sh; sudo /tmp/configure-gpu.sh")
     Invoke-Podman $sshArgs | Out-Null
 }
@@ -118,8 +138,8 @@ Confirm-PodmanCli
 Confirm-PodmanMachine
 Start-MachineIfNeeded
 $osInfo = Get-OsRelease
-$machineId = if ($osInfo.ContainsKey('ID') -and $osInfo['ID']) { $osInfo['ID'] } else { 'unknown' }
-if ($machineId -ne 'fedora') {
+$machineId = if ($osInfo.ContainsKey('ID') -and $osInfo['ID']) { $osInfo['ID'] } elseif ($osInfo.ContainsKey('ID_LIKE') -and $osInfo['ID_LIKE']) { $osInfo['ID_LIKE'] } elseif ($osInfo.ContainsKey('PRETTY_NAME') -and $osInfo['PRETTY_NAME']) { $osInfo['PRETTY_NAME'] } else { 'unknown' }
+if ($machineId -notlike 'fedora*') {
     Write-Warning ("Machine reports ID='{0}'. Script was validated against Fedora 42; adjust steps manually if your image differs." -f $machineId)
 }
 

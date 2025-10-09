@@ -387,7 +387,9 @@ prepare_run_args() {
 		RUN_ARGS+=(--tmpfs "/tmp:size=$tmpfs_size")
 	fi
 
-	if [[ -d /usr/lib/wsl ]]; then
+	if [[ $IS_MSYS -eq 1 ]]; then
+		true
+	elif [[ -d /usr/lib/wsl ]]; then
 		RUN_ARGS+=(-v /usr/lib/wsl:/usr/lib/wsl:ro)
 		if [[ -e /dev/dxg ]]; then
 			RUN_ARGS+=(--device /dev/dxg)
