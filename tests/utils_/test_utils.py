@@ -999,13 +999,16 @@ def test_unique_filepath():
 def test_find_library():
     # Monkey patch subprocess.check_output
     with patch("vllm.utils.subprocess.check_output") as mock_check_output:
-        mock_check_output.return_value = b"as\x02\xcfabc bac"
+        # This mock output simulates `ldconfig -p` output with garbage chars.
+        mock_output = (
+            b"libgood.so.1 (libc6,x86-64) => /path/to/libgood.so.1\n"
+            b"\tlibfoo\x80.so (libc6,x86-64) => /path/to/libfoo.so\n"
+        )
+        mock_check_output.return_value = mock_output
 
         # Clear the cache for find_library to ensure it runs with our mock
         find_library.cache_clear()
 
-        # Call find_library with argument "bac"
-        result = find_library("bac")
-
-        # Check that the result is "bac"
-        assert result == "bac"
+        # Test that we can find the library from the line with garbage
+        result = find_library("libfoo.so")
+        assert result == "/path/to/libfoo.so"
