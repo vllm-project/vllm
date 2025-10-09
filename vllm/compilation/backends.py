@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
-import logging
 import dataclasses
 import hashlib
 import json
+import logging
 import os
 import pprint
 import time
@@ -27,6 +27,7 @@ from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
+from vllm.logging_utils import lazy
 
 from .compiler_interface import (
     CompilerInterface,
@@ -563,17 +564,10 @@ class VllmBackend:
         config_hash = vllm_config.compute_hash()
         compiler_hash = self.compiler_manager.compute_hash(vllm_config)
         forward_code_files = list(sorted(self.compilation_config.traced_files))
-        class _LazyJoin:
-            def __init__(self, seq: list[str], sep: str = "\n"):
-                self.seq = seq
-                self.sep = sep
-
-            def __str__(self) -> str:
-                return self.sep.join(self.seq)
 
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",
-            _LazyJoin(forward_code_files),
+            lazy(lambda: "\n".join(forward_code_files)),
         )
         hash_content = []
         for filepath in forward_code_files:
