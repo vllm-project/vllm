@@ -27,6 +27,7 @@ import regex as re
 FILES = [
     "vllm/*.py",
     "vllm/assets",
+    "vllm/engine",
     "vllm/entrypoints",
     "vllm/inputs",
     "vllm/logging_utils",

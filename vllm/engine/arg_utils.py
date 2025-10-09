@@ -1243,7 +1243,7 @@ class EngineArgs:
         (self.model, self.tokenizer, self.speculative_config) = (
             maybe_override_with_speculators(
                 model=self.model,
-                tokenizer=self.tokenizer,
+                tokenizer=self.tokenizer if self.tokenizer is not None else self.model,
                 revision=self.revision,
                 trust_remote_code=self.trust_remote_code,
                 vllm_speculative_config=self.speculative_config,
@@ -1685,7 +1685,7 @@ class EngineArgs:
         return True
 
     def _set_default_args(
-        self, usage_context: UsageContext, model_config: ModelConfig
+        self, usage_context: Optional[UsageContext], model_config: ModelConfig
     ) -> None:
         """Set Default Arguments for V1 Engine."""
 
