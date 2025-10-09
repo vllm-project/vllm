@@ -678,6 +678,9 @@ class VllmConfig:
                 max_cudagraph_capture_size = min(
                     self.scheduler_config.max_num_seqs * 2, 512
                 )
+            max_num_tokens = self.scheduler_config.max_num_batched_tokens
+            max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
+
             assert max_cudagraph_capture_size >= 1, (
                 "Maximum cudagraph size should be greater than or equal to 1 "
                 "when using cuda graph."
@@ -703,24 +706,22 @@ class VllmConfig:
                 batch_size_capture_list = self.update_sizes_for_sequence_parallelism(
                     batch_size_capture_list
                 )
-            max_num_tokens = self.scheduler_config.max_num_batched_tokens
-            batch_size_capture_list = [
-                size for size in batch_size_capture_list if size <= max_num_tokens
-            ]
-            # adjust user specificed max_cudagraph_capture_size if they should
+
+            # batch_size_capture_list[-1] may be slightly different from
+            # max_cudagraph_capture_size after the generation pattern and
+            # sequence_parallelism filtering. We should respect the final value.
+            valid_max_size = batch_size_capture_list[-1]
+            # user-specific compilation_config.max_cudagraph_capture_size get
+            # truncated to valid_max_size when they are inconsistent.
             if (
                 self.compilation_config.max_cudagraph_capture_size
-                and batch_size_capture_list
-                and batch_size_capture_list[-1]
-                != self.compilation_config.max_cudagraph_capture_size
+                and self.compilation_config.max_cudagraph_capture_size != valid_max_size
             ):
                 logger.warning(
-                    "max_cudagraph_capture_size is adjusted to %d",
-                    batch_size_capture_list[-1],
+                    "Truncating max_cudagraph_capture_size to %d",
+                    valid_max_size,
                 )
-                self.compilation_config.max_cudagraph_capture_size = (
-                    batch_size_capture_list[-1]
-                )
+                self.compilation_config.max_cudagraph_capture_size = valid_max_size
 
         self.compilation_config.init_with_cudagraph_sizes(batch_size_capture_list)
 
