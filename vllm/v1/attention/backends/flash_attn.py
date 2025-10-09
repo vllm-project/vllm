@@ -3,7 +3,7 @@
 """Attention layer with FlashAttention."""
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -14,6 +14,7 @@ from vllm.attention.backends.abstract import (
     AttentionImpl,
     AttentionMetadata,
     AttentionType,
+    MultipleOf,
     is_quantized_kv_cache,
 )
 from vllm.attention.layer import Attention
@@ -56,6 +57,10 @@ class FlashAttentionBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 96, 128, 160, 192, 224, 256]
+
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
+        return [MultipleOf(16)]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:

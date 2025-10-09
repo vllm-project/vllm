@@ -3,7 +3,7 @@
 """High-Performance Triton-only Attention layer."""
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Union
 
 import torch
 
@@ -12,6 +12,7 @@ from vllm.attention.backends.abstract import (
     AttentionImpl,
     AttentionMetadata,
     AttentionType,
+    MultipleOf,
 )
 from vllm.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
@@ -156,6 +157,10 @@ class TritonAttentionBackend(AttentionBackend):
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float32]
+
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
+        return [MultipleOf(16)]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
