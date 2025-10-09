@@ -327,7 +327,7 @@ class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
             self.config.hidden_size, eps=self.config.rms_norm_eps
         )
 
-        use_mla = getattr(self.config, "use_mla", False)
+        use_mla = getattr(self.model_config, "use_mla", False)
         attn_cls = MiniCPM3MLAAttention if use_mla else MiniCPM3Attention
 
         self.self_attn = attn_cls(
