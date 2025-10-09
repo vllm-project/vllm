@@ -42,6 +42,11 @@ def inductor_partition_rule_context(op_names: list[str]):
     Inductor scheduler to partition the graph at these operators. The rules
     are automatically restored to their previous state on exit.
 
+    Note: Only vLLM custom operators (vllm::*) are registered. Built-in
+    PyTorch operators (aten::*, torch::*) are filtered out because they may
+    be decomposed, fused, or transformed during Inductor compilation, which
+    can cause the scheduler to fail when looking up FX nodes.
+
     Args:
         op_names (list[str]): List of operator names in PyTorch format
             (e.g., ["aten::addmm.default", "vllm::unified_attention"]).
