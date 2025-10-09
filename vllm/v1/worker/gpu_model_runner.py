@@ -1171,7 +1171,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             max_num_scheduled_tokens == self.uniform_decode_query_len
         ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
 
-        # Disable DP padding when running eager
+        # Disable DP padding when running eager. This lets us set enforce_eager on
+        # the prefiller in a P/D setup and still use CUDA graphs (enabled by this
+        # padding) on the decoder.
         allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
 
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
