@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import itertools
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -37,7 +38,8 @@ class KVCacheBlocks:
         """Adds two KVCacheBlocks instances."""
         return KVCacheBlocks(
             tuple(
-                list(blk1) + list(blk2) for blk1, blk2 in zip(self.blocks, other.blocks)
+                list(itertools.chain(blk1, blk2))
+                for blk1, blk2 in zip(self.blocks, other.blocks)
             )
         )
 
