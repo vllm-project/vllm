@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    Configures a Podman machine running under WSL2 (Fedora 42 base) for NVIDIA GPU passthrough.
+    Configures a Podman machine running under WSL2 (Rocky Linux 10 default) for NVIDIA GPU passthrough.
 
 .DESCRIPTION
     Installs the NVIDIA Container Toolkit inside the Podman machine, generates a CDI spec for
@@ -15,7 +15,7 @@
     Prevents the script from automatically restarting the Podman machine after configuration.
 
 .PARAMETER ImagePath
-    Optional override for the Podman Fedora image. When omitted, Podman's default channel is used.
+    Optional override for the Podman guest image. Defaults to the Rocky Linux 10 WSL Base archive.
 
 .EXAMPLE
     pwsh extras/tools/enable-podman-wsl-gpu.ps1
@@ -30,12 +30,13 @@ param(
     [string]$MachineName = "podman-machine-default",
     [switch]$SkipReboot,
     [switch]$Reset,
-    [string]$ImagePath,
+    [string]$ImagePath = "https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-WSL-Base.latest.x86_64.wsl",
     [switch]$Rootful
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 
 function Invoke-Podman {
     param([string[]]$Arguments)
@@ -60,14 +61,54 @@ function Confirm-PodmanCli {
     }
 }
 
+function Resolve-ImagePath {
+    param([string]$ImageSpec)
+
+    if (-not $ImageSpec) {
+        return $null
+    }
+
+    if ($ImageSpec -match '^[a-zA-Z][a-zA-Z0-9+.-]*://') {
+        $cacheRoot = Join-Path $env:LOCALAPPDATA 'vllm-podman-images'
+        if (-not (Test-Path $cacheRoot)) {
+            [void](New-Item -ItemType Directory -Path $cacheRoot -Force)
+        }
+        $leaf = Split-Path $ImageSpec -Leaf
+        if (-not $leaf) {
+            $leaf = 'podman-machine-image.qcow2'
+        }
+        $localPath = Join-Path $cacheRoot $leaf
+        if (-not (Test-Path $localPath)) {
+            Write-Host "⬇️  Downloading Podman machine image from '$ImageSpec'..." -ForegroundColor Cyan
+            try {
+                Invoke-WebRequest -Uri $ImageSpec -OutFile $localPath -UseBasicParsing | Out-Null
+            } catch {
+                if (Test-Path $localPath) { Remove-Item $localPath -Force }
+                throw "Failed to download image from '$ImageSpec': $($_.Exception.Message)"
+            }
+        } else {
+            Write-Host "ℹ️  Reusing cached machine image '$localPath'." -ForegroundColor DarkGray
+        }
+        return $localPath
+    }
+
+    if (-not (Test-Path $ImageSpec)) {
+        throw "Image path '$ImageSpec' does not exist."
+    }
+
+    return (Resolve-Path $ImageSpec).Path
+}
+
 function Initialize-PodmanMachine {
     if (Test-PodmanMachine) {
         return
     }
     Write-Host "🆕 Creating Podman machine '$MachineName'..." -ForegroundColor Cyan
+    $resolvedImage = Resolve-ImagePath -ImageSpec $ImagePath
     $initArgs = @('machine','init')
-    if ($ImagePath) {
-        $initArgs += @('--image',$ImagePath)
+    if ($resolvedImage) {
+        Write-Host "📦 Using machine image '$resolvedImage'." -ForegroundColor DarkGray
+        $initArgs += @('--image',$resolvedImage)
     }
     $initArgs += $MachineName
     Invoke-Podman $initArgs | Out-Null
@@ -137,15 +178,43 @@ function Install-NvidiaToolkit {
 set -euo pipefail
 
 REPO_FILE="/etc/yum.repos.d/nvidia-container-toolkit.repo"
+ARCH="$(uname -m)"
+. /etc/os-release
+MAJOR="${VERSION_ID%%.*}"
+ID_LIKE_LOWER=$(echo "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')
+ID_LOWER=$(echo "$ID" | tr '[:upper:]' '[:lower:]')
+
 if [ ! -f "$REPO_FILE" ]; then
-    cat <<'EOF' | sudo tee "$REPO_FILE" >/dev/null
+    if [[ "$ID_LOWER" == "rocky" || "$ID_LOWER" == "rhel" || "$ID_LIKE_LOWER" == *"rhel"* ]]; then
+        if [[ "$MAJOR" =~ ^1[0-9]$ ]]; then
+            CUDA_REPO="https://developer.download.nvidia.com/compute/cuda/repos/rhel${MAJOR}/${ARCH}/cuda-rhel${MAJOR}.repo"
+            TMP_REPO=$(mktemp)
+            if curl -fsSL "$CUDA_REPO" -o "$TMP_REPO"; then
+                sudo mv "$TMP_REPO" "$REPO_FILE"
+            else
+                rm -f "$TMP_REPO"
+            fi
+        elif [[ "$MAJOR" -ge 8 ]]; then
+            CUDA_REPO="https://developer.download.nvidia.com/compute/cuda/repos/rhel${MAJOR}/${ARCH}/cuda-rhel${MAJOR}.repo"
+            TMP_REPO=$(mktemp)
+            if curl -fsSL "$CUDA_REPO" -o "$TMP_REPO"; then
+                sudo mv "$TMP_REPO" "$REPO_FILE"
+            else
+                rm -f "$TMP_REPO"
+            fi
+        fi
+    fi
+
+    if [ ! -f "$REPO_FILE" ]; then
+        cat <<'EOF' | sudo tee "$REPO_FILE" >/dev/null
 [nvidia-container-toolkit]
 name=NVIDIA Container Toolkit
-baseurl=https://nvidia.github.io/libnvidia-container/stable/rpm/
+baseurl=https://nvidia.github.io/libnvidia-container/stable/rpm
 enabled=1
 gpgcheck=1
 gpgkey=https://nvidia.github.io/libnvidia-container/gpgkey
 EOF
+    fi
 fi
 
 if command -v rpm-ostree >/dev/null 2>&1; then
@@ -199,8 +268,8 @@ Set-PodmanRootfulMode
 Start-MachineIfNeeded
 $osInfo = Get-OsRelease
 $machineId = if ($osInfo.ContainsKey('ID') -and $osInfo['ID']) { $osInfo['ID'] } elseif ($osInfo.ContainsKey('ID_LIKE') -and $osInfo['ID_LIKE']) { $osInfo['ID_LIKE'] } elseif ($osInfo.ContainsKey('PRETTY_NAME') -and $osInfo['PRETTY_NAME']) { $osInfo['PRETTY_NAME'] } else { 'unknown' }
-if ($machineId -notlike 'fedora*') {
-    Write-Warning ("Machine reports ID='{0}'. Script was validated against Fedora 42; adjust steps manually if your image differs." -f $machineId)
+if ($machineId -notlike 'rocky*') {
+    Write-Warning ("Machine reports ID='{0}'. Script was validated against Rocky Linux 10; adjust steps manually if your image differs." -f $machineId)
 }
 
 Write-Host "⚙️  Installing NVIDIA container runtime bits inside '$MachineName'..." -ForegroundColor Cyan

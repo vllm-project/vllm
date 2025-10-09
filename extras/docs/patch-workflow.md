@@ -63,8 +63,12 @@ and keeps the Windows-mounted repository free of unexpected modifications.
 
 1. Make sure your Windows host has the latest NVIDIA driver with WSL2 support and that `wsl --update`
    has run recently.
-1. Initialize your Podman machine with the Fedora 42 image (`podman machine init`) if you have not done
-  so already. Pass `--image <archive>` if you need to override Podman's default Fedora download.
+1. If you prefer to prepare the machine manually, download the
+  [Rocky Linux 10 WSL Base image](https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-WSL-Base.latest.x86_64.wsl)
+  and run `podman machine init --image <local-file>`. The helper downloads and caches this archive automatically,
+  so you can skip this step unless you want to supply a different build or an offline mirror.
+    > **Heads-up:** Podman on Windows currently rejects `template://` URIs, so always point it at an actual
+    > local file or an HTTP(S) download.
 1. From the repository root, run the helper script:
 
   ```powershell
@@ -72,13 +76,14 @@ and keeps the Windows-mounted repository free of unexpected modifications.
   ```
 
    Add `-MachineName <name>` if you use a non-default Podman machine or `-SkipReboot` when you prefer
-  to restart it manually later. Use `-ImagePath rocky-10` (or another image recognized by `podman machine
-  init`) to create a machine from a different base image, and pass `-Rootful` to enable rootful
+  to restart it manually later. Use `-ImagePath <file-or-url>` to override the default image; HTTP(S) URLs are
+  downloaded into `%LOCALAPPDATA%\vllm-podman-images` on first use. Pass `-Rootful` to enable rootful
   mode automatically. Add `-Reset` to wipe and reinitialize the Podman machine (the helper removes the
   existing VM and re-runs `podman machine init`) when you want to start from a clean slate.
 
 1. After the script restarts the machine, launch `extras/podman/run.ps1 -GPUCheck` (or `run.sh --gpu-check`)
-   to confirm that `/dev/dxg` and the CUDA libraries are visible from inside the dev container.
+   to confirm that `/dev/dxg` and the CUDA libraries are visible from inside the dev container. If the helper
+   reports `Image missing. Use --build.`, rebuild the development container first via `extras/podman/run.ps1 --build`.
 
 If the helper still reports missing `/dev/dxg`, open Podman Desktop, ensure GPU sharing is enabled for
 the selected machine, and rerun the script (include `-Rootful` if you skipped it the first time, since
