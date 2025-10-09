@@ -47,6 +47,15 @@ def is_rocm_aiter_moe_enabled() -> bool:
     )
 
 
+@cache
+def use_fp4_aiter_moe() -> bool:
+    return (
+        current_platform.is_rocm()
+        and envs.VLLM_ROCM_USE_CK_MXFP4_MOE
+        and envs.VLLM_ROCM_USE_AITER
+    )
+
+
 def rocm_aiter_asm_moe_tkw1_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
