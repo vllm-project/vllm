@@ -361,7 +361,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi
 
 # install build and runtime dependencies
-COPY requirements/common.txt requirements/common.txt
+# COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/cuda.txt \
@@ -489,8 +489,6 @@ ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
 # note that this uses vllm installed by `pip`
 FROM vllm-base AS test
 
-ADD . /vllm-workspace/
-
 ARG PYTHON_VERSION
 
 ARG PIP_INDEX_URL UV_INDEX_URL
@@ -522,11 +520,19 @@ ENV HF_HUB_ENABLE_HF_TRANSFER 1
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
+# Install vllm wheel
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
 # Source code is used in the `python_only_compile.sh` test
 # We hide it inside `src/` so that this source code
 # will not be imported by other tests
 RUN mkdir src
 RUN mv vllm src/vllm
+
+ADD . /vllm-workspace/
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
