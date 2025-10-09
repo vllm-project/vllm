@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 from types import TracebackType
-from typing import Optional, TextIO
+from typing import TextIO
 
 import vllm.envs as envs
 
@@ -17,7 +17,20 @@ _LOG_PATH = envs.VLLM_LITE_PROFILER_LOG_PATH
 _THREAD_LOCK = threading.Lock()
 
 
-def _get_process_rank() -> Optional[int]:
+def _get_process_rank() -> int | None:
+    """Get the current process rank in distributed/multi-process environments.
+
+    In distributed machine learning setups, multiple processes are spawned
+    across different GPUs/nodes. Each process has a unique rank (0, 1, 2, ...).
+    To avoid duplicate profiling data and file contention, we typically want
+    only rank 0 (the main process) to perform profiling and logging.
+
+    This function checks common environment variables used by different
+    frameworks:
+    - VLLM_DP_RANK: vLLM's data parallel rank
+    - RANK: Standard distributed training rank
+    - LOCAL_RANK: Local rank within a single node
+    """
     for env_name in ("VLLM_DP_RANK", "RANK", "LOCAL_RANK"):
         value = os.environ.get(env_name)
         if value is not None:
@@ -62,15 +75,19 @@ def _write_log_entry(name: str, elapsed_us: int) -> None:
             atexit.register(log_file.close)
 
         log_file.write(log_line)
-        log_file.flush()
 
 
 class LiteScope:
-    """Lite Scope that directly logs function duration"""
+    """Lightweight context manager for timing code blocks with minimal overhead.
+
+    This class provides a simple way to measure and log the execution time of
+    code blocks using Python's context manager protocol (with statement). It's
+    designed for high-frequency profiling with minimal performance impact.
+    """
 
     def __init__(self, name: str) -> None:
         self._name = name
-        self._start_time: Optional[int] = None
+        self._start_time: int | None = None
 
     def __enter__(self) -> None:
         self._start_time = time.perf_counter_ns()
@@ -90,7 +107,13 @@ class LiteScope:
 
 
 def maybe_emit_lite_profiler_report() -> None:
-    """Print a lite-profiler summary when profiling is enabled."""
+    """Generate and display a summary report of profiling data if available.
+
+    This function serves as the main entry point for analyzing and displaying
+    profiling results. It checks if profiling was enabled and a log file exists,
+    then delegates to the lite_profiler_report module to generate statistics
+    like function call counts, timing distributions, and performance insights.
+    """
 
     log_path = envs.VLLM_LITE_PROFILER_LOG_PATH
     if log_path is None:
