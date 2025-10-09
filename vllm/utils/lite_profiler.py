@@ -28,14 +28,24 @@ def _get_process_rank() -> Optional[int]:
     return None
 
 
-_SHOULD_LOG = _LOG_PATH is not None and ((rank := _get_process_rank()) is None
-                                         or rank == 0)
+_SHOULD_LOG = _LOG_PATH and ((rank := _get_process_rank()) is None
+                             or rank == 0)
 
 # Cache for log file handles
 _log_file_cache: dict[str, TextIO] = {}
 
 
 def _write_log_entry(name: str, elapsed_us: int) -> None:
+    """Write a profiler entry using cached file handles for optimal performance.
+
+    This function implements an efficient caching approach where file handles
+    are opened once per log path and reused for all subsequent writes. This
+    eliminates the significant overhead of opening/closing files for every
+    profiler entry, which is crucial for maintaining the lightweight nature
+    of the profiler.
+
+    The cached file handles are automatically closed on program exit via atexit.
+    """
     if not _SHOULD_LOG or _LOG_PATH is None:
         return
 
@@ -46,9 +56,10 @@ def _write_log_entry(name: str, elapsed_us: int) -> None:
             directory = os.path.dirname(_LOG_PATH)
             if directory:
                 os.makedirs(directory, exist_ok=True)
-            with open(_LOG_PATH, "a", buffering=50000) as log_file:
-                _log_file_cache[_LOG_PATH] = log_file
-                atexit.register(log_file.close)
+            # ruff: noqa: SIM115 - intentionally keeping file handle cached globally
+            log_file = open(_LOG_PATH, "a", buffering=50000)
+            _log_file_cache[_LOG_PATH] = log_file
+            atexit.register(log_file.close)
 
         log_file.write(log_line)
         log_file.flush()
