@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-
 from vllm.distributed.eplb.eplb_policy.default_eplb_policy import DefaultEplb
 
 
@@ -25,7 +24,8 @@ def test_basic_rebalance():
 
     policy = DefaultEplb()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus)
+        weight, num_replicas, num_groups, num_nodes, num_gpus
+    )
 
     # Verify output shapes
     assert phy2log.shape == (
@@ -79,7 +79,8 @@ def test_single_gpu_case():
 
     policy = DefaultEplb()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus)
+        weight, num_replicas, num_groups, num_nodes, num_gpus
+    )
 
     # Verify shapes
     assert phy2log.shape == (1, 4)
@@ -101,7 +102,8 @@ def test_equal_weights():
 
     policy = DefaultEplb()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus)
+        weight, num_replicas, num_groups, num_nodes, num_gpus
+    )
 
     # Verify shapes
     assert phy2log.shape == (1, 8)
@@ -124,7 +126,8 @@ def test_extreme_weight_imbalance():
 
     policy = DefaultEplb()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus)
+        weight, num_replicas, num_groups, num_nodes, num_gpus
+    )
 
     # Verify shapes
     assert phy2log.shape == (1, 12)
@@ -152,7 +155,8 @@ def test_multiple_layers():
 
     policy = DefaultEplb()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus)
+        weight, num_replicas, num_groups, num_nodes, num_gpus
+    )
 
     # Verify shapes
     assert phy2log.shape == (3, 8)
@@ -200,7 +204,8 @@ def test_small_scale_hierarchical():
 
     policy = DefaultEplb()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus)
+        weight, num_replicas, num_groups, num_nodes, num_gpus
+    )
 
     # Verify basic constraints
     assert phy2log.shape == (1, 12)
@@ -227,7 +232,8 @@ def test_global_load_balance_fallback():
 
     policy = DefaultEplb()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus)
+        weight, num_replicas, num_groups, num_nodes, num_gpus
+    )
 
     # Should work normally, just using global load balancing strategy
     assert phy2log.shape == (1, 8)
@@ -249,7 +255,8 @@ def test_device_compatibility(device):
 
     policy = DefaultEplb()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus)
+        weight, num_replicas, num_groups, num_nodes, num_gpus
+    )
 
     # Function will convert to CPU internally, but should handle different
     # device inputs normally
@@ -304,7 +311,8 @@ if __name__ == "__main__":
 
     policy = DefaultEplb()
     phy2log, log2phy, logcnt = policy.rebalance_experts(
-        weight, num_replicas, num_groups, num_nodes, num_gpus)
+        weight, num_replicas, num_groups, num_nodes, num_gpus
+    )
     print(phy2log)
 
     test_basic_rebalance()
