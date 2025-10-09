@@ -90,6 +90,14 @@ class ConversationContext(ABC):
         pass
 
     @abstractmethod
+    async def __aenter__(self):
+        pass
+
+    @abstractmethod
+    async def __aexit__(self, exc_type, exc, tb):
+        pass
+
+    @abstractmethod
     async def cleanup_session(self) -> None:
         raise NotImplementedError("Should not be called.")
 
@@ -129,6 +137,12 @@ class SimpleContext(ConversationContext):
     ) -> None:
         pass
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        pass
+
     async def cleanup_session(self) -> None:
         raise NotImplementedError("Should not be called.")
 
@@ -138,12 +152,17 @@ class HarmonyContext(ConversationContext):
         self,
         messages: list,
         available_tools: list[str],
+        tool_server: Optional[ToolServer],
     ):
         self._messages = messages
         self.finish_reason: Optional[str] = None
         self.available_tools = available_tools
         self._tool_sessions: dict[str, Union[ClientSession, Tool]] = {}
         self.called_tools: set[str] = set()
+        self._tool_server = tool_server
+        self._async_exit_stack: Optional[AsyncExitStack] = None
+        self._reference_count = 0
+        self._reference_count_lock = asyncio.Lock()
 
         self.parser = get_streamable_parser_for_assistant()
         self.num_init_messages = len(messages)
@@ -288,6 +307,18 @@ class HarmonyContext(ConversationContext):
             or recipient.startswith("container.")
         )
 
+    async def _get_tool_session(self, tool_name: str) -> Union["ClientSession", Tool]:
+        if tool_name not in self._tool_sessions and self._tool_server is not None:
+            assert self._async_exit_stack is not None, (
+                "Async exit stack not set. Please report this issue."
+            )
+            self._tool_sessions[
+                tool_name
+            ] = await self._async_exit_stack.enter_async_context(
+                self._tool_server.new_session(tool_name)
+            )
+        return self._tool_sessions[tool_name]
+
     async def call_tool(self) -> list[Message]:
         if not self.messages:
             return []
@@ -296,15 +327,15 @@ class HarmonyContext(ConversationContext):
         if recipient is not None:
             if recipient.startswith("browser."):
                 return await self.call_search_tool(
-                    self._tool_sessions["browser"], last_msg
+                    await self._get_tool_session("browser"), last_msg
                 )
             elif recipient.startswith("python"):
                 return await self.call_python_tool(
-                    self._tool_sessions["python"], last_msg
+                    await self._get_tool_session("python"), last_msg
                 )
             elif recipient.startswith("container."):
                 return await self.call_container_tool(
-                    self._tool_sessions["container"], last_msg
+                    await self._get_tool_session("container"), last_msg
                 )
         raise ValueError("No tool call found")
 
@@ -430,6 +461,25 @@ class HarmonyContext(ConversationContext):
                 for tool in self.called_tools
             )
         )
+
+    async def __aenter__(self):
+        async with self._reference_count_lock:
+            self._reference_count += 1
+            if self._async_exit_stack is None:
+                assert self._reference_count == 1, (
+                    "Reference count of exit stack should be "
+                )
+                "1 when initializing exit stack."
+                self._async_exit_stack = AsyncExitStack()
+                await self._async_exit_stack.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        async with self._reference_count_lock:
+            self._reference_count -= 1
+            if self._reference_count == 0 and self._async_exit_stack is not None:
+                await self._async_exit_stack.__aexit__(exc_type, exc, tb)
+                self._async_exit_stack = None
 
 
 class StreamingHarmonyContext(HarmonyContext):
