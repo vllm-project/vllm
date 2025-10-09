@@ -1005,13 +1005,12 @@ class FlexAttentionImpl(AttentionImpl):
                 (query, key_cache, value_cache),
             )
 
-            query = query[:, :, :num_actual_tokens, :]
-
-            if self.attn_type == AttentionType.ENCODER_DECODER and (key_tensor.size(-2) > num_actual_tokens) or (
-                value_tensor.size(-2) > num_actual_tokens
-            ):
-                key_tensor = key_tensor[:, :, :128, :]
-                value_tensor = value_tensor[:, :, :128, :]
+            if self.attn_type == AttentionType.ENCODER_DECODER:
+                query = query[:, :, :attn_metadata.max_query_len, :]
+                key_tensor = key_tensor[:, :, :attn_metadata.max_seq_len, :]
+                value_tensor = value_tensor[:, :, :attn_metadata.max_seq_len, :]
+            else:
+                query = query[:, :, :num_actual_tokens, :]
 
         # Doesn't work for now -> constraint violation
         # torch._dynamo.try_mark_dynamic(query, 2)
@@ -1050,7 +1049,6 @@ class FlexAttentionImpl(AttentionImpl):
         )
 
         # Use flex_attention directly (no compilation for CUDA graph compat)
-        print(query.size(-2), key_tensor.size(-2), attn_metadata.block_mask.shape[-2], attn_metadata.block_mask.shape[-1])
         out = flex_attention_compiled(
             query,
             key_tensor,
