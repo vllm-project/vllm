@@ -509,6 +509,9 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
 
+    def output_is_reduced(self) -> bool:
+        return False
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -640,7 +643,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
-        assert not self.quant_config.use_mxfp4_w4a4, "NYI"
+        assert self.quant_config.ocp_mx_scheme is None, "NYI"
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -665,8 +668,6 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
@@ -674,14 +675,13 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-        assert a.dim() == 2
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         num_dp = self.num_dispatchers
         num_experts = local_num_experts
         workspace13 = (num_experts, self.max_num_tokens * num_dp, K)
         workspace2 = (self.max_num_tokens * num_dp, N)
         output = workspace13
-        return (workspace13, workspace2, output, a.dtype)
+        return (workspace13, workspace2, output)
 
     def dequant(self, t: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         assert self.quant_config.is_quantized
@@ -835,7 +835,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
-        assert not self.quant_config.use_mxfp4_w4a4, "NYI"
+        assert self.quant_config.ocp_mx_scheme is None, "NYI"
         assert max_num_tokens > 0
         assert num_dispatchers > 0
         self.max_num_tokens = max_num_tokens
@@ -862,8 +862,6 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
@@ -871,15 +869,14 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-        assert a.dim() == 2
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         num_dp = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = self.max_num_tokens
         workspace13 = (num_experts, max_num_tokens * num_dp, max(K, N))
         workspace2 = (num_experts, max_num_tokens * num_dp, (N // 2))
         output = (num_experts, max_num_tokens * num_dp, K)
-        return (workspace13, workspace2, output, a.dtype)
+        return (workspace13, workspace2, output)
 
     def apply(
         self,
