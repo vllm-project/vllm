@@ -3309,9 +3309,9 @@ def has_arctic_inference() -> bool:
     return _has_module("arctic_inference")
 
 
-def set_process_title(name: str,
-                      suffix: str = "",
-                      prefix: str = envs.VLLM_PROCESS_NAME_PREFIX) -> None:
+def set_process_title(
+    name: str, suffix: str = "", prefix: str = envs.VLLM_PROCESS_NAME_PREFIX
+) -> None:
     """
     Set the current process title to a specific name with an
     optional suffix.

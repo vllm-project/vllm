@@ -5,7 +5,6 @@ from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
 class SuffixDecodingProposer:
-
     def __init__(self, vllm_config: VllmConfig):
         config = vllm_config.speculative_config
         self.num_speculative_tokens = config.num_speculative_tokens
@@ -19,7 +18,8 @@ class SuffixDecodingProposer:
 
         self.suffix_cache = SuffixDecodingCache(
             max_tree_depth=config.suffix_decoding_max_tree_depth,
-            max_cached_requests=config.suffix_decoding_max_cached_requests)
+            max_cached_requests=config.suffix_decoding_max_cached_requests,
+        )
 
     def update(
         self,
@@ -40,8 +40,7 @@ class SuffixDecodingProposer:
                     # Reset the suffix cache for this request.
                     self.suffix_cache.evict_cached_response(req_id)
                 num_prompt_tokens = input_batch.num_prompt_tokens[index]
-                prompt_token_ids = (
-                    input_batch.token_ids_cpu[index, :num_prompt_tokens])
+                prompt_token_ids = input_batch.token_ids_cpu[index, :num_prompt_tokens]
                 prompt_token_ids = prompt_token_ids.tolist()
                 self.suffix_cache.start_request(req_id, prompt_token_ids)
 
@@ -85,10 +84,12 @@ class SuffixDecodingProposer:
             draft = self.suffix_cache.speculate(
                 req_id,
                 pattern,
-                max_spec_tokens=min(self.num_speculative_tokens,
-                                    self.max_model_len - num_tokens - 1),
+                max_spec_tokens=min(
+                    self.num_speculative_tokens, self.max_model_len - num_tokens - 1
+                ),
                 max_spec_factor=self.max_spec_factor,
-                min_token_prob=self.min_token_prob)
+                min_token_prob=self.min_token_prob,
+            )
 
             draft_token_ids.append(draft.token_ids)
 

@@ -77,16 +77,21 @@ def model_name():
     return "meta-llama/Llama-3.1-8B-Instruct"
 
 
-@pytest.mark.parametrize("speculative_config",
-                         [{
-                             "method": "ngram",
-                             "prompt_lookup_max": 5,
-                             "prompt_lookup_min": 3,
-                             "num_speculative_tokens": 3,
-                         }, {
-                             "method": "suffix",
-                             "suffix_decoding_max_spec_factor": 2.0,
-                         }])
+@pytest.mark.parametrize(
+    "speculative_config",
+    [
+        {
+            "method": "ngram",
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 3,
+            "num_speculative_tokens": 3,
+        },
+        {
+            "method": "suffix",
+            "suffix_decoding_max_spec_factor": 2.0,
+        },
+    ],
+)
 def test_ngram_and_suffix_correctness(
     speculative_config: dict,
     monkeypatch: pytest.MonkeyPatch,
@@ -134,10 +139,10 @@ def test_suffix_decoding_acceptance(
     sampling_config: SamplingParams,
     model_name: str,
 ):
-    '''
+    """
     Check that suffix decoding caching takes effect and improves acceptance
     lengths and acceptance rates over multiple runs of the same prompts.
-    '''
+    """
     test_prompts = get_test_prompts(mm_enabled=False)
 
     spec_llm = LLM(

@@ -322,27 +322,34 @@ class SpeculativeConfig:
             if not has_arctic_inference():
                 raise ImportError(
                     "Arctic Inference is required for suffix decoding. "
-                    "Install via `pip install arctic-inference==0.0.9`.")
+                    "Install via `pip install arctic-inference==0.0.9`."
+                )
             if self.num_speculative_tokens is None:
                 self.num_speculative_tokens = 32
             # Validate values
             if self.suffix_decoding_max_tree_depth < 1:
                 raise ValueError(
                     f"suffix_decoding_max_tree_depth="
-                    f"{self.suffix_decoding_max_tree_depth} must be >= 1")
+                    f"{self.suffix_decoding_max_tree_depth} must be >= 1"
+                )
             if self.suffix_decoding_max_cached_requests < 0:
                 raise ValueError(
                     f"suffix_decoding_max_cached_requests="
-                    f"{self.suffix_decoding_max_cached_requests} must be >= 0")
+                    f"{self.suffix_decoding_max_cached_requests} must be >= 0"
+                )
             if self.suffix_decoding_max_spec_factor < 0:
                 raise ValueError(
                     f"suffix_decoding_max_spec_factor="
-                    f"{self.suffix_decoding_max_spec_factor} must be >= 0")
-            if (self.suffix_decoding_min_token_prob < 0
-                    or self.suffix_decoding_min_token_prob > 1):
+                    f"{self.suffix_decoding_max_spec_factor} must be >= 0"
+                )
+            if (
+                self.suffix_decoding_min_token_prob < 0
+                or self.suffix_decoding_min_token_prob > 1
+            ):
                 raise ValueError(
                     f"suffix_decoding_min_token_prob="
-                    f"{self.suffix_decoding_min_token_prob} must be in [0, 1]")
+                    f"{self.suffix_decoding_min_token_prob} must be in [0, 1]"
+                )
         else:
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
@@ -648,7 +655,6 @@ class SpeculativeConfig:
 
     def __repr__(self) -> str:
         method = self.method
-        model = (None if method in ("ngram", "suffix")
-                 else self.draft_model_config.model)
+        model = None if method in ("ngram", "suffix") else self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
