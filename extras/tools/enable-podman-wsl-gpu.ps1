@@ -44,8 +44,12 @@ function Confirm-PodmanCli {
 }
 
 function Confirm-PodmanMachine {
-    $machines = Invoke-Podman @('machine','list','--format','{{.Name}}')
-    if (-not ($machines -split "`n" | Where-Object { $_.Trim() -eq $MachineName })) {
+    try {
+        $inspect = Invoke-Podman @('machine','inspect',$MachineName,'--format','{{.Name}}') | Select-Object -First 1
+    } catch {
+        throw "Podman machine '$MachineName' not found. Create it with 'podman machine init $MachineName --image-path fedora-42' before running this script."
+    }
+    if (-not $inspect -or $inspect.TrimEnd('*') -ne $MachineName) {
         throw "Podman machine '$MachineName' not found. Create it with 'podman machine init $MachineName --image-path fedora-42' before running this script."
     }
 }
@@ -114,8 +118,9 @@ Confirm-PodmanCli
 Confirm-PodmanMachine
 Start-MachineIfNeeded
 $osInfo = Get-OsRelease
-if ($osInfo['ID'] -ne 'fedora') {
-    Write-Warning "Machine reports ID='${($osInfo['ID'])}'. Script was validated against Fedora 42; adjust steps manually if your image differs."
+$machineId = if ($osInfo.ContainsKey('ID') -and $osInfo['ID']) { $osInfo['ID'] } else { 'unknown' }
+if ($machineId -ne 'fedora') {
+    Write-Warning ("Machine reports ID='{0}'. Script was validated against Fedora 42; adjust steps manually if your image differs." -f $machineId)
 }
 
 Write-Host "⚙️  Installing NVIDIA container runtime bits inside '$MachineName'..." -ForegroundColor Cyan
