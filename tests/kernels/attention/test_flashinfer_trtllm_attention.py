@@ -7,9 +7,8 @@ import pytest
 import torch
 
 from tests.kernels.quantization.nvfp4_utils import (
-    FLOAT4_E2M1_MAX,
-    FLOAT8_E4M3_MAX,
     dequantize_nvfp4_to_dtype,
+    get_nvfp4_global_scale,
 )
 from vllm.platforms import current_platform
 from vllm.utils import round_up
@@ -171,13 +170,12 @@ def test_flashinfer_trtllm_decode_with_baseline(
     output = torch.empty(ref_query.shape, dtype=dtype)
     wrapper.run(ref_query, ref_kv_cache, out=output)
     o_scale = 1.0
-    o_sf_scale = None
+    o_sf_scale_float = None
     if o_quant_dtype == FP8_DTYPE:
         _, o_scale = to_float8(output)
     elif o_quant_dtype == FP4_DTYPE:
-        o_sf_scale = (
-            (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(output.flatten(), dim=-1)
-        ).to(torch.float32)
+        o_sf_scale = get_nvfp4_global_scale(output)
+        o_sf_scale_float = o_sf_scale.item()
 
     # TRTLLM Decode
     if o_quant_dtype == FP4_DTYPE:
@@ -204,7 +202,7 @@ def test_flashinfer_trtllm_decode_with_baseline(
         bmm1_scale=q_scale * k_scale * sm_scale,
         bmm2_scale=v_scale / o_scale,
         window_left=window_left,
-        o_sf_scale=o_sf_scale,
+        o_sf_scale=o_sf_scale_float,
         out=output_trtllm,
     )
     if o_quant_dtype == FP8_DTYPE:
@@ -361,13 +359,12 @@ def test_flashinfer_trtllm_prefill_with_baseline(
     output = torch.empty(ref_query.shape, dtype=dtype)
     wrapper.run(ref_query, ref_kv_cache, out=output)
     o_scale = 1.0
-    o_sf_scale = None
+    o_sf_scale_float = None
     if o_quant_dtype == FP8_DTYPE:
         _, o_scale = to_float8(output)
     elif o_quant_dtype == FP4_DTYPE:
-        o_sf_scale = (
-            (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(output.flatten(), dim=-1)
-        ).to(torch.float32)
+        o_sf_scale = get_nvfp4_global_scale(output)
+        o_sf_scale_float = o_sf_scale.item()
 
     # TRTLLM Prefill
     if o_quant_dtype == FP4_DTYPE:
@@ -398,7 +395,7 @@ def test_flashinfer_trtllm_prefill_with_baseline(
         cum_seq_lens_q=q_indptr,
         cum_seq_lens_kv=kv_indptr,
         window_left=window_left,
-        o_sf_scale=o_sf_scale,
+        o_sf_scale=o_sf_scale_float,
         out=output_trtllm,
     )
     if o_quant_dtype == FP8_DTYPE:
