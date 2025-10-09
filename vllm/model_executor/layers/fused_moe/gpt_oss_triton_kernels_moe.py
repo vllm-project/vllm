@@ -15,7 +15,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils import has_triton_kernels
+from vllm.utils import has_triton_kernels, round_up
 
 logger = init_logger(__name__)
 
@@ -184,10 +184,8 @@ def triton_kernel_fused_experts(
         hidden_dim = hidden_states.shape[-1]
         ffn_dim = N // 2  # w1 outputs 2*ffn_dim for SwiGLU
 
-        hidden_dim_padding = (
-            triton.cdiv(hidden_dim, pad_align) * pad_align
-        ) - hidden_dim
-        ffn_dim_padding = (triton.cdiv(ffn_dim, pad_align) * pad_align) - ffn_dim
+        hidden_dim_padding = round_up(hidden_dim, pad_align) - hidden_dim
+        ffn_dim_padding = round_up(ffn_dim, pad_align) - ffn_dim
 
         # Pad tensors for optimal memory alignment
         if hidden_dim_padding > 0 or ffn_dim_padding > 0:

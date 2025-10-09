@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     BatchedOAITritonExperts,
+    get_padding_alignment,
     triton_kernel_moe_forward,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
@@ -98,8 +99,9 @@ def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
     else:  # quantize to mx4
         # careful on the padding here, the activation padding need to be
         # multiple of 64, the actual engine is not implemented
-        w1_bottom_pad = round_up(w1_tri.shape[1], 256) - w1_tri.shape[1]
-        w1_right_pad = round_up(w1_tri.shape[2], 512) - w1_tri.shape[2]
+        pad_align = get_padding_alignment()
+        w1_bottom_pad = round_up(w1_tri.shape[1], pad_align) - w1_tri.shape[1]
+        w1_right_pad = round_up(w1_tri.shape[2], pad_align) - w1_tri.shape[2]
 
         w2_bottom_pad = w1_right_pad // 2
         w2_right_pad = w1_bottom_pad
