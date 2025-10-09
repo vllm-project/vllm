@@ -488,7 +488,9 @@ class Qwen3_VisionTransformer(nn.Module):
 
             indices = torch.stack([idx00, idx01, idx10, idx11], dim=0).reshape(4, -1)
             weights = torch.stack([w00, w01, w10, w11], dim=0).reshape(4, -1, 1)
-            weights = weights.to(dtype=self.dtype, device=self.device)
+            weights = weights.to(
+                dtype=self.dtype, device=self.device, non_blocking=True
+            )
 
             embeds = self.pos_embed(indices)
             weighted_embeds = embeds * weights
@@ -524,7 +526,7 @@ class Qwen3_VisionTransformer(nn.Module):
         x: torch.Tensor,
         grid_thw: list[list[int]],
     ) -> torch.Tensor:
-        hidden_states = x.to(device=self.device, dtype=self.dtype)
+        hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
         hidden_states = self.patch_embed(hidden_states)
 
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
@@ -542,7 +544,7 @@ class Qwen3_VisionTransformer(nn.Module):
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         hidden_states = hidden_states.unsqueeze(1)
-        rotary_pos_emb = rotary_pos_emb.to(hidden_states.device)
+        rotary_pos_emb = rotary_pos_emb.to(hidden_states.device, non_blocking=True)
         max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
 
         deepstack_feature_lists = []
