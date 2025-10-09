@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import json
 import sys
 import time
@@ -15,17 +16,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
-from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.processor import Processor
-
 if sys.version_info >= (3, 12):
     from typing import TypedDict
 else:
     from typing_extensions import TypedDict
 
 import vllm.envs as envs
-from vllm.config import ModelConfig
+from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -68,9 +65,14 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
+from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import PromptType
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
-from vllm.inputs.parse import PromptComponents, get_prompt_components
+from vllm.inputs.parse import (
+    PromptComponents,
+    get_prompt_components,
+    is_explicit_encoder_decoder_prompt,
+)
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
@@ -78,7 +80,7 @@ from vllm.multimodal import (  # noqa: F401 - Required to resolve Pydantic error
     MultiModalDataDict,
     MultiModalUUIDDict,
 )
-from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tracing import (
@@ -89,11 +91,13 @@ from vllm.tracing import (
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import (
     AsyncMicrobatchTokenizer,
+    collect_from_async_generator,
     is_list_of,
     make_async,
     merge_async_iterators,
     random_uuid,
 )
+from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
 
@@ -240,7 +244,6 @@ class OpenAIServing:
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -251,8 +254,6 @@ class OpenAIServing:
         super().__init__()
 
         self.engine_client = engine_client
-        self.model_config = model_config
-        self.max_model_len = model_config.max_model_len
 
         self.models = models
 
@@ -268,12 +269,194 @@ class OpenAIServing:
         self._async_tokenizer_pool: dict[AnyTokenizer, AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
 
-    async def _get_processor(self) -> Processor:
-        if not hasattr(self, "_processor"):
-            vllm_config = await self.engine_client.get_vllm_config()
-            self._processor = Processor(vllm_config)
+        self.processor = self.models.processor
+        self.io_processor = self.models.io_processor
+        self.model_config = self.models.model_config
+        self.max_model_len = self.model_config.max_model_len
 
-        return self._processor
+    async def beam_search(
+        self,
+        prompt: PromptType,
+        request_id: str,
+        params: BeamSearchParams,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> AsyncGenerator[RequestOutput, None]:
+        beam_width = params.beam_width
+        max_tokens = params.max_tokens
+        ignore_eos = params.ignore_eos
+        temperature = params.temperature
+        length_penalty = params.length_penalty
+        include_stop_str_in_output = params.include_stop_str_in_output
+
+        processor = self.processor
+        tokenizer = processor.tokenizer
+        if tokenizer is None:
+            raise ValueError(
+                "You cannot use beam search when `skip_tokenizer_init` is True"
+            )
+
+        eos_token_id: int = tokenizer.eos_token_id  # type: ignore
+
+        if is_explicit_encoder_decoder_prompt(prompt):
+            raise NotImplementedError
+        else:
+            processed_inputs = processor.input_preprocessor._prompt_to_llm_inputs(
+                prompt
+            )
+
+        if processed_inputs["type"] == "embeds":
+            raise NotImplementedError
+
+        # This is a workaround to fix multimodal beam search; this is a
+        # bandaid fix for 2 small problems:
+        # 1. Multi_modal_data on the processed_inputs currently resolves to
+        #    `None`.
+        # 2. preprocessing above expands the multimodal placeholders. However,
+        #    this happens again in generation, so the double expansion causes
+        #    a mismatch.
+        # TODO - would be ideal to handle this more gracefully.
+        prompt_text: Optional[str]
+        prompt_token_ids: list[int]
+        multi_modal_data: Optional[MultiModalDataDict]
+        if isinstance(prompt, str):
+            prompt_text = prompt
+            prompt_token_ids = []
+            multi_modal_data = None
+        else:
+            prompt_text = prompt.get("prompt")  # type: ignore
+            prompt_token_ids = prompt.get("prompt_token_ids", [])  # type: ignore
+            multi_modal_data = prompt.get("multi_modal_data")  # type: ignore
+
+        mm_processor_kwargs: Optional[dict[str, Any]] = processed_inputs.get(
+            "mm_processor_kwargs"
+        )  # type: ignore
+
+        tokenized_length = len(prompt_token_ids)
+
+        sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
+
+        beam_search_params = SamplingParams(
+            logprobs=2 * beam_width,
+            max_tokens=1,
+            temperature=temperature,
+        )
+        all_beams = [
+            BeamSearchSequence(
+                tokens=prompt_token_ids,
+                cum_logprob=0,
+                logprobs=[],
+                multi_modal_data=multi_modal_data,
+                mm_processor_kwargs=mm_processor_kwargs,
+                lora_request=lora_request,
+            )
+        ]
+        completed = []
+
+        for _ in range(max_tokens):
+            prompts_batch, lora_req_batch = zip(
+                *[
+                    (
+                        EngineTokensPrompt(
+                            prompt_token_ids=beam.tokens,
+                            multi_modal_data=beam.multi_modal_data,
+                            mm_processor_kwargs=beam.mm_processor_kwargs,
+                        ),
+                        beam.lora_request,
+                    )
+                    for beam in all_beams
+                ]
+            )
+
+            tasks = []
+            request_id_batch = f"{request_id}-{random_uuid()}"
+
+            for i, (individual_prompt, lora_req) in enumerate(
+                zip(prompts_batch, lora_req_batch)
+            ):
+                request_id_item = f"{request_id_batch}-beam-{i}"
+                task = asyncio.create_task(
+                    collect_from_async_generator(
+                        self.engine_client.generate(
+                            individual_prompt,
+                            beam_search_params,
+                            request_id_item,
+                            lora_request=lora_req,
+                        )
+                    )
+                )
+                tasks.append(task)
+
+            output = [x[0] for x in await asyncio.gather(*tasks)]
+
+            new_beams = []
+            for i, current_beam in enumerate(all_beams):
+                result = output[i]
+
+                if result.outputs[0].logprobs is not None:
+                    logprobs = result.outputs[0].logprobs[0]
+                    for token_id, logprob_obj in logprobs.items():
+                        if token_id == eos_token_id and not ignore_eos:
+                            completed.append(
+                                BeamSearchSequence(
+                                    tokens=current_beam.tokens + [token_id]
+                                    if include_stop_str_in_output
+                                    else current_beam.tokens,
+                                    logprobs=current_beam.logprobs + [logprobs],
+                                    cum_logprob=current_beam.cum_logprob
+                                    + logprob_obj.logprob,
+                                    finish_reason="stop",
+                                    stop_reason=eos_token_id,
+                                )
+                            )
+                        else:
+                            new_beams.append(
+                                BeamSearchSequence(
+                                    tokens=current_beam.tokens + [token_id],
+                                    logprobs=current_beam.logprobs + [logprobs],
+                                    lora_request=current_beam.lora_request,
+                                    cum_logprob=current_beam.cum_logprob
+                                    + logprob_obj.logprob,
+                                    multi_modal_data=current_beam.multi_modal_data,
+                                    mm_processor_kwargs=current_beam.mm_processor_kwargs,
+                                )
+                            )
+
+            sorted_beams = sorted(new_beams, key=sort_beams_key, reverse=True)
+            all_beams = sorted_beams[:beam_width]
+
+        completed.extend(all_beams)
+        sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
+        best_beams = sorted_completed[:beam_width]
+
+        for beam in best_beams:
+            if beam.tokens[-1] == eos_token_id and not ignore_eos:
+                # Skip the eos token in the text.
+                tokens = beam.tokens[tokenized_length:-1]
+            else:
+                tokens = beam.tokens[tokenized_length:]
+            beam.text = tokenizer.decode(tokens)
+
+        yield RequestOutput(
+            request_id=request_id,
+            prompt=prompt_text,
+            outputs=[
+                CompletionOutput(
+                    text=beam.text,  # type: ignore
+                    cumulative_logprob=beam.cum_logprob,
+                    token_ids=beam.tokens[tokenized_length:],
+                    index=i,
+                    logprobs=beam.logprobs,
+                    finish_reason=beam.finish_reason
+                    if beam.finish_reason is not None
+                    else "length",
+                    stop_reason=beam.stop_reason,
+                )
+                for (i, beam) in enumerate(best_beams)
+            ],
+            finished=True,
+            prompt_token_ids=prompt_token_ids,
+            prompt_logprobs=None,
+        )
 
     def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:
         """
@@ -938,8 +1121,7 @@ class OpenAIServing:
             self.max_model_len, params.truncate_prompt_tokens, tokenization_kwargs
         )
 
-        processor = await self._get_processor()
-        engine_request = processor.process_inputs(
+        engine_request = self.processor.process_inputs(
             request_id,
             engine_prompt,
             params,

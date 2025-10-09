@@ -17,7 +17,7 @@ from vllm.multimodal.inputs import (
     MultiModalUUIDDict,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils.jsontree import json_iter_leaves
 
 from .data import (
@@ -45,19 +45,16 @@ class InputPreprocessor:
     def __init__(
         self,
         model_config: ModelConfig,
+        tokenizer: Optional[AnyTokenizer],
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         mm_processor_cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> None:
         super().__init__()
 
         self.model_config = model_config
+        self.tokenizer = tokenizer
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_processor_cache
-
-        if model_config.skip_tokenizer_init:
-            self.tokenizer = None
-        else:
-            self.tokenizer = init_tokenizer_from_configs(model_config)
 
     def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
@@ -358,8 +355,8 @@ class InputPreprocessor:
         if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_token_ids,
-                parsed_content.get("multi_modal_data", {}),
-                parsed_content.get("mm_processor_kwargs"),
+                parsed_content.get("multi_modal_data") or {},
+                parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
@@ -387,8 +384,8 @@ class InputPreprocessor:
         if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_text,
-                parsed_content.get("multi_modal_data", {}),
-                parsed_content.get("mm_processor_kwargs"),
+                parsed_content.get("multi_modal_data") or {},
+                parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
