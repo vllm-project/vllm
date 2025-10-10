@@ -19,7 +19,7 @@ from typing_extensions import TypeAlias
 
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend, MultipleOf
 from vllm.attention.layer import MLAAttention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
@@ -359,6 +359,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
+            kernel_block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
             logitsprocs=build_logitsprocs(
                 self.vllm_config,
@@ -397,6 +398,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.max_num_reqs + 1, dtype=torch.int32
         )
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        if self.dcp_world_size > 1:
+            self.dcp_local_seq_lens = self._make_buffer(
+                self.max_num_reqs, dtype=torch.int32
+            )
         # Because inputs_embeds may be bfloat16 and we don't need a numpy
         # version of this tensor, avoid a RuntimeError by not creating a
         # numpy buffer.
@@ -580,7 +585,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE(lucas): currently no backend supports the custom masking
             #  required for DCP with q_len > 1, so we assert here. Remove this
             #  assert once the custom mask is support is added to FA3.
-            if self.dcp_world_size > 1:
+            if (
+                self.dcp_world_size > 1
+                and envs.VLLM_ATTENTION_BACKEND != "FLASH_ATTN_MLA"
+            ):
                 assert self.reorder_batch_threshold == 1, (
                     "DCP not support reorder_batch_threshold > 1 now."
                 )
@@ -1334,6 +1342,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_logits_indices=logits_indices.size(0),
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
+                dcp_local_seq_lens=self.dcp_local_seq_lens.gpu[:num_reqs]
+                if self.dcp_world_size > 1
+                else None,
             )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
@@ -1995,7 +2006,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     # Should be called after attention metadata creation. This just pads
     # the second ubatch slice out to the total number of tokens
     # (num_tokens + padding)
-    def pad_out_ubatch_slice(self, ubatch_slices: UBatchSlices, num_total_tokens: int):
+    @staticmethod
+    def pad_out_ubatch_slice(ubatch_slices: UBatchSlices, num_total_tokens: int):
         padded_second_ubatch_slice = slice(
             ubatch_slices[1].token_slice.start, num_total_tokens
         )
@@ -2084,12 +2096,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dict[str, Any],
     ]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        is_first_rank = get_pp_group().is_first_rank
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
         if (
             self.supports_mm_inputs
-            and get_pp_group().is_first_rank
+            and is_first_rank
             and not self.model_config.is_encoder_decoder
         ):
             # Run the multimodal encoder if any.
@@ -2114,7 +2127,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **self._init_model_kwargs(num_scheduled_tokens),
                 **self._extract_mm_kwargs(scheduler_output),
             }
-        elif self.enable_prompt_embeds and get_pp_group().is_first_rank:
+        elif self.enable_prompt_embeds and is_first_rank:
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.
             # TODO(qthequartermasterman): Since even when prompt embeds are
@@ -2154,7 +2167,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             positions = self.positions.gpu[:num_input_tokens]
 
-        if get_pp_group().is_first_rank:
+        if is_first_rank:
             intermediate_tensors = None
         else:
             intermediate_tensors = self.sync_and_slice_intermediate_tensors(
@@ -2185,38 +2198,37 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         if spec_decode_metadata is None:
-            sampler_output = self.sampler(
+            return self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
-        else:
-            # When indexing with a tensor (bonus_logits_indices), PyTorch
-            # creates a new tensor with separate storage from the original
-            # logits tensor. This means any in-place operations on bonus_logits
-            # won't affect the original logits tensor.
-            assert logits is not None
-            bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
-            sampler_output = self.sampler(
-                logits=bonus_logits,
-                sampling_metadata=sampling_metadata,
-                predict_bonus_token=True,
-            )
-            bonus_token_ids = sampler_output.sampled_token_ids
 
-            # Just like `bonus_logits`, `target_logits` is a new tensor with
-            # separate storage from the original `logits` tensor. Therefore,
-            # it is safe to update `target_logits` in place.
-            target_logits = logits[spec_decode_metadata.target_logits_indices]
-            output_token_ids = self.rejection_sampler(
-                spec_decode_metadata,
-                None,  # draft_probs
-                target_logits,
-                bonus_token_ids,
-                sampling_metadata,
-            )
-            sampler_output.sampled_token_ids = output_token_ids
-            self._update_states_after_model_execute(output_token_ids)
+        # When indexing with a tensor (bonus_logits_indices), PyTorch
+        # creates a new tensor with separate storage from the original
+        # logits tensor. This means any in-place operations on bonus_logits
+        # won't affect the original logits tensor.
+        assert logits is not None
+        bonus_logits = logits[spec_decode_metadata.bonus_logits_indices]
+        sampler_output = self.sampler(
+            logits=bonus_logits,
+            sampling_metadata=sampling_metadata,
+            predict_bonus_token=True,
+        )
+        bonus_token_ids = sampler_output.sampled_token_ids
 
+        # Just like `bonus_logits`, `target_logits` is a new tensor with
+        # separate storage from the original `logits` tensor. Therefore,
+        # it is safe to update `target_logits` in place.
+        target_logits = logits[spec_decode_metadata.target_logits_indices]
+        output_token_ids = self.rejection_sampler(
+            spec_decode_metadata,
+            None,  # draft_probs
+            target_logits,
+            bonus_token_ids,
+            sampling_metadata,
+        )
+        sampler_output.sampled_token_ids = output_token_ids
+        self._update_states_after_model_execute(output_token_ids)
         return sampler_output
 
     def _bookkeeping_sync(
@@ -2293,9 +2305,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # These will be copied into input_ids in the next step
             # when preparing inputs.
             self.input_batch.prev_sampled_token_ids = sampled_token_ids
-            self.input_batch.prev_sampled_token_ids_invalid_indices = (
-                invalid_req_indices_set
-            )
             self.input_batch.prev_req_id_to_index = {
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids)
@@ -3308,6 +3317,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         kv_cache_group_id
                     ].slot_mapping.gpu[:num_tokens],
                     causal=True,
+                    dcp_local_seq_lens=self.dcp_local_seq_lens.gpu[:num_reqs]
+                    if self.dcp_world_size > 1
+                    else None,
                 )
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     if ubatch_slices is not None:
@@ -3740,7 +3752,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 decode_cudagraph_batch_sizes = [
                     x
                     for x in self.cudagraph_batch_sizes
-                    if x <= max_num_tokens and x >= self.uniform_decode_query_len
+                    if max_num_tokens >= x >= self.uniform_decode_query_len
                 ]
                 compilation_cases_decode = list(reversed(decode_cudagraph_batch_sizes))
                 self._capture_cudagraphs(
@@ -4050,6 +4062,86 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     self.reorder_batch_threshold = reorder_batch_threshold_i
 
+    def _find_compatible_block_sizes(
+        self,
+        kv_manager_block_size: int,
+        backend_cls: type[AttentionBackend],
+        return_all: bool = False,
+    ) -> list[int]:
+        """
+        Find compatible block sizes for a backend.
+
+        Args:
+            kv_manager_block_size: Physical block size of KV cache
+            backend_cls: Attention backend class
+            return_all: Return all compatible sizes if True, max size if False
+
+        Returns:
+            Compatible block size(s) based on return_all parameter
+
+        Raises:
+            ValueError: If no compatible block size found
+        """
+        supported_block_size = backend_cls.get_supported_kernel_block_size()
+        compatible_sizes = []
+
+        for block_size in supported_block_size:
+            if isinstance(block_size, int):
+                if kv_manager_block_size % block_size == 0:
+                    compatible_sizes.append(block_size)
+            elif (
+                isinstance(block_size, MultipleOf)
+                and kv_manager_block_size % block_size.base == 0
+            ):
+                compatible_sizes.append(kv_manager_block_size)
+
+        if not compatible_sizes:
+            raise ValueError(f"No compatible block size for {kv_manager_block_size}")
+
+        return compatible_sizes if return_all else [max(compatible_sizes)]
+
+    def _select_common_block_size(
+        self, kv_manager_block_size: int, attn_groups: list[AttentionGroup]
+    ) -> int:
+        """
+        Select common block size for all backends.
+
+        Args:
+            kv_manager_block_size: Block size of KV cache
+            attn_groups: List of attention groups
+
+        Returns:
+            Block size supported by all backends,
+            prioritizing cache_config.block_size
+
+        Raises:
+            ValueError: If no common block size found
+        """
+        all_backend_supports = []
+
+        for attn_group in attn_groups:
+            compatible_sizes = self._find_compatible_block_sizes(
+                kv_manager_block_size, attn_group.backend, return_all=True
+            )
+            supported_sizes = sorted(list(set(compatible_sizes)), reverse=True)
+            all_backend_supports.append(set(supported_sizes))
+
+        common_supported_sizes = set.intersection(*all_backend_supports)
+
+        if not common_supported_sizes:
+            error_msg = f"No common block size for {kv_manager_block_size}. "
+            for i, attn_group in enumerate(attn_groups):
+                supported = all_backend_supports[i]
+                error_msg += (
+                    f"Backend {attn_group.backend} supports: {sorted(supported)}. "
+                )
+            raise ValueError(error_msg)
+
+        if self.cache_config.block_size in common_supported_sizes:
+            return self.cache_config.block_size
+
+        return max(common_supported_sizes)
+
     def may_reinitialize_input_batch(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Re-initialize the input batch if the block sizes are different from
@@ -4062,8 +4154,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         block_sizes = [
             kv_cache_group.kv_cache_spec.block_size
             for kv_cache_group in kv_cache_config.kv_cache_groups
+            if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec)
         ]
-        if block_sizes != [self.cache_config.block_size]:
+
+        # Generate kernel_block_sizes that matches each block_size
+        kernel_block_sizes = self._prepare_kernel_block_sizes(kv_cache_config)
+
+        if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [
+            self.cache_config.block_size
+        ]:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
@@ -4077,6 +4176,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 pin_memory=self.pin_memory,
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
+                kernel_block_sizes=kernel_block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
                 is_pooling_model=self.is_pooling_model,
@@ -4128,6 +4228,46 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for attn_groups in self.attn_groups:
             yield from attn_groups
 
+    def _prepare_kernel_block_sizes(self, kv_cache_config: KVCacheConfig) -> list[int]:
+        """
+        Generate kernel_block_sizes that matches each block_size.
+
+        For attention backends that support virtual block splitting,
+        use the supported block sizes from the backend.
+        For other backends (like Mamba), use the same block size (no splitting).
+
+        Args:
+            kv_cache_config: The KV cache configuration.
+
+        Returns:
+            list[int]: List of kernel block sizes for each cache group.
+        """
+        kernel_block_sizes = []
+        for kv_cache_group_id, kv_cache_group in enumerate(
+            kv_cache_config.kv_cache_groups
+        ):
+            if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
+                continue
+            elif isinstance(kv_cache_group.kv_cache_spec, AttentionSpec):
+                # This is an attention backend that supports virtual
+                # block splitting. Get the supported block sizes from
+                # all backends in the group.
+                attn_groups = self.attn_groups[kv_cache_group_id]
+                kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
+                selected_kernel_size = self._select_common_block_size(
+                    kv_manager_block_size, attn_groups
+                )
+                kernel_block_sizes.append(selected_kernel_size)
+            elif isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
+                # This is likely Mamba or other non-attention cache,
+                # no splitting.
+                kernel_block_sizes.append(kv_cache_group.kv_cache_spec.block_size)
+            else:
+                raise NotImplementedError(
+                    f"unknown kv cache spec {kv_cache_group.kv_cache_spec}"
+                )
+        return kernel_block_sizes
+
     def _reshape_kv_cache_tensors(
         self,
         kv_cache_config: KVCacheConfig,
@@ -4157,16 +4297,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
+                    kv_manager_block_size = kv_cache_spec.block_size
+                    kernel_size_list = self._find_compatible_block_sizes(
+                        kv_manager_block_size, attn_backend, return_all=False
+                    )
+                    kernel_size = kernel_size_list[0]
+                    num_blocks_per_kv_block = kv_manager_block_size // kernel_size
+                    kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        num_blocks,
-                        kv_cache_spec.block_size,
+                        kernel_num_blocks,
+                        kernel_size,
                         kv_cache_spec.num_kv_heads,
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,
                     )
                     dtype = kv_cache_spec.dtype
                     try:
-                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()  # noqa: E501
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
@@ -4320,10 +4468,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
-        self.may_reinitialize_input_batch(kv_cache_config)
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
+        # Reinitialize need to after initialize_attn_backend
+        self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
         if self.speculative_config and self.speculative_config.use_eagle():
