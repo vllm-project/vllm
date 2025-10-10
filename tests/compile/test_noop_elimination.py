@@ -12,15 +12,23 @@ from .backend import TestBackend
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-@pytest.mark.parametrize("num_tokens", [256, 1024])
+# Important edge case is when `num_tokens == buffer_size`
+@pytest.mark.parametrize(
+    ("num_tokens", "buffer_size"), [(256, 256), (256, 512), (1024, 1024), (1024, 1025)]
+)
 @pytest.mark.parametrize("hidden_size", [64, 4096])
-def test_noop_elimination(dtype, num_tokens, hidden_size):
+def test_noop_elimination(dtype, num_tokens, hidden_size, buffer_size):
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(1)
 
     class Model(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pos_embed = torch.empty(buffer_size, hidden_size, dtype=dtype)
+
         def forward(self, x):
+            x += self.pos_embed[: x.shape[0]]
             # Chain of reshapes
             y = x.reshape(-1, 128, 32)
             z = y.reshape(-1, 4096)
@@ -65,9 +73,10 @@ def test_noop_elimination(dtype, num_tokens, hidden_size):
         torch.testing.assert_close(result, result2, atol=ATOL, rtol=RTOL)
 
         # The no-op reshape and slice should be eliminated.
+        # The initial slice on the positional embedding should remain.
         # The chain of reshapes should be fused into a single reshape.
         assert backend.op_count(torch.ops.aten.reshape.default) == 1
-        assert backend.op_count(torch.ops.aten.slice.Tensor) == 0
+        assert backend.op_count(torch.ops.aten.slice.Tensor) == 1
         assert backend.op_count(torch.ops.aten.slice_scatter.default) == 0
 
 
