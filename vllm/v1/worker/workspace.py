@@ -16,6 +16,36 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
+
+@dataclass(frozen=True)
+class WorkspaceSpec:
+    """Specification of a workspace to be allocated.
+
+    Attributes:
+        shape: The shape of the workspace.
+        dtype: The data type of the workspace.
+        name: Optional name for debugging.
+    """
+
+    shape: tuple[int, ...]
+    dtype: torch.dtype
+    name: str = "unnamed"
+
+    def num_bytes(self) -> int:
+        return prod(self.shape) * self.dtype.itemsize
+
+
+class PerKVCacheTokenWorkspace(WorkspaceSpec):
+    """Workspaces for per-key-value caching.
+
+    Attributes:
+        key: The workspace for the key cache.
+        value: The workspace for the value cache.
+    """
+
+    pass
+
+
 # Constants
 _MB = 1024**2
 _GiB = 1024**3
@@ -55,6 +85,13 @@ class WorkspaceManager:
         self._num_kv_cache_tokens: Optional[int] = None
         self._locked: bool = False
 
+    @staticmethod
+    def _workspace_size_bytes(workspace: Optional[torch.Tensor]) -> int:
+        """Get size of workspace in bytes."""
+        if workspace is None:
+            return 0
+        return workspace.numel() * workspace.element_size()
+
     def lock(self) -> None:
         """Lock the workspace to prevent further growth.
 
@@ -66,7 +103,7 @@ class WorkspaceManager:
             logger.info(
                 "[WORKSPACE DEBUG] Workspace locked. Current sizes: %s",
                 [
-                    _workspace_size_bytes(ws) / _MB
+                    self._workspace_size_bytes(ws) / _MB
                     for ws in self._current_workspaces
                     if ws is not None
                 ],
@@ -78,7 +115,9 @@ class WorkspaceManager:
 
     def current_allocated_size_bytes(self) -> int:
         """Get the size of the current workspace in bytes."""
-        return _workspace_size_bytes(self._current_workspaces[dbo_current_ubatch_id()])
+        return self._workspace_size_bytes(
+            self._current_workspaces[dbo_current_ubatch_id()]
+        )
 
     def adjust_available_memory(
         self,
@@ -132,7 +171,7 @@ class WorkspaceManager:
         # Allocate if workspace needs resize
         # Note: both ubatches always have the same size, so we only check the first
         num_bytes = spec.num_bytes()
-        if _workspace_size_bytes(self._current_workspaces[0]) < num_bytes:
+        if self._workspace_size_bytes(self._current_workspaces[0]) < num_bytes:
             self._increase_size(num_bytes, spec.name)
 
     def get(self, spec: "WorkspaceSpec") -> torch.Tensor:
@@ -239,7 +278,7 @@ class WorkspaceManager:
 
         # Manager owns a single device; no cross-device assertions needed
 
-        if _workspace_size_bytes(current_workspace) < num_bytes:
+        if self._workspace_size_bytes(current_workspace) < num_bytes:
             self._increase_size(num_bytes, name)
             current_workspace = self._current_workspaces[ubatch_id]
 
@@ -266,83 +305,49 @@ class WorkspaceManager:
         # Manager owns a single device; no cross-device assertions needed
 
         # Check if we need to grow the workspace
-        current_size = _workspace_size_bytes(self._current_workspaces[0])
-        if self._locked and current_size < required_bytes:
-            raise AssertionError(
-                f"Workspace is locked but allocation for '{name}' requires "
-                f"{required_bytes / _MB:.2f} MB, current size is "
-                f"{current_size / _MB:.2f} MB. "
-                "Workspace growth is not allowed after locking."
-            )
+        current_size = self._workspace_size_bytes(self._current_workspaces[0])
+
+        if envs.VLLM_DEBUG_WORKSPACE:
+            if self._current_workspaces[0] is None:
+                assert not self._locked
+                logger.info(
+                    "[WORKSPACE DEBUG] Allocating workspace '%s': %.2f MB "
+                    "(%d ubatches, total memory %.2f MB)",
+                    name,
+                    required_bytes / _MB,
+                    self._num_ubatches,
+                    required_bytes * self._num_ubatches / _MB,
+                )
+            else:
+                assert current_size < required_bytes
+                if self._locked:
+                    raise AssertionError(
+                        f"Workspace is locked but allocation for '{name}' requires "
+                        f"{required_bytes / _MB:.2f} MB, current size is "
+                        f"{current_size / _MB:.2f} MB. "
+                        "Workspace growth is not allowed after locking."
+                    )
+
+                logger.info(
+                    "[WORKSPACE DEBUG] Resizing workspace '%s': %.2f MB -> %.2f "
+                    "MB (%d ubatches, total memory %.2f MB)",
+                    name,
+                    current_size / _MB,
+                    required_bytes / _MB,
+                    self._num_ubatches,
+                    required_bytes * self._num_ubatches / _MB,
+                )
 
         for ubatch_id in range(self._num_ubatches):
             current_workspace = self._current_workspaces[ubatch_id]
 
-            # Check if we need to allocate/resize
             if current_workspace is None:
-                # First allocation
-                if envs.VLLM_DEBUG_WORKSPACE:
-                    logger.info(
-                        "[WORKSPACE DEBUG] Allocating workspace '%s' "
-                        "for ubatch %d: %.2f MB",
-                        name,
-                        ubatch_id,
-                        required_bytes / _MB,
-                    )
-
                 self._current_workspaces[ubatch_id] = torch.empty(
                     (required_bytes,), dtype=torch.uint8, device=self._device
                 )
-            elif _workspace_size_bytes(current_workspace) < required_bytes:
-                # Resize existing workspace using resize_()
-                if envs.VLLM_DEBUG_WORKSPACE:
-                    logger.info(
-                        "[WORKSPACE DEBUG] Resizing workspace '%s' "
-                        "for ubatch %d: %.2f MB -> %.2f MB",
-                        name,
-                        ubatch_id,
-                        _workspace_size_bytes(current_workspace) / _MB,
-                        required_bytes / _MB,
-                    )
-
+            elif self._workspace_size_bytes(current_workspace) < required_bytes:
                 # Use resize_() for efficient in-place resizing
                 current_workspace.resize_(required_bytes)
-
-
-def _workspace_size_bytes(workspace: Optional[torch.Tensor]) -> int:
-    """Get size of workspace in bytes."""
-    if workspace is None:
-        return 0
-    return workspace.numel() * workspace.element_size()
-
-
-@dataclass(frozen=True)
-class WorkspaceSpec:
-    """Specification of a workspace to be allocated.
-
-    Attributes:
-        shape: The shape of the workspace.
-        dtype: The data type of the workspace.
-        name: Optional name for debugging.
-    """
-
-    shape: tuple[int, ...]
-    dtype: torch.dtype
-    name: str = "unnamed"
-
-    def num_bytes(self) -> int:
-        return prod(self.shape) * self.dtype.itemsize
-
-
-class PerKVCacheTokenWorkspace(WorkspaceSpec):
-    """Workspaces for per-key-value caching.
-
-    Attributes:
-        key: The workspace for the key cache.
-        value: The workspace for the value cache.
-    """
-
-    pass
 
 
 def init_workspace_manager(device: torch.device, vllm_config: VllmConfig) -> None:
