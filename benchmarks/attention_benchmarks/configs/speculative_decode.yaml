@@ -1,0 +1,66 @@
+# Speculative decoding benchmark configuration
+# Tests reorder_batch_threshold optimization
+
+model:
+  name: "deepseek-v3"
+  num_layers: 60
+  num_q_heads: 128
+  num_kv_heads: 1
+  head_dim: 576
+  kv_lora_rank: 512
+  qk_nope_head_dim: 128
+  qk_rope_head_dim: 64
+  v_head_dim: 128
+
+batch_specs:
+  # Pure speculative decode (K-token verification)
+  - "spec2s1k"      # 2-token spec, 1k KV
+  - "spec4s1k"      # 4-token spec, 1k KV
+  - "spec8s1k"      # 8-token spec, 1k KV
+  - "spec16s1k"     # 16-token spec, 1k KV
+
+  # Speculative with different context lengths
+  - "spec4s2k"      # 4-token spec, 2k KV
+  - "spec4s4k"      # 4-token spec, 4k KV
+  - "spec8s2k"      # 8-token spec, 2k KV
+  - "spec8s4k"      # 8-token spec, 4k KV
+
+  # Mixed: speculative + regular decode
+  - "32spec4s1k"                    # 32 spec requests
+  - "16spec4s1k_16s1k"              # 16 spec + 16 regular
+  - "8spec8s2k_24s2k"               # 8 spec (8-tok) + 24 regular
+
+  # Mixed: speculative + prefill + decode
+  - "2q1k_16spec4s1k_16s1k"         # 2 prefill + 16 spec + 16 decode
+  - "4q2k_32spec4s2k_32s2k"         # 4 prefill + 32 spec + 32 decode
+
+  # Large batches with speculation
+  - "64spec4s1k"                    # 64 spec requests
+  - "32spec8s2k"                    # 32 spec (8-token)
+  - "16spec16s4k"                   # 16 spec (16-token)
+
+# Backends that support query length > 1
+backends:
+  - flash_attn_mla    # reorder_batch_threshold = 512
+  - flashmla          # reorder_batch_threshold = 1 (tunable)
+
+# FlashInfer-MLA also supports uniform spec-as-decode but with different mechanism
+# - flashinfer_mla
+
+device: "cuda:0"
+repeats: 10  # More repeats for statistical significance
+warmup_iters: 5
+profile_memory: false
+
+# Test these threshold values for optimization
+reorder_batch_thresholds:
+  - 1
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  - 128
+  - 256
+  - 512
