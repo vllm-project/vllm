@@ -89,6 +89,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 # currently be an MI300 series.
                 self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
+        self.all2all_manager = None
         if self.use_all2all:
             if self.all2all_backend == "naive":
                 from .all2all import NaiveAll2AllManager
@@ -102,7 +103,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import PPLXAll2AllManager
 
                 self.all2all_manager = PPLXAll2AllManager(self.cpu_group)
-            elif self.all2all_backend == "deepep_high_throughput":
+                logger.info("Using PPLX all2all manager.")
+            elif all2all_backend == "pplx_efa":
+                from .all2all import PPLXEfaAll2AllManager
+
+                self.all2all_manager = PPLXEfaAll2AllManager(
+                    self.cpu_group, self.device
+                )
+                logger.info("Using PPLX EFA all2all manager.")
+            elif all2all_backend == "deepep_high_throughput":
                 from .all2all import DeepEPHTAll2AllManager
 
                 self.all2all_manager = DeepEPHTAll2AllManager(self.cpu_group)
