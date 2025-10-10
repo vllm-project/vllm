@@ -36,7 +36,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -216,11 +215,7 @@ class EagleProposer:
 
         assert self.runner is not None
 
-        # FIXME: need to consider multiple kv_cache_groups
-        ubatch_id = dbo_current_ubatch_id()
-        attn_metadata_builder = self.runner.attn_groups[0][0].metadata_builders[
-            ubatch_id
-        ]
+        attn_metadata_builder = self._get_attention_metadata_builder()
         attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0
         )
@@ -1031,7 +1026,7 @@ class EagleProposer:
                 inputs_embeds=inputs_embeds,
             )
 
-    def _get_attention_metadata_builder(self) -> list[AttentionMetadataBuilder]:
+    def _get_attention_metadata_builder(self) -> AttentionMetadataBuilder:
         """Find and return the attention metadata builders for EAGLE layers.
 
         Returns:
