@@ -623,7 +623,7 @@ class NixlConnectorWorker:
         # invalid blocks from failed NIXL operations
         self._invalid_block_ids: set[int] = set()
         # requests that skipped transfer (handshake or transfer failures)
-        self._skipped_transfer: set[ReqId] = set()
+        self._failed_recv_reqs: set[ReqId] = set()
 
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
@@ -821,7 +821,7 @@ class NixlConnectorWorker:
                 )
                 if req_meta := self._recving_metadata.get(req_id):
                     self._invalid_block_ids.update(req_meta.local_block_ids)
-                self._skipped_transfer.add(req_id)
+                self._failed_recv_reqs.add(req_id)
 
         fut.add_done_callback(request_ready)
 
@@ -1230,8 +1230,8 @@ class NixlConnectorWorker:
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
         # add requests that skipped transfer to done_recving
-        done_recving.update(self._skipped_transfer)
-        self._skipped_transfer.clear()
+        done_recving.update(self._failed_recv_reqs)
+        self._failed_recv_reqs.clear()
 
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
@@ -1533,7 +1533,7 @@ class NixlConnectorWorker:
             self.xfer_stats.record_failed_transfer()
             if handle is not None:
                 self.nixl_wrapper.release_xfer_handle(handle)
-            self._skipped_transfer.add(request_id)
+            self._failed_recv_reqs.add(request_id)
 
     def _get_block_descs_ids(
         self, engine_id: str, block_ids: list[int], layer_idx: int | None = None
