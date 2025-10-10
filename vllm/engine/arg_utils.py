@@ -452,7 +452,7 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[int] = CacheConfig.num_gpu_blocks_override
     num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
-    ignore_patterns: Optional[Union[str, list[str]]] = LoadConfig.ignore_patterns
+    ignore_patterns: Union[str, list[str]] = get_field(LoadConfig, "ignore_patterns")
 
     enable_chunked_prefill: Optional[bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
