@@ -12,6 +12,7 @@ import functools
 import importlib
 import importlib.util
 import os
+import shutil
 from typing import Any, Callable, NoReturn
 
 import requests
@@ -37,7 +38,14 @@ def has_flashinfer() -> bool:
     """Return ``True`` if FlashInfer is available."""
     # Use find_spec to check if the module exists without importing it
     # This avoids potential CUDA initialization side effects
-    return importlib.util.find_spec("flashinfer") is not None
+    if importlib.util.find_spec("flashinfer") is None:
+        logger.debug_once("FlashInfer unavailable since package was not found")
+        return False
+    # Also check if nvcc is available since it's required to JIT compile flashinfer
+    if shutil.which("nvcc") is None:
+        logger.debug_once("FlashInfer unavailable since nvcc was not found")
+        return False
+    return True
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
@@ -269,11 +277,6 @@ def use_trtllm_attention(
 
     # Must use TRTLLM attention if query is FP8 quantized
     if q_dtype == current_platform.fp8_dtype():
-        if has_sinks:
-            raise RuntimeError(
-                "TRTLLM FP8-qkv kernel is not supported for attention sinks. "
-                "Use kv_cache_dtype=auto for now."
-            )
         logger.info_once("Using TRTLLM attention (query is quantized).")
         return True
 
@@ -386,8 +389,6 @@ def flashinfer_scaled_fp4_mm(
     assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
     assert a.stride(-1) == 1 and b.stride(-1) == 1
     assert a.shape[1] == b.shape[1]
-    assert block_scale_a.shape[1] == a.shape[1] // 8
-    assert block_scale_b.shape[1] == b.shape[1] // 8
 
     if backend == "cutlass":
         block_scale_a = block_scale_a.view(torch.uint8)
