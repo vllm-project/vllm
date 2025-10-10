@@ -15,19 +15,19 @@ batch_specs:
   - "q8k"       # Very large prefill (8192 tokens)
 
   # Pure decode
-  - "8s1k"      # 8 requests, 1k KV cache each
-  - "16s2k"     # 16 requests, 2k KV cache each
-  - "32s1k"     # 32 requests, 1k KV cache each
-  - "64s4k"     # 64 requests, 4k KV cache each
+  - "8q1kv1k"      # 8 requests, 1k KV cache each
+  - "16q1kv2k"     # 16 requests, 2k KV cache each
+  - "32q1kv1k"     # 32 requests, 1k KV cache each
+  - "64q1kv4k"     # 64 requests, 4k KV cache each
 
   # Mixed prefill/decode
-  - "2q2k_8s1k"      # 2 prefill + 8 decode
-  - "4q1k_16s2k"     # 4 prefill + 16 decode
-  - "2q4k_32s1k"     # 2 large prefill + 32 decode
+  - "2q2k_8q1kv1k"      # 2 prefill + 8 decode
+  - "4q1k_16q1kv2k"     # 4 prefill + 16 decode
+  - "2q4k_32q1kv1k"     # 2 large prefill + 32 decode
 
   # Context extension
-  - "q1ks2k"         # 1k query, 2k KV (chunked prefill)
-  - "2q1ks4k"        # 2 requests: 1k query, 4k KV
+  - "q1kkv2k"         # 1k query, 2k KV (chunked prefill)
+  - "2q1kkv4k"        # 2 requests: 1k query, 4k KV
 
 backends:
   - flash
