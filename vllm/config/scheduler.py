@@ -4,7 +4,7 @@
 import hashlib
 from typing import Any, Literal, Union
 
-from pydantic import Field, SkipValidation, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -30,19 +30,19 @@ class SchedulerConfig:
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
 
-    max_num_batched_tokens: SkipValidation[int] = None  # type: ignore
+    max_num_batched_tokens: int = Field(default=None, ge=1)
     """Maximum number of tokens to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_num_seqs: int = 128
+    max_num_seqs: int = Field(default=None, validate_default=True, ge=1)
     """Maximum number of sequences to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_model_len: int = 8192
+    max_model_len: int = Field(default=None, validate_default=True, ge=1)
     """Maximum length of a sequence (including prompt and generated text). This
     is primarily set in `ModelConfig` and that value should be manually
     duplicated here."""
@@ -78,7 +78,7 @@ class SchedulerConfig:
     3. more than one value (e.g. 1 2 128) is provided, then the capture list
     will follow the provided list."""
 
-    enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
+    enable_chunked_prefill: bool = Field(default=None)
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
 
@@ -167,6 +167,22 @@ class SchedulerConfig:
         factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
+
+    @field_validator("max_num_seqs", mode="before")
+    @classmethod
+    def _validate_max_num_seqs(cls, max_num_seqs: Any | None) -> Any:
+        if max_num_seqs is None:
+            logger.warning("max_num_seqs is not set, using arbitrary value 128.")
+            return 128
+        return max_num_seqs
+
+    @field_validator("max_model_len", mode="before")
+    @classmethod
+    def _validate_max_model_len(cls, max_model_len: Any | None) -> Any:
+        if max_model_len is None:
+            logger.warning("max_model_len is not set, using arbitrary value 8192.")
+            return 8192
+        return max_model_len
 
     def __post_init__(self, is_encoder_decoder: bool) -> None:
         """Post init to handle init vars."""
