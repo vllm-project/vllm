@@ -824,7 +824,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 elif response_format.type == "structural_tag":
                     structural_tag = response_format
                     assert structural_tag is not None and isinstance(
-                        structural_tag, AnyStructuralTagResponseFormat
+                        structural_tag,
+                        (
+                            LegacyStructuralTagResponseFormat,
+                            StructuralTagResponseFormat,
+                        ),
                     )
                     s_tag_obj = structural_tag.model_dump(by_alias=True)
                     self.structured_outputs.structural_tag = json.dumps(s_tag_obj)

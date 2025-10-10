@@ -631,11 +631,7 @@ class EngineArgs:
         model_group.add_argument(
             "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
         )
-        model_group.add_argument(
-            "--model-impl",
-            choices=[f.value for f in ModelImpl],
-            **model_kwargs["model_impl"],
-        )
+        model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
         model_group.add_argument(
             "--override-attention-dtype", **model_kwargs["override_attention_dtype"]
         )
