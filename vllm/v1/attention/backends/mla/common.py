@@ -485,7 +485,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     # The threshold for reordering the batch into decode and prefill requests.
     # If > 1, the batch will be reordered such that requests with
     # query length <= threshold are classified as decode requests.
-    # Use `supports_uniform_spec_as_decode` (above) to set this automatically
+    # Use `query_len_support` (above) to set this automatically
     # when speculative decoding is enabled.
     reorder_batch_threshold: int = 1
 
