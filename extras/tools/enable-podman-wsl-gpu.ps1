@@ -30,7 +30,7 @@ param(
     [string]$MachineName = "podman-machine-default",
     [switch]$SkipReboot,
     [switch]$Reset,
-    [string]$ImagePath = "https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-WSL-Base.latest.x86_64.wsl",
+    [string]$ImagePath = "https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-Container-UBI.latest.x86_64.tar.xz",
     [switch]$ConvertImage,
     [string]$CacheRoot,
 
@@ -173,7 +173,26 @@ function Convert-RockyImage {
         }
 
         try {
-            & wsl.exe @('-d',$tempDistro,'--user','root','bash','-lc','set -euo pipefail; mkdir -p /etc/containers /etc/containers/registries.conf.d /etc/ssh') | Out-Null
+            $prepScript = @'
+set -euo pipefail
+SUDO=
+if command -v sudo >/dev/null 2>&1; then
+    SUDO=sudo
+fi
+if command -v dnf >/dev/null 2>&1; then
+    $SUDO dnf install -y openssh-server shadow-utils policycoreutils-python-utils || true
+fi
+mkdir -p /etc/containers /etc/containers/registries.conf.d /etc/ssh
+touch /etc/containers/containers.conf
+touch /etc/containers/registries.conf.d/999-podman-machine.conf
+touch /etc/ssh/sshd_config
+if command -v systemctl >/dev/null 2>&1; then
+    $SUDO systemctl enable sshd || true
+fi
+'@
+            $prepScript = $prepScript -replace "`r", ""
+            $prepEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($prepScript))
+            & wsl.exe @('-d',$tempDistro,'--user','root','bash','-lc',"echo $prepEncoded | base64 -d | bash") | Out-Null
         } catch {
             Write-Host "ℹ️  Could not pre-create /etc/containers in temp distro; continuing." -ForegroundColor DarkGray
         }
