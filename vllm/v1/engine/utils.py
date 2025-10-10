@@ -462,28 +462,11 @@ class CoreEngineActorManager:
             else:
                 dp_size_to_allocate = dp_size_available
 
+            n_device_per_node = world_size if nodes_per_pg == 1 else max_device_per_node
             for i in range(dp_size_to_allocate):
-                master_device_dict = {device_str: 1.0, "node:" + dp_master_ip: 0.001}
-                device_dict = {device_str: 1.0}
-                cpu_dict = {"CPU": 1.0}
-                n_device_per_node = (
-                    world_size if nodes_per_pg == 1 else max_device_per_node
-                )
-
-                # If we need multiple nodes per DP group we might have both "master ip"
-                # devices and "worker ip" devices in the same bundle
-                # => [{GPU: 1.0, "node:127.01.10.109": 0.001}, ...,
-                #                                  {GPU: 1.0}, ...., {CPU: 2.0}]
-                # If we only need one node, we will have either only "master ip"
-                # devices or "worker ip" devices in the same bundle
-                # Only one CPU is needed per placement group
-                bundles = (
-                    [master_device_dict] * int(is_master_ip) * n_device_per_node
-                    + [device_dict]
-                    * (nodes_per_pg - int(is_master_ip))
-                    * n_device_per_node
-                    + [cpu_dict]
-                )
+                bundles = [
+                    {device_str: 1.0, "node:" + node_ip: 0.001}
+                ] * n_device_per_node + [{"CPU": 1.0}]
 
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{len(placement_groups)}",
