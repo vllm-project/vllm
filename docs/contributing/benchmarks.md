@@ -879,9 +879,7 @@ vllm bench serve \
 
 </details>
 
-
 #### Reranker Benchmark
-
 
 Benchmark the performance of rerank requests in vLLM.
 
@@ -923,7 +921,6 @@ to account for the extra prompt which is the query. The token accounting to repo
 throughput numbers correctly is also adjusted.
 
 </details>
-
 
 [](){ #performance-benchmarks }
 
