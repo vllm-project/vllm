@@ -1008,7 +1008,7 @@ steps:
 - label: Distributed Comm Ops Test # 7min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: ami325_2
+  agent_pool: mi325_2
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
