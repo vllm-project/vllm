@@ -2206,8 +2206,8 @@ class FusedMoE(CustomOp):
                 )
             assert shared_output is not None
             return (
-                padded_hidden_states[..., :og_hidden_states],
                 shared_output[..., :og_hidden_states],
+                padded_hidden_states[..., :og_hidden_states],
             )
 
     def forward_cuda(
