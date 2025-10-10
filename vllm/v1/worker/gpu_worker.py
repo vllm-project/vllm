@@ -442,6 +442,9 @@ class Worker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
+    def reset_mm_cache(self) -> None:
+        self.model_runner.reset_mm_cache()
+
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
