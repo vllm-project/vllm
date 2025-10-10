@@ -15,6 +15,8 @@ def parse_args():
         model="jason9693/Qwen2.5-1.5B-apeach",
         runner="pooling",
         enforce_eager=True,
+        max_num_batched_tokens=131072,
+        dtype="bfloat16",
     )
     return parser.parse_args()
 
