@@ -199,6 +199,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         if compiler_config is not None:
             current_config.update(compiler_config)
         set_inductor_config(current_config, runtime_shape)
+        set_functorch_config()
 
         if isinstance(runtime_shape, int):
             dynamic_shapes = "from_example_inputs"
@@ -307,6 +308,7 @@ class InductorAdaptor(CompilerInterface):
         current_config["fx_graph_remote_cache"] = False
 
         set_inductor_config(current_config, runtime_shape)
+        set_functorch_config()
 
         # inductor can inplace modify the graph, so we need to copy it
         # see https://github.com/pytorch/pytorch/issues/138980
@@ -594,6 +596,10 @@ def set_inductor_config(config, runtime_shape):
         config["coordinate_descent_tuning"] = (
             envs.VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING
         )
+
+
+def set_functorch_config():
+    torch._functorch.config.bundled_autograd_cache = False
 
 
 class EagerAdaptor(CompilerInterface):
