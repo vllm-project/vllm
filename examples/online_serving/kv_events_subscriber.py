@@ -6,7 +6,7 @@ import msgspec
 import zmq
 from msgspec.msgpack import Decoder
 
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_utils import ExternalBlockHash
 
 
 #
@@ -24,8 +24,8 @@ class KVCacheEvent(
 
 
 class BlockStored(KVCacheEvent):
-    block_hashes: list[BlockHash]
-    parent_block_hash: Optional[BlockHash]
+    block_hashes: list[ExternalBlockHash]
+    parent_block_hash: Optional[ExternalBlockHash]
     token_ids: list[int]
     block_size: int
     lora_id: Optional[int]
@@ -33,7 +33,7 @@ class BlockStored(KVCacheEvent):
 
 
 class BlockRemoved(KVCacheEvent):
-    block_hashes: list[BlockHash]
+    block_hashes: list[ExternalBlockHash]
     medium: Optional[str]
 
 

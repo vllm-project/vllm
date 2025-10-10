@@ -34,7 +34,7 @@ DEVICE_MLA_BACKENDS = {
 
 DEVICE_REGULAR_ATTN_BACKENDS = {
     "cuda": ["XFORMERS", "FLASHINFER", "FLASH_ATTN"],
-    "hip": ["ROCM_FLASH"],
+    "hip": ["ROCM_ATTN"],
     "cpu": ["TORCH_SDPA"],
 }
 
@@ -80,17 +80,16 @@ def test_env(
 ):
     """Test attention backend selection with valid device-backend pairs."""
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
         m.setenv(STR_BACKEND_ENV_VAR, name)
         m.setenv("VLLM_MLA_DISABLE", "1" if use_mla else "0")
 
         if device == "cpu":
-            with patch("vllm.attention.selector.current_platform", CpuPlatform()):
+            with patch("vllm.platforms.current_platform", CpuPlatform()):
                 backend = get_attn_backend(16, torch.float16, None, block_size)
             assert backend.get_name() == "TORCH_SDPA"
 
         elif device == "hip":
-            with patch("vllm.attention.selector.current_platform", RocmPlatform()):
+            with patch("vllm.platforms.current_platform", RocmPlatform()):
                 if use_mla:
                     # ROCm MLA backend logic:
                     # - TRITON_MLA: supported when block_size != 1
@@ -123,11 +122,11 @@ def test_env(
                     backend = get_attn_backend(
                         16, torch.float16, None, block_size, use_mla=use_mla
                     )
-                    expected = "TRITON_ATTN"
+                    expected = "ROCM_ATTN"
                     assert backend.get_name() == expected
 
         elif device == "cuda":
-            with patch("vllm.attention.selector.current_platform", CudaPlatform()):
+            with patch("vllm.platforms.current_platform", CudaPlatform()):
                 if use_mla:
                     # CUDA MLA backend logic:
                     # - CUTLASS_MLA: only supported with block_size == 128
@@ -166,10 +165,10 @@ def test_env(
                             pytest.skip("FlashMLA only supports block_size 64")
                         else:
                             from vllm.v1.attention.backends.mla.flashmla import (
-                                is_flashmla_supported,
+                                is_flashmla_dense_supported,
                             )
 
-                            is_supported, _ = is_flashmla_supported()
+                            is_supported, _ = is_flashmla_dense_supported()
                             if not is_supported:
                                 pytest.skip("FlashMLA not supported on this platform")
                             else:
@@ -212,30 +211,21 @@ def test_env(
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_fp32_fallback(
-    device: str,
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_fp32_fallback(device: str):
     """Test attention backend selection with fp32."""
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
+    if device == "cpu":
+        with patch("vllm.platforms.current_platform", CpuPlatform()):
+            backend = get_attn_backend(16, torch.float32, None, 16)
+        assert backend.get_name() == "TORCH_SDPA"
 
-        if device == "cpu":
-            with patch("vllm.attention.selector.current_platform", CpuPlatform()):
-                backend = get_attn_backend(16, torch.float32, None, 16)
-            assert backend.get_name() == "TORCH_SDPA"
-
-        elif device == "cuda":
-            with patch("vllm.attention.selector.current_platform", CudaPlatform()):
-                backend = get_attn_backend(16, torch.float32, None, 16)
-            assert backend.get_name() == "FLEX_ATTENTION"
+    elif device == "cuda":
+        with patch("vllm.platforms.current_platform", CudaPlatform()):
+            backend = get_attn_backend(16, torch.float32, None, 16)
+        assert backend.get_name() == "FLEX_ATTENTION"
 
 
 def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
     """Test FlashAttn validation."""
-    # TODO: When testing for v1, pipe in `use_v1` as an argument to
-    # get_attn_backend
-
     pytest.skip(
         "Skipping as current backend selector does not "
         "handle fallbacks when a backend is set via env var."
@@ -287,9 +277,8 @@ def test_invalid_env(monkeypatch: pytest.MonkeyPatch):
     """Test that invalid attention backend names raise ValueError."""
     with (
         monkeypatch.context() as m,
-        patch("vllm.attention.selector.current_platform", CudaPlatform()),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
     ):
-        m.setenv("VLLM_USE_V1", "1")
         m.setenv(STR_BACKEND_ENV_VAR, STR_INVALID_VAL)
 
         # Should raise ValueError for invalid backend

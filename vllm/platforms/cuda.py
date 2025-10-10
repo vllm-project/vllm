@@ -118,7 +118,15 @@ class CudaPlatformBase(Platform):
 
         # TODO(lucas): handle this more gracefully
         # Note: model_config may be None during testing
-        if model_config is not None and model_config.use_mla:
+        # Note: block_size is initialized in
+        # HybridAttentionMambaModelConfig.verify_and_update_config
+        # for models with both attention and mamba,
+        # and doesn't need to be reinitialized here
+        if (
+            model_config is not None
+            and model_config.use_mla
+            and cache_config.block_size is not None
+        ):
             use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
             # If `VLLM_ATTENTION_BACKEND` is not set and we are using MLA,
             # then we default to FlashMLA backend for non-blackwell GPUs,
@@ -146,23 +154,27 @@ class CudaPlatformBase(Platform):
                 use_cutlass_mla = envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA"
                 use_flashinfer_mla = envs.VLLM_ATTENTION_BACKEND == "FLASHINFER_MLA"
 
-            from vllm.attention.ops.flashmla import is_flashmla_supported
+            from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 
             if (
                 use_flashmla
-                and is_flashmla_supported()[0]
-                and cache_config.block_size != 64
+                and is_flashmla_dense_supported()[0]
+                and cache_config.block_size % 64 != 0
             ):
                 cache_config.block_size = 64
                 logger.info("Forcing kv cache block size to 64 for FlashMLA backend.")
 
-            if use_cutlass_mla and cache_config.block_size != 128:
+            if use_cutlass_mla and cache_config.block_size % 128 != 0:
                 cache_config.block_size = 128
                 logger.info(
                     "Forcing kv cache block size to 128 for CUTLASS_MLA backend."
                 )
 
-            if use_flashinfer_mla and cache_config.block_size not in [32, 64]:
+            if (
+                use_flashinfer_mla
+                and cache_config.block_size != 32
+                and cache_config.block_size % 64 != 0
+            ):
                 cache_config.block_size = 64
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashInferMLA backend."
@@ -256,7 +268,7 @@ class CudaPlatformBase(Platform):
                     "Set VLLM_USE_V1=1 to enable them."
                 )
 
-            from vllm.attention.ops.flashmla import is_flashmla_supported
+            from vllm.attention.ops.flashmla import is_flashmla_dense_supported
             from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 
             if use_sparse:
@@ -269,15 +281,15 @@ class CudaPlatformBase(Platform):
             use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
                 selected_backend is None
                 and cls.is_device_capability(100)
-                and block_size == 128
+                and block_size % 128 == 0
             )
             use_flashinfermla = selected_backend == _Backend.FLASHINFER_MLA or (
                 selected_backend is None
                 and cls.is_device_capability(100)
-                and block_size in [32, 64]
+                and (block_size == 32 or block_size % 64 == 0)
             )
             use_flashmla = selected_backend == _Backend.FLASHMLA or (
-                selected_backend is None and is_flashmla_supported()[0]
+                selected_backend is None and is_flashmla_dense_supported()[0]
             )
             use_flashattn = selected_backend == _Backend.FLASH_ATTN_MLA or (
                 selected_backend is None and flash_attn_supports_mla()
@@ -298,7 +310,7 @@ class CudaPlatformBase(Platform):
                     "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"
                 )
             if use_flashmla:
-                if block_size != 64:
+                if block_size % 64 != 0:
                     logger.warning(
                         "FlashMLA backend is not supported for block size %d"
                         " (currently only supports block size 64).",

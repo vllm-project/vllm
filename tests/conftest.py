@@ -57,7 +57,7 @@ from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import set_default_torch_num_threads
+from vllm.utils import is_list_of, set_default_torch_num_threads
 
 logger = init_logger(__name__)
 
@@ -406,11 +406,11 @@ class HfRunner:
 
     def get_inputs(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[list[int]]],
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
-    ) -> list[Union[BatchFeature, BatchEncoding]]:
+    ) -> list[Union[BatchFeature, BatchEncoding, dict[str, torch.Tensor]]]:
         if images is not None:
             assert len(prompts) == len(images)
 
@@ -420,31 +420,48 @@ class HfRunner:
         if audios is not None:
             assert len(prompts) == len(audios)
 
-        all_inputs: list[Union[BatchFeature, BatchEncoding]] = []
+        all_inputs: list[
+            Union[BatchFeature, BatchEncoding, dict[str, torch.Tensor]]
+        ] = []
         for i, prompt in enumerate(prompts):
-            processor_kwargs: dict[str, Any] = {
-                "text": prompt,
-                "return_tensors": "pt",
-            }
-            if images is not None and (image := images[i]) is not None:
-                processor_kwargs["images"] = image
-            if videos is not None and (video := videos[i]) is not None:
-                processor_kwargs["videos"] = video
-            if audios is not None and (audio_inputs := audios[i]) is not None:
-                # HACK - not all processors take sampling_rate; we should
-                # clean this up in the future.
-                if len(audio_inputs) == 2:
-                    audio, sr = audio_inputs
-                    processor_kwargs["audio"] = audio
-                    processor_kwargs["sampling_rate"] = sr
-                else:
-                    processor_kwargs["audio"] = audio_inputs
+            if isinstance(prompt, str):
+                processor_kwargs: dict[str, Any] = {
+                    "text": prompt,
+                    "return_tensors": "pt",
+                }
+                if images is not None and (image := images[i]) is not None:
+                    processor_kwargs["images"] = image
+                if videos is not None and (video := videos[i]) is not None:
+                    processor_kwargs["videos"] = video
+                if audios is not None and (audio_inputs := audios[i]) is not None:
+                    # HACK - not all processors take sampling_rate; we should
+                    # clean this up in the future.
+                    if len(audio_inputs) == 2:
+                        audio, sr = audio_inputs
+                        processor_kwargs["audio"] = audio
+                        processor_kwargs["sampling_rate"] = sr
+                    else:
+                        processor_kwargs["audio"] = audio_inputs
 
-            inputs = self.processor(**processor_kwargs)
-            if isinstance(inputs, BatchFeature):
-                inputs = inputs.to(dtype=self.dtype)
-
-            all_inputs.append(inputs)
+                inputs = self.processor(**processor_kwargs)
+                if isinstance(inputs, BatchFeature):
+                    inputs = inputs.to(dtype=self.dtype)
+                all_inputs.append(inputs)
+            else:
+                # check that prompt is (batched) list of integers (token ids)
+                if not is_list_of(prompt, typ=int, check="all"):
+                    raise ValueError(
+                        "Prompt must be a list of ints corresponding to the prompt token ids."
+                    )
+                # check that no multimodal input is provided
+                if images or videos or audios:
+                    raise ValueError(
+                        "When providing prompt token ids multimodal inputs are not supported."
+                    )
+                input_dict = {
+                    "input_ids": torch.tensor(prompt, dtype=torch.long).unsqueeze(0),
+                }
+                all_inputs.append(input_dict)
 
         return all_inputs
 
@@ -477,7 +494,7 @@ class HfRunner:
 
     def generate(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[list[int]]],
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
@@ -505,7 +522,7 @@ class HfRunner:
 
     def generate_greedy(
         self,
-        prompts: list[str],
+        prompts: Union[list[str], list[list[int]]],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
@@ -807,7 +824,7 @@ class VllmRunner:
 
     def generate(
         self,
-        prompts: Union[list[str], list[torch.Tensor]],
+        prompts: Union[list[str], list[torch.Tensor], list[list[int]]],
         sampling_params: SamplingParams,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
@@ -877,7 +894,7 @@ class VllmRunner:
 
     def generate_greedy(
         self,
-        prompts: Union[list[str], list[torch.Tensor]],
+        prompts: Union[list[str], list[torch.Tensor], list[list[int]]],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,

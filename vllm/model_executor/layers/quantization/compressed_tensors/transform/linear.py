@@ -16,7 +16,6 @@ from compressed_tensors.utils import is_match
 from vllm.model_executor.layers.linear import (
     WEIGHT_LOADER_V2_SUPPORTED,
     LinearMethodBase,
-    QKVCrossParallelLinear,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsScheme,
@@ -89,10 +88,7 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         # hack around this by getting weight loader v1 so ULM can load correctly
         quant_method_name = self.quant_method.__class__.__name__
         if quant_method_name not in WEIGHT_LOADER_V2_SUPPORTED:
-            if isinstance(layer, QKVCrossParallelLinear):
-                weight_loader_v1 = layer.weight_loader_v1
-            else:
-                weight_loader_v1 = layer.weight_loader
+            weight_loader_v1 = layer.weight_loader
             extra_weight_attrs["weight_loader"] = weight_loader_v1
 
         self.quant_method.create_weights(

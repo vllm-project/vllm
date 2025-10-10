@@ -380,6 +380,8 @@ class CompilationConfig:
     _attention_ops: ClassVar[list[str]] = [
         "vllm.unified_attention",
         "vllm.unified_attention_with_output",
+        "vllm.unified_mla_attention",
+        "vllm.unified_mla_attention_with_output",
         "vllm.mamba_mixer2",
         "vllm.mamba_mixer",
         "vllm.short_conv",
