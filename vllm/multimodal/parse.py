@@ -424,7 +424,6 @@ class MultiModalDataParser:
         if self._is_embeddings(data):
             return AudioEmbeddingItems(data)
 
-        # Normalize into a list of audio items
         data_items: list[AudioItem]
         if (
             is_list_of(data, float)
@@ -489,6 +488,7 @@ class MultiModalDataParser:
         if self._is_embeddings(data):
             return VideoEmbeddingItems(data)
 
+        data_items: list[VideoItem]
         if (
             is_list_of(data, PILImage.Image)
             or isinstance(data, (np.ndarray, torch.Tensor))
@@ -500,7 +500,7 @@ class MultiModalDataParser:
         elif isinstance(data, tuple) and len(data) == 2:
             data_items = [data]
         else:
-            data_items = data  # type: ignore[assignment]
+            data_items = data
 
         new_videos = list[tuple[np.ndarray, Optional[dict[str, Any]]]]()
         metadata_lst: list[Optional[dict[str, Any]]] = []
