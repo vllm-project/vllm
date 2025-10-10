@@ -1171,7 +1171,14 @@ class NixlConnectorWorker:
 
         # Handle tp_size>num_kv_heads: replicate KV cache.
         indexes_into_remote = (
-            not self.kv_info.replicates_kv_cache(engine_id) and tp_ratio < 0
+            not self.kv_info.replicates_kv_cache(engine_id) and tp_ratio > 0
+        )
+
+        logger.debug(
+            "Registering remote agent (%s, rank %s) memory regions with tp_ratio %s",
+            engine_id,
+            remote_tp_rank,
+            tp_ratio,
         )
 
         ### (Optional) Register local agent memory regions
@@ -1724,8 +1731,8 @@ class NixlConnectorWorker:
         if self._nixl_handshake_listener_t is not None:
             self._nixl_handshake_listener_t.join(timeout=0)
             self._nixl_handshake_listener_t = None
-        for handles in self._recving_transfers.values():
-            for handle, _ in handles:
+        for rcv_handles in self._recving_transfers.values():
+            for handle, _ in rcv_handles:
                 self.nixl_wrapper.release_xfer_handle(handle)
         self._recving_transfers.clear()
         if self.src_xfer_side_handle:
