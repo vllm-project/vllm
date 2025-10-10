@@ -121,7 +121,7 @@ class ReasoningParser:
         self,
         original_tag: Optional[str],
         tool_server: Optional[ToolServer],
-    ) -> Union[DeltaMessage, None]:
+    ) -> str:
         """
         Instance method that is implemented for preparing the structured tag
         Otherwise, None is returned
