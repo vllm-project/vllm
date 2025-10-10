@@ -1280,7 +1280,11 @@ class NixlConnectorWorker:
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
 
-        if self.enable_permute_local_kv and len(done_recving) > 0:
+        if (
+            not self.use_host_buffer
+            and self.enable_permute_local_kv
+            and len(done_recving) > 0
+        ):
             block_ids = []
             for req_id in done_recving:
                 meta = self._recving_metadata.pop(req_id)
