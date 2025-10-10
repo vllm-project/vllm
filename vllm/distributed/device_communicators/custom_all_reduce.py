@@ -119,15 +119,18 @@ class CustomAllreduce:
         # now `device` is a `torch.device` object
         assert isinstance(device, torch.device)
         self.device = device
-        device_capability = current_platform.get_device_capability().as_version_str()
+        device_capability_obj = current_platform.get_device_capability()
         if (
             current_platform.is_cuda()
             and symm_mem_enabled
-            and device_capability in CUSTOM_ALL_REDUCE_MAX_SIZES
+            and device_capability_obj is not None
         ):
-            max_size = min(
-                CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability][world_size], max_size
-            )
+            device_capability = device_capability_obj.as_version_str()
+            if device_capability in CUSTOM_ALL_REDUCE_MAX_SIZES:
+                max_size = min(
+                    CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability][world_size],
+                    max_size,
+                )
         cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
         if cuda_visible_devices:
             device_ids = list(map(int, cuda_visible_devices.split(",")))
