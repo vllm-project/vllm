@@ -644,7 +644,7 @@ class SPLADESparsePooler(Pooler):
         assert isinstance(hidden_states, torch.Tensor) and hidden_states.dim() == 2
 
         device = hidden_states.device
-        H: int = int(self.mlm_head.dense.in_features)
+        H = int(self.mlm_head.dense.in_features)
 
         hs_list = list(torch.split(hidden_states, lens, dim=0))
 
