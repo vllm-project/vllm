@@ -143,75 +143,23 @@ function Convert-RockyImage {
         throw "Unable to resolve image reference '$ImageSpec'."
     }
 
+    # If the image is a tar.xz, decompress it to tar
+    if ($resolved.EndsWith('.tar.xz',[StringComparison]::OrdinalIgnoreCase)) {
+        $decompressed = [IO.Path]::ChangeExtension($resolved, '.tar')
+        if (-not (Test-Path $decompressed)) {
+            Write-Host "🗜️  Decompressing '$resolved' to '$decompressed'..." -ForegroundColor Yellow
+            # Use built-in tar if available
+            tar -xf $resolved -C (Split-Path $decompressed) --force-local
+        }
+        $resolved = $decompressed
+    }
+
     if ($resolved.EndsWith('.tar',[StringComparison]::OrdinalIgnoreCase)) {
-        Write-Host "ℹ️  Resolved image already a tar archive: $resolved" -ForegroundColor DarkGray
+        Write-Host "ℹ️  Resolved image is a tar archive: $resolved" -ForegroundColor DarkGray
         return $resolved
     }
 
-    if ($resolved.EndsWith('.vhdx',[StringComparison]::OrdinalIgnoreCase)) {
-        Write-Host "ℹ️  Resolved image is a VHDX; Podman may not accept it directly. Consider exporting to tar via 'wsl --export'." -ForegroundColor Yellow
-        return $resolved
-    }
-
-    $preparedArchive = [IO.Path]::ChangeExtension($resolved,'prepared.tar')
-    if (Test-Path $preparedArchive) {
-        Write-Host "ℹ️  Reusing prepared archive '$preparedArchive'." -ForegroundColor DarkGray
-        return $preparedArchive
-    }
-
-    Assert-Administrator
-
-    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("vllm-wsl-" + [Guid]::NewGuid().ToString('N'))
-    $tempDistro = "vllm-temp-" + [Guid]::NewGuid().ToString('N')
-    New-Item -ItemType Directory -Path $tempRoot | Out-Null
-    try {
-        Write-Host "⬇️  Importing Rocky archive into temporary WSL distro '$tempDistro' for conversion..." -ForegroundColor DarkGray
-        & wsl.exe @('--import',$tempDistro,$tempRoot,$resolved,'--version','2') | Out-Null
-        $importExit = $LASTEXITCODE
-        if ($importExit -ne 0) {
-            throw "wsl.exe import failed with exit code $importExit"
-        }
-
-        try {
-            $prepScript = @'
-set -euo pipefail
-SUDO=
-if command -v sudo >/dev/null 2>&1; then
-    SUDO=sudo
-fi
-if command -v dnf >/dev/null 2>&1; then
-    $SUDO dnf install -y openssh-server shadow-utils policycoreutils-python-utils || true
-fi
-mkdir -p /etc/containers /etc/containers/registries.conf.d /etc/ssh
-touch /etc/containers/containers.conf
-touch /etc/containers/registries.conf.d/999-podman-machine.conf
-touch /etc/ssh/sshd_config
-if command -v systemctl >/dev/null 2>&1; then
-    $SUDO systemctl enable sshd || true
-fi
-'@
-            $prepScript = $prepScript -replace "`r", ""
-            $prepEncoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($prepScript))
-            & wsl.exe @('-d',$tempDistro,'--user','root','bash','-lc',"echo $prepEncoded | base64 -d | bash") | Out-Null
-        } catch {
-            Write-Host "ℹ️  Could not pre-create /etc/containers in temp distro; continuing." -ForegroundColor DarkGray
-        }
-
-        & wsl.exe @('--terminate',$tempDistro) | Out-Null
-        & wsl.exe @('--shutdown') | Out-Null
-
-        Write-Host "�️  Exporting prepared distro to tar archive..." -ForegroundColor Yellow
-        & wsl.exe @('--export',$tempDistro,$preparedArchive) | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "wsl.exe export failed with exit code $LASTEXITCODE"
-        }
-
-        Write-Host "✅ Prepared archive ready at '$preparedArchive'." -ForegroundColor Green
-        return $preparedArchive
-    } finally {
-        try { & wsl.exe @('--unregister',$tempDistro) | Out-Null } catch {}
-        Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    throw "Unsupported image format: $resolved. Please provide a .tar.xz or .tar container rootfs."
 }
 
 function Resolve-ImagePath {
