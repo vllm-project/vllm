@@ -1023,7 +1023,7 @@ def test_kv_connector_unable_to_allocate():
     """
 
     # Setup Scheduler With Mock External Cache Hit.
-    BLOCK_SIZE = 4
+    BLOCK_SIZE = 8
     NUM_BLOCKS = 10
     scheduler = create_scheduler(
         enable_prefix_caching=True,
