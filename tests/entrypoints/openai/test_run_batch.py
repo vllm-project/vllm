@@ -77,7 +77,7 @@ def test_completions():
                 "-o",
                 output_file.name,
                 "--model",
-                "NousResearch/Meta-Llama-3-8B-Instruct",
+                "Qwen/Qwen3-8B",
             ],
         )
         proc.communicate()
