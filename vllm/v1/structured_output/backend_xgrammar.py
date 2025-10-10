@@ -121,13 +121,15 @@ class XgrammarBackend(StructuredOutputBackend):
                         begin=s["begin"],
                         schema=json.dumps(s["schema"]),
                         end=s["end"],
-                    ) for s in s_tag["structures"]
+                    )
+                    for s in s_tag["structures"]
                 ]
-                ctx = self.compiler.compile_structural_tag(
-                    tags, s_tag["triggers"])
+                ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
             else:
-                logger.info(f"Compiling structural tag grammar_spec: \
-                    {grammar_spec}")
+                logger.info(
+                    f"Compiling structural tag grammar_spec: \
+                    {grammar_spec}"
+                )
                 ctx = self.compiler.compile_structural_tag(grammar_spec)
         else:
             logger.error(
@@ -354,7 +356,8 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                         begin=s["begin"],
                         schema=json.dumps(s["schema"]),
                         end=s["end"],
-                    ) for s in s_tag["structures"]
+                    )
+                    for s in s_tag["structures"]
                 ]
                 xgr.Grammar.from_structural_tag(tags, s_tag["triggers"])
             else:

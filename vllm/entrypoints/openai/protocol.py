@@ -208,8 +208,9 @@ class StructuralTagResponseFormat(OpenAIBaseModel):
     format: Any
 
 
-AnyStructuralTagResponseFormat = Union[LegacyStructuralTagResponseFormat,
-                                       StructuralTagResponseFormat]
+AnyStructuralTagResponseFormat = Union[
+    LegacyStructuralTagResponseFormat, StructuralTagResponseFormat
+]
 
 
 class ResponseFormat(OpenAIBaseModel):
@@ -218,8 +219,9 @@ class ResponseFormat(OpenAIBaseModel):
     json_schema: Optional[JsonSchemaResponseFormat] = None
 
 
-AnyResponseFormat = Union[ResponseFormat, LegacyStructuralTagResponseFormat,
-                          StructuralTagResponseFormat]
+AnyResponseFormat = Union[
+    ResponseFormat, LegacyStructuralTagResponseFormat, StructuralTagResponseFormat
+]
 
 
 class StreamOptions(OpenAIBaseModel):

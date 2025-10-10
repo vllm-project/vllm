@@ -881,32 +881,25 @@ def test_structured_output_with_structural_tag(
     structural_tag_config = {
         "type": "structural_tag",
         "format": {
-            "type":
-            "triggered_tags",
-            "tags": [{
-                "begin": "hello_flag",
-                "content": {
-                    "type": "any_text"
-                },
-                "end": "hello"
-            }],
+            "type": "triggered_tags",
+            "tags": [
+                {"begin": "hello_flag", "content": {"type": "any_text"}, "end": "hello"}
+            ],
             "triggers": ["hello"],
-            "stop_after_first":
-            False
-        }
+            "stop_after_first": False,
+        },
     }
 
     sampling_params = SamplingParams(
         temperature=0.0,
         max_tokens=500,
         guided_decoding=StructuredOutputsParams(
-            structural_tag=json.dumps(structural_tag_config)),
+            structural_tag=json.dumps(structural_tag_config)
+        ),
     )
 
     prompt = "Hello and repete hello 10 times, do not say anything else. Only say hello hello hello, now start"
-    outputs = llm.generate(prompt,
-                           sampling_params=sampling_params,
-                           use_tqdm=True)
+    outputs = llm.generate(prompt, sampling_params=sampling_params, use_tqdm=True)
     assert outputs is not None
     for output in outputs:
         assert output is not None
@@ -914,4 +907,6 @@ def test_structured_output_with_structural_tag(
         prompt = output.prompt
         generated_text = output.outputs[0].text
         assert generated_text is not None
-        assert "hello_flag" in generated_text, f"Expected 'hello_flag' to be in generated text, but got: {generated_text}"
+        assert "hello_flag" in generated_text, (
+            f"Expected 'hello_flag' to be in generated text, but got: {generated_text}"
+        )
