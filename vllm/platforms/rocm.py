@@ -211,6 +211,7 @@ class RocmPlatform(Platform):
     @classmethod
     def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> _Backend:
         from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.attention.backends.registry import _Backend
 
         if rocm_aiter_ops.is_mha_enabled():
             # Note: AITER FA is only supported for Qwen-VL models.
