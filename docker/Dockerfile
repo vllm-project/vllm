@@ -245,13 +245,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="9.0a 10.0a" /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"} --wheel-dir /tmp/deepgemm/dist
 
 # Install EP kernels(pplx-kernels and DeepEP)
-RUN ln -sf /opt/venv/bin/pip /usr/local/bin/pip
-RUN python3 -m ensurepip --upgrade && \
-    python3 -m pip install --upgrade setuptools && \
-    /opt/venv/bin/python3 -m pip install --upgrade pip setuptools wheel && \
-    /opt/venv/bin/python3 -m pip --version && \
-    ln -sf /opt/venv/bin/pip /usr/local/bin/pip && \
-    ln -sf /opt/venv/bin/pip /usr/local/bin/pip3
 
 COPY --chmod=755 tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
 ENV CUDA_HOME=/usr/local/cuda
