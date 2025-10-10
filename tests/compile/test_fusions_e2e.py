@@ -10,6 +10,7 @@ from typing import Any, Optional, Union
 
 import pytest
 import regex as re
+from black.cache import NamedTuple
 
 from tests.v1.attention.utils import _Backend
 from vllm import LLM, SamplingParams
@@ -20,72 +21,111 @@ from vllm.utils.flashinfer import has_flashinfer
 
 from ..utils import flat_product, multi_gpu_test
 
-MODELS_FP8: list[tuple[str, dict[str, Any], _Backend]] = []
-MODELS_FP4: list[tuple[str, dict[str, Any], _Backend]] = []
-MODELS: list[tuple[str, dict[str, Any], _Backend]] = []  # tp-only
+
+class ModelBackendTestCase(NamedTuple):
+    model_name: str
+    model_kwargs: dict[str, Any]
+    backend: _Backend
+    attention_fusions: int
+    allreduce_fusions: Optional[int] = None
+
+
+MODELS_FP8: list[ModelBackendTestCase] = []
+MODELS_FP4: list[ModelBackendTestCase] = []
+MODELS: list[ModelBackendTestCase] = []  # tp-only
 
 if current_platform.is_cuda():
-    MODELS_FP8 += [
-        (
-            "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
-            {"max_model_len": 1024},
-            _Backend.TRITON_ATTN,
-        )
+    MODELS_FP8 = [
+        ModelBackendTestCase(
+            model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+            model_kwargs=dict(max_model_len=1024),
+            backend=_Backend.TRITON_ATTN,
+            attention_fusions=48,
+            allreduce_fusions=96,
+        ),
+        ModelBackendTestCase(
+            model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+            model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
+            backend=_Backend.FLASHINFER,
+            attention_fusions=48,
+            allreduce_fusions=96,
+        ),
     ]
 
-    if current_platform.is_device_capability((10, 0)) and has_flashinfer():
-        MODELS_FP8 += [
-            (
-                "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
-                {"kv_cache_dtype": "fp8", "max_model_len": 1024},
-                _Backend.FLASHINFER,
-            )
-        ]
+    MODELS_FP4 = [
+        ModelBackendTestCase(
+            model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+            model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
+            backend=_Backend.FLASHINFER,
+            attention_fusions=48,
+            allreduce_fusions=96,
+        ),
+    ]
 
-        MODELS_FP4 += [
-            (
-                "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
-                {"kv_cache_dtype": "fp8", "max_model_len": 1024},
-                _Backend.FLASHINFER,
-            )
-        ]
-
-        MODELS += [
-            (
-                "meta-llama/Llama-3.1-8B-Instruct",
-                {"max_model_len": 1024},
-                _Backend.FLASHINFER,
-            )
-        ]
+    # TP only
+    MODELS = [
+        ModelBackendTestCase(
+            model_name="meta-llama/Llama-3.1-8B-Instruct",
+            model_kwargs=dict(max_model_len=1024),
+            backend=_Backend.TRITON_ATTN,
+            attention_fusions=0,
+            allreduce_fusions=64,
+        ),
+    ]
 
 elif current_platform.is_rocm():
-    MODELS_FP8 += [("amd/Llama-3.1-8B-Instruct-FP8-KV", {}, _Backend.TRITON_ATTN)]
-
-INDUCTOR_GRAPH_PARTITION = (
-    [True, False] if (is_torch_equal_or_newer("2.9.0.dev")) else [False]
-)
+    MODELS_FP8 = [
+        ModelBackendTestCase(
+            model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
+            model_kwargs=dict(max_model_len=1024),
+            backend=_Backend.TRITON_ATTN,
+            attention_fusions=32,
+        ),
+        ModelBackendTestCase(
+            model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
+            model_kwargs=dict(max_model_len=1024),
+            backend=_Backend.ROCM_ATTN,
+            attention_fusions=32,
+        ),
+        ModelBackendTestCase(
+            model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
+            model_kwargs=dict(max_model_len=1024),
+            backend=_Backend.ROCM_AITER_FA,  # TODO ROCM_AITER_UNIFIED_ATTN
+            attention_fusions=32,
+        ),
+    ]
 
 # TODO(luka) test both in nightly
 CUSTOM_OPS_FP8 = ["-quant_fp8"]  # , "+quant_fp8"]
 
 
 @pytest.mark.parametrize(
-    "model_name, model_kwargs, backend, custom_ops",
+    "model_name, model_kwargs, backend, "
+    "attention_fusions, allreduce_fusions, custom_ops",
     # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
     list(flat_product(MODELS_FP8, CUSTOM_OPS_FP8))
     # quant_fp4 only has the custom impl
     + list(flat_product(MODELS_FP4, [""])),
 )
-@pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
+@pytest.mark.parametrize("inductor_graph_partition", [True, False])
 def test_attn_quant(
     model_name: str,
     model_kwargs: dict[str, Any],
     backend: _Backend,
+    attention_fusions: int,
+    allreduce_fusions: int,
     custom_ops: str,
     inductor_graph_partition: bool,
     caplog_mp_spawn,
     monkeypatch,
 ):
+    if backend == _Backend.FLASHINFER and (
+        not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
+    ):
+        pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
+    if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("Inductor graph partition requires torch>=2.9")
+
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
     if inductor_graph_partition:
@@ -120,7 +160,9 @@ def test_attn_quant(
     with caplog_mp_spawn(logging.DEBUG) as log_holder:
         run_model(compilation_config, model_name, **model_kwargs)
 
-    assert "Fused quant onto 48 attention nodes" in log_holder.text, log_holder.text
+    assert f"Fused quant onto {attention_fusions} attention nodes" in log_holder.text, (
+        log_holder.text
+    )
 
 
 # TODO(luka) test both in nightly
@@ -135,14 +177,15 @@ def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "model_name, model_kwargs, backend, custom_ops",
+    "model_name, model_kwargs, backend, "
+    "attention_fusions, allreduce_fusions, custom_ops",
     # Toggle RMSNorm and QuantFP8 for FP8 models
     list(flat_product(MODELS_FP8, ["+quant_fp8,+rms_norm"]))
     # custom_ops_product(CUSTOM_OPS_FP8, CUSTOM_OPS_RMS_NORM))) # TODO
     # Toggle RMSNorm for FP4 models and unquant models
     + list(flat_product(MODELS_FP4 + MODELS, CUSTOM_OPS_RMS_NORM)),
 )
-@pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
+@pytest.mark.parametrize("inductor_graph_partition", [True, False])
 @pytest.mark.skipif(
     not current_platform.is_cuda()
     or not has_flashinfer()
@@ -150,14 +193,19 @@ def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
     reason="allreduce+rmsnorm fusion requires flashinfer",
 )
 def test_tp2_attn_quant_allreduce_rmsnorm(
-    model_name,
-    model_kwargs,
-    backend,
+    model_name: str,
+    model_kwargs: dict,
+    backend: _Backend,
+    attention_fusions: int,
+    allreduce_fusions: int,
     custom_ops: str,
     inductor_graph_partition: bool,
     caplog_mp_spawn,
     monkeypatch,
 ):
+    if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("Inductor graph partition requires torch>=2.9")
+
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
     if inductor_graph_partition:
@@ -198,10 +246,13 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
             compilation_config, model_name, tensor_parallel_size=2, **model_kwargs
         )
 
-    assert "Fused quant onto 48 attention nodes" in log_holder.text, log_holder.text
+    assert f"Fused quant onto {attention_fusions} attention nodes" in log_holder.text, (
+        log_holder.text
+    )
 
     matches = re.findall(
-        r"\[collective_fusion.py:\d+] Replaced 96 patterns", log_holder.text
+        rf"\[collective_fusion.py:\d+] Replaced {allreduce_fusions} patterns",
+        log_holder.text,
     )
     assert len(matches) == 2, log_holder.text
 
