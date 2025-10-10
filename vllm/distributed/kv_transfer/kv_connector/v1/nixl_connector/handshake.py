@@ -52,7 +52,7 @@ class HandshakeStrategy(ABC):
         tp_size: int,
         side_channel_port: int,
         engine_id: str,
-        handshake_lock: Optional[threading.RLock] = None,
+        handshake_lock: threading.RLock,
     ):
         self.nixl_wrapper = nixl_wrapper
         self.tp_rank = tp_rank
@@ -91,7 +91,7 @@ class ZmqHandshakeStrategy(HandshakeStrategy):
         side_channel_port: int,
         engine_id: str,
         add_remote_agent_func,
-        handshake_lock: Optional[threading.RLock] = None,
+        handshake_lock: threading.RLock,
     ):
         super().__init__(
             nixl_wrapper, tp_rank, tp_size, side_channel_port, engine_id, handshake_lock
@@ -123,13 +123,7 @@ class ZmqHandshakeStrategy(HandshakeStrategy):
                         f"Expected {expected_engine_id},"
                         f"received {metadata.engine_id}."
                     )
-                # Register Remote agent (with locking if provided)
-                if self.handshake_lock:
-                    with self.handshake_lock:
-                        agent_name = self.add_remote_agent_func(
-                            metadata, rank, remote_tp_size
-                        )
-                else:
+                with self.handshake_lock:
                     agent_name = self.add_remote_agent_func(
                         metadata, rank, remote_tp_size
                     )
