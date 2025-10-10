@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 
 import torch
-from pydantic import ConfigDict, Field, SkipValidation, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -19,12 +19,10 @@ Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
-    device: SkipValidation[Optional[Union[Device, torch.device]]] = "auto"
+    device: Device | str = "auto"
     """Device type for vLLM execution.
-    This parameter is deprecated and will be
-    removed in a future release.
-    It will now be set automatically based
-    on the current platform."""
+    This parameter is deprecated and will be removed in a future release.
+    It will now be set automatically based on the current platform."""
     device_type: str = Field(init=False)
     """Device type from the current platform. Set during validation."""
 
@@ -46,6 +44,13 @@ class DeviceConfig:
         factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
+
+    @field_validator("device", mode="before")
+    @classmethod
+    def validate_device(cls, device: str | torch.device) -> str:
+        if isinstance(device, torch.device):
+            return device.type
+        return device
 
     @model_validator(mode="after")
     def _validate_device_type(self) -> Self:
