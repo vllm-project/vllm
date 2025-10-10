@@ -51,7 +51,6 @@ class Metrics:
 
         # Use this flag to hide metrics that were deprecated in
         # a previous release and which will be removed future
-        assert vllm_config.observability_config is not None
         self.show_hidden_metrics = vllm_config.observability_config.show_hidden_metrics
 
         # System stats
@@ -452,11 +451,6 @@ class LoggingStatLogger(StatLoggerBase):
 
     def __init__(self, local_interval: float, vllm_config: VllmConfig) -> None:
         super().__init__(local_interval, vllm_config)
-
-        self.num_prompt_tokens: list[int]
-        self.num_generation_tokens: list[int]
-        self.last_local_log: float
-        self.local_interval: float
         self.last_prompt_throughput: Optional[float] = None
         self.last_generation_throughput: Optional[float] = None
 
@@ -519,8 +513,8 @@ class LoggingStatLogger(StatLoggerBase):
 
     def _reset(self, stats, prompt_throughput, generation_throughput) -> None:
         # Reset tracked stats for next interval.
-        self.num_prompt_tokens = []
-        self.num_generation_tokens = []
+        self.num_prompt_tokens: list[int] = []
+        self.num_generation_tokens: list[int] = []
         self.last_local_log = stats.now
         self.last_prompt_throughput = prompt_throughput
         self.last_generation_throughput = generation_throughput
@@ -539,11 +533,6 @@ class PrometheusStatLogger(StatLoggerBase):
         self, local_interval: float, labels: dict[str, str], vllm_config: VllmConfig
     ) -> None:
         super().__init__(local_interval, vllm_config)
-
-        self.num_prompt_tokens: list[int]
-        self.num_generation_tokens: list[int]
-        self.last_local_log: float
-        self.local_interval: float
         # Prometheus metrics
         self.labels = labels
         self.metrics = self._metrics_cls(
@@ -671,9 +660,9 @@ class PrometheusStatLogger(StatLoggerBase):
         # Log locally every local_interval seconds.
         if local_interval_elapsed(stats.now, self.last_local_log, self.local_interval):
             # Reset tracked stats for next interval.
-            self.num_prompt_tokens = []
-            self.num_generation_tokens = []
-            self.last_local_log = stats.now
+            self.num_prompt_tokens: list[int] = []
+            self.num_generation_tokens: list[int] = []
+            self.last_local_log: float = stats.now
 
     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         # Info type metrics are syntactic sugar for a gauge permanently set to 1

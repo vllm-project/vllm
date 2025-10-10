@@ -4,7 +4,7 @@
 
 from collections.abc import Iterable
 from functools import reduce
-from typing import TYPE_CHECKING, Any, Callable, TypeVar, Union, overload
+from typing import TYPE_CHECKING, Callable, TypeVar, Union, cast, overload
 
 if TYPE_CHECKING:
     import torch
@@ -83,7 +83,7 @@ def json_map_leaves(
 ) -> JSONTree[_U]: ...
 
 
-def json_map_leaves(
+def json_map_leaves(  # type: ignore[misc]
     func: Callable[[_T], _U],
     value: Union["BatchedTensorInputs", _JSONTree[_T]],
 ) -> Union["BatchedTensorInputs", _JSONTree[_U]]:
@@ -143,18 +143,18 @@ def json_reduce_leaves(
 
 
 def json_reduce_leaves(
-    func: Callable[..., Any],
-    value: _JSONTree[Any],
-    initial: Any = ...,  # noqa: B008
+    func: Callable[..., Union[_T, _U]],
+    value: _JSONTree[_T],
+    initial: _U = cast(_U, ...),  # type: ignore  # noqa
     /,
-) -> Any:
+) -> Union[_T, _U]:
     """
     Apply a function of two arguments cumulatively to each leaf in a
     nested JSON structure, from left to right, so as to reduce the
     sequence to a single value.
     """
     if initial is ...:
-        return reduce(func, json_iter_leaves(value))  # type: ignore[arg-type]
+        return reduce(func, json_iter_leaves(value))  # type: ignore
 
     return reduce(
         func,  # type: ignore[arg-type]

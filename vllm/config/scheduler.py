@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import InitVar, field
 from typing import Any, Literal, Union
 
-from pydantic import SkipValidation, model_validator
+from pydantic import Field, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -31,19 +31,19 @@ class SchedulerConfig:
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
 
-    max_num_batched_tokens: SkipValidation[int] = None  # type: ignore
+    max_num_batched_tokens: int = Field(default=None)
     """Maximum number of tokens to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_num_seqs: SkipValidation[int] = None  # type: ignore
+    max_num_seqs: int = Field(default=None)
     """Maximum number of sequences to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_model_len: SkipValidation[int] = None  # type: ignore
+    max_model_len: int = Field(default=None)
     """Maximum length of a sequence (including prompt and generated text). This
     is primarily set in `ModelConfig` and that value should be manually
     duplicated here."""

@@ -81,7 +81,7 @@ import regex as re
 import setproctitle
 import torch
 import torch.types
-import yaml  # type: ignore[import-untyped]
+import yaml
 import zmq
 import zmq.asyncio
 from packaging import version
@@ -484,11 +484,8 @@ async def merge_async_iterators(
             yield 0, item
         return
 
-    loop = asyncio.get_running_loop()
-
     awaits: dict[asyncio.Task[T], tuple[int, AsyncGenerator[T, None]]] = {
-        loop.create_task(anext(it)): (i, it)  # type: ignore[arg-type]
-        for i, it in enumerate(iterators)
+        asyncio.ensure_future(anext(it)): (i, it) for i, it in enumerate(iterators)
     }
     try:
         while awaits:
@@ -498,7 +495,7 @@ async def merge_async_iterators(
                 try:
                     item = await d
                     i, it = pair
-                    awaits[loop.create_task(anext(it))] = pair  # type: ignore[arg-type]
+                    awaits[asyncio.ensure_future(anext(it))] = pair
                     yield i, item
                 except StopAsyncIteration:
                     pass
@@ -1166,13 +1163,11 @@ def find_nccl_include_paths() -> list[str] | None:
         import importlib.util
 
         spec = importlib.util.find_spec("nvidia.nccl")
-        if spec:
-            locations = getattr(spec, "submodule_search_locations", None)
-            if locations:
-                for loc in locations:
-                    inc_dir = os.path.join(loc, "include")
-                    if os.path.exists(os.path.join(inc_dir, "nccl.h")):
-                        paths.append(inc_dir)
+        if spec is not None and spec.submodule_search_locations is not None:
+            for loc in spec.submodule_search_locations:
+                inc_dir = os.path.join(loc, "include")
+                if os.path.exists(os.path.join(inc_dir, "nccl.h")):
+                    paths.append(inc_dir)
     except Exception:
         pass
 

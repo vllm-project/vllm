@@ -218,12 +218,11 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
             default = field.default
             # Handle pydantic.Field defaults
             if isinstance(default, FieldInfo):
-                if default.default_factory is not None and callable(
-                    default.default_factory
-                ):
-                    default = cast(Callable[[], Any], default.default_factory)()
-                else:
+                if default.default_factory is None:
                     default = default.default
+                else:
+                    default_factory = cast(Callable[[], Any], default.default_factory)
+                    default = default_factory()
         elif field.default_factory is not MISSING:
             default = field.default_factory()
 
@@ -354,7 +353,7 @@ class EngineArgs:
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = ModelConfig.seed
-    max_model_len: Optional[int] = ModelConfig.max_model_len
+    max_model_len: int = ModelConfig.max_model_len
     cuda_graph_sizes: list[int] = get_field(SchedulerConfig, "cuda_graph_sizes")
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
@@ -395,7 +394,7 @@ class EngineArgs:
     max_parallel_loading_workers: Optional[int] = (
         ParallelConfig.max_parallel_loading_workers
     )
-    block_size: Optional[BlockSize] = CacheConfig.block_size
+    block_size: BlockSize = CacheConfig.block_size
     enable_prefix_caching: Optional[bool] = CacheConfig.enable_prefix_caching
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
@@ -406,11 +405,11 @@ class EngineArgs:
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: Optional[int] = CacheConfig.kv_cache_memory_bytes
-    max_num_batched_tokens: Optional[int] = SchedulerConfig.max_num_batched_tokens
+    max_num_batched_tokens: int = SchedulerConfig.max_num_batched_tokens
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
-    max_num_seqs: Optional[int] = SchedulerConfig.max_num_seqs
+    max_num_seqs: int = SchedulerConfig.max_num_seqs
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
@@ -473,7 +472,7 @@ class EngineArgs:
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     # Deprecated guided decoding fields
-    guided_decoding_backend: Optional[str] = None
+    guided_decoding_backend: Optional[StructuredOutputsBackend] = None
     guided_decoding_disable_fallback: Optional[bool] = None
     guided_decoding_disable_any_whitespace: Optional[bool] = None
     guided_decoding_disable_additional_properties: Optional[bool] = None
@@ -518,7 +517,7 @@ class EngineArgs:
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
-    pt_load_map_location: Union[str, dict[str, str]] = LoadConfig.pt_load_map_location
+    pt_load_map_location: str | dict[str, str] = LoadConfig.pt_load_map_location
 
     # DEPRECATED
     enable_multimodal_encoder_data_parallel: bool = False
@@ -1102,7 +1101,11 @@ class EngineArgs:
 
             self.mm_encoder_tp_mode = "data"
 
-        model_config_kwargs: dict[str, Any] = dict(
+        kwargs = dict[str, Any]()
+        if self.tokenizer is not None:
+            kwargs["tokenizer"] = self.tokenizer
+
+        return ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
             runner=self.runner,
@@ -1121,6 +1124,7 @@ class EngineArgs:
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
             tokenizer_revision=self.tokenizer_revision,
+            max_model_len=self.max_model_len,
             quantization=self.quantization,
             enforce_eager=self.enforce_eager,
             max_logprobs=self.max_logprobs,
@@ -1151,12 +1155,8 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
+            **kwargs,
         )
-        if self.tokenizer is not None:
-            model_config_kwargs["tokenizer"] = self.tokenizer
-        if self.max_model_len is not None:
-            model_config_kwargs["max_model_len"] = self.max_model_len
-        return ModelConfig(**model_config_kwargs)
 
     def validate_tensorizer_args(self):
         from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -1250,8 +1250,6 @@ class EngineArgs:
         self.model = model_config.model
         self.tokenizer = model_config.tokenizer
 
-        # After ModelConfig init, tokenizer must be resolved (never None).
-        assert self.tokenizer is not None
         (self.model, self.tokenizer, self.speculative_config) = (
             maybe_override_with_speculators(
                 model=self.model,
@@ -1313,7 +1311,8 @@ class EngineArgs:
             f"dcp_size={self.decode_context_parallel_size}."
         )
 
-        cache_kwargs: dict[str, Any] = dict(
+        cache_config = CacheConfig(
+            block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
             swap_space=self.swap_space,
@@ -1329,9 +1328,6 @@ class EngineArgs:
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
         )
-        if self.block_size is not None:
-            cache_kwargs["block_size"] = self.block_size
-        cache_config = CacheConfig(**cache_kwargs)
 
         ray_runtime_env = None
         if is_ray_initialized():
@@ -1500,8 +1496,10 @@ class EngineArgs:
         if speculative_config is not None:
             num_lookahead_slots = speculative_config.num_lookahead_slots
 
-        scheduler_kwargs: dict[str, Any] = dict(
+        scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
+            max_num_batched_tokens=self.max_num_batched_tokens,
+            max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
             cuda_graph_sizes=self.cuda_graph_sizes,
             num_lookahead_slots=num_lookahead_slots,
@@ -1518,11 +1516,6 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
         )
-        if self.max_num_batched_tokens is not None:
-            scheduler_kwargs["max_num_batched_tokens"] = self.max_num_batched_tokens
-        if self.max_num_seqs is not None:
-            scheduler_kwargs["max_num_seqs"] = self.max_num_seqs
-        scheduler_config = SchedulerConfig(**scheduler_kwargs)
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
             raise ValueError(
@@ -1560,9 +1553,7 @@ class EngineArgs:
         # Forward the deprecated CLI args to the StructuredOutputsConfig
         so_config = self.structured_outputs_config
         if self.guided_decoding_backend is not None:
-            so_config.backend = cast(
-                StructuredOutputsBackend, self.guided_decoding_backend
-            )
+            so_config.backend = self.guided_decoding_backend
         if self.guided_decoding_disable_fallback is not None:
             so_config.disable_fallback = self.guided_decoding_disable_fallback
         if self.guided_decoding_disable_any_whitespace is not None:
