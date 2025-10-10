@@ -26,7 +26,7 @@ class KVTransferConfig:
     """The KV connector for vLLM to transmit KV caches between vLLM instances.
     """
 
-    engine_id: str = Field(default=None)
+    engine_id: str = Field(default=None, validate_default=True)
     """The engine id for KV transfers."""
 
     kv_buffer_device: Optional[KVBufferDevice] = "cuda"
@@ -81,9 +81,9 @@ class KVTransferConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @field_validator("engine_id", mode="after")
+    @field_validator("engine_id", mode="before")
     @classmethod
-    def _validate_engine_id(cls, engine_id: Optional[str]) -> str:
+    def _validate_engine_id(cls, engine_id: Optional[Any]) -> Any:
         """Must be set here instead of `default_factory` to ensure
         that each instance of `KVTransferConfig` gets a unique `engine_id`."""
         if engine_id is None:
