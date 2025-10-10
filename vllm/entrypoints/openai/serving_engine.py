@@ -274,6 +274,10 @@ class OpenAIServing:
         self.model_config = self.models.model_config
         self.max_model_len = self.model_config.max_model_len
 
+    async def reset_mm_cache(self) -> None:
+        self.processor.clear_mm_cache()
+        await self.engine_client.reset_mm_cache()
+
     async def beam_search(
         self,
         prompt: PromptType,
