@@ -876,8 +876,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use aiter rope.
     # By default is disabled.
-    "VLLM_ROCM_USE_TRITON_ROPE": lambda: (
-        os.getenv("VLLM_ROCM_USE_TRITON_ROPE", "False").lower() in ("true", "1")
+    "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter triton fp8 bmm kernel
     # By default is enabled.

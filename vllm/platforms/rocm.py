@@ -234,13 +234,17 @@ class RocmPlatform(Platform):
         has_sink,
         use_sparse,
     ) -> str:
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.attention.backends.registry import _Backend
+
+        if use_sparse:
+            raise NotImplementedError("Sparse Attention is not supported on ROCm.")
+
         if not use_v1:
             raise RuntimeError(
                 "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
                 "to select a supported backend."
             )
-
-        from vllm._aiter_ops import rocm_aiter_ops
 
         if use_mla:
             if selected_backend is None:
@@ -278,10 +282,14 @@ class RocmPlatform(Platform):
             logger.info("Using FlexAttention backend on V1 engine.")
             return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
 
-        if rocm_aiter_ops.is_mha_enabled():
-            logger.info("Using Flash Attention backend on V1 engine.")
+        if (
+            rocm_aiter_ops.is_mha_enabled()
+            or selected_backend == _Backend.ROCM_AITER_FA
+        ):
+            logger.info("Using AITER Flash Attention backend on V1 engine.")
             return "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend"
-        elif (
+
+        if (
             rocm_aiter_ops.is_triton_unified_attn_enabled()
             or envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
             or selected_backend == _Backend.ROCM_ATTN
