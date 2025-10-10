@@ -178,6 +178,12 @@ class EngineCore:
             or self.scheduler.get_kv_connector() is not None
         ):
             block_size = vllm_config.cache_config.block_size
+            
+            # Use logical block size for hashing when DCP is enabled.
+            dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+            if dcp_world_size > 1:
+                block_size *= dcp_world_size
+            
             caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo
             )
