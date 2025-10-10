@@ -97,6 +97,11 @@ class CachingMetrics:
         self.query_queue.clear()
 
     @property
+    def empty(self) -> bool:
+        """Return true if no requests have been observed."""
+        return self.aggregated_requests == 0
+
+    @property
     def hit_rate(self) -> float:
         """Calculate the hit rate for the past N requests."""
         if self.aggregated_query_total == 0:
