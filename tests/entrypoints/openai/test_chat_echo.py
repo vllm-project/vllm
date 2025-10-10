@@ -19,7 +19,7 @@ def get_vocab_size(model_name):
     config = ModelConfig(
         model=model_name,
         seed=0,
-        dtype="bfloat16",
+        dtype="float16",
     )
     return config.get_vocab_size()
 
