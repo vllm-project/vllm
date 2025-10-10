@@ -2174,41 +2174,41 @@ class FusedMoE(CustomOp):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        og_size = hidden_states.shape
         og_hidden_states = hidden_states.shape[-1]
         if self.hidden_size != og_hidden_states:
-            hidden_states = F.pad(
+            padded_hidden_states = F.pad(
                 hidden_states,
                 (0, self.hidden_size - og_hidden_states),
                 mode="constant",
                 value=0.0,
             )
+        else:
+            padded_hidden_states = hidden_states
 
         if self.shared_experts is None:
             if current_platform.is_tpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
-                self.forward_impl(hidden_states, router_logits)
+                self.forward_impl(padded_hidden_states, router_logits)
             else:
                 torch.ops.vllm.moe_forward(
-                    hidden_states, router_logits, self.layer_name
+                    padded_hidden_states, router_logits, self.layer_name
                 )
-            # hidden_states.resize_(og_size)
-            hidden_states.copy_(hidden_states.narrow(-1, 0, og_hidden_states))
-            return hidden_states
+            return padded_hidden_states[..., :og_hidden_states]
         else:
             if current_platform.is_tpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
-                shared_output = self.forward_impl(hidden_states, router_logits)
+                shared_output = self.forward_impl(padded_hidden_states, router_logits)
             else:
                 shared_output = torch.ops.vllm.moe_forward_shared(
-                    hidden_states, router_logits, self.layer_name
+                    padded_hidden_states, router_logits, self.layer_name
                 )
-            # hidden_states.resize_(og_size)
-            hidden_states.copy_(hidden_states.narrow(-1, 0, og_hidden_states))
             assert shared_output is not None
-            return (hidden_states, shared_output[..., :og_hidden_states])
+            return (
+                padded_hidden_states[..., :og_hidden_states],
+                shared_output[..., :og_hidden_states],
+            )
 
     def forward_cuda(
         self,
