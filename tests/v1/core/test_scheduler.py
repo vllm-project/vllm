@@ -807,8 +807,10 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         engine_core_outputs[0].scheduler_stats if engine_core_outputs else None
     )
     if expected[0] == 0:
+        assert scheduler_stats is not None
         assert scheduler_stats.spec_decoding_stats is None
     else:
+        assert scheduler_stats is not None
         assert scheduler_stats.spec_decoding_stats is not None
         stats = scheduler_stats.spec_decoding_stats
         assert stats.num_drafts == expected[0]

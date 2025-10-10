@@ -49,16 +49,16 @@ class CompressedTensors24(CompressedTensorsScheme):
         self.quantized = quantized
         self.weight_quant = weight_quant
         self.input_quant = input_quant
-        self.model_compressor = (
-            ModelCompressor.from_compression_config(model_compression_config)
-            if model_compression_config is not None
-            else None
+        model_compressor = ModelCompressor.from_compression_config(
+            model_compression_config
         )
         self.do_sparse_decompress = (
-            self.model_compressor is not None
-            and self.model_compressor.sparsity_config.format
+            model_compressor is not None
+            and model_compressor.sparsity_config.format
             == CompressionFormat.sparse_24_bitmask.value
         )
+        if self.do_sparse_decompress:
+            self.model_compressor = model_compressor
 
         if (
             quantized

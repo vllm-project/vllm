@@ -200,12 +200,10 @@ class BaseResampler(nn.Module):
         self.ln_q = norm_layer(embed_dim)
         self.ln_kv = norm_layer(embed_dim)
         self.do_post_projection = do_post_projection
-        self.ln_post = norm_layer(embed_dim) if do_post_projection else None
-        self.proj = (
-            nn.Parameter((embed_dim**-0.5) * torch.empty(embed_dim, embed_dim))
-            if do_post_projection
-            else None
-        )
+        if self.do_post_projection:
+            self.ln_post = norm_layer(embed_dim)
+            data = (embed_dim**-0.5) * torch.empty(embed_dim, embed_dim)
+            self.proj = nn.Parameter(data=data)
 
     def _repeat(self, query, N: int):
         return query.unsqueeze(1).repeat(1, N, 1)
