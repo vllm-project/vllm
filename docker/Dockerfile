@@ -371,6 +371,7 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
+# Install deepgemm wheel that has been built in the `build` stage
 COPY --from=build /tmp/deepgemm/dist /tmp/deepgemm/dist
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system /tmp/deepgemm/dist/*.whl
