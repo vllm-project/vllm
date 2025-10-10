@@ -201,7 +201,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 block_shape=quant_config.block_shape,
             )
 
-            # All different?
             all_to_all_args = dict(
                 max_num_tokens=moe.max_num_tokens,
                 num_experts=moe.num_experts,
@@ -219,12 +218,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 all2all_manager.world_size // all2all_manager.tp_group.world_size
             )
 
-            # Intranode pplx a2a takes a group name while internode does not.
-            if not all2all_manager.internode:
-                all_to_all_args["group_name"] = all2all_manager.cpu_group.group_name
-
             handle = all2all_manager.get_handle(all_to_all_args)
 
+            # Note: the API for EFA appears identical to the regular pplx kernels,
+            # so we can reuse the PplxPrepareAndFinalize class for both.
             prepare_finalize = PplxPrepareAndFinalize(
                 handle,
                 max_num_tokens=moe.max_num_tokens,

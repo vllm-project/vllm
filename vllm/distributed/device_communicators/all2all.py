@@ -241,6 +241,7 @@ class PPLXEfaAll2AllManager(All2AllManagerBase):
     """
 
     def __init__(self, cpu_group, device):
+        # TODO: update README.md
         assert has_pplx(), (
             "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md"
             " to install pplx_kernels."
@@ -281,7 +282,7 @@ class PPLXEfaAll2AllManager(All2AllManagerBase):
 
         return self.handle_cache.get_or_create(
             kwargs,
-            pplx.EfaAllToAll,
+            pplx.rose.kernels.EfaAllToAll,
         )
 
     def dispatch(
@@ -301,12 +302,6 @@ class PPLXEfaAll2AllManager(All2AllManagerBase):
         with self.handle_cache._lock:
             for _, handle in self.handle_cache._cache.items():
                 handle.destroy()
-
-        if self.internode:
-            from pplx_kernels.nvshmem import nvshmem_finalize
-
-            logger.debug("PPLX NVSHMEM finalize")
-            nvshmem_finalize()
 
 
 class DeepEPAll2AllManagerBase(All2AllManagerBase):
