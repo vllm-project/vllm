@@ -1624,8 +1624,8 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     embed_dtype: str = Field(
         default="float32",
         description=(
-            "What dtype to use for base64 encoding. Default to using "
-            "float32 for base64 encoding to match the OpenAI python client behavior."
+            "Which dtype to use for base64 encoding. Defaults to float32 "
+            "to match OpenAI API."
         ),
     )
     # --8<-- [end:chat-embedding-extra-params]
