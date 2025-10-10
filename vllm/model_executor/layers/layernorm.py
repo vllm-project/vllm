@@ -187,12 +187,12 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         variance_epsilon: float,
         hidden_size: int,
+        orig_dtype: torch.dtype,
         weight: Optional[torch.Tensor] = None,
         residual: Optional[torch.Tensor] = None,
         variance_size_override: Optional[int] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
-        orig_dtype = x.dtype
         x = x.to(torch.float32)
         if residual is not None:
             # residual promoted f16->f32 automatically,
@@ -239,6 +239,7 @@ class RMSNorm(CustomOp):
             x,
             self.variance_epsilon,
             self.hidden_size,
+            x.dtype,
             self.weight.data if self.has_weight else None,
             residual,
             self.variance_size_override,

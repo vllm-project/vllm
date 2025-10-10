@@ -65,8 +65,6 @@ class MatcherCustomOp(ABC):
 class MatcherRMSNorm(MatcherCustomOp):
     def __init__(self, epsilon: float, enabled: Optional[bool] = None):
         if enabled is None:
-            # TODO either pass config to enabled or set it globally
-            #  (global during pass init seems reasonable)
             enabled = RMSNorm.enabled()
 
         super().__init__(enabled)
@@ -83,7 +81,6 @@ class MatcherRMSNorm(MatcherCustomOp):
         self,
         input: torch.Tensor,
         weight: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         result = torch.empty_like(input)
         _, result = auto_functionalized(
@@ -100,28 +97,15 @@ class MatcherRMSNorm(MatcherCustomOp):
         self,
         input: torch.Tensor,
         weight: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        x = input.to(torch.float32)
-        if residual is not None:
-            x = x + residual
-            residual = x.to(self.model_dtype)
-
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-
-        x = x * torch.rsqrt(variance + self.epsilon)
-        x = x.to(self.model_dtype)
-        if weight is not None:
-            x = x * weight
-
-        return x if residual is None else (x, residual)
+        return RMSNorm.forward_static(
+            input, self.epsilon, input.size(-1), self.model_dtype, weight
+        )
 
 
 class MatcherFusedAddRMSNorm(MatcherCustomOp):
     def __init__(self, epsilon: float, enabled: Optional[bool] = None):
         if enabled is None:
-            # TODO either pass config to enabled or set it globally
-            #  (global during pass init seems reasonable)
             enabled = RMSNorm.enabled()
 
         super().__init__(enabled)
@@ -157,19 +141,9 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
         weight: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        x = input.to(torch.float32)
-        if residual is not None:
-            x = x + residual
-            residual = x.to(self.model_dtype)
-
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-
-        x = x * torch.rsqrt(variance + self.epsilon)
-        x = x.to(self.model_dtype)
-        if weight is not None:
-            x = x * weight
-
-        return x if residual is None else (x, residual)
+        return RMSNorm.forward_static(
+            input, self.epsilon, input.size(-1), self.model_dtype, weight, residual
+        )
 
 
 class MatcherQuant:
