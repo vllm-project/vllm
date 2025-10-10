@@ -1411,6 +1411,7 @@ def create_scheduler_with_priority(
         kv_cache_config=kv_cache_config,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
+        block_size=block_size,
     )
 
 
