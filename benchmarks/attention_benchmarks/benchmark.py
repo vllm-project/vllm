@@ -1,0 +1,587 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+"""
+Universal vLLM Attention Benchmark
+
+Benchmark any attention backend with the extended grammar.
+Supports standard attention (Flash/Triton/FlashInfer) and MLA backends.
+
+Examples:
+    # Standard attention
+    python benchmark.py --backends flash flashinfer --batch-specs "q2k" "8s1k"
+
+    # MLA backends
+    python benchmark.py --backends cutlass_mla flashinfer_mla --batch-specs "64s1k"
+
+    # CUTLASS num-splits sweep
+    python benchmark.py --backend cutlass_mla \
+                        --batch-specs "64s1k" \
+                        --num-splits 1 4 8 16
+
+    # Speculative decode threshold tuning
+    python benchmark.py --backend flashmla \
+                        --batch-specs "spec4s1k" \
+                        --thresholds 1 4 16 64
+"""
+
+import argparse
+import sys
+from dataclasses import replace
+from pathlib import Path
+
+import yaml
+from rich.console import Console
+from tqdm import tqdm
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from batch_spec import parse_batch_spec
+from common import BenchmarkConfig, BenchmarkResult, ResultsFormatter
+
+
+def run_standard_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
+    """Run standard attention benchmark (Flash/Triton/FlashInfer)."""
+    from runner import run_attention_benchmark_impl
+
+    return run_attention_benchmark_impl(config)
+
+
+def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
+    """Run MLA benchmark with appropriate backend."""
+    from mla_runner import (
+        run_cutlass_mla_benchmark,
+        run_flashattn_mla_benchmark,
+        run_flashinfer_mla_benchmark,
+        run_flashmla_benchmark,
+    )
+
+    backend_map = {
+        "cutlass_mla": run_cutlass_mla_benchmark,
+        "flashinfer_mla": run_flashinfer_mla_benchmark,
+        "flash_attn_mla": run_flashattn_mla_benchmark,
+        "flashmla": run_flashmla_benchmark,
+    }
+
+    runner = backend_map[config.backend]
+    result_dict = runner(config, **kwargs)
+
+    return BenchmarkResult(
+        config=config,
+        mean_time=result_dict["mean"],
+        std_time=result_dict["std"],
+        min_time=result_dict["min"],
+        max_time=result_dict["max"],
+        throughput_tokens_per_sec=result_dict["throughput"],
+    )
+
+
+def load_config_from_yaml(config_path: str) -> dict:
+    """Load configuration from YAML file."""
+    with open(config_path) as f:
+        return yaml.safe_load(f)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Universal vLLM attention benchmark",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+
+    # Config file
+    parser.add_argument(
+        "--config",
+        help="Path to YAML config file (overrides other args)",
+    )
+
+    # Backend selection
+    parser.add_argument(
+        "--backends",
+        nargs="+",
+        help="Backends to benchmark (flash, triton, flashinfer, cutlass_mla, "
+        "flashinfer_mla, flash_attn_mla, flashmla)",
+    )
+    parser.add_argument(
+        "--backend",
+        help="Single backend (alternative to --backends)",
+    )
+
+    # Batch specifications
+    parser.add_argument(
+        "--batch-specs",
+        nargs="+",
+        default=["q2k", "8s1k"],
+        help="Batch specifications using extended grammar",
+    )
+
+    # Model config
+    parser.add_argument("--num-layers", type=int, default=10, help="Number of layers")
+    parser.add_argument("--head-dim", type=int, default=128, help="Head dimension")
+    parser.add_argument("--num-q-heads", type=int, default=32, help="Query heads")
+    parser.add_argument("--num-kv-heads", type=int, default=8, help="KV heads")
+    parser.add_argument("--block-size", type=int, default=16, help="Block size")
+
+    # Benchmark settings
+    parser.add_argument("--device", default="cuda:0", help="Device")
+    parser.add_argument("--repeats", type=int, default=1, help="Repetitions")
+    parser.add_argument("--warmup-iters", type=int, default=3, help="Warmup iterations")
+    parser.add_argument("--profile-memory", action="store_true", help="Profile memory")
+
+    # MLA-specific options
+    parser.add_argument(
+        "--num-splits",
+        type=int,
+        nargs="+",
+        help="CUTLASS MLA: Test multiple num_kv_splits values",
+    )
+    parser.add_argument(
+        "--thresholds",
+        type=int,
+        nargs="+",
+        help="FlashMLA/FlashAttn MLA: Test multiple reorder_batch_threshold values",
+    )
+    parser.add_argument(
+        "--compare-auto",
+        action="store_true",
+        help="CUTLASS MLA: Also test auto num_kv_splits",
+    )
+
+    # Output
+    parser.add_argument("--output-csv", help="Save to CSV")
+    parser.add_argument("--output-json", help="Save to JSON")
+
+    args = parser.parse_args()
+
+    console = Console()
+    console.print("[bold cyan]vLLM Attention Benchmark[/]")
+
+    # Load config from YAML if provided
+    if args.config:
+        console.print(f"[yellow]Loading config from: {args.config}[/]")
+        yaml_config = load_config_from_yaml(args.config)
+
+        # Show description if available
+        if "description" in yaml_config:
+            console.print(f"[dim]{yaml_config['description']}[/]")
+
+        # Override args with YAML values
+        # (YAML takes precedence unless CLI arg was explicitly set)
+        # Backend(s)
+        if "backend" in yaml_config:
+            args.backend = yaml_config["backend"]
+            args.backends = None
+        elif "backends" in yaml_config:
+            args.backends = yaml_config["backends"]
+            args.backend = None
+
+        # Check for special modes
+        if "mode" in yaml_config:
+            args.mode = yaml_config["mode"]
+        else:
+            args.mode = None
+
+        # Batch specs and sizes
+        if "batch_specs" in yaml_config:
+            args.batch_specs = yaml_config["batch_specs"]
+        if "batch_sizes" in yaml_config:
+            args.batch_sizes = yaml_config["batch_sizes"]
+        else:
+            args.batch_sizes = None
+
+        # Model config
+        if "model" in yaml_config:
+            model = yaml_config["model"]
+            args.num_layers = model.get("num_layers", args.num_layers)
+            args.head_dim = model.get("head_dim", args.head_dim)
+            args.num_q_heads = model.get("num_q_heads", args.num_q_heads)
+            args.num_kv_heads = model.get("num_kv_heads", args.num_kv_heads)
+            args.block_size = model.get("block_size", args.block_size)
+
+        # Benchmark settings
+        if "benchmark" in yaml_config:
+            bench = yaml_config["benchmark"]
+            args.device = bench.get("device", args.device)
+            args.repeats = bench.get("repeats", args.repeats)
+            args.warmup_iters = bench.get("warmup_iters", args.warmup_iters)
+            args.profile_memory = bench.get("profile_memory", args.profile_memory)
+
+        # MLA-specific sweeps
+        if "num_splits" in yaml_config:
+            args.num_splits = yaml_config["num_splits"]
+        if "thresholds" in yaml_config:
+            args.thresholds = yaml_config["thresholds"]
+        if "compare_auto" in yaml_config:
+            args.compare_auto = yaml_config["compare_auto"]
+
+        # Output
+        if "output" in yaml_config:
+            output = yaml_config["output"]
+            if "csv" in output and not args.output_csv:
+                args.output_csv = output["csv"]
+            if "json" in output and not args.output_json:
+                args.output_json = output["json"]
+
+        console.print()
+
+    # Determine backends
+    backends = args.backends or ([args.backend] if args.backend else ["flash"])
+    console.print(f"Backends: {', '.join(backends)}")
+    console.print(f"Batch specs: {', '.join(args.batch_specs)}")
+    console.print()
+
+    # Run benchmarks
+    all_results = []
+
+    # Handle special mode: decode_vs_prefill comparison
+    if hasattr(args, "mode") and args.mode == "decode_vs_prefill":
+        console.print("[yellow]Mode: Decode vs Prefill pipeline comparison[/]")
+        console.print(
+            "[dim]For each query length, testing both decode and prefill pipelines[/]"
+        )
+
+        # Extract batch sizes from config
+        batch_sizes = getattr(args, "batch_sizes", [1])
+
+        # Calculate total benchmarks: batch_specs * batch_sizes * 2 (decode + prefill)
+        total = len(args.batch_specs) * len(batch_sizes) * 2
+
+        with tqdm(total=total, desc="Benchmarking") as pbar:
+            for batch_size in batch_sizes:
+                for spec in args.batch_specs:
+                    # Parse the batch spec to get query length
+                    requests = parse_batch_spec(spec)
+                    if not requests:
+                        console.print(
+                            f"[red]Error: Could not parse batch spec '{spec}'[/]"
+                        )
+                        continue
+
+                    # Get query length from first request
+                    query_length = requests[0].q_len
+
+                    # Create batch spec for this batch size
+                    # For batch_size > 1, we need to prepend the count
+                    batch_spec = f"{batch_size}{spec}" if batch_size > 1 else spec
+
+                    backend = backends[0]  # Use first backend (should only be one)
+
+                    # Test 1: Decode pipeline (threshold >= query_length)
+                    decode_threshold = query_length
+                    config_decode = BenchmarkConfig(
+                        backend=f"{backend}_decode_qlen{query_length}_bs{batch_size}",
+                        batch_spec=batch_spec,
+                        num_layers=args.num_layers,
+                        head_dim=args.head_dim,
+                        num_q_heads=args.num_q_heads,
+                        num_kv_heads=args.num_kv_heads,
+                        block_size=args.block_size,
+                        device=args.device,
+                        repeats=args.repeats,
+                        warmup_iters=args.warmup_iters,
+                        profile_memory=args.profile_memory,
+                    )
+
+                    try:
+                        clean_config = replace(config_decode, backend=backend)
+                        result = run_mla_benchmark(
+                            clean_config, reorder_batch_threshold=decode_threshold
+                        )
+                        result = replace(result, config=config_decode)
+                        all_results.append(result)
+                    except Exception as e:
+                        console.print(
+                            f"[red]Error decode qlen={query_length} "
+                            f"bs={batch_size}: {e}[/]"
+                        )
+                        result = BenchmarkResult(
+                            config=config_decode,
+                            mean_time=float("inf"),
+                            std_time=0,
+                            min_time=float("inf"),
+                            max_time=float("inf"),
+                            error=str(e),
+                        )
+                        all_results.append(result)
+
+                    pbar.update(1)
+
+                    # Test 2: Prefill pipeline (threshold < query_length)
+                    if query_length > 1:
+                        prefill_threshold = query_length - 1
+                        config_prefill = BenchmarkConfig(
+                            backend=f"{backend}_prefill_qlen{query_length}_bs{batch_size}",
+                            batch_spec=batch_spec,
+                            num_layers=args.num_layers,
+                            head_dim=args.head_dim,
+                            num_q_heads=args.num_q_heads,
+                            num_kv_heads=args.num_kv_heads,
+                            block_size=args.block_size,
+                            device=args.device,
+                            repeats=args.repeats,
+                            warmup_iters=args.warmup_iters,
+                            profile_memory=args.profile_memory,
+                        )
+
+                        try:
+                            clean_config = replace(config_prefill, backend=backend)
+                            result = run_mla_benchmark(
+                                clean_config, reorder_batch_threshold=prefill_threshold
+                            )
+                            result = replace(result, config=config_prefill)
+                            all_results.append(result)
+                        except Exception as e:
+                            console.print(
+                                f"[red]Error prefill qlen={query_length} "
+                                f"bs={batch_size}: {e}[/]"
+                            )
+                            result = BenchmarkResult(
+                                config=config_prefill,
+                                mean_time=float("inf"),
+                                std_time=0,
+                                min_time=float("inf"),
+                                max_time=float("inf"),
+                                error=str(e),
+                            )
+                            all_results.append(result)
+
+                    pbar.update(1)
+
+        # Display decode vs prefill results
+        console.print("\n[bold green]Decode vs Prefill Results:[/]")
+
+        # Group by batch size
+        by_batch_size = {}
+        for r in all_results:
+            if r.success:
+                # Extract batch size from backend name
+                parts = r.config.backend.split("_")
+                bs_part = [p for p in parts if p.startswith("bs")]
+                if bs_part:
+                    bs = int(bs_part[0][2:])
+                    if bs not in by_batch_size:
+                        by_batch_size[bs] = []
+                    by_batch_size[bs].append(r)
+
+        # For each batch size, analyze crossover point
+        for bs in sorted(by_batch_size.keys()):
+            console.print(f"\n[bold cyan]Batch size: {bs}[/]")
+            results = by_batch_size[bs]
+
+            # Group by query length
+            by_qlen = {}
+            for r in results:
+                parts = r.config.backend.split("_")
+                qlen_part = [p for p in parts if p.startswith("qlen")]
+                if qlen_part:
+                    qlen = int(qlen_part[0][4:])
+                    if qlen not in by_qlen:
+                        by_qlen[qlen] = {}
+
+                    pipeline = "decode" if "decode" in r.config.backend else "prefill"
+                    by_qlen[qlen][pipeline] = r
+
+            # Find crossover point
+            last_decode_faster = None
+            for qlen in sorted(by_qlen.keys()):
+                pipelines = by_qlen[qlen]
+                if "decode" in pipelines and "prefill" in pipelines:
+                    decode_time = pipelines["decode"].mean_time
+                    prefill_time = pipelines["prefill"].mean_time
+                    faster = "decode" if decode_time < prefill_time else "prefill"
+
+                    speedup = (
+                        prefill_time / decode_time
+                        if decode_time < prefill_time
+                        else decode_time / prefill_time
+                    )
+
+                    console.print(
+                        f"  qlen={qlen:3d}: decode={decode_time:.6f}s, "
+                        f"prefill={prefill_time:.6f}s -> "
+                        f"[bold]{faster}[/] ({speedup:.2f}x)"
+                    )
+
+                    if faster == "decode":
+                        last_decode_faster = qlen
+
+            if last_decode_faster is not None:
+                optimal_threshold = last_decode_faster
+                console.print(
+                    f"\n  [bold green]Optimal threshold for batch_size={bs}: "
+                    f"{optimal_threshold}[/]"
+                )
+                console.print(
+                    f"  [dim](Use decode pipeline for query_length <= "
+                    f"{optimal_threshold})[/]"
+                )
+            else:
+                console.print(
+                    f"\n  [yellow]Prefill always faster for batch_size={bs}[/]"
+                )
+
+    # Handle special cases: num-splits sweep or threshold sweep
+    elif args.num_splits or args.thresholds:
+        # Sweep mode
+        sweep_param = "num_splits" if args.num_splits else "thresholds"
+        sweep_values = args.num_splits or args.thresholds
+
+        if args.compare_auto and args.num_splits:
+            sweep_values = list(sweep_values) + ["auto"]
+
+        console.print(f"[yellow]Sweep mode: testing {sweep_param} = {sweep_values}[/]")
+
+        total = len(backends) * len(args.batch_specs) * len(sweep_values)
+
+        with tqdm(total=total, desc="Benchmarking") as pbar:
+            for backend in backends:
+                for spec in args.batch_specs:
+                    for value in sweep_values:
+                        # Create config
+                        config = BenchmarkConfig(
+                            backend=f"{backend}_{sweep_param}_{value}",
+                            batch_spec=spec,
+                            num_layers=args.num_layers,
+                            head_dim=args.head_dim,
+                            num_q_heads=args.num_q_heads,
+                            num_kv_heads=args.num_kv_heads,
+                            block_size=args.block_size,
+                            device=args.device,
+                            repeats=args.repeats,
+                            warmup_iters=args.warmup_iters,
+                            profile_memory=args.profile_memory,
+                        )
+
+                        try:
+                            # Create a clean config with just the backend name
+                            # for the actual benchmark but keep the full name
+                            # with sweep params in the result
+                            clean_config = replace(config, backend=backend)
+
+                            if args.num_splits:
+                                # CUTLASS num_kv_splits
+                                num_splits = None if value == "auto" else value
+                                result = run_mla_benchmark(
+                                    clean_config, num_kv_splits=num_splits
+                                )
+                            else:
+                                # Threshold sweep
+                                result = run_mla_benchmark(
+                                    clean_config, reorder_batch_threshold=value
+                                )
+
+                            # Replace the result's config with the one that has
+                            # the sweep params in the name
+                            result = replace(result, config=config)
+                            all_results.append(result)
+                        except Exception as e:
+                            console.print(
+                                f"[red]Error {backend} {spec} {sweep_param}="
+                                f"{value}: {e}[/]"
+                            )
+                            result = BenchmarkResult(
+                                config=config,
+                                mean_time=float("inf"),
+                                std_time=0,
+                                min_time=float("inf"),
+                                max_time=float("inf"),
+                                error=str(e),
+                            )
+                            all_results.append(result)
+
+                        pbar.update(1)
+
+        # Display sweep results
+        console.print("\n[bold green]Sweep Results:[/]")
+        backend_names = [
+            f"{b}_{sweep_param}_{v}" for b in backends for v in sweep_values
+        ]
+        formatter = ResultsFormatter(console)
+        formatter.print_table(all_results, backend_names)
+
+        # Show optimal
+        console.print(f"\n[bold cyan]Optimal {sweep_param} per batch spec:[/]")
+        by_spec = {}
+        for r in all_results:
+            if r.success:
+                spec = r.config.batch_spec
+                if spec not in by_spec:
+                    by_spec[spec] = []
+                by_spec[spec].append(r)
+
+        for spec in sorted(by_spec.keys()):
+            results = by_spec[spec]
+            best = min(results, key=lambda r: r.mean_time)
+            console.print(
+                f"  {spec}: [bold green]{best.config.backend}[/] "
+                f"({best.mean_time:.6f}s)"
+            )
+
+    else:
+        # Normal mode: compare backends
+        total = len(backends) * len(args.batch_specs)
+
+        with tqdm(total=total, desc="Benchmarking") as pbar:
+            for spec in args.batch_specs:
+                for backend in backends:
+                    config = BenchmarkConfig(
+                        backend=backend,
+                        batch_spec=spec,
+                        num_layers=args.num_layers,
+                        head_dim=args.head_dim,
+                        num_q_heads=args.num_q_heads,
+                        num_kv_heads=args.num_kv_heads,
+                        block_size=args.block_size,
+                        device=args.device,
+                        repeats=args.repeats,
+                        warmup_iters=args.warmup_iters,
+                        profile_memory=args.profile_memory,
+                    )
+
+                    try:
+                        # Determine if MLA backend
+                        if backend in [
+                            "cutlass_mla",
+                            "flashinfer_mla",
+                            "flash_attn_mla",
+                            "flashmla",
+                        ]:
+                            result = run_mla_benchmark(config)
+                        else:
+                            result = run_standard_attention_benchmark(config)
+
+                        all_results.append(result)
+                    except Exception as e:
+                        console.print(f"[red]Error {backend} {spec}: {e}[/]")
+                        import traceback
+
+                        traceback.print_exc()
+                        result = BenchmarkResult(
+                            config=config,
+                            mean_time=float("inf"),
+                            std_time=0,
+                            min_time=float("inf"),
+                            max_time=float("inf"),
+                            error=str(e),
+                        )
+                        all_results.append(result)
+
+                    pbar.update(1)
+
+        # Display results
+        console.print("\n[bold green]Results:[/]")
+        formatter = ResultsFormatter(console)
+        formatter.print_table(all_results, backends)
+
+    # Save results
+    if all_results:
+        formatter = ResultsFormatter(console)
+        if args.output_csv:
+            formatter.save_csv(all_results, args.output_csv)
+        if args.output_json:
+            formatter.save_json(all_results, args.output_json)
+
+
+if __name__ == "__main__":
+    main()

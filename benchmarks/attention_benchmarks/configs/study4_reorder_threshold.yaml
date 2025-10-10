@@ -1,0 +1,130 @@
+# Study 4: What is optimal reorder_batch_threshold for MLA backends supporting query length > 1?
+# Question: At what query length does prefill pipeline become faster than decode pipeline?
+# Methodology: For each query length, compare decode vs prefill performance to find crossover point
+# Applies to: FlashAttn MLA, FlashMLA
+
+description: "Decode vs Prefill pipeline crossover analysis"
+
+# Test FlashAttn MLA (recommended - FlashMLA has known issues with speculative decode)
+backend: flash_attn_mla
+
+# Mode: decode_vs_prefill comparison (special sweep mode)
+# For each batch spec, we'll test both decode and prefill pipelines
+mode: "decode_vs_prefill"
+
+# Query lengths to test (from old benchmark_mla_threshold.py methodology)
+# Each query length will be tested with BOTH decode and prefill pipelines:
+#   - decode: threshold >= query_length (forces decode pipeline)
+#   - prefill: threshold < query_length (forces prefill pipeline)
+#
+# We use spec<N>s1k format which creates q_len=N, kv_len=1024 requests
+# This tests different query lengths with fixed KV cache context
+batch_specs:
+  # Fine-grained: 1-16 (decode range, step 1)
+  - "s1k"         # q_len=1 (regular decode, not spec)
+  - "spec2s1k"    # q_len=2
+  - "spec3s1k"    # q_len=3
+  - "spec4s1k"    # q_len=4
+  - "spec5s1k"    # q_len=5
+  - "spec6s1k"    # q_len=6
+  - "spec7s1k"    # q_len=7
+  - "spec8s1k"    # q_len=8
+  - "spec9s1k"    # q_len=9
+  - "spec10s1k"   # q_len=10
+  - "spec11s1k"   # q_len=11
+  - "spec12s1k"   # q_len=12
+  - "spec13s1k"   # q_len=13
+  - "spec14s1k"   # q_len=14
+  - "spec15s1k"   # q_len=15
+  - "spec16s1k"   # q_len=16
+  # Transition zone: 17-64 (step 2)
+  - "spec17s1k"
+  - "spec19s1k"
+  - "spec21s1k"
+  - "spec23s1k"
+  - "spec25s1k"
+  - "spec27s1k"
+  - "spec29s1k"
+  - "spec31s1k"
+  - "spec33s1k"
+  - "spec35s1k"
+  - "spec37s1k"
+  - "spec39s1k"
+  - "spec41s1k"
+  - "spec43s1k"
+  - "spec45s1k"
+  - "spec47s1k"
+  - "spec49s1k"
+  - "spec51s1k"
+  - "spec53s1k"
+  - "spec55s1k"
+  - "spec57s1k"
+  - "spec59s1k"
+  - "spec61s1k"
+  - "spec63s1k"
+  # Prefill range: 65-128 (step 4)
+  - "spec65s1k"
+  - "spec69s1k"
+  - "spec73s1k"
+  - "spec77s1k"
+  - "spec81s1k"
+  - "spec85s1k"
+  - "spec89s1k"
+  - "spec93s1k"
+  - "spec97s1k"
+  - "spec101s1k"
+  - "spec105s1k"
+  - "spec109s1k"
+  - "spec113s1k"
+  - "spec117s1k"
+  - "spec121s1k"
+  - "spec125s1k"
+
+# Batch sizes to test (from old script)
+batch_sizes:
+  - 1
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  - 128
+  - 256
+
+# Model configuration (DeepSeek V2/V3 defaults)
+model:
+  num_layers: 10
+  head_dim: 576
+  num_q_heads: 128
+  num_kv_heads: 1
+  block_size: 128
+
+# Benchmark settings
+benchmark:
+  device: "cuda:0"
+  repeats: 15          # More repeats for spec decode variance
+  warmup_iters: 5
+  profile_memory: false
+
+# Output
+output:
+  csv: "study4_reorder_threshold_results.csv"
+  json: "study4_reorder_threshold_results.json"
+
+# Expected outcome (reproduces old benchmark_mla_threshold.py study):
+# - For each batch size, find the crossover point where prefill becomes faster than decode
+# - Show decode vs prefill performance across all query lengths (1-125)
+# - Determine optimal reorder_batch_threshold based on last query length where decode is faster
+# - Understand how crossover point varies with batch size
+# - Provide data-driven guidance for default threshold value
+#
+# Methodology (from old script):
+# - Each query length tested with BOTH pipelines:
+#     * decode: threshold >= query_length (forces decode pipeline)
+#     * prefill: threshold < query_length (forces prefill pipeline)
+# - Compare which is faster to find crossover point
+# - Use multiple repeats (15) to handle variance
+#
+# Note: FlashMLA may have issues with speculative decode workloads
+# Use flash_attn_mla instead if you encounter errors with flashmla
