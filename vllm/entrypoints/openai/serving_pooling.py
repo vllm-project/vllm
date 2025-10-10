@@ -74,7 +74,6 @@ class OpenAIServingPooling(OpenAIServing):
 
         if request.embed_dtype not in EMBED_DTYPE_TO_TORCH_DTYPE:
             return self.create_error_response(
-                f"embed_dtype [{request.embed_dtype}] not support. "
                 f"embed_dtype [{request.embed_dtype}] not supported. "
                 f"Supported types: {EMBED_DTYPE_TO_TORCH_DTYPE.keys()}"
             )

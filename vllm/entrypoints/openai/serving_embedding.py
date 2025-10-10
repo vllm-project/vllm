@@ -69,7 +69,6 @@ class EmbeddingMixin(OpenAIServing):
         try:
             if ctx.request.embed_dtype not in EMBED_DTYPE_TO_TORCH_DTYPE:
                 return self.create_error_response(
-                    f"embed_dtype [{ctx.request.embed_dtype}] not support. "
                     f"embed_dtype [{ctx.request.embed_dtype}] not supported. "
                     f"Supported types: {EMBED_DTYPE_TO_TORCH_DTYPE.keys()}"
                 )
