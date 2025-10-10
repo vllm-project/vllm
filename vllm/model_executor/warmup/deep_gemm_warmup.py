@@ -26,8 +26,9 @@ from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.utils.deep_gemm import fp8_gemm_nt, m_grouped_fp8_gemm_nt_contiguous
 
 
-def _generate_optimal_warmup_m_values(max_tokens: int, n: int,
-                                      device: torch.device) -> list[int]:
+def _generate_optimal_warmup_m_values(
+    max_tokens: int, n: int, device: torch.device
+) -> list[int]:
     """
     Generate M values that cover all possible DeepGEMM kernel configurations.
     Reference: https://github.com/deepseek-ai/DeepGEMM/blob/79f48ee15a82dd5fad5cd9beaa393c1f755e6b55/csrc/jit_kernels/heuristics/common.hpp
@@ -184,20 +185,26 @@ def _deepgemm_fp8_gemm_nt_warmup(w: torch.Tensor, ws: torch.Tensor, max_tokens: 
     )
     out = torch.empty((max_tokens, n), device=device, dtype=torch.bfloat16)
 
-    # Use optimal M values only if VLLM_RELAX_DEEP_GEMM_WARMUP is set
+    # Use optimal M values only if VLLM_DEEP_GEMM_WARMUP is set to "relax".
     # Otherwise warmup all token sizes to avoid JIT compilation in hotpath
-    if envs.VLLM_RELAX_DEEP_GEMM_WARMUP:
+    if envs.VLLM_DEEP_GEMM_WARMUP == "relax":
         m_values = _generate_optimal_warmup_m_values(max_tokens, n, device)
         desc = f"DeepGemm(fp8_gemm_nt) warmup (W={w.size()}) [relaxed]"
     else:
+        assert envs.VLLM_DEEP_GEMM_WARMUP == "full", (
+            "Expected "
+            'VLLM_DEEP_GEMM_WARMUP env to be set to "full" but got '
+            f"{envs.VLLM_DEEP_GEMM_WARMUP}"
+        )
         m_values = list(range(1, max_tokens + 1))
         desc = f"DeepGemm(fp8_gemm_nt) warmup (W={w.size()}) [all tokens]"
 
     pbar = tqdm(total=len(m_values), desc=desc)
 
     for num_tokens in m_values:
-        fp8_gemm_nt((a1q[:num_tokens], a1q_scales[:num_tokens]), (w, ws),
-                    out[:num_tokens])
+        fp8_gemm_nt(
+            (a1q[:num_tokens], a1q_scales[:num_tokens]), (w, ws), out[:num_tokens]
+        )
         pbar.update(1)
 
     FP8_GEMM_NT_WARMUP_CACHE.add(w.size())
@@ -255,9 +262,9 @@ def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
 
         pbar = tqdm(
             total=len(m_values),
-            desc=
-            f"DeepGemm(m_grouped_fp8_gemm_nt_contiguous) warmup (W={w.size()}) "
-            f"[{len(m_values)} values, block_m={block_m}]")
+            desc=f"DeepGemm(m_grouped_fp8_gemm_nt_contiguous) warmup (W={w.size()}) "
+            f"[{len(m_values)} values, block_m={block_m}]",
+        )
 
         for num_tokens in m_values:
             m_grouped_fp8_gemm_nt_contiguous(
