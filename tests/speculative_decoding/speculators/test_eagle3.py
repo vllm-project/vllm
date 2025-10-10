@@ -7,19 +7,30 @@ from vllm.config import SpeculativeConfig
 from vllm.model_executor.models.interfaces import supports_eagle3
 
 
-@pytest.mark.parametrize("model_path", [
-    pytest.param(
-        "nm-testing/SpeculatorLlama3-1-8B-Eagle3-converted-0717-quantized",
-        id="llama3-eagle3-speculator"),
-    pytest.param(
-        "nm-testing/Speculator-Qwen3-8B-Eagle3-converted-071-quantized",
-        id="qwen3-eagle3-speculator"),
-    pytest.param(
-        "nm-testing/Speculator-Qwen3-8B-Eagle3-converted-071-quantized-w4a16",
-        id="qwen3-eagle3-speculator-w4a16-verifier"),
-])
-def test_eagle3_speculators_model(vllm_runner, example_prompts, model_path,
-                                  monkeypatch):
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        pytest.param(
+            "nm-testing/SpeculatorLlama3-1-8B-Eagle3-converted-0717-quantized",
+            id="llama3-eagle3-speculator",
+        ),
+        pytest.param(
+            "nm-testing/Speculator-Qwen3-8B-Eagle3-converted-071-quantized",
+            id="qwen3-eagle3-speculator",
+        ),
+        pytest.param(
+            "nm-testing/Speculator-Qwen3-8B-Eagle3-converted-071-quantized-w4a16",
+            id="qwen3-eagle3-speculator-w4a16-verifier",
+        ),
+        pytest.param(
+            "nm-testing/random-weights-llama3.1.8b-2layer-eagle3",
+            id="llama3-eagl3-multiple-layers",
+        ),
+    ],
+)
+def test_eagle3_speculators_model(
+    vllm_runner, example_prompts, model_path, monkeypatch
+):
     """
     Test Eagle3 speculators models properly initialize speculative decoding.
 
@@ -40,18 +51,19 @@ def test_eagle3_speculators_model(vllm_runner, example_prompts, model_path,
 
         vllm_config = vllm_model.llm.llm_engine.vllm_config
 
-        assert isinstance(vllm_config.speculative_config, SpeculativeConfig), \
+        assert isinstance(vllm_config.speculative_config, SpeculativeConfig), (
             "Speculative config should be initialized for speculators model"
+        )
 
         spec_config = vllm_config.speculative_config
-        assert spec_config.num_speculative_tokens > 0, \
-            (f"Expected positive speculative tokens, "
-             f"got {spec_config.num_speculative_tokens}")
+        assert spec_config.num_speculative_tokens > 0, (
+            f"Expected positive speculative tokens, "
+            f"got {spec_config.num_speculative_tokens}"
+        )
 
-        assert spec_config.model == model_path, \
+        assert spec_config.model == model_path, (
             f"Draft model should be {model_path}, got {spec_config.model}"
+        )
 
-        vllm_outputs = vllm_model.generate_greedy(example_prompts,
-                                                  max_tokens=20)
-        assert vllm_outputs, \
-            f"No outputs generated for speculators model {model_path}"
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens=20)
+        assert vllm_outputs, f"No outputs generated for speculators model {model_path}"

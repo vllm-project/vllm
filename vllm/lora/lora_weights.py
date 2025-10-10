@@ -58,8 +58,9 @@ class LoRALayerWeights:
 
     @property
     def extra_vocab_size(self) -> int:
-        return self.embeddings_tensor.shape[
-            0] if self.embeddings_tensor is not None else 0
+        return (
+            self.embeddings_tensor.shape[0] if self.embeddings_tensor is not None else 0
+        )
 
     @classmethod
     def from_config(
@@ -154,7 +155,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             scaling=[
                 1 if lora is not None else None  # type: ignore
                 for lora in loras
-            ])
+            ],
+        )
         return obj
 
     def optimize(self) -> "PackedLoRALayerWeights":

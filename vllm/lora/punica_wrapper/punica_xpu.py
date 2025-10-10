@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Based on:
-Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
-Punica: Multi-Tenant LoRA Serving. 
+Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023).
+Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
@@ -21,25 +21,35 @@ from .punica_base import PunicaWrapperBase
 class PunicaWrapperXPU(PunicaWrapperBase):
     """
     PunicaWrapperXPU is designed to manage and provide metadata for the punica
-    kernel. The main function is to maintain the state information for 
+    kernel. The main function is to maintain the state information for
     Multi-LoRA, and to provide the interface for the punica ipex kernel.
     """
 
-    def __init__(self, max_num_batched_tokens: int, max_batches: int,
-                 device: Union[torch.device, str], **kwargs):
-        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
-                                   device)
+    def __init__(
+        self,
+        max_num_batched_tokens: int,
+        max_batches: int,
+        device: Union[torch.device, str],
+        **kwargs,
+    ):
+        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         torch._dynamo.mark_dynamic(self._token_lora_indices, 0)
         torch._dynamo.mark_dynamic(self._embeddings_indices, 1)
         torch._dynamo.mark_dynamic(self._sampler_indices_padded, 0)
 
-    def update_metadata(self, mapping: LoRAMapping,
-                        lora_index_to_id: list[Optional[int]], max_loras: int,
-                        vocab_size: int, extra_vocab_size: int, **kwargs):
-
+    def update_metadata(
+        self,
+        mapping: LoRAMapping,
+        lora_index_to_id: list[Optional[int]],
+        max_loras: int,
+        vocab_size: int,
+        extra_vocab_size: int,
+        **kwargs,
+    ):
         self.is_prefill = mapping.is_prefill
-        self._update_base_metadata(mapping, lora_index_to_id, max_loras,
-                                   vocab_size, extra_vocab_size)
+        self._update_base_metadata(
+            mapping, lora_index_to_id, max_loras, vocab_size, extra_vocab_size
+        )
 
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
@@ -63,19 +73,25 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         add_inputs: bool,
     ):
         token_lora_indices = self._get_token_lora_indices(x)
-        bgmv_expand_slice(x, w_t_all, y, token_lora_indices, y_offset,
-                          y_slice_size, add_inputs)
+        bgmv_expand_slice(
+            x, w_t_all, y, token_lora_indices, y_offset, y_slice_size, add_inputs
+        )
 
-    def add_shrink(self, y: torch.Tensor, x: torch.Tensor,
-                   lora_a_stacked: tuple[torch.Tensor,
-                                         ...], scale: float, **kwargs):
+    def add_shrink(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        scale: float,
+        **kwargs,
+    ):
         """
         Performs GEMM  for multiple slices of lora_a.
-            
+
         Semantics:
         for i in range(len(lora_a_stacked)):
             y[i] += (x @ lora_a_stacked[i]) * scale
-        
+
         Args:
             y (torch.Tensor): Output tensors
             x (torch.Tensor): Input tensor
@@ -85,8 +101,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
 
         x = x.view(-1, x.shape[-1])
         for slice_idx in range(len(lora_a_stacked)):
-            self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx],
-                               scale)
+            self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx], scale)
 
     def add_expand(self,
                    y: torch.Tensor,
@@ -98,13 +113,13 @@ class PunicaWrapperXPU(PunicaWrapperBase):
                    **kwargs) -> None:
         """
         Performs GEMM and bias addition for multiple slices of lora_b.
-      
+
         Semantics:
             for i in range(len(lora_b_stacked)):
                 slice = output_slices[i]
                 y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i]
                 offset += slice
-            
+
         Args:
             y (torch.Tensor): Output tensor.
             x (torch.Tensor): Input tensors
@@ -131,12 +146,14 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             offset_start += output_slices[slice_idx]
         y.view_as(y_org)
 
-    def add_lora_embedding(self,
-                           y: torch.Tensor,
-                           x: torch.Tensor,
-                           lora_b_stacked: torch.Tensor,
-                           add_inputs: bool = True,
-                           **kwargs) -> None:
+    def add_lora_embedding(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+        add_inputs: bool = True,
+        **kwargs,
+    ) -> None:
         """
         Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
 
@@ -200,7 +217,8 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             x,
             lora_a_stacked,
             scale,
-            **kwargs)
+            **kwargs,
+        )
         self.add_expand(
             y,
             buffer,  # type: ignore
@@ -208,7 +226,8 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             None,
             output_slices,
             add_inputs=True,
-            **kwargs)
+            **kwargs,
+        )
 
     @property
     def sampler_indices_padded(self) -> torch.Tensor:
@@ -217,18 +236,20 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         """
         return self._sampler_indices_padded[:]
 
-    def add_lora_logits(self,
-                        y: torch.Tensor,
-                        x: torch.Tensor,
-                        lora_a_stacked: torch.Tensor,
-                        lora_b_stacked: torch.Tensor,
-                        scale,
-                        *,
-                        buffer: Optional[torch.Tensor] = None,
-                        **kwargs) -> None:
+    def add_lora_logits(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+        scale,
+        *,
+        buffer: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> None:
         """
         Applies lora  specifically for LogitsProcessorWithLoRA.
-        
+
         Semantics:
             buffer = (x @ lora_a_stacked) * scale
             y += buffer @ lora_b_stacked
@@ -248,14 +269,8 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         if buffer is None:
             # We set the buffer to be float32 by default, refer to:
             # https://github.com/triton-lang/triton/issues/1387
-            buffer = torch.zeros((x.size(0), r),
-                                 dtype=torch.float32,
-                                 device=x.device)
+            buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
         sampler_indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
         bgmv_shrink(x, lora_a_stacked, buffer, sampler_indices, scale)
-        bgmv_expand(buffer,
-                    lora_b_stacked,
-                    y,
-                    sampler_indices,
-                    add_inputs=True)
+        bgmv_expand(buffer, lora_b_stacked, y, sampler_indices, add_inputs=True)
         return y.view_as(y_org)

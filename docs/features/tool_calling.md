@@ -145,7 +145,7 @@ Supported models:
 Known issues:
 
 1. Mistral 7B struggles to generate parallel tool calls correctly.
-2. Mistral's `tokenizer_config.json` chat template requires tool call IDs that are exactly 9 digits, which is
+2. **For Transformers tokenization backend only**: Mistral's `tokenizer_config.json` chat template requires tool call IDs that are exactly 9 digits, which is
    much shorter than what vLLM generates. Since an exception is thrown when this condition
    is not met, the following additional chat templates are provided:
 
@@ -154,7 +154,14 @@ Known issues:
     * <gh-file:examples/tool_chat_template_mistral_parallel.jinja> - this is a "better" version that adds a tool-use system prompt
       when tools are provided, that results in much better reliability when working with parallel tool calling.
 
-Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+Recommended flags:
+
+1. To use [mistral-common](https://github.com/mistralai/mistral-common) the official Mistral tokenization backend:
+
+    `--tokenizer_mode mistral --config_format mistral --load_format mistral --tool-call-parser mistral`
+
+2. To use the default Transformers tokenization backend:
+    `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
 ### Llama Models (`llama3_json`)
 
@@ -191,9 +198,13 @@ VLLM also provides a pythonic and JSON-based chat template for Llama 4, but pyth
 
 For Llama 4 model, use `--tool-call-parser llama4_pythonic --chat-template examples/tool_chat_template_llama4_pythonic.jinja`.
 
-#### IBM Granite
+### IBM Granite
 
 Supported models:
+
+* `ibm-granite/granite-4.0-h-small` and other Granite 4.0 models
+
+    Recommended flags: `--tool-call-parser hermes`
 
 * `ibm-granite/granite-3.0-8b-instruct`
 

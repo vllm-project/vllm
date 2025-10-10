@@ -8,10 +8,12 @@ from transformers import PretrainedConfig
 
 from vllm.config.lora import LoRAConfig
 from vllm.distributed.utils import divide
-# yapf: disable
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearBase, ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    LinearBase,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.platforms import current_platform
 
 from .base import BaseLayerWithLoRA
@@ -19,7 +21,6 @@ from .utils import _get_lora_device
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
-
     def __init__(self, base_layer: LinearBase):
         super().__init__()
         self.base_layer = base_layer
@@ -46,16 +47,20 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             lora_b_out_size = self.output_size
 
         elif isinstance(self.base_layer, ColumnParallelLinear):
-            lora_a_out_size = (lora_config.max_lora_rank if
-                               not lora_config.fully_sharded_loras else divide(
-                                   lora_config.max_lora_rank, self.tp_size))
+            lora_a_out_size = (
+                lora_config.max_lora_rank
+                if not lora_config.fully_sharded_loras
+                else divide(lora_config.max_lora_rank, self.tp_size)
+            )
             lora_b_out_size = self.output_size
 
         elif isinstance(self.base_layer, RowParallelLinear):
             lora_a_out_size = lora_config.max_lora_rank
-            lora_b_out_size = (self.output_size if
-                               not lora_config.fully_sharded_loras else divide(
-                                   self.output_size, self.tp_size))
+            lora_b_out_size = (
+                self.output_size
+                if not lora_config.fully_sharded_loras
+                else divide(self.output_size, self.tp_size)
+            )
         else:
             raise NotImplementedError
 
@@ -67,7 +72,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 self.input_size,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
-            ) for _ in range(self.n_slices))
+            )
+            for _ in range(self.n_slices)
+        )
         self.lora_b_stacked = tuple(
             torch.zeros(
                 max_loras,
@@ -97,8 +104,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
         # store weights in a tuple of size 1. These two layers will
         # override this function.
-        assert (len(self.lora_a_stacked) == len(self.lora_b_stacked) ==
-                self.n_slices == 1)
+        assert (
+            len(self.lora_a_stacked) == len(self.lora_b_stacked) == self.n_slices == 1
+        )
 
         self.reset_lora(index)
         if self.tp_size > 1:
@@ -111,11 +119,11 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[0][index,
                                0, :lora_b.shape[0], :lora_b.shape[1]].copy_(
                                    lora_b, non_blocking=True)
-        # lora_bias_stacked copy removed
 
-    def apply(self,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+    def apply(
+        self, x: torch.Tensor, bias: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
         # In transformers backend, x and output have extra batch dimension like
@@ -136,7 +144,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
     @property
     def weight(self) -> torch.Tensor:
-
         # unquantizedLinear
         if hasattr(self.base_layer, "weight"):
             return self.base_layer.weight

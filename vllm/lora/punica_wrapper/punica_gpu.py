@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Based on:
-Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
-Punica: Multi-Tenant LoRA Serving. 
+Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023).
+Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
@@ -15,8 +15,7 @@ from vllm.lora.layers import LoRAMapping
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
-    from vllm.lora.ops.triton_ops import (LoRAKernelMeta, lora_expand,
-                                          lora_shrink)
+    from vllm.lora.ops.triton_ops import LoRAKernelMeta, lora_expand, lora_shrink
 
 from .punica_base import PunicaWrapperBase
 
@@ -24,48 +23,63 @@ from .punica_base import PunicaWrapperBase
 @final
 class PunicaWrapperGPU(PunicaWrapperBase):
     """
-    PunicaWrapperGPU is designed to manage and provide metadata for the punica 
-    kernel. The main function is to maintain the state information for 
+    PunicaWrapperGPU is designed to manage and provide metadata for the punica
+    kernel. The main function is to maintain the state information for
     Multi-LoRA, and to provide the interface for the punica triton kernel.
     """
 
-    def __init__(self, max_num_batched_tokens: int, max_batches: int,
-                 device: Union[torch.device, str], **kwargs):
-        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
-                                   device)
+    def __init__(
+        self,
+        max_num_batched_tokens: int,
+        max_batches: int,
+        device: Union[torch.device, str],
+        **kwargs,
+    ):
+        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
 
-        self.max_loras = kwargs['max_loras']
+        self.max_loras = kwargs["max_loras"]
 
-        self.token_mapping_meta = LoRAKernelMeta.make(self.max_loras,
-                                                      max_num_batched_tokens,
-                                                      device=device)
+        self.token_mapping_meta = LoRAKernelMeta.make(
+            self.max_loras, max_num_batched_tokens, device=device
+        )
 
-        self.prompt_mapping_meta = LoRAKernelMeta.make(self.max_loras,
-                                                       max_batches,
-                                                       device=device)
+        self.prompt_mapping_meta = LoRAKernelMeta.make(
+            self.max_loras, max_batches, device=device
+        )
 
-    def update_metadata(self, mapping: LoRAMapping,
-                        lora_index_to_id: list[Optional[int]], max_loras: int,
-                        vocab_size: int, extra_vocab_size: int, **kwargs):
-
+    def update_metadata(
+        self,
+        mapping: LoRAMapping,
+        lora_index_to_id: list[Optional[int]],
+        max_loras: int,
+        vocab_size: int,
+        extra_vocab_size: int,
+        **kwargs,
+    ):
         self.is_prefill = mapping.is_prefill
-        self._update_base_metadata(mapping, lora_index_to_id, max_loras,
-                                   vocab_size, extra_vocab_size)
+        self._update_base_metadata(
+            mapping, lora_index_to_id, max_loras, vocab_size, extra_vocab_size
+        )
 
         # Prepare cuda kernel metadata tensors
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
-    def add_shrink(self, y: torch.Tensor, x: torch.Tensor,
-                   lora_a_stacked: tuple[torch.Tensor,
-                                         ...], scale: float, **kwargs):
+    def add_shrink(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        scale: float,
+        **kwargs,
+    ):
         """
         Performs GEMM  for multiple slices of lora_a.
-            
+
         Semantics:
         for i in range(len(lora_a_stacked)):
             y[i] += (x @ lora_a_stacked[i]) * scale
-        
+
         Args:
             y (torch.Tensor): Output tensors
             x (torch.Tensor): Input tensor
@@ -92,13 +106,13 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                    **kwargs) -> None:
         """
         Performs GEMM and bias addition for multiple slices of lora_b.
-      
+
         Semantics:
             for i in range(len(lora_b_stacked)):
                 slice = output_slices[i]
                 y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i]
                 offset += slice
-            
+
         Args:
             y (torch.Tensor): Output tensor.
             x (torch.Tensor): Input tensors
@@ -124,12 +138,14 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         y = y.view_as(y_org)
 
-    def add_lora_embedding(self,
-                           y: torch.Tensor,
-                           x: torch.Tensor,
-                           lora_b_stacked: torch.Tensor,
-                           add_inputs: bool = True,
-                           **kwargs) -> None:
+    def add_lora_embedding(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+        add_inputs: bool = True,
+        **kwargs,
+    ) -> None:
         """
         Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
 
@@ -145,7 +161,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         lora_expand(
             x.unsqueeze(dim=0),
-            (lora_b_stacked, ),
+            (lora_b_stacked,),
             y,
             *self.token_mapping_meta.meta_args(x.size(0)),
             offset_start=0,
@@ -163,7 +179,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                         buffer: Optional[torch.Tensor] = None,
                         **kwargs) -> None:
         """
-        Applicable to linear-related lora. 
+        Applicable to linear-related lora.
 
         Semantics:
             for i in range(len(lora_a_stacked)):
@@ -199,7 +215,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             lora_a_stacked,
             scale,
-            **kwargs)
+            **kwargs,
+        )
         self.add_expand(
             y,
             buffer,  # type: ignore
@@ -207,20 +224,23 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             None,
             output_slices,
             add_inputs=True,
-            **kwargs)
+            **kwargs,
+        )
 
-    def add_lora_logits(self,
-                        y: torch.Tensor,
-                        x: torch.Tensor,
-                        lora_a_stacked: torch.Tensor,
-                        lora_b_stacked: torch.Tensor,
-                        scale,
-                        *,
-                        buffer: Optional[torch.Tensor] = None,
-                        **kwargs) -> None:
+    def add_lora_logits(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+        scale,
+        *,
+        buffer: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> None:
         """
         Applies lora  specifically for LogitsProcessorWithLoRA.
-        
+
         Semantics:
             buffer = (x @ lora_a_stacked) * scale
             y += buffer @ lora_b_stacked
@@ -240,15 +260,21 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         if buffer is None:
             # We set the buffer to be float32 by default, refer to:
             # https://github.com/triton-lang/triton/issues/1387
-            buffer = torch.zeros((x.size(0), r),
-                                 dtype=torch.float32,
-                                 device=x.device)
+            buffer = torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device)
 
-        lora_shrink(x, [lora_a_stacked], buffer.unsqueeze(dim=0),
-                    *self.prompt_mapping_meta.meta_args(x.size(0)), scale)
+        lora_shrink(
+            x,
+            [lora_a_stacked],
+            buffer.unsqueeze(dim=0),
+            *self.prompt_mapping_meta.meta_args(x.size(0)),
+            scale,
+        )
 
-        lora_expand(buffer.unsqueeze(dim=0), [lora_b_stacked],
-                    y,
-                    *self.prompt_mapping_meta.meta_args(buffer.size(0)),
-                    add_inputs=True)
+        lora_expand(
+            buffer.unsqueeze(dim=0),
+            [lora_b_stacked],
+            y,
+            *self.prompt_mapping_meta.meta_args(buffer.size(0)),
+            add_inputs=True,
+        )
         y = y.view_as(y_org)
