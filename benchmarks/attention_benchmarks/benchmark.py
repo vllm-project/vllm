@@ -240,15 +240,20 @@ def main():
         console.print(
             "[dim]For each query length, testing both decode and prefill pipelines[/]"
         )
+        console.print("[dim]Using batched execution for optimal performance[/]")
 
         # Extract batch sizes from config
         batch_sizes = getattr(args, "batch_sizes", [1])
+        backend = backends[0]  # Use first backend (should only be one)
 
-        # Calculate total benchmarks: batch_specs * batch_sizes * 2 (decode + prefill)
-        total = len(args.batch_specs) * len(batch_sizes) * 2
+        # Calculate total benchmarks
+        total = len(batch_sizes)
 
         with tqdm(total=total, desc="Benchmarking") as pbar:
             for batch_size in batch_sizes:
+                # Prepare all configs for this batch size
+                configs_with_thresholds = []
+
                 for spec in args.batch_specs:
                     # Parse the batch spec to get query length
                     requests = parse_batch_spec(spec)
@@ -265,12 +270,9 @@ def main():
                     # For batch_size > 1, we need to prepend the count
                     batch_spec = f"{batch_size}{spec}" if batch_size > 1 else spec
 
-                    backend = backends[0]  # Use first backend (should only be one)
-
-                    # Test 1: Decode pipeline (threshold >= query_length)
-                    decode_threshold = query_length
-                    config_decode = BenchmarkConfig(
-                        backend=f"{backend}_decode_qlen{query_length}_bs{batch_size}",
+                    # Create base config (without backend name)
+                    base_config = BenchmarkConfig(
+                        backend=backend,  # Will be overridden later
                         batch_spec=batch_spec,
                         num_layers=args.num_layers,
                         head_dim=args.head_dim,
@@ -283,20 +285,58 @@ def main():
                         profile_memory=args.profile_memory,
                     )
 
-                    try:
-                        clean_config = replace(config_decode, backend=backend)
-                        result = run_mla_benchmark(
-                            clean_config, reorder_batch_threshold=decode_threshold
+                    # Add decode pipeline config
+                    decode_threshold = query_length
+                    config_decode = replace(
+                        base_config,
+                        backend=f"{backend}_decode_qlen{query_length}_bs{batch_size}",
+                    )
+                    configs_with_thresholds.append((config_decode, decode_threshold))
+
+                    # Add prefill pipeline config if query_length > 1
+                    if query_length > 1:
+                        prefill_threshold = query_length - 1
+                        config_prefill = replace(
+                            base_config,
+                            backend=f"{backend}_prefill_qlen{query_length}"
+                            f"_bs{batch_size}",
                         )
-                        result = replace(result, config=config_decode)
-                        all_results.append(result)
-                    except Exception as e:
-                        console.print(
-                            f"[red]Error decode qlen={query_length} "
-                            f"bs={batch_size}: {e}[/]"
+                        configs_with_thresholds.append(
+                            (config_prefill, prefill_threshold)
                         )
+
+                # Run all benchmarks for this batch size in one go (batched mode)
+                try:
+                    from mla_runner import run_flashattn_mla_benchmark
+
+                    # Use batched API: pass list of (config, threshold) tuples
+                    timing_results = run_flashattn_mla_benchmark(
+                        configs_with_thresholds
+                    )
+
+                    # Create BenchmarkResult objects from timing results
+                    for (config, _), timing in zip(
+                        configs_with_thresholds, timing_results
+                    ):
                         result = BenchmarkResult(
-                            config=config_decode,
+                            config=config,
+                            mean_time=timing["mean"],
+                            std_time=timing["std"],
+                            min_time=timing["min"],
+                            max_time=timing["max"],
+                            throughput_tokens_per_sec=timing.get("throughput", None),
+                        )
+                        all_results.append(result)
+
+                except Exception as e:
+                    console.print(
+                        f"[red]Error running batched benchmarks for "
+                        f"batch_size={batch_size}: {e}[/]"
+                    )
+                    # Add error results for all configs
+                    for config, _ in configs_with_thresholds:
+                        result = BenchmarkResult(
+                            config=config,
                             mean_time=float("inf"),
                             std_time=0,
                             min_time=float("inf"),
@@ -305,48 +345,7 @@ def main():
                         )
                         all_results.append(result)
 
-                    pbar.update(1)
-
-                    # Test 2: Prefill pipeline (threshold < query_length)
-                    if query_length > 1:
-                        prefill_threshold = query_length - 1
-                        config_prefill = BenchmarkConfig(
-                            backend=f"{backend}_prefill_qlen{query_length}_bs{batch_size}",
-                            batch_spec=batch_spec,
-                            num_layers=args.num_layers,
-                            head_dim=args.head_dim,
-                            num_q_heads=args.num_q_heads,
-                            num_kv_heads=args.num_kv_heads,
-                            block_size=args.block_size,
-                            device=args.device,
-                            repeats=args.repeats,
-                            warmup_iters=args.warmup_iters,
-                            profile_memory=args.profile_memory,
-                        )
-
-                        try:
-                            clean_config = replace(config_prefill, backend=backend)
-                            result = run_mla_benchmark(
-                                clean_config, reorder_batch_threshold=prefill_threshold
-                            )
-                            result = replace(result, config=config_prefill)
-                            all_results.append(result)
-                        except Exception as e:
-                            console.print(
-                                f"[red]Error prefill qlen={query_length} "
-                                f"bs={batch_size}: {e}[/]"
-                            )
-                            result = BenchmarkResult(
-                                config=config_prefill,
-                                mean_time=float("inf"),
-                                std_time=0,
-                                min_time=float("inf"),
-                                max_time=float("inf"),
-                                error=str(e),
-                            )
-                            all_results.append(result)
-
-                    pbar.update(1)
+                pbar.update(1)
 
         # Display decode vs prefill results
         console.print("\n[bold green]Decode vs Prefill Results:[/]")
