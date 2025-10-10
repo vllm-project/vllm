@@ -646,7 +646,7 @@ class SPLADESparsePooler(Pooler):
         device = hidden_states.device
         H = int(self.mlm_head.dense.in_features)
 
-        hs_list = list(torch.split(hidden_states, lens, dim=0))
+        hs_list = torch.split(hidden_states, lens, dim=0)
 
         padded = hidden_states.new_zeros((B, max_len, H))
         valid_mask = torch.zeros((B, max_len), dtype=torch.bool, device=device)
