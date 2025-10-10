@@ -50,22 +50,9 @@ def run_standard_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult
 
 def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
     """Run MLA benchmark with appropriate backend."""
-    from mla_runner import (
-        run_cutlass_mla_benchmark,
-        run_flashattn_mla_benchmark,
-        run_flashinfer_mla_benchmark,
-        run_flashmla_benchmark,
-    )
+    from mla_runner import run_mla_benchmark as run_mla
 
-    backend_map = {
-        "cutlass_mla": run_cutlass_mla_benchmark,
-        "flashinfer_mla": run_flashinfer_mla_benchmark,
-        "flash_attn_mla": run_flashattn_mla_benchmark,
-        "flashmla": run_flashmla_benchmark,
-    }
-
-    runner = backend_map[config.backend]
-    result_dict = runner(config, **kwargs)
+    result_dict = run_mla(config.backend, config, **kwargs)
 
     return BenchmarkResult(
         config=config,
@@ -307,12 +294,10 @@ def main():
 
                 # Run all benchmarks for this batch size in one go (batched mode)
                 try:
-                    from mla_runner import run_flashattn_mla_benchmark
+                    from mla_runner import run_mla_benchmark as run_mla
 
                     # Use batched API: pass list of (config, threshold) tuples
-                    timing_results = run_flashattn_mla_benchmark(
-                        configs_with_thresholds
-                    )
+                    timing_results = run_mla(backend, configs_with_thresholds)
 
                     # Create BenchmarkResult objects from timing results
                     for (config, _), timing in zip(
