@@ -18,7 +18,6 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.envs import VLLM_USE_V1
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils import is_torch_equal_or_newer
 
@@ -127,7 +126,6 @@ def _run_simple_model(
 @pytest.mark.parametrize("use_inductor", [True, False])
 @torch.inference_mode()
 def test_simple_piecewise_compile(use_inductor):
-    assert VLLM_USE_V1
     _run_simple_model(
         splitting_ops=["silly.attention"],
         use_inductor_graph_partition=False,
@@ -145,10 +143,13 @@ def test_simple_piecewise_compile(use_inductor):
 
 @torch.inference_mode()
 @pytest.mark.parametrize("splitting_ops", [["silly.attention"], []])
-def test_simple_inductor_graph_partition(splitting_ops):
-    assert VLLM_USE_V1
+def test_simple_inductor_graph_partition(splitting_ops, monkeypatch):
     if not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
+
+    # disable compile cache so that we run separately for different splitting_ops
+    # and get the expected number of cudagraphs captured.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     _run_simple_model(
         # Inductor graph partition automatically resets splitting_ops to an empty list
