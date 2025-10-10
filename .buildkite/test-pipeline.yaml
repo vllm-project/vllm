@@ -431,8 +431,9 @@ steps:
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
+  - tests/kernels/test_top_k_per_row.py
   commands:
-    - pytest -v -s kernels/core
+    - pytest -v -s kernels/core kernels/test_top_k_per_row.py
 
 - label: Kernels Attention Test %N # 23min
   timeout_in_minutes: 35
