@@ -11,10 +11,14 @@ import prometheus_client
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorLogging
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import (
+    CachingMetrics,
+    IterationStats,
+    MultiModalCacheStats,
+    SchedulerStats,
+)
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
@@ -38,6 +42,7 @@ class StatLoggerBase(ABC):
         self,
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
+        mm_cache_stats: Optional[MultiModalCacheStats] = None,
         engine_idx: int = 0,
     ): ...
 
@@ -53,10 +58,15 @@ class LoggingStatLogger(StatLoggerBase):
         self.engine_index = engine_index
         self.vllm_config = vllm_config
         self._reset(time.monotonic())
+
         self.last_scheduler_stats = SchedulerStats()
-        # Prefix cache metrics. This cannot be reset.
+        self.last_mm_cache_stats: Optional[MultiModalCacheStats] = None
+
+        # Caching metrics. This cannot be reset.
         # TODO: Make the interval configurable.
-        self.prefix_caching_metrics = PrefixCachingMetrics()
+        self.prefix_caching_metrics = CachingMetrics()
+        self.mm_caching_metrics = CachingMetrics()
+
         self.spec_decoding_logging = SpecDecodingLogging()
         kv_tranfer_config = self.vllm_config.kv_transfer_config
         self.kv_connector_logging = KVConnectorLogging(kv_tranfer_config)
@@ -86,6 +96,7 @@ class LoggingStatLogger(StatLoggerBase):
         self,
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
+        mm_cache_stats: Optional[MultiModalCacheStats] = None,
         engine_idx: int = 0,
     ):
         """Log Stats to standard output."""
@@ -100,6 +111,11 @@ class LoggingStatLogger(StatLoggerBase):
             if kv_connector_stats := scheduler_stats.kv_connector_stats:
                 self.kv_connector_logging.observe(kv_connector_stats)
             self.last_scheduler_stats = scheduler_stats
+
+        if mm_cache_stats:
+            self.mm_caching_metrics.observe(mm_cache_stats)
+
+            self.last_mm_cache_stats = mm_cache_stats
 
     def log(self):
         now = time.monotonic()
@@ -125,21 +141,32 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_prompt_throughput = prompt_throughput
 
         # Format and print output.
-        log_fn(
-            "Engine %03d: "
-            "Avg prompt throughput: %.1f tokens/s, "
-            "Avg generation throughput: %.1f tokens/s, "
-            "Running: %d reqs, Waiting: %d reqs, "
-            "GPU KV cache usage: %.1f%%, "
+        log_parts = [
+            "Avg prompt throughput: %.1f tokens/s",
+            "Avg generation throughput: %.1f tokens/s",
+            "Running: %d reqs",
+            "Waiting: %d reqs",
+            "GPU KV cache usage: %.1f%%",
             "Prefix cache hit rate: %.1f%%",
-            self.engine_index,
+        ]
+        log_args = [
             prompt_throughput,
             generation_throughput,
             scheduler_stats.num_running_reqs,
             scheduler_stats.num_waiting_reqs,
             scheduler_stats.kv_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
+        ]
+        if self.last_mm_cache_stats:
+            log_parts.append("MM cache hit rate: %.1f%%")
+            log_args.append(self.mm_caching_metrics.hit_rate * 100)
+
+        log_fn(
+            "Engine %03d: " + ", ".join(log_parts),
+            self.engine_index,
+            *log_args,
         )
+
         self.spec_decoding_logging.log(log_fn=log_fn)
         self.kv_connector_logging.log(log_fn=log_fn)
 
@@ -286,6 +313,32 @@ class PrometheusStatLogger(StatLoggerBase):
         )
         self.counter_prefix_cache_hits = make_per_engine(
             counter_prefix_cache_hits, engine_indexes, model_name
+        )
+
+        #
+        # Multi-modal cache
+        #
+
+        counter_mm_cache_queries = self._counter_cls(
+            name="vllm:mm_cache_queries",
+            documentation=(
+                "Multi-modal cache queries, in terms of number of queried items."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_mm_cache_queries = make_per_engine(
+            counter_mm_cache_queries, engine_indexes, model_name
+        )
+
+        counter_mm_cache_hits = self._counter_cls(
+            name="vllm:mm_cache_hits",
+            documentation=(
+                "Multi-modal cache hits, in terms of number of cached items."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_mm_cache_hits = make_per_engine(
+            counter_mm_cache_hits, engine_indexes, model_name
         )
 
         #
@@ -657,6 +710,7 @@ class PrometheusStatLogger(StatLoggerBase):
         self,
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
+        mm_cache_stats: Optional[MultiModalCacheStats] = None,
         engine_idx: int = 0,
     ):
         """Log to prometheus."""
@@ -693,6 +747,10 @@ class PrometheusStatLogger(StatLoggerBase):
                 self.spec_decoding_prom.observe(
                     scheduler_stats.spec_decoding_stats, engine_idx
                 )
+
+        if mm_cache_stats is not None:
+            self.counter_mm_cache_queries[engine_idx].inc(mm_cache_stats.queries)
+            self.counter_mm_cache_hits[engine_idx].inc(mm_cache_stats.hits)
 
         if iteration_stats is None:
             return
@@ -871,6 +929,7 @@ class StatLoggerManager:
         self,
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
+        mm_cache_stats: Optional[MultiModalCacheStats] = None,
         engine_idx: Optional[int] = None,
     ):
         if engine_idx is None:
@@ -878,9 +937,19 @@ class StatLoggerManager:
 
         per_engine_loggers = self.per_engine_logger_dict[engine_idx]
         for logger in per_engine_loggers:
-            logger.record(scheduler_stats, iteration_stats, engine_idx)
+            logger.record(
+                scheduler_stats,
+                iteration_stats,
+                mm_cache_stats=mm_cache_stats,
+                engine_idx=engine_idx,
+            )
 
-        self.prometheus_logger.record(scheduler_stats, iteration_stats, engine_idx)
+        self.prometheus_logger.record(
+            scheduler_stats,
+            iteration_stats,
+            mm_cache_stats=mm_cache_stats,
+            engine_idx=engine_idx,
+        )
 
     def log(self):
         for per_engine_loggers in self.per_engine_logger_dict.values():
