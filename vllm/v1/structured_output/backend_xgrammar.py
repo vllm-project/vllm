@@ -127,8 +127,7 @@ class XgrammarBackend(StructuredOutputBackend):
                 ctx = self.compiler.compile_structural_tag(tags, s_tag["triggers"])
             else:
                 logger.info(
-                    f"Compiling structural tag grammar_spec: \
-                    {grammar_spec}"
+                    "Compiling structural tag grammar_spec: %s", grammar_spec
                 )
                 ctx = self.compiler.compile_structural_tag(grammar_spec)
         else:
