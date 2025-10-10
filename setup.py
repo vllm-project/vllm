@@ -540,6 +540,11 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
+    # Allow overriding the version. This is useful to build platform-specific
+    # wheels (e.g. CPU, TPU) without modifying the source.
+    if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
+        return env_version
+
     version = get_version(write_to="vllm/_version.py")
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
