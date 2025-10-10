@@ -10,7 +10,7 @@ import torch
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
-from vllm.config import ModelDType, TokenizerMode
+from vllm.config.model import ModelDType, TokenizerMode
 
 
 @dataclass(frozen=True)
@@ -172,9 +172,8 @@ class _HfExamplesInfo:
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
     "ApertusForCausalLM": _HfExamplesInfo(
-        "swiss-ai/Apertus-8B-2509",
+        "swiss-ai/Apertus-8B-Instruct-2509",
         min_transformers_version="4.56.0",
-        trust_remote_code=True,
     ),
     "AquilaModel": _HfExamplesInfo("BAAI/AquilaChat-7B", trust_remote_code=True),
     "AquilaForCausalLM": _HfExamplesInfo("BAAI/AquilaChat2-7B", trust_remote_code=True),
@@ -251,6 +250,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
+    "FlexOlmoForCausalLM": _HfExamplesInfo("allenai/Flex-reddit-2x7B-1T"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-1.1-2b-it"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
@@ -320,6 +320,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "Lfm2ForCausalLM": _HfExamplesInfo(
         "LiquidAI/LFM2-1.2B", min_transformers_version="4.54"
+    ),
+    "Lfm2MoeForCausalLM": _HfExamplesInfo(
+        "LiquidAI/LFM2-8B-A1B", min_transformers_version="4.58"
     ),
     "LlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-3.2-1B-Instruct",
@@ -526,6 +529,9 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     ),
     "ModernBertForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-reranker-modernbert-base"
+    ),
+    "ModernBertForTokenClassification": _HfExamplesInfo(
+        "disham993/electrical-ner-ModernBERT-base"
     ),
     "RobertaForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/quora-roberta-base"
