@@ -283,6 +283,12 @@ def set_forward_context(
             vllm_config.parallel_config, num_tokens or 0, num_tokens_across_dp
         )
 
+    # Convenience: if cudagraph is used and num_tokens is given, we can just
+    # create a batch descriptor here if not given (there's no harm since if it
+    # doesn't match in the wrapper it'll fall through).
+    if cudagraph_runtime_mode != CUDAGraphMode.NONE and num_tokens is not None:
+        batch_descriptor = batch_descriptor or BatchDescriptor(num_tokens=num_tokens)
+
     forward_context = create_forward_context(
         attn_metadata,
         vllm_config,
