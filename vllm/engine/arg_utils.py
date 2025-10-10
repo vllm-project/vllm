@@ -72,6 +72,7 @@ from vllm.config.parallel import (
     ExpertPlacementStrategy,
 )
 from vllm.config.scheduler import SchedulerPolicy
+from vllm.config.structured_outputs import StructuredOutputsBackend
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -217,11 +218,12 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
             default = field.default
             # Handle pydantic.Field defaults
             if isinstance(default, FieldInfo):
-                default = (
-                    default.default
-                    if default.default_factory is None
-                    else default.default_factory()
-                )
+                if default.default_factory is not None and callable(
+                    default.default_factory
+                ):
+                    default = cast(Callable[[], Any], default.default_factory)()
+                else:
+                    default = default.default
         elif field.default_factory is not MISSING:
             default = field.default_factory()
 
@@ -1311,8 +1313,7 @@ class EngineArgs:
             f"dcp_size={self.decode_context_parallel_size}."
         )
 
-        cache_config = CacheConfig(
-            block_size=self.block_size,
+        cache_kwargs: dict[str, Any] = dict(
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
             swap_space=self.swap_space,
@@ -1328,6 +1329,9 @@ class EngineArgs:
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
         )
+        if self.block_size is not None:
+            cache_kwargs["block_size"] = self.block_size
+        cache_config = CacheConfig(**cache_kwargs)
 
         ray_runtime_env = None
         if is_ray_initialized():
@@ -1556,7 +1560,9 @@ class EngineArgs:
         # Forward the deprecated CLI args to the StructuredOutputsConfig
         so_config = self.structured_outputs_config
         if self.guided_decoding_backend is not None:
-            so_config.backend = self.guided_decoding_backend
+            so_config.backend = cast(
+                StructuredOutputsBackend, self.guided_decoding_backend
+            )
         if self.guided_decoding_disable_fallback is not None:
             so_config.disable_fallback = self.guided_decoding_disable_fallback
         if self.guided_decoding_disable_any_whitespace is not None:
