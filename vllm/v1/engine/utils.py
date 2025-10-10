@@ -410,7 +410,8 @@ class CoreEngineActorManager:
 
         # if a placement group spans N (N>1) nodes
         # we only need to consider every Nth node
-        for node_resources in nodes[::nodes_per_pg]:
+        prev_bundles = []
+        for node_idx, node_resources in enumerate(nodes):
             node_ip_keys = [
                 key
                 for key in node_resources
@@ -462,11 +463,23 @@ class CoreEngineActorManager:
             else:
                 dp_size_to_allocate = dp_size_available
 
-            n_device_per_node = world_size if nodes_per_pg == 1 else max_device_per_node
             for i in range(dp_size_to_allocate):
+                n_devices_per_bundle = world_size if nodes_per_pg == 0 else max_device_per_node
                 bundles = [
                     {device_str: 1.0, "node:" + node_ip: 0.001}
-                ] * n_device_per_node + [{"CPU": 1.0}]
+                ] * n_devices_per_bundle
+
+                # we only create a placement group if we've iterated
+                # over all nodes that we need
+                is_all_nodes_collected = ((node_idx + 1) % nodes_per_pg == 0) or (node_idx == len(nodes) - 1)
+                if not is_all_nodes_collected:
+                    assert nodes_per_pg > 1, "Only multi-node placement groups can have prev_bundles"
+                    prev_bundles += bundles
+                    continue
+
+                bundles += prev_bundles
+                bundles += [{"CPU": 1.0}]
+                prev_bundles = []
 
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{len(placement_groups)}",
