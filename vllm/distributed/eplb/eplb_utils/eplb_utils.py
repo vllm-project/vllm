@@ -114,9 +114,10 @@ def generate_log2phy_map(expert_map):
     log2phy_map = expert_map.clone()
     num_ranks, num_global_expert = log2phy_map.shape
 
-    row_indices = torch.arange(num_ranks).view(-1, 1).expand(
-        num_ranks, num_global_expert
-    ) * num_local_experts
+    row_indices = (
+        torch.arange(num_ranks).view(-1, 1).expand(num_ranks, num_global_expert)
+        * num_local_experts
+    )
     log2phy_map[log2phy_map != -1] += row_indices[log2phy_map != -1]
 
     for idx in range(num_global_expert):
@@ -165,9 +166,7 @@ def determine_default_log2phy_map(global_expert_num, world_size, rank_id):
     """
     local_num_experts = global_expert_num // world_size
 
-    expert_map_all = torch.full(
-        (world_size, global_expert_num), -1, dtype=torch.int32
-    )
+    expert_map_all = torch.full((world_size, global_expert_num), -1, dtype=torch.int32)
 
     for r in range(world_size):
         if r < world_size - 1:

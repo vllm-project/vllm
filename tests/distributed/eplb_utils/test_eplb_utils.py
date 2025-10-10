@@ -11,7 +11,8 @@ from vllm.distributed.eplb.eplb_utils.eplb_utils import (
     get_ep_ranks_with_expert,
     global_idx_to_rank,
     idx_global_to_local,
-    idx_local_to_global)
+    idx_local_to_global,
+)
 
 
 # -------------------------- Test idx_local_to_global --------------------------
@@ -67,7 +68,7 @@ def test_global_idx_to_rank_edge():
     # Global index = 0 (minimum valid value)
     assert global_idx_to_rank(global_idx=0, local_cnt=100) == 0
     # Global index = local_cnt*N - 1 (last index of rank N-1)
-    assert global_idx_to_rank(global_idx=99, local_cnt=100) == 0 
+    assert global_idx_to_rank(global_idx=99, local_cnt=100) == 0
     # 0*100 ≤99 <1*100
     assert global_idx_to_rank(global_idx=199, local_cnt=100) == 1
     # 1*100 ≤199 <2*100
