@@ -88,6 +88,7 @@ class KVCacheManager:
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
+        wa_offline_param_path: Optional[str] = None,
     ) -> None:
         self.max_model_len = max_model_len
 
@@ -126,6 +127,7 @@ class KVCacheManager:
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            wa_offline_param_path=wa_offline_param_path,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
@@ -299,7 +301,10 @@ class KVCacheManager:
         )
 
         new_blocks = self.coordinator.allocate_new_blocks(
-            request.request_id, num_tokens_need_slot, num_encoder_tokens
+            request.request_id,
+            num_tokens_need_slot,
+            num_encoder_tokens,
+            request.type_info,
         )
 
         # P/D: delay caching blocks if we have to recv from

@@ -525,6 +525,8 @@ class EngineArgs:
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
 
+    wa_offline_param_path: Optional[str] = CacheConfig.wa_offline_param_path
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -861,6 +863,9 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-ssm-cache-dtype", **cache_kwargs["mamba_ssm_cache_dtype"]
+        )
+        cache_group.add_argument(
+            "--wa-offline-param-path", **cache_kwargs["wa_offline_param_path"]
         )
 
         # Multimodal related configs
@@ -1317,6 +1322,7 @@ class EngineArgs:
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
+            wa_offline_param_path=self.wa_offline_param_path,
         )
 
         ray_runtime_env = None

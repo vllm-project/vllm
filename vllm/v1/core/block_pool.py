@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
@@ -17,6 +18,7 @@ from vllm.v1.core.kv_cache_utils import (
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
+    WAFreeQueue,
     get_block_hash,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
@@ -141,10 +143,12 @@ class BlockPool:
         num_gpu_blocks: int,
         enable_caching: bool,
         enable_kv_cache_events: bool = False,
+        wa_offline_param_path: Optional[str] = None,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
+        self.free_block_queue: Union[FreeKVCacheBlockQueue, WAFreeQueue]
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
@@ -152,7 +156,11 @@ class BlockPool:
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
         # enabled).
-        self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+        if wa_offline_param_path:
+            print("[pool] Enabling WA block queue")
+            self.free_block_queue = WAFreeQueue(self.blocks, wa_offline_param_path)
+        else:
+            self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
@@ -264,21 +272,25 @@ class BlockPool:
                 )
             )
 
-    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+    def get_new_blocks(
+        self, num_blocks: int, type_info: Optional[str]
+    ) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
 
         Args:
             num_blocks: The number of blocks to allocate.
-
+            type_info: The request type corresponding to these blocks
         Returns:
             A list of new block.
         """
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(
+            num_blocks, type_info=type_info
+        )
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
@@ -340,6 +352,7 @@ class BlockPool:
             for block in blocks_per_group:
                 # ref_cnt=0 means this block is in the free list (i.e. eviction
                 # candidate), so remove it.
+                block.last_accessed = time.time()
                 if block.ref_cnt == 0 and not block.is_null:
                     self.free_block_queue.remove(block)
                 block.ref_cnt += 1

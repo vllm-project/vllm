@@ -3,6 +3,7 @@
 import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from typing import Optional
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -114,7 +115,7 @@ class SingleTypeKVCacheManager(ABC):
             assert len(new_computed_blocks) == 0
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int
+        self, request_id: str, num_tokens: int, type_info: Optional[str]
     ) -> list[KVCacheBlock]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -124,6 +125,7 @@ class SingleTypeKVCacheManager(ABC):
             request_id: The request ID.
             num_tokens: The total number of tokens that need a slot (including
                 tokens that are already allocated).
+            type_info: The request type corresponding to these blocks
 
         Returns:
             The new allocated blocks.
@@ -134,7 +136,7 @@ class SingleTypeKVCacheManager(ABC):
         if num_new_blocks <= 0:
             return []
         else:
-            new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+            new_blocks = self.block_pool.get_new_blocks(num_new_blocks, type_info)
             req_blocks.extend(new_blocks)
             return new_blocks
 
@@ -608,7 +610,7 @@ class MambaManager(SingleTypeKVCacheManager):
         )
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int
+        self, request_id: str, num_tokens: int, type_info: Optional[str]
     ) -> list[KVCacheBlock]:
         # Allocate extra `num_speculative_blocks` blocks for
         # speculative decoding (MTP/EAGLE) with linear attention.
@@ -618,7 +620,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 self.kv_cache_spec.block_size
                 * self.kv_cache_spec.num_speculative_blocks
             )
-        return super().allocate_new_blocks(request_id, num_tokens)
+        return super().allocate_new_blocks(request_id, num_tokens, type_info)
 
 
 class CrossAttentionManager(SingleTypeKVCacheManager):

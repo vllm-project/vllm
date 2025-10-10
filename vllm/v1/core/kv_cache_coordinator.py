@@ -27,13 +27,17 @@ class KVCacheCoordinator(ABC):
         enable_caching: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
+        wa_offline_param_path: Optional[str],
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
 
         self.block_pool = BlockPool(
-            kv_cache_config.num_blocks, enable_caching, enable_kv_cache_events
+            kv_cache_config.num_blocks,
+            enable_caching,
+            enable_kv_cache_events,
+            wa_offline_param_path,
         )
 
         # Needs special handling for find_longest_cache_hit if eagle is enabled
@@ -99,7 +103,11 @@ class KVCacheCoordinator(ABC):
             manager.save_new_computed_blocks(request_id, new_computed_blocks[i])
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_encoder_tokens: int = 0
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_encoder_tokens: int = 0,
+        type_info: Optional[str] = "",
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -111,6 +119,7 @@ class KVCacheCoordinator(ABC):
                 tokens that are already allocated).
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
+            type_info: The request type corresponding to these blocks
 
         Returns:
             The new allocated blocks.
@@ -121,6 +130,7 @@ class KVCacheCoordinator(ABC):
                 num_encoder_tokens
                 if isinstance(manager, CrossAttentionManager)
                 else num_tokens,
+                type_info,
             )
             for manager in self.single_type_managers
         )
@@ -210,6 +220,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         use_eagle: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
+        wa_offline_param_path: Optional[str],
     ):
         super().__init__(
             kv_cache_config,
@@ -218,6 +229,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             False,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            wa_offline_param_path=wa_offline_param_path,
         )
         self.num_single_type_manager = len(self.single_type_managers)
 
@@ -250,6 +262,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         enable_caching: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
+        wa_offline_param_path: Optional[str],
     ):
         super().__init__(
             kv_cache_config,
@@ -258,6 +271,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            wa_offline_param_path=wa_offline_param_path,
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
         self.block_size = self.kv_cache_spec.block_size
@@ -302,6 +316,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         enable_caching: bool,
         enable_kv_cache_events: bool,
         dcp_world_size: int,
+        wa_offline_param_path: Optional[str],
     ):
         super().__init__(
             kv_cache_config,
@@ -310,6 +325,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            wa_offline_param_path=wa_offline_param_path,
         )
         assert dcp_world_size == 1, "DCP not support hybrid attn now."
         self.verify_and_split_kv_cache_groups()
@@ -452,6 +468,7 @@ def get_kv_cache_coordinator(
     enable_caching: bool,
     enable_kv_cache_events: bool,
     dcp_world_size: int,
+    wa_offline_param_path: Optional[str],
 ) -> KVCacheCoordinator:
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
@@ -460,6 +477,7 @@ def get_kv_cache_coordinator(
             use_eagle,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            wa_offline_param_path=None,
         )
     if len(kv_cache_config.kv_cache_groups) == 1:
         return UnitaryKVCacheCoordinator(
@@ -469,6 +487,7 @@ def get_kv_cache_coordinator(
             enable_caching,
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            wa_offline_param_path=wa_offline_param_path,
         )
     return HybridKVCacheCoordinator(
         kv_cache_config,
@@ -477,4 +496,5 @@ def get_kv_cache_coordinator(
         enable_caching,
         enable_kv_cache_events,
         dcp_world_size=dcp_world_size,
+        wa_offline_param_path=wa_offline_param_path,
     )

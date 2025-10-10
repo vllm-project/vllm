@@ -125,6 +125,12 @@ class CacheConfig:
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
 
+    wa_offline_param_path: Optional[str] = None
+    """The offline parameter used by workload-aware policy
+        if None, disable workload-aware policy for KVcache pool and
+        fallback to normal LRU policy
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

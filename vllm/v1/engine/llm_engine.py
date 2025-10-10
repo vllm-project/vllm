@@ -125,6 +125,8 @@ class LLMEngine:
             executor_class=executor_class,
             log_stats=self.log_stats,
         )
+        # TODO, remove this when commiting
+        print(f"[llm-engine] engineCoreClient type: {type(self.engine_core)}")
 
         self.logger_manager: Optional[StatLoggerManager] = None
         if self.log_stats:
@@ -233,6 +235,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         prompt_text: Optional[str] = None,
+        type_info: Optional[str] = "",
     ) -> None:
         # Validate the request_id type.
         if not isinstance(request_id, str):
@@ -256,6 +259,7 @@ class LLMEngine:
                 tokenization_kwargs,
                 trace_headers,
                 priority,
+                type_info,
             )
             prompt_text = prompt if isinstance(prompt, str) else prompt.get("prompt")
 

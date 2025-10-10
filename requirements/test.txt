@@ -1156,7 +1156,7 @@ torchaudio==2.8.0+cu128
     #   -r requirements/test.in
     #   encodec
     #   vocos
-torchgeo==0.7.0
+torchgeo==0.6.2
     # via terratorch
 torchmetrics==1.7.4
     # via
@@ -1247,7 +1247,6 @@ typing-extensions==4.15.0
     #   pytorch-lightning
     #   sqlalchemy
     #   torch
-    #   torchgeo
     #   typer
     #   typeshed-client
     #   typing-inspection
@@ -1288,7 +1287,7 @@ word2number==1.1
     # via lm-eval
 wrapt==1.17.2
     # via smart-open
-xarray==2025.7.1
+xarray==2025.6.1
     # via rioxarray
 xxhash==3.5.0
     # via

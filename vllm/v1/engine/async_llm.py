@@ -268,6 +268,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
         prompt_text: Optional[str] = None,
+        type_info: Optional[str] = "",
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -297,6 +298,7 @@ class AsyncLLM(EngineClient):
                 tokenization_kwargs,
                 trace_headers,
                 priority,
+                type_info,
                 data_parallel_rank,
             )
             prompt_text = prompt if isinstance(prompt, str) else prompt.get("prompt")
