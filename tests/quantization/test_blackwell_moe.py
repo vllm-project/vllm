@@ -25,11 +25,6 @@ def set_test_environment():
     os.environ["FLASHINFER_NVCC_THREADS"] = "16"
 
 
-# Make sure TRTLLM attention is available
-os.environ["VLLM_HAS_FLASHINFER_CUBIN"] = "1"
-# Set compilation threads to 16 to speed up startup
-os.environ["FLASHINFER_NVCC_THREADS"] = "16"
-
 # dummy_hf_overrides = {"num_layers": 4, "num_hidden_layers": 4,
 # "text_config": {"num_layers": 4, "num_hidden_layers": 4}}
 dummy_hf_overrides = {"num_layers": 4, "num_hidden_layers": 4}
