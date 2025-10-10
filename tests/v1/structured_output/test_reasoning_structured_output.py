@@ -150,8 +150,7 @@ class TestReasoningStructuredOutput:
         manager.reasoner = mock_reasoning_parser
 
         # Set reasoning as not ended
-        mock_request_with_structured_output.structured_output_request\
-            .reasoning_ended = False
+        mock_request_with_structured_output.structured_output_request.reasoning_ended = False
         mock_reasoning_parser.is_reasoning_end.return_value = False
 
         result = manager.should_advance(mock_request_with_structured_output)
@@ -170,8 +169,7 @@ class TestReasoningStructuredOutput:
         manager.reasoner = mock_reasoning_parser
 
         # Set reasoning as not ended initially, but ends in this step
-        mock_request_with_structured_output.structured_output_request\
-            .reasoning_ended = False
+        mock_request_with_structured_output.structured_output_request.reasoning_ended = False
         mock_reasoning_parser.is_reasoning_end.return_value = True
 
         result = manager.should_advance(mock_request_with_structured_output)
@@ -194,8 +192,7 @@ class TestReasoningStructuredOutput:
         manager.reasoner = mock_reasoning_parser
 
         # Set reasoning as already ended
-        mock_request_with_structured_output.structured_output_request\
-            .reasoning_ended = True
+        mock_request_with_structured_output.structured_output_request.reasoning_ended = True
 
         result = manager.should_advance(mock_request_with_structured_output)
 
