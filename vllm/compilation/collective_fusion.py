@@ -775,6 +775,18 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
         )
 
+        # Same pattern, but only return the output and not residual
+        # (helpful for end of graph where residual is not used again)
+        first_return_only = lambda fn: lambda a, b, c: fn(a, b, c)[0]
+
+        pm.register_replacement(
+            first_return_only(pattern),
+            first_return_only(replacement),
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+        )
+
 
 class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
     """
