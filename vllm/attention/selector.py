@@ -211,12 +211,12 @@ def _cached_get_mamba_attn_backend(
     selected_backend: Optional[str] = None,
 ) -> type[AttentionBackend]:
     # Get device-specific mamba_attn_backend.
-    mamba_cls = current_platform.get_mamba_attn_backend_cls(
+    mamba_cls = current_platform.get_mamba_attn_backend_cls(  # type: ignore[name-defined]
         mamba_type, selected_backend
     )
-    if mamba_cls is None:
+    if not mamba_cls:
         raise ValueError(
-            f"Invalid mamba attention backend for {current_platform.device_name}."
+            f"Invalid mamba attention backend for {current_platform.device_name}."  # type: ignore[name-defined]
         )
     return resolve_obj_by_qualname(mamba_cls)
 
