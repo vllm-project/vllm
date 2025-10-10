@@ -1,1 +1,65 @@
-# TODO
+# Copyright (C) 2025 Habana Labs, Ltd. an Intel Company
+# SPDX-License-Identifier: Apache-2.0
+
+# Parameterize base image components
+ARG DOCKER_URL=vault.habana.ai/gaudi-docker
+ARG VERSION=1.22.0
+ARG BASE_NAME=ubuntu24.04
+ARG PT_VERSION=2.7.1
+ARG REVISION=latest
+ARG REPO_TYPE=habanalabs
+
+FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-installer-${PT_VERSION}:${REVISION}
+
+# Parameterize commit/branch for vllm-project & vllm-gaudi checkout
+ARG VLLM_GAUDI_COMMIT=v0.10.2_next
+ARG VLLM_PROJECT_COMMIT=v0.10.2
+
+ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      git \
+      build-essential \
+      ca-certificates \
+      bash \
+      gettext \
+      moreutils \
+      jq && \
+    ln -sf /usr/bin/python3 /usr/bin/python && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /root
+
+ENV VLLM_PATH=/workspace/vllm-project
+ENV VLLM_PATH2=/workspace/vllm-gaudi
+
+RUN echo "dash dash/sh boolean false" | debconf-set-selections && \
+    DEBIAN_FRONTEND=noninteractive dpkg-reconfigure dash
+ENV ENV=~/.profile
+
+# Clone the vllm-project repository and install inside the container
+
+RUN mkdir -p $VLLM_PATH && \
+    git clone https://github.com/vllm-project/vllm.git $VLLM_PATH && \
+    cd $VLLM_PATH && \
+    git remote add upstream https://github.com/vllm-project/vllm.git && \
+    git fetch upstream --tags || true && \
+    git checkout ${VLLM_PROJECT_COMMIT} && \
+    bash -c "pip install -r <(sed '/^[torch]/d' requirements/build.txt)" && \
+    VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
+
+    # Clone the vllm-gaudi repository and install inside the container
+
+RUN mkdir -p $VLLM_PATH2 && \
+    git clone https://github.com/vllm-project/vllm-gaudi.git $VLLM_PATH2 && \
+    cd $VLLM_PATH2 && \
+    git checkout ${VLLM_GAUDI_COMMIT} && \ 
+    VLLM_TARGET_DEVICE=hpu && pip install -v $VLLM_PATH2 --no-build-isolation
+
+# Install additional Python packages
+RUN pip install datasets && \
+    pip install pandas
+
+# Default to interactive shell
+ENTRYPOINT ["/bin/bash"]
