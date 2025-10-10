@@ -137,6 +137,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.nano_batch_split import nano_ubatch_split
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
     UBatchSlices,
@@ -1178,14 +1179,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         uniform_decode = (
             max_num_scheduled_tokens == self.uniform_decode_query_len
         ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
-        ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
-            num_scheduled_tokens,
-            num_tokens_unpadded,
-            num_tokens_padded,
-            self.parallel_config,
-            True,
-            uniform_decode,
-        )
+        if self.compilation_config.enable_nano_batch_split:
+            ubatch_slices, num_tokens_across_dp = nano_ubatch_split(
+                num_scheduled_tokens, num_tokens_unpadded, num_tokens_padded
+            )
+        else:
+            ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
+                num_scheduled_tokens,
+                num_tokens_unpadded,
+                num_tokens_padded,
+                self.parallel_config,
+                True,
+                uniform_decode,
+            )
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
@@ -3903,6 +3909,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.device,
                     num_metadata_builders=1
                     if not self.parallel_config.enable_dbo
+                    and not self.compilation_config.enable_nano_batch_split
                     else 2,
                 )
 
