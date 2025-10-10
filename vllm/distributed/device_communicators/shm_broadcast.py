@@ -556,13 +556,14 @@ class MessageQueue:
         else:
             return self.dequeue()
 
-    def create_from_process_group_single_reader(pg: ProcessGroup,
-                                                max_chunk_bytes,
-                                                max_chunks,
-                                                reader_rank: int = 0,
-                                                blocking: bool = False):
-        """Create a message queue from ranks.
-        """
+    def create_from_process_group_single_reader(
+        pg: ProcessGroup,
+        max_chunk_bytes,
+        max_chunks,
+        reader_rank: int = 0,
+        blocking: bool = False,
+    ):
+        """Create a message queue from ranks."""
         # We assume same size acrsso groups
         local_size = torch.cuda.device_count()
         group_rank = dist.get_rank(pg)
@@ -574,8 +575,9 @@ class MessageQueue:
             max_chunks=max_chunks,
         )
         handle = buffer_io.export_handle()
-        handles = [None] * dist.get_world_size(
-            pg) if group_rank == reader_rank else None
+        handles = (
+            [None] * dist.get_world_size(pg) if group_rank == reader_rank else None
+        )
         dist.gather_object(handle, handles, dst=reader_rank, group=pg)
         if blocking:
             buffer_io.wait_until_ready()
@@ -612,7 +614,8 @@ class MessageQueue:
         if group_rank == writer_rank:
             if extra_writer_handler is not None:
                 buffer_io = MessageQueue.create_from_handle(
-                    extra_writer_handler, group_rank)
+                    extra_writer_handler, group_rank
+                )
             else:
                 buffer_io = MessageQueue(
                     n_reader=n_reader,

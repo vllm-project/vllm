@@ -709,15 +709,18 @@ class EngineArgs:
             "-pp",
             **parallel_kwargs["pipeline_parallel_size"],
         )
-        parallel_group.add_argument("--distributed-master-ip",
-                                    **parallel_kwargs["distributed_master_ip"])
         parallel_group.add_argument(
-            "--distributed-master-port",
-            **parallel_kwargs["distributed_master_port"])
-        parallel_group.add_argument("--distributed-node-size",
-                                    **parallel_kwargs["distributed_node_size"])
-        parallel_group.add_argument("--distributed-node-rank",
-                                    **parallel_kwargs["distributed_node_rank"])
+            "--distributed-master-ip", **parallel_kwargs["distributed_master_ip"]
+        )
+        parallel_group.add_argument(
+            "--distributed-master-port", **parallel_kwargs["distributed_master_port"]
+        )
+        parallel_group.add_argument(
+            "--distributed-node-size", **parallel_kwargs["distributed_node_size"]
+        )
+        parallel_group.add_argument(
+            "--distributed-node-rank", **parallel_kwargs["distributed_node_rank"]
+        )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
         )

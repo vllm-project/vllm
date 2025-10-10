@@ -107,11 +107,11 @@ class EngineCore:
         self.available_gpu_memory_for_kv_cache = -1
         # No scheduler needed for distributed inference for folo
         self.batch_queue_size = 0
-        self.batch_queue: Optional[deque[tuple[Future[ModelRunnerOutput],
-                                               SchedulerOutput]]] = None
+        self.batch_queue: Optional[
+            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput]]
+        ] = None
 
-        self.request_block_hasher: Optional[Callable[[Request],
-                                                     list[BlockHash]]] = None
+        self.request_block_hasher: Optional[Callable[[Request], list[BlockHash]]] = None
         if self.vllm_config.parallel_config.distributed_node_rank > 0:
             self._scheduler = None
             return
@@ -174,14 +174,10 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
-        self.batch_queue: Optional[
-            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput]]
-        ] = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
-        self.request_block_hasher: Optional[Callable[[Request], list[BlockHash]]] = None
         if (
             self.vllm_config.cache_config.enable_prefix_caching
             or self.scheduler.get_kv_connector() is not None

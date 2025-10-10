@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, TypeVar, Union
+from typing import Any, Callable, Optional, TypeVar, Union
 
 import torch
 import torch.nn as nn
@@ -186,6 +186,7 @@ class WorkerWrapperBase:
         self,
         vllm_config: VllmConfig,
         rpc_rank: int = 0,
+        global_rank: Optional[int] = None,
     ) -> None:
         """
         Initialize the worker wrapper with the given vllm_config and rpc_rank.
@@ -198,6 +199,7 @@ class WorkerWrapperBase:
         group.
         """
         self.rpc_rank = rpc_rank
+        self.global_rank = self.rpc_rank if global_rank is None else global_rank
         self.worker: WorkerBase | None = None
         self.vllm_config: VllmConfig | None = None
         # do not store this `vllm_config`, `init_worker` will set the final
@@ -295,7 +297,7 @@ class WorkerWrapperBase:
             assert self.worker is not None
 
     def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
-        kv_cache_config = kv_cache_configs[self.rpc_rank]
+        kv_cache_config = kv_cache_configs[self.global_rank]
         with set_current_vllm_config(self.vllm_config):
             self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 

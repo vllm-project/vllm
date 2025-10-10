@@ -30,9 +30,11 @@ else:
 logger = init_logger(__name__)
 
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
-DistributedExecutorBackend = Literal["ray", "mp", "mp_distributed", "uni",
-                                     "external_launcher"]
+DistributedExecutorBackend = Literal[
+    "ray", "mp", "mp_distributed", "uni", "external_launcher"
+]
 DataParallelBackend = Literal["ray", "mp"]
+
 
 @config
 @dataclass
@@ -494,9 +496,11 @@ class ParallelConfig:
                 backend = "uni"
             elif current_platform.is_cuda() and self.distributed_node_size > 1:
                 backend = "mp_distributed"
-            elif (current_platform.is_cuda()
-                  and cuda_device_count_stateless() < self.world_size
-                  and self.distributed_node_size == 1):
+            elif (
+                current_platform.is_cuda()
+                and cuda_device_count_stateless() < self.world_size
+                and self.distributed_node_size == 1
+            ):
                 if not ray_found:
                     raise ValueError(
                         "Unable to load Ray: "

@@ -891,12 +891,20 @@ def wait_for_engine_startup(
             conn_pending[0 if local else 1] -= 1
             start_pending[0 if local else 1] += 1
             engine.state = CoreEngineState.CONNECTED
-        
-        elif status == "READY" and engine.state == CoreEngineState.CONNECTED \
-            and parallel_config.distributed_node_rank > 0:
+
+        elif (
+            status == "READY"
+            and engine.state == CoreEngineState.CONNECTED
+            and parallel_config.distributed_node_rank > 0
+        ):
             engine.state = CoreEngineState.READY
             start_pending[0 if local else 1] -= 1
         elif status == "READY" and engine.state == CoreEngineState.CONNECTED:
+            # Setup KV cache config with initialization state from
+            # engine core process. Sum values from all engines in DP case.
+            num_gpu_blocks = cache_config.num_gpu_blocks or 0
+            num_gpu_blocks += msg["num_gpu_blocks"]
+            cache_config.num_gpu_blocks = num_gpu_blocks
             # In external DP LB mode, the coordinator address that the
             # front-end procs connect to is obtained from rank 0 via
             # one of the engine handshakes, and passed to the local
