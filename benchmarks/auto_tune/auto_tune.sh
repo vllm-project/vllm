@@ -18,6 +18,7 @@ MIN_CACHE_HIT_PCT=${MIN_CACHE_HIT_PCT:-0}
 MAX_LATENCY_ALLOWED_MS=${MAX_LATENCY_ALLOWED_MS:-100000000000}
 NUM_SEQS_LIST=${NUM_SEQS_LIST:-"128 256"}
 NUM_BATCHED_TOKENS_LIST=${NUM_BATCHED_TOKENS_LIST:-"512 1024 2048 4096"}
+ENABLE_PREFIX_CACHING=${ENABLE_PREFIX_CACHING:-"yes"}
 
 LOG_FOLDER="$BASE/auto-benchmark/$TAG"
 RESULT="$LOG_FOLDER/result.txt"
@@ -37,6 +38,7 @@ echo "MIN_CACHE_HIT_PCT=$MIN_CACHE_HIT_PCT"
 echo "MAX_LATENCY_ALLOWED_MS=$MAX_LATENCY_ALLOWED_MS"
 echo "NUM_SEQS_LIST=$NUM_SEQS_LIST"
 echo "NUM_BATCHED_TOKENS_LIST=$NUM_BATCHED_TOKENS_LIST"
+echo "ENABLE_PREFIX_CACHING=$ENABLE_PREFIX_CACHING"
 echo "VLLM_LOGGING_LEVEL=$VLLM_LOGGING_LEVEL"
 echo "RESULT_FILE=$RESULT"
 echo "====================== AUTO TUNEPARAMETERS ===================="
@@ -67,6 +69,18 @@ best_num_batched_tokens=0
 best_goodput=0
 best_request_rate=0
 
+_ternary() {
+    # simulate predicate ? value-on-true : value-on-false
+    (
+        shopt -s nocasematch
+        if [[ "$1" == "yes" ]] || [[ "$1" == "true" ]]; then
+            printf "%s" "$2"
+        else
+            printf "%s" "$3"
+        fi
+    )
+}
+
 start_server() {
     local gpu_memory_utilization=$1
     local max_num_seqs=$2
@@ -86,7 +100,7 @@ start_server() {
         "--max-num-seqs" "$max_num_seqs"
         "--max-num-batched-tokens" "$max_num_batched_tokens"
         "--tensor-parallel-size" "$TP"
-        "--enable-prefix-caching"
+        "$(_ternary "$ENABLE_PREFIX_CACHING" "--enable-prefix-caching" "--no-enable-prefix-caching")"
         "--load-format" "dummy"
         "--download-dir" "$DOWNLOAD_DIR"
         "--max-model-len" "$MAX_MODEL_LEN"
