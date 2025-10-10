@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
+from dataclasses import InitVar
 from typing import Any, Literal, Union
 
 from pydantic import Field, field_validator, model_validator
@@ -85,7 +86,7 @@ class SchedulerConfig:
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 
-    is_encoder_decoder: bool = Field(default=False, init_var=True)
+    is_encoder_decoder: InitVar[bool] = False
     """True if the model is an encoder-decoder model.
 
     Note: This is stored in the ModelConfig, and is used only here to
