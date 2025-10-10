@@ -296,14 +296,31 @@ def test_kv_transfer_metadata(dist_init):
 
     # Create two NixlConnector of role WORKER, one is the worker of
     # the scheduler (prefill), the other is a worker of decode instance.
+
+    # Prefill connector will register KV cache to populate proper handshake
+    # metadata.
     prefill_connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    )
+    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    kv_caches = {
+        "layer0": shared_tensor,
+        "layer1": unique_tensor,
+        "layer2": shared_tensor,
+    }
+    prefill_connector.register_kv_caches(kv_caches)
+
+    # Simulate EngineCore initialization that would
     # gather connector metadata from all workers, the scheduler connector
     # expects metadata to be in Dict[int, Dict[int, KVConnectorHandshakeMetadata]],
     # where the first key is the dp_rank, the second key is the tp_rank.
     metadata = {0: {0: prefill_connector.get_handshake_metadata()}}
     scheduler.get_kv_connector().set_xfer_handshake_metadata(metadata)
 
-    # 2 Full Blocks and 1 Half Block.
+    # Simulate a request that finishes prefill, which returns
+    # corresponding NixlConnectorMetadata for decode instance.
     BLOCK_SIZE = vllm_config.cache_config.block_size
     NUM_EXTERNAL_FULL_BLOCKS = 2
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
@@ -312,28 +329,23 @@ def test_kv_transfer_metadata(dist_init):
         request_id=1,
         block_size=BLOCK_SIZE,
         num_tokens=NUM_TOKENS,
-        do_remote_prefill=True,
+        do_remote_decode=True,
     )
-    request_id = request.request_id
-
-    scheduler.add_request(request)
-
-    # Remote Prefill, triggers NixlConnectorMetadata for handshake.
-    scheduler_output = scheduler.schedule()
-    kv_connector_metadata = scheduler_output.kv_connector_metadata
-    assert kv_connector_metadata is not None
-    assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
+    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+    delay, kv_connector_metadata = scheduler.get_kv_connector().request_finished(
+        request, [0, 1, 2]
+    )
+    assert delay
 
     # Decode connector will be able to create handshake with the prefill connector.
     decode_connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
-    # Here we are testing the retrieval of NIXLAgentMetadata,
-    # by knowing the implementation detail, we override the add_remote_agent
-    # to validate the metadata received is the same as the one in prefill_connector.
 
+    # Here we are testing the retrieval of NIXLAgentMetadata.
+    # Knowing the implementation detail, we override the add_remote_agent
+    # to validate the metadata received is the same as the one in prefill_connector.
     received_metadata = None
 
     def mock_add_remote_agent(
-        self,
         agent_metadata: NixlAgentMetadata,
         remote_tp_rank: int,
         remote_tp_size: int,
@@ -344,9 +356,11 @@ def test_kv_transfer_metadata(dist_init):
 
     decode_connector.connector_worker.add_remote_agent = mock_add_remote_agent
 
-    meta = kv_connector_metadata.reqs_to_recv[request_id]
     decode_connector.connector_worker._nixl_handshake(
-        meta.remote_host, meta.remote_port, meta.tp_size, meta.remote_engine_id
+        kv_connector_metadata["remote_host"],
+        kv_connector_metadata["remote_port"],
+        kv_connector_metadata["tp_size"],
+        kv_connector_metadata["remote_engine_id"],
     )
     assert received_metadata is not None
     assert received_metadata[1] == 0  # remote_tp_rank
