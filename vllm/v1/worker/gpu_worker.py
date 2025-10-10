@@ -20,7 +20,11 @@ from vllm.distributed import (
     set_custom_all_reduce,
 )
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import (
+    get_pp_group,
+    get_tp_group,
+    is_global_first_rank,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -79,18 +83,19 @@ class Worker(WorkerBase):
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info(
-                "Profiling enabled. Traces will be saved to: %s",
-                torch_profiler_trace_dir,
-            )
-            logger.debug(
-                "Profiler config: record_shapes=%s,"
-                "profile_memory=%s,with_stack=%s,with_flops=%s",
-                envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
-                envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-                envs.VLLM_TORCH_PROFILER_WITH_STACK,
-                envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
-            )
+            if is_global_first_rank():
+                logger.info_once(
+                    "Profiling enabled. Traces will be saved to: %s",
+                    torch_profiler_trace_dir,
+                )
+                logger.debug_once(
+                    "Profiler config: record_shapes=%s,"
+                    "profile_memory=%s,with_stack=%s,with_flops=%s",
+                    envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
+                    envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
+                    envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                    envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
+                )
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,

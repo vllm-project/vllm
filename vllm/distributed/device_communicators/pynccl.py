@@ -18,6 +18,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclRedOpTypeEnum,
     ncclUniqueId,
 )
+from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import current_stream
@@ -106,7 +107,8 @@ class PyNcclCommunicator:
         self.disabled = False
 
         self.nccl_version = self.nccl.ncclGetRawVersion()
-        logger.info("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
+        if is_global_first_rank():
+            logger.info("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
 
         if self.rank == 0:
             # get the unique id from NCCL
