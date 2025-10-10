@@ -21,6 +21,7 @@ from vllm.v1.worker.ubatching import (
     dbo_register_recv_hook,
     dbo_yield,
 )
+from vllm.v1.worker.workspace import current_workspace_manager
 
 #
 # This file defines a set of base classes used to make MoE kernels more modular.
@@ -741,7 +742,7 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         # Allocate workspaces using the workspace system
         # The workspace system automatically handles DBO (dual batch overlap)
-        from vllm.v1.worker.workspace import WorkspaceSpec, get_workspaces
+        from vllm.v1.worker.workspace import WorkspaceSpec
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
@@ -757,16 +758,18 @@ class FusedMoEModularKernel(torch.nn.Module):
         # as it is large enough. This will not always be the case for standard
         # format experts and with experts that have empty workspaces.
         if num_chunks == 1 and prod(workspace13_shape) >= prod(fused_out_shape):
-            workspace13, workspace2 = get_workspaces(
-                workspace13_spec, workspace2_spec, device=device
+            workspace13, workspace2 = current_workspace_manager().get_multiple(
+                workspace13_spec, workspace2_spec
             )
             fused_out = _resize_cache(workspace13, fused_out_shape)
         else:
             fused_out_spec = WorkspaceSpec(
                 shape=fused_out_shape, dtype=out_dtype, name="moe.fused_out"
             )
-            workspace13, workspace2, fused_out = get_workspaces(
-                workspace13_spec, workspace2_spec, fused_out_spec, device=device
+            workspace13, workspace2, fused_out = (
+                current_workspace_manager().get_multiple(
+                    workspace13_spec, workspace2_spec, fused_out_spec
+                )
             )
 
         return workspace13, workspace2, fused_out

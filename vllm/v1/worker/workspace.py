@@ -1,97 +1,319 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
+
 from dataclasses import dataclass
+from itertools import accumulate
 from math import prod
 from typing import Optional
 
 import torch
 
-from vllm.config import get_current_vllm_config
+import vllm.envs as envs
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import round_up
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
-_REQUIRED_WORKSPACES: dict[str, "WorkspaceSpec"] = {}
-_CURRENT_WORKSPACES: list[torch.Tensor] = [None, None]
-_NUM_KV_CACHE_TOKENS: Optional[int] = None
-_DEBUG_WORKSPACE: bool = os.environ.get("VLLM_DEBUG_WORKSPACE", "0").lower() in (
-    "1",
-    "true",
-    "yes",
-    "all",
-)
+# Constants
+_MB = 1024**2
+_GiB = 1024**3
+
+# Global workspace manager instance
+_manager: Optional["WorkspaceManager"] = None
 
 
-def _increase_size(
-    required_bytes: int,
-    device: torch.device,
-    name: str = "unnamed",
-) -> None:
-    """Allocate or resize workspace for all ubatches.
+def current_workspace_manager() -> "WorkspaceManager":
+    """Get the current workspace manager instance.
 
-    If DBO is enabled, allocates for both ubatches. Otherwise, allocates for ubatch 0.
-    Uses PyTorch's resize_() for efficient in-place resizing when possible.
-
-    Args:
-        required_bytes: The number of bytes required.
-        device: The device to allocate on.
-        name: Name for debugging/logging.
+    Raises:
+        AssertionError: If workspace manager has not been initialized.
     """
-    global _CURRENT_WORKSPACES
+    assert _manager is not None, (
+        "WorkspaceManager not initialized. Call init_workspace_manager() "
+        "with a device before using workspace functions."
+    )
+    return _manager
 
-    # Determine number of ubatches based on DBO configuration
-    from vllm.config import get_current_vllm_config
 
-    vllm_config = get_current_vllm_config()
-    num_ubatches = 2 if vllm_config.parallel_config.enable_dbo else 1
+class WorkspaceManager:
+    """Manager for workspace allocation.
 
-    for ubatch_id in range(num_ubatches):
-        current_workspace = _CURRENT_WORKSPACES[ubatch_id]
+    Manages workspace buffers for DBO (Dual Batch Overlap) execution.
+    Can be locked to prevent further growth during execution.
+    """
 
-        # Assert device matches if workspace already exists
-        if current_workspace is not None:
-            assert current_workspace.device == device, (
-                f"Workspace device mismatch for '{name}': "
-                f"existing={current_workspace.device}, requested={device}"
+    def __init__(self, device: torch.device, vllm_config):
+        self._device = device
+        self._vllm_config = vllm_config
+        self._cache_config = vllm_config.cache_config
+        # Cache num ubatches at init based on configuration
+        self._num_ubatches = 2 if vllm_config.parallel_config.enable_dbo else 1
+        self._reserved_workspaces: dict[str, WorkspaceSpec] = {}
+        self._current_workspaces: list[Optional[torch.Tensor]] = [None, None]
+        self._num_kv_cache_tokens: Optional[int] = None
+        self._locked: bool = False
+
+    def lock(self) -> None:
+        """Lock the workspace to prevent further growth.
+
+        After locking, any attempt to allocate a larger workspace will raise
+        an assertion error. This ensures workspace size is fixed during execution.
+        """
+        self._locked = True
+        if envs.VLLM_DEBUG_WORKSPACE:
+            logger.info(
+                "[WORKSPACE DEBUG] Workspace locked. Current sizes: %s",
+                [
+                    _workspace_size_bytes(ws) / _MB
+                    for ws in self._current_workspaces
+                    if ws is not None
+                ],
             )
 
-        # Check if we need to allocate/resize
-        if current_workspace is None:
-            # First allocation
-            if _DEBUG_WORKSPACE:
-                logger.info(
-                    "[WORKSPACE DEBUG] Allocating workspace '%s' "
-                    "for ubatch %d: %.2f MB",
-                    name,
-                    ubatch_id,
-                    required_bytes / (1024**2),
-                )
+    def is_locked(self) -> bool:
+        """Check if workspace is locked."""
+        return self._locked
 
-            current_workspace = torch.empty(
-                (required_bytes,), dtype=torch.uint8, device=device
-            )
-            _CURRENT_WORKSPACES[ubatch_id] = current_workspace
-        elif (
-            current_workspace.numel() * current_workspace.element_size()
-            < required_bytes
+    def current_allocated_size_bytes(self) -> int:
+        """Get the size of the current workspace in bytes."""
+        return _workspace_size_bytes(self._current_workspaces[dbo_current_ubatch_id()])
+
+    def adjust_available_memory(
+        self,
+        available_memory: int,
+        per_token_workspace_bytes: int,
+        estimated_max_kv_tokens: int,
+    ) -> int:
+        """Reserve workspace memory by shrinking available KV memory.
+
+        Args:
+            available_memory: Memory available for KV cache in bytes.
+            per_token_workspace_bytes: Workspace memory required per KV cache token.
+            estimated_max_kv_tokens: Estimated maximum number of KV cache tokens.
+
+        Returns:
+            Remaining memory for KV cache after reserving workspace.
+        """
+        if per_token_workspace_bytes == 0:
+            return available_memory
+
+        already_allocated = self.current_allocated_size_bytes()
+        expected_workspace = per_token_workspace_bytes * estimated_max_kv_tokens
+
+        if already_allocated > expected_workspace:
+            return available_memory
+
+        workspace_to_reserve = expected_workspace - already_allocated
+        adjusted_available_memory = max(available_memory - workspace_to_reserve, 0)
+
+        return adjusted_available_memory
+
+    def reserve(self, spec: "WorkspaceSpec") -> None:
+        """Reserve workspace memory for a given spec.
+
+        For PerKVCacheTokenWorkspace, this just registers the spec.
+        For regular WorkspaceSpec, this registers the spec and allocates immediately
+        if workspace needs to grow.
+
+        Args:
+            spec: The workspace specification.
+        """
+        # Store the spec by name
+        if spec.name in self._reserved_workspaces:
+            logger.warning("Workspace '%s' already reserved, overwriting", spec.name)
+        self._reserved_workspaces[spec.name] = spec
+
+        # PerKVCacheTokenWorkspace allocation is deferred until first use
+        if isinstance(spec, PerKVCacheTokenWorkspace):
+            return
+
+        # Allocate if workspace needs resize
+        # Note: both ubatches always have the same size, so we only check the first
+        num_bytes = spec.num_bytes()
+        if _workspace_size_bytes(self._current_workspaces[0]) < num_bytes:
+            self._increase_size(num_bytes, spec.name)
+
+    def get(self, spec: "WorkspaceSpec") -> torch.Tensor:
+        """Get a workspace tensor for the given spec.
+
+        Args:
+            spec: The workspace specification.
+
+        Returns:
+            A tensor view into the workspace buffer with the requested shape and dtype.
+        """
+        shape, num_bytes = self._shape_and_bytes_for_spec(spec)
+        current_workspace = self._ensure_workspace_size(num_bytes, spec.name)
+        return current_workspace[:num_bytes].view(spec.dtype).reshape(shape)
+
+    def _shape_and_bytes_for_spec(
+        self, spec: "WorkspaceSpec"
+    ) -> tuple[tuple[int, ...], int]:
+        """Return adjusted shape and actual size for a workspace spec."""
+        num_bytes = spec.num_bytes()
+        shape = spec.shape
+
+        if isinstance(spec, PerKVCacheTokenWorkspace):
+            num_tokens, multiplier = self._get_kv_cache_multiplier(spec.name)
+            shape = (num_tokens, *spec.shape)
+            num_bytes *= multiplier
+
+        return shape, num_bytes
+
+    def get_multiple(self, *specs: "WorkspaceSpec") -> list[torch.Tensor]:
+        """Get multiple workspace tensors efficiently from a single allocation.
+
+        Args:
+            *specs: One or more workspace specifications.
+
+        Returns:
+            List of tensor views into the workspace buffer, one per spec.
+        """
+        adjusted = [self._shape_and_bytes_for_spec(spec) for spec in specs]
+        adjusted_shapes = [shape for shape, _ in adjusted]
+        actual_bytes = [actual for _, actual in adjusted]
+        aligned_bytes = [round_up(actual, 256) for actual in actual_bytes]
+        total_bytes = sum(aligned_bytes)
+
+        # Calculate cumulative offsets using itertools.accumulate
+        offsets = list(accumulate([0] + aligned_bytes[:-1]))
+
+        workspace_names = ", ".join(spec.name for spec in specs)
+        current_workspace = self._ensure_workspace_size(
+            total_bytes, f"[{workspace_names}]"
+        )
+
+        return [
+            current_workspace[offsets[i] : offsets[i] + actual_bytes[i]]
+            .view(specs[i].dtype)
+            .reshape(adjusted_shapes[i])
+            for i in range(len(specs))
+        ]
+
+    def per_kv_cache_token_workspace_size_bytes(self) -> int:
+        """Get the maximum per-KV-cache-token workspace size in bytes."""
+        return max(
+            (
+                spec.num_bytes()
+                for spec in self._reserved_workspaces.values()
+                if isinstance(spec, PerKVCacheTokenWorkspace)
+            ),
+            default=0,
+        )
+
+    def _get_kv_cache_multiplier(self, spec_name: str) -> tuple[int, int]:
+        """Get KV cache token count and multiplier for shape calculation.
+
+        Returns:
+            Tuple of (num_tokens, multiplier) where shape becomes
+            (num_tokens, *spec.shape) and num_bytes is multiplied by
+            multiplier.
+        """
+        if (
+            self._num_kv_cache_tokens is None
+            and self._cache_config.num_gpu_blocks is not None
         ):
-            # Resize existing workspace using resize_()
-            if _DEBUG_WORKSPACE:
-                old_size = current_workspace.numel() * current_workspace.element_size()
-                logger.info(
-                    "[WORKSPACE DEBUG] Resizing workspace '%s' "
-                    "for ubatch %d: %.2f MB -> %.2f MB",
-                    name,
-                    ubatch_id,
-                    old_size / (1024**2),
-                    required_bytes / (1024**2),
-                )
+            self._num_kv_cache_tokens = (
+                self._cache_config.num_gpu_blocks * self._cache_config.block_size
+            )
 
-            # Use resize_() for efficient in-place resizing
-            current_workspace.resize_(required_bytes)
+        if self._num_kv_cache_tokens is None:
+            # KV cache not initialized - use minimal workspace
+            import warnings
+
+            warnings.warn(
+                f"PerKVCacheTokenWorkspace '{spec_name}' requested before "
+                "KV cache initialization. Allocating minimal workspace.",
+                stacklevel=4,
+            )
+            return (1, 1)
+
+        return (self._num_kv_cache_tokens, self._num_kv_cache_tokens)
+
+    def _ensure_workspace_size(self, num_bytes: int, name: str) -> torch.Tensor:
+        """Ensure workspace is allocated and large enough, return current workspace."""
+        ubatch_id = dbo_current_ubatch_id()
+        current_workspace = self._current_workspaces[ubatch_id]
+
+        # Manager owns a single device; no cross-device assertions needed
+
+        if _workspace_size_bytes(current_workspace) < num_bytes:
+            self._increase_size(num_bytes, name)
+            current_workspace = self._current_workspaces[ubatch_id]
+
+        return current_workspace
+
+    def _increase_size(
+        self,
+        required_bytes: int,
+        name: str = "unnamed",
+    ) -> None:
+        """Allocate or resize workspace for all ubatches.
+
+        If DBO is enabled, allocates for both ubatches. Otherwise, allocates for
+        ubatch 0. Uses PyTorch's resize_() for efficient in-place resizing when
+        possible.
+
+        Invariant: Both ubatches always have the same size after this function
+        completes.
+
+        Args:
+            required_bytes: The number of bytes required.
+            name: Name for debugging/logging.
+        """
+        # Manager owns a single device; no cross-device assertions needed
+
+        # Check if we need to grow the workspace
+        current_size = _workspace_size_bytes(self._current_workspaces[0])
+        if self._locked and current_size < required_bytes:
+            raise AssertionError(
+                f"Workspace is locked but allocation for '{name}' requires "
+                f"{required_bytes / _MB:.2f} MB, current size is "
+                f"{current_size / _MB:.2f} MB. "
+                "Workspace growth is not allowed after locking."
+            )
+
+        for ubatch_id in range(self._num_ubatches):
+            current_workspace = self._current_workspaces[ubatch_id]
+
+            # Check if we need to allocate/resize
+            if current_workspace is None:
+                # First allocation
+                if envs.VLLM_DEBUG_WORKSPACE:
+                    logger.info(
+                        "[WORKSPACE DEBUG] Allocating workspace '%s' "
+                        "for ubatch %d: %.2f MB",
+                        name,
+                        ubatch_id,
+                        required_bytes / _MB,
+                    )
+
+                self._current_workspaces[ubatch_id] = torch.empty(
+                    (required_bytes,), dtype=torch.uint8, device=self._device
+                )
+            elif _workspace_size_bytes(current_workspace) < required_bytes:
+                # Resize existing workspace using resize_()
+                if envs.VLLM_DEBUG_WORKSPACE:
+                    logger.info(
+                        "[WORKSPACE DEBUG] Resizing workspace '%s' "
+                        "for ubatch %d: %.2f MB -> %.2f MB",
+                        name,
+                        ubatch_id,
+                        _workspace_size_bytes(current_workspace) / _MB,
+                        required_bytes / _MB,
+                    )
+
+                # Use resize_() for efficient in-place resizing
+                current_workspace.resize_(required_bytes)
+
+
+def _workspace_size_bytes(workspace: Optional[torch.Tensor]) -> int:
+    """Get size of workspace in bytes."""
+    if workspace is None:
+        return 0
+    return workspace.numel() * workspace.element_size()
 
 
 @dataclass(frozen=True)
@@ -109,7 +331,7 @@ class WorkspaceSpec:
     name: str = "unnamed"
 
     def num_bytes(self) -> int:
-        return prod(self.shape) * torch.tensor([], dtype=self.dtype).element_size()
+        return prod(self.shape) * self.dtype.itemsize
 
 
 class PerKVCacheTokenWorkspace(WorkspaceSpec):
@@ -123,195 +345,43 @@ class PerKVCacheTokenWorkspace(WorkspaceSpec):
     pass
 
 
-def current_workspace_size_bytes() -> int:
-    current_workspace = _CURRENT_WORKSPACES[dbo_current_ubatch_id()]
-    if current_workspace is None:
-        return 0
-    return current_workspace.element_size() * current_workspace.numel()
+def init_workspace_manager(device: torch.device, vllm_config: VllmConfig) -> None:
+    """Initialize the workspace manager with a device.
 
-
-def adjust_available_memory_to_account_for_workspaces(
-    available_memory: int,
-    per_token_workspace_bytes: int,
-    estimated_max_kv_tokens: int,
-) -> int:
-    """Adjust available memory accounting for reserved workspace.
-
-    If current workspace is not large enough yet, adds back the already-allocated
-    workspace memory to avoid double-counting during KV cache allocation.
+    Must be called before using any workspace functions. Typically called
+    from GPUModelRunner.__init__.
 
     Args:
-        available_memory: Memory available for KV cache in bytes.
-        per_token_workspace_bytes: Workspace memory required per KV cache token.
-        estimated_max_kv_tokens: Estimated maximum number of KV cache tokens.
-
-    Returns:
-        Adjusted available memory in bytes.
+        device: The device to allocate workspace on.
     """
-    if per_token_workspace_bytes == 0:
-        return available_memory
-
-    already_allocated_workspace_bytes = current_workspace_size_bytes()
-
-    # Calculate the maximum expected workspace size based on estimated KV cache tokens
-    max_expected_workspace_bytes = per_token_workspace_bytes * estimated_max_kv_tokens
-
-    # Only add back workspace memory up to the expected amount to avoid over-allocation
-    workspace_to_add_back = min(
-        already_allocated_workspace_bytes, max_expected_workspace_bytes
-    )
-
-    if workspace_to_add_back < already_allocated_workspace_bytes:
-        # Convert to GiB for logging
-        GiB_bytes = 1024**3
+    global _manager
+    if _manager is not None:
         logger.warning(
-            "Already-allocated workspace (%.2f GB) exceeds expected "
-            "workspace size (%.2f GB). Only adding back %.2f GB to "
-            "avoid over-allocating KV cache.",
-            already_allocated_workspace_bytes / GiB_bytes,
-            max_expected_workspace_bytes / GiB_bytes,
-            workspace_to_add_back / GiB_bytes,
+            "WorkspaceManager already initialized on device %s, "
+            "reinitializing on device %s",
+            _manager._device,
+            device,
         )
+    _manager = WorkspaceManager(device, vllm_config)
 
-    return available_memory + workspace_to_add_back
 
+def lock_workspace() -> None:
+    """Lock the workspace to prevent further growth.
 
-def reserve_workspace(spec: WorkspaceSpec, device: Optional[torch.device] = None):
-    """Reserve workspace memory for a given spec.
+    After calling this function, any attempt to allocate a workspace larger
+    than the current size will raise an AssertionError. This ensures that
+    workspace size is fixed during execution and prevents unexpected memory
+    allocations in the hot path.
 
-    For PerKVCacheTokenWorkspace, this just registers the spec.
-    For regular WorkspaceSpec, this registers the spec and optionally allocates
-    immediately if device is provided. If device is None, allocation is deferred
-    until first get_workspace() call.
+    Example:
+        # During initialization
+        init_workspace_manager(device)
+        reserve_workspace(spec1)
+        reserve_workspace(spec2)
 
-    If workspace is already allocated (any ubatch), uses that device if device=None.
-    If DBO is enabled and device is provided, allocates workspace for both ubatches.
+        # Lock after warmup/profiling
+        lock_workspace()
 
-    Args:
-        spec: The workspace specification.
-        device: The device to allocate on (optional, allocation deferred if None).
+        # Now all get_workspace calls must fit in pre-allocated size
     """
-    global _REQUIRED_WORKSPACES, _CURRENT_WORKSPACES
-
-    # Store the spec by name
-    if spec.name in _REQUIRED_WORKSPACES:
-        logger.warning("Workspace '%s' already reserved, overwriting", spec.name)
-    _REQUIRED_WORKSPACES[spec.name] = spec
-
-    # For non-PerKVCacheTokenWorkspace, allocate immediately if device is provided
-    # or if workspace is already allocated (use existing device)
-    if not isinstance(spec, PerKVCacheTokenWorkspace):
-        # If device not specified, check if workspace already exists and use its device
-        if device is None:
-            for ws in _CURRENT_WORKSPACES:
-                if ws is not None:
-                    device = ws.device
-                    break
-
-        # Allocate if we have a device
-        if device is not None:
-            num_bytes = spec.num_bytes()
-
-            # Determine which ubatch(s) to check
-            from vllm.config import get_current_vllm_config
-
-            vllm_config = get_current_vllm_config()
-            num_ubatches = 2 if vllm_config.parallel_config.enable_dbo else 1
-
-            # Check if any ubatch needs allocation/resize
-            needs_resize = False
-            for ubatch_id in range(num_ubatches):
-                ws = _CURRENT_WORKSPACES[ubatch_id]
-                if ws is None or ws.numel() * ws.element_size() < num_bytes:
-                    needs_resize = True
-                    break
-
-            # Only call _increase_size if actually needed
-            if needs_resize:
-                _increase_size(num_bytes, device, spec.name)
-
-
-def per_kv_cache_token_workspace_size_bytes() -> int:
-    _max_per_kv_cache_token = 0
-    for spec in _REQUIRED_WORKSPACES.values():
-        if isinstance(spec, PerKVCacheTokenWorkspace):
-            _per_kv_cache_token_workspace_size = spec.num_bytes()
-            if _per_kv_cache_token_workspace_size > _max_per_kv_cache_token:
-                _max_per_kv_cache_token = _per_kv_cache_token_workspace_size
-    return _max_per_kv_cache_token
-
-
-def get_workspace(spec: WorkspaceSpec, device: torch.device) -> torch.Tensor:
-    global _NUM_KV_CACHE_TOKENS
-    shape = spec.shape
-    num_bytes = spec.num_bytes()
-    ubatch_id = dbo_current_ubatch_id()
-
-    if isinstance(spec, PerKVCacheTokenWorkspace):
-        if _NUM_KV_CACHE_TOKENS is None:
-            cache_config = get_current_vllm_config().cache_config
-            if cache_config.num_gpu_blocks is not None:
-                _NUM_KV_CACHE_TOKENS = (
-                    cache_config.num_gpu_blocks * cache_config.block_size
-                )
-
-        if _NUM_KV_CACHE_TOKENS is None:
-            # KV cache still not initialized
-            # This should only happen during initialization/dummy runs
-            # Allocate a minimal workspace as a fallback, but don't cache this value
-            import warnings
-
-            warnings.warn(
-                f"PerKVCacheTokenWorkspace '{spec.name}' requested before "
-                "KV cache initialization. Allocating minimal workspace.",
-                stacklevel=2,
-            )
-            shape = (1, *spec.shape)  # Minimal 1-token workspace
-            num_bytes *= 1
-        else:
-            shape = (_NUM_KV_CACHE_TOKENS, *spec.shape)
-            num_bytes *= _NUM_KV_CACHE_TOKENS
-
-    # Get the workspace for current ubatch
-    current_workspace = _CURRENT_WORKSPACES[ubatch_id]
-
-    # Only allocate/resize if needed
-    if (
-        current_workspace is None
-        or current_workspace.numel() * current_workspace.element_size() < num_bytes
-    ):
-        _increase_size(num_bytes, device, spec.name)
-        current_workspace = _CURRENT_WORKSPACES[ubatch_id]
-
-    return current_workspace[:num_bytes].view(spec.dtype).reshape(shape)
-
-
-def get_workspaces(*args: WorkspaceSpec, device: torch.device) -> list[torch.Tensor]:
-    # Align to 256 bytes for better memory allocation performance.
-    byte_sizes = [round_up(spec.num_bytes(), 256) for spec in args]
-    total_bytes = sum(byte_sizes)
-    offsets = [0]
-    for i in range(len(byte_sizes) - 1):
-        offsets.append(offsets[-1] + byte_sizes[i])
-
-    ubatch_id = dbo_current_ubatch_id()
-
-    # Get the workspace for current ubatch
-    current_workspace = _CURRENT_WORKSPACES[ubatch_id]
-
-    # Only allocate/resize if needed
-    if (
-        current_workspace is None
-        or current_workspace.numel() * current_workspace.element_size() < total_bytes
-    ):
-        # Create a combined name for logging
-        workspace_names = ", ".join(spec.name for spec in args)
-        _increase_size(total_bytes, device, f"[{workspace_names}]")
-        current_workspace = _CURRENT_WORKSPACES[ubatch_id]
-
-    return [
-        current_workspace[offsets[i] : offsets[i] + byte_sizes[i]]
-        .view(args[i].dtype)
-        .reshape(args[i].shape)
-        for i in range(len(args))
-    ]
+    current_workspace_manager().lock()

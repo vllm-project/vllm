@@ -31,6 +31,7 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -699,10 +700,8 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                     and unique_prefill_indices.numel() > 0
                 ):
                     # Get workspace for prefill_bf16_workspace
-                    from vllm.v1.worker.workspace import get_workspace
-
-                    prefill_bf16_workspace = get_workspace(
-                        self.prefill_bf16_workspace_spec, device=q.device
+                    prefill_bf16_workspace = current_workspace_manager().get(
+                        self.prefill_bf16_workspace_spec
                     )
 
                     indices_for_upconvert = unique_prefill_indices.to(
