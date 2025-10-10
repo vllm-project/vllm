@@ -114,8 +114,9 @@ def generate_log2phy_map(expert_map):
     log2phy_map = expert_map.clone()
     num_ranks, num_global_expert = log2phy_map.shape
 
-    row_indices = torch.arange(num_ranks).view(-1, 1).expand(num_ranks,\
-        num_global_expert) * num_local_experts
+    row_indices = torch.arange(num_ranks).view(-1, 1).expand(
+        num_ranks, num_global_expert
+    ) * num_local_experts
     log2phy_map[log2phy_map != -1] += row_indices[log2phy_map != -1]
 
     for idx in range(num_global_expert):
@@ -125,18 +126,19 @@ def generate_log2phy_map(expert_map):
 
         if num_rank_holding_expert == 1:
             log2phy_map[negative_rank_idx, idx] = torch.full(
-                (num_ranks - 1, ),
+                (num_ranks - 1,),
                 log2phy_map[positive_rank_idx, idx].item(),
-                dtype=log2phy_map.dtype)
+                dtype=log2phy_map.dtype,
+            )
         else:
             holding_ranks_values = log2phy_map[positive_rank_idx, idx].tolist()
             random_list = [
                 random.choice(holding_ranks_values)
                 for _ in range(num_ranks - num_rank_holding_expert)
             ]
-            log2phy_map[negative_rank_idx,
-                        idx] = torch.tensor(random_list,
-                                            dtype=log2phy_map.dtype)
+            log2phy_map[negative_rank_idx, idx] = torch.tensor(
+                random_list, dtype=log2phy_map.dtype
+            )
 
     return log2phy_map
 
@@ -155,7 +157,7 @@ def determine_default_log2phy_map(global_expert_num, world_size, rank_id):
         rank_id: The ID of the current rank.
 
     Returns:
-        A 1D tensor representing the logical-to-physical mapping for the 
+        A 1D tensor representing the logical-to-physical mapping for the
         specified `rank_id`.
         Shape: [num_global_experts].
         Each element `log2phy_map[g]` is the global physical ID of the expert
@@ -163,9 +165,9 @@ def determine_default_log2phy_map(global_expert_num, world_size, rank_id):
     """
     local_num_experts = global_expert_num // world_size
 
-    expert_map_all = torch.full((world_size, global_expert_num),
-                                -1,
-                                dtype=torch.int32)
+    expert_map_all = torch.full(
+        (world_size, global_expert_num), -1, dtype=torch.int32
+    )
 
     for r in range(world_size):
         if r < world_size - 1:

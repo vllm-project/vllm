@@ -12,23 +12,25 @@ from torch._C._distributed_c10d import ProcessGroup
 from torch.distributed import P2POp, Work, batch_isend_irecv, get_global_rank
 
 from vllm.distributed.eplb.eplb_adaptor.vllm_adaptor import VllmEplbAdaptor
-from vllm.distributed.eplb.eplb_loader.abstract_loader import BaseLoader
+from vllm.distributed.eplb.eplb_transfer.abstract_transfer import BaseTransfer
 from vllm.distributed.eplb.eplb_utils.eplb_utils import (
-    get_ep_ranks_with_expert, idx_local_to_global)
+    get_ep_ranks_with_expert,
+    idx_local_to_global,
+    )
 
 
-class EplbWeightLoader(BaseLoader):
+class EplbWeightTransfer(BaseTransfer):
     """
-    A concrete implementation of BaseLoader for Expert Parallel Load 
+    A concrete implementation of BaseTransfer for Expert Parallel Load
     Balancing (EPLB).
 
-    This class is responsible for managing the transfer and update of 
+    This class is responsible for managing the transfer and update of
     expert weights across different ranks during expert rearrangement.
     """
 
     def __init__(self, eplb_adaptor: VllmEplbAdaptor):
         """
-        Initializes the EplbWeightLoader.
+        Initializes the EplbWeightTransfer.
 
         Args:
             eplb_adaptor: An adaptor to interact with the vLLM model's expert
@@ -54,7 +56,7 @@ class EplbWeightLoader(BaseLoader):
     ) -> None:
         """
         Performs expert weights rearrangement for a single MoE layer.
-        This method orchestrates the entire shuffling process including 
+        This method orchestrates the entire shuffling process including
         local copies and inter-rank P2P communications.
 
         Args:
@@ -71,7 +73,7 @@ class EplbWeightLoader(BaseLoader):
             expert_weights_buffer: An iterable of torch.Tensor,
                                    representing buffers for receiving expert
                                    weights. Same structure as expert_weights.
-            ep_group: The PyTorch distributed process group for 
+            ep_group: The PyTorch distributed process group for
                       expert parallelism.
         """
 
@@ -95,39 +97,68 @@ class EplbWeightLoader(BaseLoader):
                 dst_global = local2global(dst)
                 if is_received_locally[dst]:
                     continue
-                if old_indices[src_global] == -1 or new_indices[
-                        dst_global] == -1:
+                if old_indices[src_global] == -1 or \
+                        new_indices[dst_global] == -1:
                     continue
                 if old_indices[src_global] == new_indices[dst_global]:
                     is_received_locally[dst] = True
-                    for weight, buffer in zip(expert_weights,
-                                              expert_weights_buffer):
+                    for weight, buffer in \
+                            zip(expert_weights, expert_weights_buffer):
                         buffer[dst].copy_(weight[src])
 
         p2p_ops: list[P2POp] = []
 
         # 2. Initiate sending of weights.
-        p2p_ops = self.prepare_send_p2p_ops(ep_group, ep_rank, expert_weights,
-                                            local2global, new_indices,
-                                            num_local_experts, old_indices,
-                                            p2p_ops)
+        p2p_ops = self.prepare_send_p2p_ops(
+            ep_group,
+            ep_rank,
+            expert_weights,
+            local2global,
+            new_indices,
+            num_local_experts,
+            old_indices,
+            p2p_ops
+        )
 
         # 3. Initiate receiving of weights.
         experts_recv_loc, p2p_ops = self.prepare_recv_p2p_ops(
-            ep_group, ep_rank, expert_weights_buffer, is_received_locally,
-            local2global, new_indices, num_local_experts, old_indices, p2p_ops)
+            ep_group,
+            ep_rank,
+            expert_weights_buffer,
+            is_received_locally,
+            local2global,
+            new_indices,
+            num_local_experts,
+            old_indices,
+            p2p_ops
+        )
 
         # 4. Execute the P2P operations. The real communication happens here.
         self.send_recv(p2p_ops)
 
         # 5. Copy the weights from the buffer back to the original weights.
-        self.update_weight(expert_weights, expert_weights_buffer,
-                           experts_recv_loc, is_received_locally, is_unchanged,
-                           local2global, new_indices, num_local_experts)
+        self.update_weight(
+            expert_weights,
+            expert_weights_buffer,
+            experts_recv_loc,
+            is_received_locally,
+            is_unchanged,
+            local2global,
+            new_indices,
+            num_local_experts
+        )
 
-    def update_weight(self, expert_weights, expert_weights_buffer,
-                      experts_recv_loc, is_received_locally, is_unchanged,
-                      local2global, new_indices, num_local_experts):
+    def update_weight(
+        self,
+        expert_weights,
+        expert_weights_buffer,
+        experts_recv_loc,
+        is_received_locally,
+        is_unchanged,
+        local2global,
+        new_indices,
+        num_local_experts
+    ):
         """
         Updates the actual expert weights from the buffer after communication.
         This is part of the `shuffle_layer` process.
@@ -152,16 +183,16 @@ class EplbWeightLoader(BaseLoader):
             if is_unchanged[dst]:
                 continue
             if is_received_locally[dst]:
-                for weight, buffer in zip(expert_weights,
-                                          expert_weights_buffer):
+                for weight, buffer in \
+                        zip(expert_weights, expert_weights_buffer):
                     weight[dst].copy_(buffer[dst])
             else:
                 expert = new_indices[local2global(dst)]
                 if expert == -1:
                     continue
                 src = experts_recv_loc[expert]
-                for weight, buffer in zip(expert_weights,
-                                          expert_weights_buffer):
+                for weight, buffer in \
+                    zip(expert_weights, expert_weights_buffer):
                     weight[dst].copy_(buffer[src])
 
     @override
@@ -177,9 +208,18 @@ class EplbWeightLoader(BaseLoader):
             for req in reqs:
                 req.wait()
 
-    def prepare_recv_p2p_ops(self, ep_group, ep_rank, expert_weights_buffer,
-                             is_received_locally, local2global, new_indices,
-                             num_local_experts, old_indices, p2p_ops):
+    def prepare_recv_p2p_ops(
+        self,
+        ep_group,
+        ep_rank,
+        expert_weights_buffer,
+        is_received_locally,
+        local2global,
+        new_indices,
+        num_local_experts,
+        old_indices,
+        p2p_ops
+    ):
         """
         Prepares irecv operations for experts thatneed to be received
         from other ranks as part of the `shuffle_layer` process.
@@ -199,7 +239,7 @@ class EplbWeightLoader(BaseLoader):
 
         Returns:
             A tuple containing:
-            - experts_recv_loc: A dictionary mapping global expert ID to the 
+            - experts_recv_loc: A dictionary mapping global expert ID to the
                                 local buffer index where it will be received.
             - p2p_ops: The updated list of P2POp objects.
         """
@@ -225,7 +265,8 @@ class EplbWeightLoader(BaseLoader):
             # Calculate the rank to recv by this rank
             if not ranks_to_send:
                 raise ValueError(
-                    f"Expert {expert} is needed but no rank has it.")
+                    f"Expert {expert} is needed but no rank has it."
+                )
             num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
             recver_pos = ranks_to_recv.index(ep_rank)
             remainder_start = len(ranks_to_send) * num_dst_per_sender
@@ -240,13 +281,22 @@ class EplbWeightLoader(BaseLoader):
                     torch.distributed.irecv,
                     weight[dst],
                     src_global,
-                ) for weight in expert_weights_buffer
+                )
+                for weight in expert_weights_buffer
             ]
         return experts_recv_loc, p2p_ops
 
-    def prepare_send_p2p_ops(self, ep_group, ep_rank, expert_weights,
-                             local2global, new_indices, num_local_experts,
-                             old_indices, p2p_ops):
+    def prepare_send_p2p_ops(
+        self,
+        ep_group,
+        ep_rank,
+        expert_weights,
+        local2global,
+        new_indices,
+        num_local_experts,
+        old_indices,
+        p2p_ops
+    ):
         """
         Prepares isend operations for experts that needto be sent
         to other ranks as part of the `shuffle_layer` process.
@@ -255,7 +305,7 @@ class EplbWeightLoader(BaseLoader):
             ep_group: The PyTorch distributed process group.
             ep_rank: Current rank in the EP group.
             expert_weights: The actual expert weight tensors to be sent.
-            local2global: Partial function for local 
+            local2global: Partial function for local
                           to global index conversion.
             new_indices: The new global expert indices mapping.
             num_local_experts: Number of local experts.
@@ -302,7 +352,8 @@ class EplbWeightLoader(BaseLoader):
                         torch.distributed.isend,
                         weight[src],
                         dst_global,
-                    ) for weight in expert_weights
+                    )
+                    for weight in expert_weights
                 ]
         return p2p_ops
 
@@ -314,17 +365,22 @@ class EplbWeightLoader(BaseLoader):
         setting up communication for a specific layer.
 
         Args:
-            expert_send_info: A list of tuples, where each tuple is 
+            expert_send_info: A list of tuples, where each tuple is
                               (destination_rank, global_expert_id_to_send).
             layer_id: The ID of the MoE layer for which experts are being sent.
         """
         for dst_rank, global_expert_id_to_send in expert_send_info:
-            local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[
-                layer_id][global_expert_id_to_send].item()
-            for src_tensor in self.eplb_adaptor.expert_param_per_layer[
-                    layer_id][local_expert_id]:
+            local_expert_id = \
+                self.eplb_adaptor.expert_map_per_layer_cpu[layer_id][
+                    global_expert_id_to_send
+                ].item()
+            for src_tensor in \
+                self.eplb_adaptor.expert_param_per_layer[layer_id][
+                local_expert_id
+            ]:
                 self.comm_op_list.append(
-                    dist.P2POp(dist.isend, src_tensor, dst_rank))
+                    dist.P2POp(dist.isend, src_tensor, dst_rank)
+                )
 
     @override
     def prepare_recv(self, expert_recv_info, updated_expert_map):
@@ -354,9 +410,9 @@ class EplbWeightLoader(BaseLoader):
             self.recv_expert_list.append(
                 (local_expert_to_replace, buffer_tensor_id))
 
-    def generate_expert_d2d_transfer_task(self, expert_send_info,
-                                          expert_recv_info, updated_expert_map,
-                                          layer_id):
+    def generate_expert_d2d_transfer_task(
+        self, expert_send_info,expert_recv_info, updated_expert_map, layer_id
+    ):
         """
         Generates the expert data-to-data transfer tasks(send and
         receiveoperations). for a given layer based on the provided
@@ -407,28 +463,32 @@ class EplbWeightLoader(BaseLoader):
             req.wait()
 
         # update expert_map
-        #解耦adaptor与loader
-        self.eplb_adaptor.do_update_expert_map(self.layer_id,
-                                               self.updated_expert_map)
+        # decouple adaptor and transfer
+        self.eplb_adaptor.do_update_expert_map(
+            self.layer_id,
+            self.updated_expert_map
+        )
 
         # update log2phy_map
-        self.eplb_adaptor.do_update_log2phy_map(self.layer_id,
-                                                self.updated_log2phy_map)
+        self.eplb_adaptor.do_update_log2phy_map(
+            self.layer_id,
+            self.updated_log2phy_map
+        )
 
         # update expert weight
         buffer_tensor_id = 0
         for recv_expert_info in self.recv_expert_list:
             local_expert_to_replace, buffer_tensor_id = recv_expert_info
-            self.eplb_adaptor.do_update_expert_weight(self.layer_id,
-                                                      local_expert_to_replace,
-                                                      buffer_tensor_id)
+            self.eplb_adaptor.do_update_expert_weight(
+                self.layer_id, local_expert_to_replace, buffer_tensor_id
+            )
 
         self.clear_update_data()
 
     def clear_update_data(self):
         """
         Clears the internal lists and temporary data used for the current
-        update cycle. This prepares the loader for the next rearrangement
+        update cycle. This prepares the transfer for the next rearrangement
         cycle.
         """
         if self.comm_op_list is not None:

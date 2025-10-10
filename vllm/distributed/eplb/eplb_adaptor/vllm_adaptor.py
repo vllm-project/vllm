@@ -4,7 +4,6 @@ from typing import Any
 
 
 class VllmEplbAdaptor:
-
     def __init__(self, model, **args):
         self.model = model
         self.expert_map_per_layer = dict()

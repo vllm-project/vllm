@@ -4,9 +4,9 @@
 from abc import ABC, abstractmethod
 
 
-class BaseLoader(ABC):
+class BaseTransfer(ABC):
     """
-    Abstract base class for a loader component responsible for managing
+    Abstract base class for a transfer component responsible for managing
     expert weights and their transfer/update mechanisms in an Expert Parallel
     (EP) system.
 
