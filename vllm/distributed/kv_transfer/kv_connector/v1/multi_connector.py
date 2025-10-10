@@ -86,6 +86,7 @@ class MultiConnector(KVConnectorBase_V1):
         super().__init__(vllm_config=vllm_config, role=role)
         self._connectors: list[KVConnectorBase_V1] = []
         self._ktc_kv_transfer_config = []
+        assert vllm_config.kv_transfer_config is not None
         ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "connectors"
         )
@@ -296,6 +297,7 @@ class MultiConnector(KVConnectorBase_V1):
             str: the required KV cache layout. e.g. HND, or NHD.
             None if the connector does not require a specific layout.
         """
+        assert vllm_config.kv_transfer_config is not None
         ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "connectors"
         )

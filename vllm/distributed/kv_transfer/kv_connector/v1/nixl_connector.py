@@ -291,6 +291,7 @@ class NixlConnectorScheduler:
             + vllm_config.parallel_config.data_parallel_rank
             * vllm_config.parallel_config.tensor_parallel_size
         )
+        assert vllm_config.kv_transfer_config is not None
         self.use_host_buffer = vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
         logger.info("Initializing NIXL Scheduler %s", engine_id)
 
@@ -334,7 +335,8 @@ class NixlConnectorScheduler:
 
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
-            count = len(request.prompt_token_ids) - num_computed_tokens
+            token_ids = request.prompt_token_ids or []
+            count = len(token_ids) - num_computed_tokens
             if count > 0:
                 return count, True
 
@@ -515,6 +517,7 @@ class NixlConnectorWorker:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
+        assert vllm_config.kv_transfer_config is not None
         self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
             "backends", ["UCX"]
         )
@@ -555,7 +558,10 @@ class NixlConnectorWorker:
 
         # KV Caches and nixl tracking data.
         self.device_type = current_platform.device_type
-        self.kv_buffer_device: str = vllm_config.kv_transfer_config.kv_buffer_device
+        assert vllm_config.kv_transfer_config is not None
+        self.kv_buffer_device: str = (
+            vllm_config.kv_transfer_config.kv_buffer_device or "cuda"
+        )
         if self.device_type not in _NIXL_SUPPORTED_DEVICE:
             raise RuntimeError(f"{self.device_type} is not supported.")
         elif self.kv_buffer_device not in _NIXL_SUPPORTED_DEVICE[self.device_type]:
@@ -571,17 +577,18 @@ class NixlConnectorWorker:
         self.use_host_buffer = self.kv_buffer_device == "cpu"
         # support for oot platform which can't register nixl memory
         # type based on kv_buffer_device
-        self.nixl_memory_type = current_platform.get_nixl_memory_type()
-        if self.nixl_memory_type is None:
+        nixl_memory_type = current_platform.get_nixl_memory_type()
+        if nixl_memory_type is None:
             if self.kv_buffer_device == "cuda":
-                self.nixl_memory_type = "VRAM"
+                nixl_memory_type = "VRAM"
             elif self.kv_buffer_device == "cpu":
-                self.nixl_memory_type = "DRAM"
-        if self.nixl_memory_type is None:
+                nixl_memory_type = "DRAM"
+        if nixl_memory_type is None:
             raise RuntimeError(
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
                 "is not supported."
             )
+        self.nixl_memory_type = nixl_memory_type
 
         # Note: host xfer buffer ops when use_host_buffer is True
         self.copy_blocks: Optional[CopyBlocksOp] = None

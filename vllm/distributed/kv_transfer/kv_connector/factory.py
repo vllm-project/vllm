@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, cast
 
 import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_connector.base import (
@@ -47,6 +47,7 @@ class KVConnectorFactory:
             )
 
         kv_transfer_config = config.kv_transfer_config
+        assert kv_transfer_config is not None
         connector_cls = cls.get_connector_class(kv_transfer_config)
         logger.info(
             "Creating v1 connector with name: %s and engine_id: %s",
@@ -69,6 +70,8 @@ class KVConnectorFactory:
     ) -> type[KVConnectorBaseType]:
         """Get the connector class by name."""
         connector_name = kv_transfer_config.kv_connector
+        if connector_name is None:
+            raise ValueError("Connector name is not set in KVTransferConfig")
         if connector_name in cls._registry:
             connector_cls = cls._registry[connector_name]()
         else:
@@ -76,7 +79,12 @@ class KVConnectorFactory:
             if connector_module_path is None:
                 raise ValueError(f"Unsupported connector type: {connector_name}")
             connector_module = importlib.import_module(connector_module_path)
-            connector_cls = getattr(connector_module, connector_name)
+            connector_cls_any = getattr(connector_module, connector_name, None)
+            if connector_cls_any is None:
+                raise AttributeError(
+                    f"Class {connector_name} not found in {connector_module_path}"
+                )
+            connector_cls = cast(type[KVConnectorBaseType], connector_cls_any)
         return connector_cls
 
 
