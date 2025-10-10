@@ -15,6 +15,7 @@ from unittest.mock import patch
 import msgspec
 import zmq
 
+from vllm import envs
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -73,6 +74,7 @@ class EngineHandshakeMetadata:
 
     addresses: EngineZmqAddresses
     parallel_config: dict[str, Union[int, str, list[int]]]
+    parallel_config_hash: Optional[str] = None
 
 
 class CoreEngineProcManager:
@@ -336,8 +338,8 @@ class CoreEngineActorManager:
 
         logger.info("Creating placement groups for data parallel")
         dp_master_ip = vllm_config.parallel_config.data_parallel_master_ip
-        num_pg_to_create = vllm_config.parallel_config.data_parallel_size
-        local_engine_count = vllm_config.parallel_config.data_parallel_size_local
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        dp_size_local = vllm_config.parallel_config.data_parallel_size_local
 
         available_resources = available_resources_per_node()
         world_size = vllm_config.parallel_config.world_size
@@ -373,54 +375,99 @@ class CoreEngineActorManager:
                 f"For multi-node data parallel groups, world_size ({world_size}) must "
                 f"be a multiple of number of devices per node ({max_device_per_node})."
             )
-            assert len(nodes) * max_device_per_node >= world_size * num_pg_to_create, (
+            assert len(nodes) * max_device_per_node >= world_size * dp_size, (
                 f"Not enough total available nodes ({len(nodes)}) and devices per node"
                 f" ({max_device_per_node}) "
                 f"to satisfy required world size {world_size} and data parallel size "
-                f"{num_pg_to_create}"
+                f"{dp_size}"
             )
-            assert local_engine_count == 1, (
-                f"data-parallel-size-local {local_engine_count} must be 1 if we "
+            assert dp_size_local == 1, (
+                f"data-parallel-size-local {dp_size_local} must be 1 if we "
                 "need multiple nodes per dp group"
             )
 
-            nodes_per_pg_group = world_size // max_device_per_node
+            nodes_per_pg = world_size // max_device_per_node
             placement_stategy = "PACK"
         else:
-            nodes_per_pg_group = 1
+            nodes_per_pg = 1
             placement_stategy = "STRICT_PACK"
 
-        for node_resources in nodes:
-            if device_str not in node_resources:
-                continue
+        if envs.VLLM_RAY_DP_PACK_STRATEGY == "fill" and (
+            envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
+            or envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency"
+        ):
+            raise ValueError(
+                "DeepEP kernels require EP ranks [0,7] (same for [8,15], ...) "
+                "to be on the same node, but VLLM_RAY_DP_PACK_STRATEGY=fill "
+                "does not guarantee that. "
+                "Please use VLLM_RAY_DP_PACK_STRATEGY=strict instead."
+            )
+        logger.info(
+            "Using '%s' DP packing strategy based on VLLM_RAY_DP_PACK_STRATEGY",
+            envs.VLLM_RAY_DP_PACK_STRATEGY,
+        )
+        strict_local_size = envs.VLLM_RAY_DP_PACK_STRATEGY == "strict"
+
+        # if a placement group spans N (N>1) nodes
+        # we only need to consider every Nth node
+        for node_resources in nodes[::nodes_per_pg]:
+            node_ip_keys = [
+                key
+                for key in node_resources
+                if key != "node:__internal_head__" and key.startswith("node:")
+            ]
+            assert len(node_ip_keys) == 1, (
+                "Zero or multiple node IP keys found in node resources: %s",
+                node_ip_keys,
+            )
+            node_ip_key = node_ip_keys[0]
+            node_ip = node_ip_key.split(":")[1]
 
             available_engine_count = (
-                int(node_resources[device_str]) * nodes_per_pg_group
+                int(node_resources[device_str]) * nodes_per_pg
             ) // world_size
             is_master_ip = dp_master_ip_key in node_resources
 
+            dp_size_available = (
+                int(node_resources[device_str]) * nodes_per_pg
+            ) // world_size
+
             if is_master_ip:
-                assert available_engine_count >= local_engine_count, (
+                assert available_engine_count >= dp_size_local, (
                     "Not enough resources to allocate DP ranks "
                     f"on DP master node {dp_master_ip}"
                 )
-                num_engines = local_engine_count
-            else:
-                num_engines = available_engine_count
 
-            for i in range(num_engines):
-                if len(placement_groups) == num_pg_to_create:
-                    assert not is_master_ip, (
-                        f"The DP master node (ip: {dp_master_ip_key}) cannot "
-                        f"place more than {num_pg_to_create} groups"
+            if node_ip == dp_master_ip:
+                if dp_size_available < dp_size_local:
+                    raise ValueError(
+                        "Not enough resources to allocate %s DP ranks "
+                        "on DP master node %s, possible to fit %s DP ranks",
+                        dp_size_local,
+                        dp_master_ip,
+                        dp_size_available,
                     )
-                    break
+                dp_size_to_allocate = dp_size_local
+            elif strict_local_size:
+                if dp_size_available < dp_size_local:
+                    logger.info(
+                        "Skipping node %s as %s DP ranks could not fit, "
+                        "possible to fit %s DP ranks",
+                        node_ip,
+                        dp_size_local,
+                        dp_size_available,
+                    )
+                    continue
+                dp_size_to_allocate = dp_size_local
+            else:
+                dp_size_to_allocate = dp_size_available
 
+            for i in range(dp_size_to_allocate):
                 master_device_dict = {device_str: 1.0, "node:" + dp_master_ip: 0.001}
                 device_dict = {device_str: 1.0}
                 cpu_dict = {"CPU": 1.0}
                 n_device_per_node = (
-                    world_size if nodes_per_pg_group == 1 else max_device_per_node
+                    world_size if nodes_per_pg == 1 else max_device_per_node
                 )
 
                 # If we need multiple nodes per DP group we might have both "master ip"
@@ -429,12 +476,13 @@ class CoreEngineActorManager:
                 #                                  {GPU: 1.0}, ...., {CPU: 2.0}]
                 # If we only need one node, we will have either only "master ip"
                 # devices or "worker ip" devices in the same bundle
+                # Only one CPU is needed per placement group
                 bundles = (
                     [master_device_dict] * int(is_master_ip) * n_device_per_node
                     + [device_dict]
-                    * (nodes_per_pg_group - int(is_master_ip))
+                    * (nodes_per_pg - int(is_master_ip))
                     * n_device_per_node
-                    + [cpu_dict] * nodes_per_pg_group
+                    + [cpu_dict]
                 )
 
                 pg = ray.util.placement_group(
@@ -445,9 +493,9 @@ class CoreEngineActorManager:
                 placement_groups.append(pg)
                 local_dp_ranks.append(i)
 
-        if len(placement_groups) < num_pg_to_create:
+        if len(placement_groups) < dp_size:
             raise ValueError(
-                f"Not enough resources to allocate {num_pg_to_create} "
+                f"Not enough resources to allocate {dp_size} "
                 "placement groups, only created "
                 f"{len(placement_groups)} placement groups. "
                 "Available resources: "
@@ -924,7 +972,8 @@ def wait_for_engine_startup(
                 )
 
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
-            # Send init message with DP config info.
+            # Send init message with DP config info and config hash.
+            # The config hash ensures all DP workers have compatible configs.
             init_message = msgspec.msgpack.encode(
                 EngineHandshakeMetadata(
                     addresses=addresses,
@@ -937,6 +986,9 @@ def wait_for_engine_startup(
                             "data_parallel_size",
                         )
                     },
+                    parallel_config_hash=parallel_config.compute_hash()
+                    if parallel_config.data_parallel_size > 1
+                    else None,
                 )
             )
             handshake_socket.send_multipart((eng_identity, init_message), copy=False)
@@ -956,6 +1008,23 @@ def wait_for_engine_startup(
             # front-end process in the response from the other.
             if addresses.frontend_stats_publish_address is None:
                 addresses.frontend_stats_publish_address = msg.get("dp_stats_address")
+
+            # Validate config hash consistency across DP workers
+            if parallel_config.data_parallel_size > 1:
+                worker_config_hash = msg.get("parallel_config_hash")
+                expected_hash = parallel_config.compute_hash()
+                if worker_config_hash != expected_hash:
+                    raise RuntimeError(
+                        f"Configuration mismatch detected for engine "
+                        f"{eng_index}. All DP workers must have identical "
+                        f"configurations for parameters that affect collective "
+                        f"communication (e.g., enable_eplb, "
+                        f"eplb_config.log_balancedness). "
+                        f"Worker hash: {worker_config_hash}, "
+                        f"Expected hash: {expected_hash}. "
+                        f"Please ensure all workers are started with the same "
+                        f"command-line arguments."
+                    )
 
             start_pending[0 if local else 1] -= 1
             engine.state = CoreEngineState.READY
