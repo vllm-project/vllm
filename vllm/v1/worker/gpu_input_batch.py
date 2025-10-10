@@ -916,7 +916,7 @@ class InputBatch:
             if sampled_token_ids is None:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()
-                sampled_token_ids = self.sampled_token_ids_cpu.squeeze().tolist()
+                sampled_token_ids = self.sampled_token_ids_cpu.squeeze(-1).tolist()
             # Replace placeholder token id with actual sampled id.
             output_token_ids[index][-1] = sampled_token_ids[prev_index]
 
