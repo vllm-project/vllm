@@ -568,6 +568,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
         last_token_indices=None,
         common_attn_metadata=common_attn_metadata,
         sampling_metadata=sampling_metadata,
+        cudagraph_args=dict(),
     )
 
     assert result.shape == (batch_size, num_speculative_tokens)
@@ -722,6 +723,7 @@ def test_propose_tree(spec_token_tree):
         last_token_indices=None,
         common_attn_metadata=common_attn_metadata,
         sampling_metadata=sampling_metadata,
+        cudagraph_args=dict(),
     )
     assert result.shape == (batch_size, num_speculative_tokens)
 
