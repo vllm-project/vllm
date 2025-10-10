@@ -893,6 +893,9 @@ def _get_open_ports(ports_to_try: Iterable[int] = (0,), max_count: int = 1) -> s
     `ports_to_try` can contain zeros, meaning any available port
     returned by the os.
 
+    Note: asking for port "0" lets the OS chose a random open port, see
+    https://man7.org/linux/man-pages/man7/ip.7.html
+
     Try to open a port either with IPv4 or IPv6.
     """
     open_ports: set[int] = set()
@@ -930,20 +933,23 @@ def get_open_ports_list(max_count: int = 5) -> list[int]:
         # assertion holds because "VLLM_PORT" in os.environ
         assert starting_port is not None
 
+    # give ourselves some room for failure / already taken ports
+    num_tries = max(2 * max_count, 10)
+
     if starting_port != 0:
-        ports_to_try = range(starting_port, starting_port + 10)
+        ports_to_try = range(starting_port, starting_port + num_tries)
     else:
-        # try 10 random ports
-        ports_to_try = (0 for _ in range(10))
+        # "0" meaning let the os choose a random available port
+        ports_to_try = (0 for _ in range(num_tries))
 
     open_port = _get_open_ports(ports_to_try, max_count)
-    if len(open_port) < 1:
+    if len(open_port) != max_count:
         if starting_port == 0:
-            err = "Could not get a random port after 10 tries."
+            err = f"Could not get {max_count} random ports after {num_tries} tries."
         else:
             err = (
-                "Could not get a port outside of range "
-                f"[{starting_port}, {starting_port + 10})"
+                f"Could not get {max_count} ports in the range "
+                f"[{starting_port}, {starting_port + num_tries})"
             )
         raise OSError(err)
 
