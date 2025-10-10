@@ -208,8 +208,9 @@ class StructuralTagResponseFormat(OpenAIBaseModel):
     format: Any
 
 
-AnyStructuralTagResponseFormat = Union[LegacyStructuralTagResponseFormat,
-                                       StructuralTagResponseFormat]
+AnyStructuralTagResponseFormat = Union[
+    LegacyStructuralTagResponseFormat, StructuralTagResponseFormat
+]
 
 
 class ResponseFormat(OpenAIBaseModel):
@@ -218,8 +219,9 @@ class ResponseFormat(OpenAIBaseModel):
     json_schema: Optional[JsonSchemaResponseFormat] = None
 
 
-AnyResponseFormat = Union[ResponseFormat, LegacyStructuralTagResponseFormat,
-                          StructuralTagResponseFormat]
+AnyResponseFormat = Union[
+    ResponseFormat, LegacyStructuralTagResponseFormat, StructuralTagResponseFormat
+]
 
 
 class StreamOptions(OpenAIBaseModel):
@@ -822,7 +824,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 elif response_format.type == "structural_tag":
                     structural_tag = response_format
                     assert structural_tag is not None and isinstance(
-                        structural_tag, AnyStructuralTagResponseFormat
+                        structural_tag,
+                        (
+                            LegacyStructuralTagResponseFormat,
+                            StructuralTagResponseFormat,
+                        ),
                     )
                     s_tag_obj = structural_tag.model_dump(by_alias=True)
                     self.structured_outputs.structural_tag = json.dumps(s_tag_obj)

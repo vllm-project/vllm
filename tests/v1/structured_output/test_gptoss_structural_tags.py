@@ -4,34 +4,34 @@
 """Unit tests for GPT-OSS structural tag support in reasoning (PR #25515)."""
 
 import json
-import pytest
 from unittest.mock import Mock
 
+import pytest
+
+from vllm.entrypoints.tool_server import ToolServer
 from vllm.reasoning.gptoss_reasoning_parser import (
     GptOssReasoningParser,
-    no_func_reaonsing_tag,
     from_builtin_tool_to_tag,
+    no_func_reaonsing_tag,
     tag_with_builtin_funcs,
 )
-from vllm.entrypoints.tool_server import ToolServer
 
 no_func_reaonsing_tag = {
     "type": "structural_tag",
     "format": {
-        "type":
-        "triggered_tags",
-        "tags": [{
-            "begin": "<|channel|>analysis<|message|>",
-            "content": {
-                "type": "any_text"
-            },
-            "end": "<|end|>"
-        }],
+        "type": "triggered_tags",
+        "tags": [
+            {
+                "begin": "<|channel|>analysis<|message|>",
+                "content": {"type": "any_text"},
+                "end": "<|end|>",
+            }
+        ],
         "triggers": ["<|channel|>analysis"],
-        "stop_after_first":
-        False
-    }
+        "stop_after_first": False,
+    },
 }
+
 
 class TestGptOssReasoningParser:
     """Test cases for GptOssReasoningParser structural tag functionality."""
@@ -86,12 +86,13 @@ class TestGptOssReasoningParser:
         assert parsed["format"]["tags"][0]["begin"] == "<|channel|>analysis<|message|>"
         assert parsed["format"]["triggers"] == ["<|channel|>analysis"]
 
-
     def test_prepare_structured_tag_with_all_tools(
         self, reasoning_parser, mock_tool_server_with_all_tools
     ):
         """Test prepare_structured_tag with all builtin tools."""
-        result = reasoning_parser.prepare_structured_tag(None, mock_tool_server_with_all_tools)
+        result = reasoning_parser.prepare_structured_tag(
+            None, mock_tool_server_with_all_tools
+        )
         parsed = json.loads(result)
 
         # Should have analysis tag + tags for all 3 tools (2 tags each)
@@ -150,7 +151,9 @@ class TestGptOssReasoningParser:
         assert analysis_tag["content"]["type"] == "any_text"
         assert analysis_tag["end"] == "<|end|>"
 
-    def test_json_serialization_valid(self, reasoning_parser, mock_tool_server_with_all_tools):
+    def test_json_serialization_valid(
+        self, reasoning_parser, mock_tool_server_with_all_tools
+    ):
         """Test that all generated tags produce valid JSON."""
         # Test with no tool server
         result1 = reasoning_parser.prepare_structured_tag(None, None)
@@ -163,9 +166,10 @@ class TestGptOssReasoningParser:
         json.loads(result2)  # Should not raise
 
         # Test with tools
-        result3 = reasoning_parser.prepare_structured_tag(None, mock_tool_server_with_all_tools)
+        result3 = reasoning_parser.prepare_structured_tag(
+            None, mock_tool_server_with_all_tools
+        )
         json.loads(result3)  # Should not raise
-
 
     @pytest.mark.parametrize("tool_name", ["browser", "python", "container"])
     def test_single_tool_integration(self, reasoning_parser, tool_name):
@@ -182,4 +186,3 @@ class TestGptOssReasoningParser:
         tag_begins = [tag["begin"] for tag in parsed["format"]["tags"]]
         assert f"<|channel|>commentary to={tool_name}" in tag_begins
         assert f"<|channel|>analysis to={tool_name}" in tag_begins
-

@@ -4,20 +4,17 @@
 """Integration tests for GPT-OSS structural tags functionality (PR #25515)."""
 
 import json
+from unittest.mock import Mock
+
 import pytest
-from unittest.mock import Mock, MagicMock, patch
 
 from vllm.entrypoints.openai.protocol import (
-    ResponsesRequest,
     StructuredOutputsParams,
 )
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.reasoning.gptoss_reasoning_parser import (
     GptOssReasoningParser,
-    no_func_reaonsing_tag,
 )
-from vllm.config import VllmConfig, ModelConfig
-from vllm.v1.structured_output import StructuredOutputManager
 
 
 class TestGptOssStructuralTagsIntegration:
@@ -83,7 +80,7 @@ class TestGptOssStructuralTagsIntegration:
         expected_begins = [
             "<|channel|>analysis<|message|>",
             "<|channel|>commentary to=python",
-            "<|channel|>analysis to=python"
+            "<|channel|>analysis to=python",
         ]
 
         for expected in expected_begins:
@@ -93,10 +90,14 @@ class TestGptOssStructuralTagsIntegration:
         assert "<|channel|>analysis" in parsed_result["format"]["triggers"]
         assert "<|channel|>commentary to=" in parsed_result["format"]["triggers"]
 
-    def test_structured_outputs_params_integration(self, gptoss_parser, tool_server_with_python):
+    def test_structured_outputs_params_integration(
+        self, gptoss_parser, tool_server_with_python
+    ):
         """Test integration with StructuredOutputsParams."""
         # Generate structural tag
-        structural_tag = gptoss_parser.prepare_structured_tag(None, tool_server_with_python)
+        structural_tag = gptoss_parser.prepare_structured_tag(
+            None, tool_server_with_python
+        )
 
         # Create StructuredOutputsParams
         params = StructuredOutputsParams(structural_tag=structural_tag)
@@ -144,7 +145,9 @@ class TestGptOssStructuralTagsIntegration:
         """Test that original tags are preserved when provided."""
         original_tag = '{"type": "custom_tag", "data": "preserved"}'
 
-        result = gptoss_parser.prepare_structured_tag(original_tag, tool_server_with_python)
+        result = gptoss_parser.prepare_structured_tag(
+            original_tag, tool_server_with_python
+        )
 
         # Should return original tag unchanged
         assert result == original_tag
@@ -223,7 +226,9 @@ class TestGptOssStructuralTagsIntegration:
     def test_tag_format_consistency(self, gptoss_parser):
         """Test that all generated tags follow consistent format."""
         tool_server = Mock(spec=ToolServer)
-        tool_server.has_tool = Mock(side_effect=lambda tool: tool in ["python", "browser"])
+        tool_server.has_tool = Mock(
+            side_effect=lambda tool: tool in ["python", "browser"]
+        )
 
         result = gptoss_parser.prepare_structured_tag(None, tool_server)
         parsed_result = json.loads(result)

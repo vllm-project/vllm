@@ -3,13 +3,14 @@
 
 """Unit tests for reasoning-aware structured output functionality (PR #25515)."""
 
-import pytest
 from unittest.mock import Mock
 
-from vllm.config import VllmConfig, ModelConfig, SchedulerConfig
-from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.request import Request
+import pytest
+
+from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.reasoning import ReasoningParser
+from vllm.v1.request import Request
+from vllm.v1.structured_output import StructuredOutputManager
 
 
 class TestReasoningStructuredOutput:
@@ -63,7 +64,9 @@ class TestReasoningStructuredOutput:
         request.structured_output_request = Mock()
         request.structured_output_request.reasoning_ended = None
         request.structured_output_request.grammar = Mock()
-        request.structured_output_request.grammar.is_terminated = Mock(return_value=False)
+        request.structured_output_request.grammar.is_terminated = Mock(
+            return_value=False
+        )
         request.use_structured_output = True
         request.prompt_token_ids = [1, 2, 3, 4, 5]
         request.all_token_ids = [1, 2, 3, 4, 5, 6, 7, 8]
@@ -83,7 +86,10 @@ class TestReasoningStructuredOutput:
         assert result is True
 
     def test_should_fill_bitmask_without_need_structured_in_reasoning(
-        self, mock_vllm_config, mock_request_with_structured_output, mock_reasoning_parser
+        self,
+        mock_vllm_config,
+        mock_request_with_structured_output,
+        mock_reasoning_parser,
     ):
         """Test should_fill_bitmask when need_structured_in_reasoning is False."""
         # Keep need_structured_in_reasoning as False (default)
@@ -98,7 +104,10 @@ class TestReasoningStructuredOutput:
         result = manager.should_fill_bitmask(mock_request_with_structured_output)
 
         # Should set reasoning_ended and return its value
-        assert mock_request_with_structured_output.structured_output_request.reasoning_ended is False
+        assert (
+            mock_request_with_structured_output.structured_output_request.reasoning_ended
+            is False
+        )
         assert result is False
 
     def test_should_fill_bitmask_no_reasoner(
@@ -114,7 +123,10 @@ class TestReasoningStructuredOutput:
         assert result is True
 
     def test_should_advance_with_need_structured_in_reasoning(
-        self, mock_vllm_config, mock_request_with_structured_output, mock_reasoning_parser
+        self,
+        mock_vllm_config,
+        mock_request_with_structured_output,
+        mock_reasoning_parser,
     ):
         """Test should_advance when need_structured_in_reasoning is True."""
         # Enable need_structured_in_reasoning
@@ -128,7 +140,10 @@ class TestReasoningStructuredOutput:
         assert result is True
 
     def test_should_advance_reasoning_not_ended(
-        self, mock_vllm_config, mock_request_with_structured_output, mock_reasoning_parser
+        self,
+        mock_vllm_config,
+        mock_request_with_structured_output,
+        mock_reasoning_parser,
     ):
         """Test should_advance when reasoning has not ended."""
         manager = StructuredOutputManager(mock_vllm_config)
@@ -144,7 +159,10 @@ class TestReasoningStructuredOutput:
         assert result is False
 
     def test_should_advance_reasoning_just_ended(
-        self, mock_vllm_config, mock_request_with_structured_output, mock_reasoning_parser
+        self,
+        mock_vllm_config,
+        mock_request_with_structured_output,
+        mock_reasoning_parser,
     ):
         """Test should_advance when reasoning ends in current step."""
         manager = StructuredOutputManager(mock_vllm_config)
@@ -157,11 +175,17 @@ class TestReasoningStructuredOutput:
         result = manager.should_advance(mock_request_with_structured_output)
 
         # Should set reasoning_ended to True but return False for this step
-        assert mock_request_with_structured_output.structured_output_request.reasoning_ended is True
+        assert (
+            mock_request_with_structured_output.structured_output_request.reasoning_ended
+            is True
+        )
         assert result is False
 
     def test_should_advance_reasoning_already_ended(
-        self, mock_vllm_config, mock_request_with_structured_output, mock_reasoning_parser
+        self,
+        mock_vllm_config,
+        mock_request_with_structured_output,
+        mock_reasoning_parser,
     ):
         """Test should_advance when reasoning has already ended."""
         manager = StructuredOutputManager(mock_vllm_config)
@@ -174,5 +198,3 @@ class TestReasoningStructuredOutput:
 
         # Should return True since reasoning has ended
         assert result is True
-
-

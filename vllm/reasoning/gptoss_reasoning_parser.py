@@ -17,41 +17,39 @@ logger = init_logger(__name__)
 no_func_reaonsing_tag = {
     "type": "structural_tag",
     "format": {
-        "type":
-        "triggered_tags",
-        "tags": [{
-            "begin": "<|channel|>analysis<|message|>",
-            "content": {
-                "type": "any_text"
-            },
-            "end": "<|end|>"
-        }],
+        "type": "triggered_tags",
+        "tags": [
+            {
+                "begin": "<|channel|>analysis<|message|>",
+                "content": {"type": "any_text"},
+                "end": "<|end|>",
+            }
+        ],
         "triggers": ["<|channel|>analysis"],
-        "stop_after_first":
-        False
-    }
+        "stop_after_first": False,
+    },
 }
 
 
 def from_builtin_tool_to_tag(tool: str) -> list[dict]:
-    tag = [{
-        "begin": f"<|channel|>commentary to={tool}",
-        "content": {
-            "type": "any_text"
+    tag = [
+        {
+            "begin": f"<|channel|>commentary to={tool}",
+            "content": {"type": "any_text"},
+            "end": "<|end|>",
         },
-        "end": "<|end|>"
-    }, {
-        "begin": f"<|channel|>analysis to={tool}",
-        "content": {
-            "type": "any_text"
+        {
+            "begin": f"<|channel|>analysis to={tool}",
+            "content": {"type": "any_text"},
+            "end": "<|end|>",
         },
-        "end": "<|end|>"
-    }]
+    ]
     return tag
 
 
 def tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tool_list: list[str]) -> dict:
     import copy
+
     new_tag = copy.deepcopy(no_func_reaonsing_tag)
     new_tag["format"]["triggers"].append("<|channel|>commentary to=")
 
@@ -130,9 +128,9 @@ class GptOssReasoningParser(ReasoningParser):
         )
 
     # This function prepares the structural tag to format reasoning output
-    def prepare_structured_tag(self, original_tag: Optional[str],
-                               tool_server: Optional[ToolServer]) -> str:
-
+    def prepare_structured_tag(
+        self, original_tag: Optional[str], tool_server: Optional[ToolServer]
+    ) -> str:
         if original_tag is None:
             if tool_server is None:
                 return json.dumps(no_func_reaonsing_tag)
@@ -147,14 +145,14 @@ class GptOssReasoningParser(ReasoningParser):
 
                 if len(builtin_tool_list) > 0:
                     logger.info("Builtin_tool_list: %s", builtin_tool_list)
-                    func_tag = json.dumps( \
-                        tag_with_builtin_funcs(no_func_reaonsing_tag, \
-                            builtin_tool_list))
+                    func_tag = json.dumps(
+                        tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tool_list)
+                    )
                 else:
                     logger.info("Builtin_tool_list is empty")
                     func_tag = json.dumps(no_func_reaonsing_tag)
 
                 return func_tag
         else:
-            #TODO (Hanchen)add reasoning tags on top of original in the future
+            # TODO (Hanchen)add reasoning tags on top of original in the future
             return original_tag
