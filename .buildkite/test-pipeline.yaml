@@ -834,6 +834,8 @@ steps:
     - pytest -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
+    - pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
+    - pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
 
 - label: Blackwell GPT-OSS Eval
   timeout_in_minutes: 60
