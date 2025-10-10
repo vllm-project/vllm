@@ -913,12 +913,17 @@ class InputBatch:
             prev_index = self.prev_req_id_to_index.get(req_id)
             if prev_index is None:
                 continue
+            req_output_token_ids = output_token_ids[index]
+            if req_output_token_ids[-1] != -1:
+                # Final output id is not a placeholder, some tokens must have
+                # been discarded after a kv-load failure.
+                continue
             if sampled_token_ids is None:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()
                 sampled_token_ids = self.sampled_token_ids_cpu.squeeze(-1).tolist()
             # Replace placeholder token id with actual sampled id.
-            output_token_ids[index][-1] = sampled_token_ids[prev_index]
+            req_output_token_ids[-1] = sampled_token_ids[prev_index]
 
     @property
     def num_reqs(self) -> int:
