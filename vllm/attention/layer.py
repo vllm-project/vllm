@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 
-from typing import Callable, Optional, cast, Union
+from typing import Callable, Optional, cast
 
 import torch
 import torch.nn as nn
@@ -702,12 +702,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 attn_metadata, "enable_kv_scales_calculation", False
             ):
                 self.calc_kv_scales(q, kv_c_normed, k_pe)
+            q_nope, q_rope = torch.split(
+                q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+            q_tuple = (q_nope, q_rope)
 
             if self.attn_backend.accept_output_buffer:
                 output = torch.zeros(output_shape, dtype=q.dtype, device=q.device)
                 self.impl.forward(
                     self,
-                    q,
+                    q_tuple,
                     kv_c_normed,
                     k_pe,
                     self_kv_cache,
@@ -717,17 +721,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 return output
             else:
                 return self.impl.forward(
-                    self, q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
+                    self, q_tuple, kv_c_normed, k_pe, self_kv_cache, attn_metadata
                 )
+
         else:
+            q_nope, q_rope = torch.split(
+                q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+            q_tuple = (q_nope, q_rope)
             if self.attn_backend.accept_output_buffer:
                 output = torch.zeros(output_shape, dtype=q.dtype, device=q.device)
-                # Pass (q_nope, q_rope) tuple across the op boundary
-                q_nope, q_rope = torch.split(
-                    q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-                )
                 torch.ops.vllm.unified_mla_attention_with_output(
-                    (q_nope, q_rope),
+                    q_tuple,
                     kv_c_normed,
                     k_pe,
                     output,
@@ -743,15 +748,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         attn_metadata = attn_metadata[self.layer_name]
                     if getattr(attn_metadata, "enable_kv_scales_calculation", False):
                         self.calc_kv_scales(q, kv_c_normed, k_pe)
-                # Pass (q_nope, q_rope) tuple across the op boundary
-                q_nope, q_rope = torch.split(
-                    q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-                )
                 return torch.ops.vllm.unified_mla_attention(
-                    (q_nope, q_rope),
-                    kv_c_normed,
-                    k_pe,
-                    self.layer_name,
+                    q_tuple, kv_c_normed, k_pe, self.layer_name
                 )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -943,7 +941,7 @@ direct_register_custom_op(
 
 
 def unified_mla_attention(
-    q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+    q: tuple[torch.Tensor, torch.Tensor],
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
@@ -963,14 +961,18 @@ def unified_mla_attention(
 
 
 def unified_mla_attention_fake(
-    q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+    q: tuple[torch.Tensor, torch.Tensor],
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    if isinstance(q, tuple):
-        q = torch.cat(q, dim=-1)
-    return torch.empty_like(q).contiguous()
+    forward_context: ForwardContext = get_forward_context()
+    layer = forward_context.no_compile_layers.get(layer_name)
+    q_nope, _ = q
+    if layer is None:
+        return torch.empty_like(torch.cat(q, dim=-1)).contiguous()
+    output_shape = (*q_nope.shape[:-1], layer.num_heads * layer.v_head_dim)
+    return torch.empty(output_shape, dtype=q_nope.dtype, device=q_nope.device)
 
 
 direct_register_custom_op(
@@ -983,7 +985,7 @@ direct_register_custom_op(
 
 
 def unified_mla_attention_with_output(
-    q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+    q: tuple[torch.Tensor, torch.Tensor],
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     output: torch.Tensor,
@@ -1014,7 +1016,7 @@ def unified_mla_attention_with_output(
 
 
 def unified_mla_attention_with_output_fake(
-    q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+    q: tuple[torch.Tensor, torch.Tensor],
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     output: torch.Tensor,
