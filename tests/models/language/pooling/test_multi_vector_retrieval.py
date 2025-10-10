@@ -32,6 +32,7 @@ def test_embed_models(hf_runner, vllm_runner, example_prompts, model: str, dtype
             inputs = hf_model.wrap_device(inputs)
             output = hf_model.model(**inputs)
             embedding = output.last_hidden_state[0].float()
+            # normal
             hf_outputs.append(embedding.cpu())
 
     for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):

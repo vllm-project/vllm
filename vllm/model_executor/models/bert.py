@@ -675,7 +675,7 @@ class BertForTokenClassification(nn.Module):
         self.pooler = DispatchPooler(
             {
                 "token_classify": Pooler.for_token_classify(
-                    pooler_config=pooler_config, classifier=self.classifier
+                    pooler_config=pooler_config
                 ),
             }
         )

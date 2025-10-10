@@ -148,7 +148,7 @@ def test_multi_vector_retrieval_models_using_normalize(
         dtype=dtype,
         pooler_config=PoolerConfig(normalize=False),
     ) as vllm_model:
-        wo_normalize = vllm_model.encode(example_prompts)
+        wo_normalize = vllm_model.token_embed(example_prompts)
 
     with vllm_runner(
         model,
@@ -156,7 +156,7 @@ def test_multi_vector_retrieval_models_using_normalize(
         dtype=dtype,
         pooler_config=PoolerConfig(normalize=True),
     ) as vllm_model:
-        w_normalize = vllm_model.encode(example_prompts)
+        w_normalize = vllm_model.token_embed(example_prompts)
 
     for wo, w in zip(wo_normalize, w_normalize):
         assert not torch.allclose(wo, w, atol=1e-2), (

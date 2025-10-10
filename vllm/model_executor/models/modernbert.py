@@ -413,7 +413,9 @@ class ModernBertForTokenClassification(nn.Module):
 
         self.pooler = DispatchPooler(
             {
-                "token_embed": Pooler.for_token_embed(pooler_config),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config=pooler_config
+                ),
             }
         )
 
