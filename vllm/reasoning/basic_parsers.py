@@ -58,21 +58,13 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 "think start/end tokens in the tokenizer!"
             )
 
-        self._last_checked_pos = 0
-        self._reasoning_end_found = False
-
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        if self._reasoning_end_found:
-            self._last_checked_pos = len(input_ids)
-            return True
-        for idx in range(self._last_checked_pos, len(input_ids)):
-            if input_ids[idx] == self.end_token_id:
-                self._reasoning_end_found = True
-                self._last_checked_pos = len(input_ids)
+        if not input_ids:
+            return False
+        for i in range(len(input_ids) - 1, -1, -1):
+            if input_ids[i] == self.end_token_id:
                 return True
-        self._last_checked_pos = len(input_ids)
         return False
-
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
         Extract the content after the end tokens
