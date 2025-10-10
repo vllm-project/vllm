@@ -45,6 +45,7 @@ class Scheduler(SchedulerInterface):
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
+        block_size: int,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
@@ -101,15 +102,8 @@ class Scheduler(SchedulerInterface):
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
 
-        self.block_size = self.cache_config.block_size
-
+        self.block_size = block_size
         self.dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        # Note(hc): The scheduler’s block_size must be multiplied
-        # by dcp_world_size, since block hashes are computed on the
-        # original full token sequence at a granularity of
-        # original_block_size × dcp_world_size.
-        if self.dcp_world_size > 1:
-            self.block_size *= self.dcp_world_size
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
