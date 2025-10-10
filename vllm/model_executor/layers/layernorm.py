@@ -195,7 +195,10 @@ class RMSNorm(CustomOp):
         orig_dtype = x.dtype
         x = x.to(torch.float32)
         if residual is not None:
-            x = x + residual.to(torch.float32)
+            # residual promoted f16->f32 automatically,
+            # otherwise Inductor eliminates the casts to and from f16,
+            # increasing memory usage (and complicating pattern matching)
+            x = x + residual
             residual = x.to(orig_dtype)
 
         if x.shape[-1] != hidden_size:

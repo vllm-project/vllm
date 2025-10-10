@@ -5,7 +5,9 @@ import pytest
 import torch
 
 import vllm.plugins
-from vllm.compilation.fusion import RMSNormQuantFusionPass
+from vllm.compilation.fusion import FUSED_OPS, FusedRMSQuantKey, RMSNormQuantFusionPass
+from vllm.compilation.fx_utils import find_op_nodes
+from vllm.compilation.matcher_utils import QUANT_OPS
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (
@@ -33,6 +35,9 @@ from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
+RMS_OP = torch.ops._C.rms_norm.default
+RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
+
 
 class TestModel(torch.nn.Module):
     def __init__(
@@ -50,7 +55,7 @@ class TestModel(torch.nn.Module):
         self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
         group_shape = GroupShape.PER_TENSOR if static else GroupShape.PER_TOKEN
         quant_scale = ScaleDesc(torch.float32, static, group_shape)
-        self.key = QuantKey(dtype=FP8_DTYPE, scale=quant_scale, symmetric=True)
+        self.quant_key = QuantKey(dtype=FP8_DTYPE, scale=quant_scale, symmetric=True)
         if static:
             self.scale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
         else:
@@ -92,6 +97,22 @@ class TestModel(torch.nn.Module):
 
         y4, resid = self.norm[3](x4, resid)  # use resid here
         return y4
+
+    def ops_in_model_after(self):
+        return [
+            FUSED_OPS[FusedRMSQuantKey(self.quant_key, True)],
+            FUSED_OPS[FusedRMSQuantKey(self.quant_key, False)],
+        ]
+
+    def ops_in_model_before(self):
+        return (
+            [QUANT_OPS[self.quant_key]]
+            if self.enable_quant_fp8
+            else [torch.ops.aten.reciprocal]
+        )
+
+    def ops_in_model_before_partial(self):
+        return [RMS_OP, RMS_ADD_OP] if self.enable_rms_norm else [torch.ops.aten.rsqrt]
 
 
 @pytest.mark.parametrize("dtype", [torch.float16])  # , torch.bfloat16])
@@ -164,3 +185,18 @@ def test_fusion_rmsnorm_quant(
         torch.testing.assert_close(result, result2, atol=ATOL, rtol=RTOL)
 
         assert fusion_pass.matched_count == 3
+        backend.check_before_ops(model.ops_in_model_before())
+        backend.check_before_ops(
+            model.ops_in_model_before_partial(), fully_replaced=False
+        )
+        backend.check_after_ops(model.ops_in_model_after())
+
+        # If RMSNorm custom op is disabled (native/torch impl used),
+        # there's a risk that the fused add doesn't get included in the
+        # replacement and only the rms part gets fused with quant.
+        # Hence, we check only 2 add nodes are left (final fused rmsnorm add).
+        if not enable_rms_norm:
+            n_add_nodes = lambda g: sum(1 for _ in find_op_nodes(torch.ops.aten.add, g))
+            # 7 = 1 (RMS) + 3x2 (3xRMS_ADD, 2 each)
+            assert n_add_nodes(backend.graph_pre_pass) == 7
+            assert n_add_nodes(backend.graph_post_pass) == 2

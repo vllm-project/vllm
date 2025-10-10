@@ -94,9 +94,6 @@ class RMSNormQuantPattern:
         self.epsilon = epsilon
         self.quant_dtype = key.quant.dtype
 
-        assert key.quant in QUANT_OPS, f"unsupported quantization scheme {key.quant}"
-        self.QUANT_OP = QUANT_OPS[key.quant]
-
         assert key in FUSED_OPS, f"unsupported fused rmsnorm+quant op for {key}"
         self.FUSED_OP = FUSED_OPS[key]
 
@@ -334,22 +331,24 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             pass_name="rmsnorm_quant_fusion_pass"
         )
 
+        # Make sure fused add patterns are before simple rms norm,
+        # as the latter is a subset of the former in torch ops
         for epsilon in [1e-5, 1e-6]:
-            # Fuse rms_norm + static fp8 quant
-            RMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
-
             # Fuse fused_add_rms_norm + static fp8 quant
             FusedAddRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
                 self.patterns
             )
 
-            # Fuse rms_norm + dynamic per-token fp8 quant
-            RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
+            # Fuse rms_norm + static fp8 quant
+            RMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
 
             # Fuse fused_add_rms_norm + dynamic per-token fp8 quant
             FusedAddRMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(
                 self.patterns
             )
+
+            # Fuse rms_norm + dynamic per-token fp8 quant
+            RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
