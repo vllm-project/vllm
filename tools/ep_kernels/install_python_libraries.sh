@@ -15,12 +15,10 @@ NVSHMEM_VER=3.3.9
 
 pushd "$WORKSPACE"
 
-# configurable pip command (default: pip3)
-PIP_CMD=${PIP_CMD:-pip3}
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 
 # install dependencies if not installed
-$PIP_CMD install cmake torch ninja
+uv pip install cmake torch ninja
 
 # fetch nvshmem
 ARCH=$(uname -m)
@@ -107,10 +105,10 @@ do_build() {
 
     if [ "$MODE" = "install" ]; then
         echo "Installing $name into environment"
-        eval "$extra_env" $PIP_CMD install --no-build-isolation -vvv .
+        eval "$extra_env" uv pip install --no-build-isolation -vvv .
     else
         echo "Building $name wheel into $WHEEL_DIR"
-        eval "$extra_env" pip3 wheel --no-build-isolation -vvv . -w "$WHEEL_DIR"
+        eval "$extra_env" uv build --wheel --no-build-isolation -vvv --out-dir "$WHEEL_DIR" .
     fi
     popd
 }
