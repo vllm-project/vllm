@@ -737,7 +737,9 @@ class Scheduler(SchedulerInterface):
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
             num_computed_tokens.append(req.num_computed_tokens)
-            num_output_tokens.append(req.num_output_tokens)
+            num_output_tokens.append(
+                req.num_output_tokens + req.num_output_placeholders
+            )
 
         return CachedRequestData(
             req_ids=req_ids,
