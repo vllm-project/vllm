@@ -27,47 +27,46 @@ import huggingface_hub
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
+from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm.config import (
-    BlockSize,
     CacheConfig,
-    CacheDType,
     CompilationConfig,
     ConfigType,
-    ConvertOption,
-    DetailedTraceModules,
-    Device,
     DeviceConfig,
-    DistributedExecutorBackend,
     EPLBConfig,
-    HfOverrides,
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
-    LogprobsMode,
     LoRAConfig,
-    MambaDType,
-    MMEncoderTPMode,
     ModelConfig,
-    ModelDType,
+    MultiModalConfig,
     ObservabilityConfig,
     ParallelConfig,
     PoolerConfig,
-    PrefixCachingHashAlgo,
-    RunnerOption,
     SchedulerConfig,
-    SchedulerPolicy,
     SpeculativeConfig,
     StructuredOutputsConfig,
-    TaskOption,
-    TokenizerMode,
     VllmConfig,
     get_attr_docs,
 )
-from vllm.config.multimodal import MMCacheType, MultiModalConfig
-from vllm.config.parallel import ExpertPlacementStrategy
+from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
+from vllm.config.device import Device
+from vllm.config.model import (
+    ConvertOption,
+    HfOverrides,
+    LogprobsMode,
+    ModelDType,
+    RunnerOption,
+    TaskOption,
+    TokenizerMode,
+)
+from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
+from vllm.config.observability import DetailedTraceModules
+from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
+from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -211,6 +210,13 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Get the default value of the field
         if field.default is not MISSING:
             default = field.default
+            # Handle pydantic.Field defaults
+            if isinstance(default, FieldInfo):
+                default = (
+                    default.default
+                    if default.default_factory is None
+                    else default.default_factory()
+                )
         elif field.default_factory is not MISSING:
             default = field.default_factory()
 
@@ -365,6 +371,9 @@ class EngineArgs:
     enable_dbo: bool = ParallelConfig.enable_dbo
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
+    disable_nccl_for_dp_synchronization: bool = (
+        ParallelConfig.disable_nccl_for_dp_synchronization
+    )
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
     expert_placement_strategy: ExpertPlacementStrategy = (
@@ -430,7 +439,6 @@ class EngineArgs:
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
-    enable_lora_bias: bool = LoRAConfig.bias_enabled
     max_loras: int = LoRAConfig.max_loras
     max_lora_rank: int = LoRAConfig.max_lora_rank
     default_mm_loras: Optional[dict[str, str]] = LoRAConfig.default_mm_loras
@@ -443,7 +451,7 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[int] = CacheConfig.num_gpu_blocks_override
     num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
-    ignore_patterns: Optional[Union[str, list[str]]] = LoadConfig.ignore_patterns
+    ignore_patterns: Union[str, list[str]] = get_field(LoadConfig, "ignore_patterns")
 
     enable_chunked_prefill: Optional[bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
@@ -760,6 +768,10 @@ class EngineArgs:
             "--dbo-prefill-token-threshold",
             **parallel_kwargs["dbo_prefill_token_threshold"],
         )
+        parallel_group.add_argument(
+            "--disable-nccl-for-dp-synchronization",
+            **parallel_kwargs["disable_nccl_for_dp_synchronization"],
+        )
         parallel_group.add_argument("--enable-eplb", **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--eplb-config", **parallel_kwargs["eplb_config"])
         parallel_group.add_argument(
@@ -903,7 +915,6 @@ class EngineArgs:
             action=argparse.BooleanOptionalAction,
             help="If True, enable handling of LoRA adapters.",
         )
-        lora_group.add_argument("--enable-lora-bias", **lora_kwargs["bias_enabled"])
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank", **lora_kwargs["max_lora_rank"])
         lora_group.add_argument(
@@ -1314,7 +1325,13 @@ class EngineArgs:
             import ray
 
             ray_runtime_env = ray.get_runtime_context().runtime_env
-            logger.info("Using ray runtime env: %s", ray_runtime_env)
+            # Avoid logging sensitive environment variables
+            sanitized_env = ray_runtime_env.to_dict() if ray_runtime_env else {}
+            if "env_vars" in sanitized_env:
+                sanitized_env["env_vars"] = {
+                    k: "***" for k in sanitized_env["env_vars"]
+                }
+            logger.info("Using ray runtime env (env vars redacted): %s", sanitized_env)
 
         # Get the current placement group if Ray is initialized and
         # we are in a Ray actor. If so, then the placement group will be
@@ -1437,6 +1454,7 @@ class EngineArgs:
             enable_dbo=self.enable_dbo,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
+            disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
             expert_placement_strategy=self.expert_placement_strategy,
@@ -1495,7 +1513,6 @@ class EngineArgs:
 
         lora_config = (
             LoRAConfig(
-                bias_enabled=self.enable_lora_bias,
                 max_lora_rank=self.max_lora_rank,
                 max_loras=self.max_loras,
                 default_mm_loras=self.default_mm_loras,
@@ -1623,6 +1640,7 @@ class EngineArgs:
             "TREE_ATTN",
             "XFORMERS",
             "ROCM_ATTN",
+            "ROCM_AITER_UNIFIED_ATTN",
         ]
         if (
             envs.is_set("VLLM_ATTENTION_BACKEND")
