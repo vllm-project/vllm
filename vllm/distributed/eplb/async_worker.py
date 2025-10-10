@@ -32,8 +32,8 @@ def start_async_worker(
     device_index = state.cuda_device_index
 
     def thread_target() -> None:
-        if device_index is not None:
-            torch.cuda.set_device(device_index)
+        assert device_index is not None
+        torch.cuda.set_device(device_index)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
