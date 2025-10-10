@@ -233,6 +233,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             #    k = hidden_size
             # In down_proj
             #    n = hidden_size
+            
             #    k = intermediate_size_per_partition_after_pad
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 128
@@ -734,29 +735,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
 
-    def _get_tile_tokens_dim(self, x: torch.Tensor, top_k: int):
-        # Number of tokens in the input tensor.
-        num_tokens = x.shape[0]
-        # Factor to account for the imbalance of the experts.
-        # factor equals to the
-        # max_real_num_tokens_per_expert / perfect_num_tokens_per_expert
-        # - 1.0 means perfect expert distribution.
-        # - > 1.0 means some experts have more
-        #     tokens than the perfect distribution.
-        # - < 1.0 does not make sense.
-        imbalance_factor = 1.3
-        # Calculate the number of tokens per expert
-        # assuming perfect distribution.
-        num_tokens_per_expert = (num_tokens * top_k) // self.num_experts
-        # Apply the imbalance factor.
-        num_tokens_per_expert = int(num_tokens_per_expert * imbalance_factor)
-        # And pad the number to the next power of 2.
-        tile_tokens_dim = next_power_of_2(num_tokens_per_expert)
-        # Cap to 8-64 tokens per CTA tile
-        # as it's the range supported by the kernel.
-        tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
-
-        return tile_tokens_dim
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -1026,7 +1004,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 layer.ep_rank * layer.local_num_experts,  # local_expert_offset
                 self.num_experts,  # local num experts
                 None,
-                self._get_tile_tokens_dim(x, top_k),
+                None,
                 1 if renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
                 tune_max_num_tokens=self.max_capture_size,

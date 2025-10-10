@@ -1121,15 +1121,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         return out.view(*output_shape)
 
 
-def _get_tile_tokens_dim(num_tokens: int, top_k: int, num_experts: int) -> int:
-    # Guess tokens per expert assuming perfect expert distribution first.
-    num_tokens_per_expert = (num_tokens * top_k) // num_experts
-    # And pad the number to the next power of 2.
-    tile_tokens_dim = next_power_of_2(num_tokens_per_expert)
-    # Cap to 8-64 tokens per CTA tile as it's the range supported by the kernel.
-    tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
-    return tile_tokens_dim
-
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     """
@@ -1672,9 +1663,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 local_expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=layer.local_num_experts,
                 routed_scaling_factor=None,
-                tile_tokens_dim=_get_tile_tokens_dim(
-                    x.shape[0], top_k, layer.local_num_experts
-                ),
+                tile_tokens_dim=None,
                 routing_method_type=routing_method_type,
                 do_finalize=True,
             )[0]
