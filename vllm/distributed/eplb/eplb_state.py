@@ -669,10 +669,10 @@ class EplbState:
                     " (profile) " if is_profile else " ",
                     time_end - time_start,
                 )
-        self.rebalanced = True
 
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
+            self.rebalanced = True
             self.layer_to_transfer = 0  # Reset for new rearrangement
             self.pending_global_ready_check = True
             self.rearrange_event.set()
