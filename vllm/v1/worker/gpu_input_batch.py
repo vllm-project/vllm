@@ -914,7 +914,7 @@ class InputBatch:
             if prev_index is None:
                 continue
             req_output_token_ids = output_token_ids[index]
-            if req_output_token_ids[-1] != -1:
+            if not req_output_token_ids or req_output_token_ids[-1] != -1:
                 # Final output id is not a placeholder, some tokens must have
                 # been discarded after a kv-load failure.
                 continue
