@@ -98,16 +98,26 @@ class LoRALayerWeights:
         lora_b = torch.zeros(
             [output_dim, rank], dtype=dtype, device=device, pin_memory=pin_memory
         )
-        embeddings_tensor = None
-        if embeddings_tensor_dim is not None:
-            embeddings_tensor = torch.zeros(
-                [embeddings_tensor_dim, input_dim],
+
+        embeddings_tensor = (
+            torch.rand(
+                10,
+                embeddings_tensor_dim,
                 dtype=dtype,
                 device=device,
                 pin_memory=pin_memory,
             )
-        # embeddings_tensor is created above if embeddings_tensor_dim is not None
-        return cls(module_name, rank, 1, lora_a, lora_b, embeddings_tensor)
+            if embeddings_tensor_dim
+            else None
+        )
+        return cls(
+            module_name,
+            rank=rank,
+            lora_alpha=1,
+            lora_a=lora_a,
+            lora_b=lora_b,
+            embeddings_tensor=embeddings_tensor,
+        )
 
 
 class PackedLoRALayerWeights(LoRALayerWeights):
