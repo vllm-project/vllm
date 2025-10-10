@@ -384,7 +384,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system /tmp/deepgemm/dist/*.whl
 
 COPY --from=build /tmp/ep_kernels_workspace/nvshmem /opt/nvshmem
-RUN find /opt/nvshmem -name '*.a' -delete
 ENV LD_LIBRARY_PATH=/opt/nvshmem/lib:$LD_LIBRARY_PATH
 
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
