@@ -63,13 +63,13 @@ if [ -z "$CUDA_VERSION" ]; then
     fi
 fi
 
-# Extract major/minor
+# Extract major and minor version numbers
 CUDA_MAJOR="${CUDA_VERSION%%.*}"
 CUDA_MINOR="${CUDA_VERSION#${CUDA_MAJOR}.}"
 CUDA_MINOR="${CUDA_MINOR%%.*}"
 echo "CUDA version: $CUDA_VERSION (major: $CUDA_MAJOR, minor: $CUDA_MINOR)"
 
-# Check requirement
+# Check CUDA version requirement
 if [ "$CUDA_MAJOR" -lt 12 ] || { [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -lt 8 ]; }; then
     echo "Skipping DeepGEMM build/installation (requires CUDA 12.8+ but got ${CUDA_VERSION})"
     exit 0
@@ -91,6 +91,7 @@ pushd "$INSTALL_DIR/deepgemm"
 git checkout "$DEEPGEMM_GIT_REF"
 
 # Clean previous build artifacts
+# (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
 rm -rf build dist *.egg-info
 
 # Build wheel
