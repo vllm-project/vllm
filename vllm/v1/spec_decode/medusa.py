@@ -33,6 +33,7 @@ class MedusaProposer:
             draft_model_config.get_hidden_size(
         )
         self.dtype = vllm_config.model_config.dtype
+        self.num_speculative_tokens = None
 
     def propose(
         self,

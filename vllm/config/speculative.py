@@ -36,6 +36,41 @@ SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
 MTP_MODEL_TYPES = ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp", "ernie_mtp",
                    "qwen3_next_mtp", "longcat_flash_mtp")
 
+@dataclass
+class DynamicSpeculativeConfig:
+    """A mapping from batch size to optimal number of drafts to use for that
+    batch size. This is used to dynamically adjust the number of drafts used
+    based on the current batch size."""
+    optimal_num_speculative_tokens: dict[int, int] = None
+    
+    """Whether the statistics are updated online or not during inference."""
+    is_online: bool = False
+
+    """ 
+    Batch statistics for different batch sizes and number of drafts.
+    The structure is as follows:
+    {
+        batch_size: {
+            num_drafts: itl (i.e., inter token latency in ms)
+        }
+    }
+
+    e.g., 
+    { 
+      1: { 0: 6.87, 3: 9.41, 5: 10.8},
+      4: { 0: 7.3, 3: 9.95, 5: 11.59},
+    }
+
+    where bs 1 at K=3 has itl 9.41ms. K=0 means no speculative decoding.
+    """
+    batch_stats: dict[int, dict[int, float]] = None
+
+    """Maximum number of speculative tokens supported in the statistics."""
+    max_num_speculative_tokens: int = None
+
+    """Acceptance rate per position on an offline dataset."""
+    acceptance_rate_per_pos: list[float] = None
+    
 
 @config
 @dataclass
@@ -116,6 +151,10 @@ class SpeculativeConfig:
     disable_log_stats: SkipValidation[bool] = None  # type: ignore
     """Whether to disable the periodic printing of stage times in speculative
     decoding."""
+
+    # dynamic speculative decoding control
+    """Configuration for dynamic speculative decoding, if provided."""
+    dynamic_config: Optional[DynamicSpeculativeConfig] = None
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore

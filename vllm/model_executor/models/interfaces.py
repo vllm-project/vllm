@@ -906,6 +906,35 @@ def supports_v0_only(
 
 
 @runtime_checkable
+class SpeculativeDecodingProposer(Protocol):
+    """The interface required for all models that support speculative decoding
+    proposer."""
+
+    """Number of speculative tokens to propose."""
+    num_speculative_tokens: int
+
+    def propose(
+        self,
+        *args,
+        **kwargs: object,
+    ) -> Union[torch.Tensor, list[list[int]]]:
+        """
+        Propose multiple tokens for speculative decoding.
+
+        Args:
+            input_ids: Input token IDs of shape (batch_size, seq_len).
+            attention_mask: Optional attention mask of shape
+                (batch_size, seq_len).
+            **kwargs: Additional model-specific arguments.
+
+        Returns:
+            A tensor of shape (batch_size, num_proposed_tokens) or a list of
+            lists of token IDs, where each inner list contains the proposed
+            token IDs for the corresponding batch item.
+        """
+        ...
+
+@runtime_checkable
 class SupportsEagle3(Protocol):
     """The interface required for models that support 
     EAGLE3 speculative decoding."""

@@ -97,6 +97,7 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.dynamic import DynamicSpeculativeDecodingManager
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -296,6 +297,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 raise ValueError("Unknown speculative decoding method: "
                                  f"{self.speculative_config.method}")
             self.rejection_sampler = RejectionSampler()
+
+            # setup Dynamic Speculative Decoding
+            self.dynamic_sd_manager = DynamicSpeculativeDecodingManager(
+                self.speculative_config.dynamic_config, 
+                self.vllm_config.scheduler_config.max_num_seqs,
+                self.vllm_config.speculative_config.num_speculative_tokens)
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -2568,11 +2575,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         common_attn_metadata: CommonAttentionMetadata,
     ) -> Union[list[list[int]], torch.Tensor]:
+
+        optimal_num_speculative_tokens = None
+        if self.dynamic_sd_manager:
+            batch_size = self.input_batch.num_reqs
+            optimal_num_speculative_tokens = self.dynamic_sd_manager.\
+                get_optimal_num_speculative_tokens(
+                    self.input_batch.num_reqs
+                )
+            
+            # REMOVE
+            print(f"Batch size: {batch_size}, "
+                  f"Optimal num speculative tokens: {optimal_num_speculative_tokens}")
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.drafter.propose(
+                optimal_num_speculative_tokens,
                 sampled_token_ids, self.input_batch.req_ids,
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
@@ -2677,6 +2698,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 mm_embed_inputs = None
 
             draft_token_ids = self.drafter.propose(
+                optimal_num_speculative_tokens=optimal_num_speculative_tokens,
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,

@@ -34,13 +34,14 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+from vllm.vllm.model_executor.models.interfaces import SpeculativeDecodingProposer
 
 logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
 
 
-class EagleProposer:
+class EagleProposer(SpeculativeDecodingProposer):
 
     def __init__(
         self,
@@ -177,6 +178,7 @@ class EagleProposer:
 
     def propose(
         self,
+        optimal_num_speculative_tokens: Optional[int],
         # [num_tokens]
         target_token_ids: torch.Tensor,
         # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
@@ -191,6 +193,10 @@ class EagleProposer:
         mm_embed_inputs: Optional[tuple[list[torch.Tensor],
                                         torch.Tensor]] = None,
     ) -> torch.Tensor:
+        # Use optimal num speculative tokens if provided
+        if optimal_num_speculative_tokens is not None:
+            self.num_speculative_tokens = optimal_num_speculative_tokens
+
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
 
