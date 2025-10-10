@@ -85,7 +85,7 @@ class SchedulerConfig:
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 
-    is_encoder_decoder: bool = False
+    is_encoder_decoder: bool = Field(default=False, init_var=True)
     """True if the model is an encoder-decoder model.
 
     Note: This is stored in the ModelConfig, and is used only here to
@@ -168,9 +168,9 @@ class SchedulerConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @model_validator(mode="after")
-    def _validate_scheduler_config(self) -> Self:
-        if self.is_encoder_decoder:
+    def __post_init__(self, is_encoder_decoder: bool) -> None:
+        """Post init to handle init vars."""
+        if is_encoder_decoder:
             # Chunked prefill should be disabled for encoder-decoder models.
             self.disable_chunked_mm_input = True
             self.chunked_prefill_enabled = False
@@ -181,6 +181,8 @@ class SchedulerConfig:
                 " prefix caching; disabling both."
             )
 
+    @model_validator(mode="after")
+    def _validate_scheduler_config(self) -> Self:
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
                 self.max_num_batched_tokens = DEFAULT_MAX_NUM_BATCHED_TOKENS
