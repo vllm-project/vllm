@@ -29,6 +29,7 @@ from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
 from vllm.logging_utils import lazy
 
+from .caching import VllmSerializableFunction
 from .compiler_interface import (
     CompilerInterface,
     EagerAdaptor,
@@ -199,6 +200,7 @@ class CompilerManager:
                 # there can be multiple graphs due to piecewise compilation.
                 now = time.time()
                 elapsed = now - compilation_start_time
+                compilation_config.compilation_time += elapsed
                 if runtime_shape is None:
                     logger.info(
                         "Directly load the compiled graph(s) for dynamic shape "
@@ -553,7 +555,11 @@ class VllmBackend:
                 self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
-    def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
+    def __call__(
+        self, graph: fx.GraphModule, example_inputs
+    ) -> VllmSerializableFunction:
+        from .caching import _compute_code_hash, compilation_config_hash_factors
+
         vllm_config = self.vllm_config
         # Minimal hashing here with existing utilities, reused below.
         from vllm.config.utils import hash_factors as _hash_factors
@@ -730,7 +736,9 @@ class VllmBackend:
             self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
             or not self.compilation_config.cudagraph_copy_inputs
         ):
-            return self.split_gm
+            return VllmSerializableFunction(
+                graph, example_inputs, self.prefix, self.split_gm
+            )
 
         # if we need to copy input buffers for cudagraph
         from torch._guards import detect_fake_mode
