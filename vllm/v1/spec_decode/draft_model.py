@@ -34,6 +34,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         self._raise_if_multimodal()
         self._raise_if_mrope()
         self._raise_if_padded_drafter_batch()
+        self._raise_if_vocab_size_mismatch()
 
     def propose(
         self,
@@ -100,6 +101,9 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 "padded drafter batch yet. Please pass --disable-padded-drafter-batch "
                 "in the speculative config."
             )
+
+    def _raise_if_vocab_size_mismatch(self):
+        self.vllm_config.speculative_config.verify_equal_vocab_size_if_draft_model()
 
     def _model_kwargs(self, num_tokens: int) -> dict[str, Any]:
         return {
