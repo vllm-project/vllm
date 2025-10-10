@@ -1,0 +1,52 @@
+# Study 2: Does head count matter for FlashAttn MLA vs FlashMLA on Hopper?
+# Question: Which backend performs better on Hopper GPUs (SM90+)?
+# Question: Does the number of attention heads affect relative performance?
+
+description: "FlashAttn MLA vs FlashMLA head count comparison on Hopper"
+
+# Compare these two Hopper backends
+backends:
+  - flash_attn_mla
+  - flashmla
+
+# Standard decode workloads
+batch_specs:
+  - "32s1k"     # 32 decode requests, 1k KV cache
+  - "64s1k"     # 64 decode requests, 1k KV cache
+  - "64s4k"     # 64 decode requests, 4k KV cache
+  - "128s1k"    # 128 decode requests, 1k KV cache
+  - "128s4k"    # 128 decode requests, 4k KV cache
+
+# Model configuration - will test different head counts
+# Note: You'll need to run this multiple times with different num_q_heads values
+# Or modify benchmark.py to support head_counts parameter
+model:
+  num_layers: 10
+  head_dim: 576        # MLA uses 576
+  num_q_heads: 128     # Test with: 16, 32, 64, 128, 256
+  num_kv_heads: 1      # MLA uses single KV head
+  block_size: 128
+
+# Benchmark settings
+benchmark:
+  device: "cuda:0"
+  repeats: 10
+  warmup_iters: 5
+  profile_memory: true  # Track memory usage differences
+
+# Output
+output:
+  csv: "study2_hopper_head_count_results.csv"
+  json: "study2_hopper_head_count_results.json"
+
+# To test different head counts, run:
+# for heads in 16 32 64 128 256; do
+#   python benchmark.py --config configs/study2_hopper_head_count.yaml \
+#     --num-q-heads $heads \
+#     --output-csv study2_heads_${heads}.csv
+# done
+
+# Expected outcome:
+# - Determine which backend is faster on Hopper
+# - Identify if head count impacts relative performance
+# - Inform backend selection for DeepSeek V2/V3 models
