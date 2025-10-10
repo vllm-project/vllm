@@ -6,6 +6,12 @@
 python examples/online_serving/pooling/cohere_rerank_client.py
 ```
 
+## Embedding embed_dtype usage
+
+```bash
+python examples/online_serving/pooling/embedding_embed_dtype_client.py
+```
+
 ## Jinaai rerank usage
 
 ```bash
@@ -34,12 +40,6 @@ python examples/online_serving/pooling/openai_classification_client.py
 
 ```bash
 python examples/online_serving/pooling/openai_embedding_client.py
-```
-
-## Openai embedding embed_dtype usage
-
-```bash
-python examples/online_serving/pooling/openai_embedding_embed_dtype_client.py
 ```
 
 ## Openai embedding matryoshka dimensions usage
