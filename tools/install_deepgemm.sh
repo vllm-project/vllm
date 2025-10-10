@@ -79,15 +79,15 @@ echo "Preparing DeepGEMM build..."
 echo "Repository: $DEEPGEMM_GIT_REPO"
 echo "Reference: $DEEPGEMM_GIT_REF"
 
-# Create build dir
+# Create a temporary directory for the build
 INSTALL_DIR=$(mktemp -d)
 trap 'rm -rf "$INSTALL_DIR"' EXIT
 
-# Clone repo
+# Clone the repository
 git clone --recursive --shallow-submodules "$DEEPGEMM_GIT_REPO" "$INSTALL_DIR/deepgemm"
 pushd "$INSTALL_DIR/deepgemm"
 
-# Checkout ref
+# Checkout the specific reference
 git checkout "$DEEPGEMM_GIT_REF"
 
 # Clean previous build artifacts
