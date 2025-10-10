@@ -63,7 +63,7 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_size() -> list[int | MultipleOf]:
         if envs.VLLM_FLASH_ATTN_VERSION == 4:
-            return [MultipleOf(128)]
+            return [128]
         return [MultipleOf(16)]
 
     @classmethod
