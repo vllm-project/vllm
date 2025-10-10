@@ -21,7 +21,6 @@ class TestReasoningStructuredOutput:
         """Create a mock ModelConfig."""
         config = Mock(spec=ModelConfig)
         config.skip_tokenizer_init = True  # Skip tokenizer init to avoid network calls
-        config.need_structured_in_reasoning = False
         config.get_vocab_size = Mock(return_value=50000)
         # Add missing runner_type attribute that tokenizer initialization expects
         config.runner_type = "generate"
@@ -47,6 +46,7 @@ class TestReasoningStructuredOutput:
         config.scheduler_config = mock_scheduler_config
         config.structured_outputs_config = Mock()
         config.structured_outputs_config.reasoning_parser = None
+        config.structured_outputs_config.need_structured_in_reasoning = False
         config.speculative_config = None
         return config
 
@@ -77,7 +77,7 @@ class TestReasoningStructuredOutput:
     ):
         """Test should_fill_bitmask when need_structured_in_reasoning is True."""
         # Enable need_structured_in_reasoning
-        mock_vllm_config.model_config.need_structured_in_reasoning = True
+        mock_vllm_config.structured_outputs_config.need_structured_in_reasoning = True
 
         manager = StructuredOutputManager(mock_vllm_config)
 
@@ -93,7 +93,7 @@ class TestReasoningStructuredOutput:
     ):
         """Test should_fill_bitmask when need_structured_in_reasoning is False."""
         # Keep need_structured_in_reasoning as False (default)
-        assert mock_vllm_config.model_config.need_structured_in_reasoning is False
+        assert mock_vllm_config.structured_outputs_config.need_structured_in_reasoning is False
 
         manager = StructuredOutputManager(mock_vllm_config)
         manager.reasoner = mock_reasoning_parser
@@ -130,7 +130,7 @@ class TestReasoningStructuredOutput:
     ):
         """Test should_advance when need_structured_in_reasoning is True."""
         # Enable need_structured_in_reasoning
-        mock_vllm_config.model_config.need_structured_in_reasoning = True
+        mock_vllm_config.structured_outputs_config.need_structured_in_reasoning = True
 
         manager = StructuredOutputManager(mock_vllm_config)
         manager.reasoner = mock_reasoning_parser

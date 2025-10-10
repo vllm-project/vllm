@@ -73,7 +73,7 @@ class StructuredOutputManager:
                 self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
         self.need_structured_in_reasoning = (
-            self.vllm_config.model_config.need_structured_in_reasoning
+            self.vllm_config.structured_outputs_config.need_structured_in_reasoning
         )
 
     def grammar_init(self, request: Request) -> None:
