@@ -384,6 +384,7 @@ def _test_processing_correctness_one(
         "Qwen/Qwen2.5-Omni-3B",
         "Qwen/Qwen3-VL-4B-Instruct",
         "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         "YannQi/R-4B",
         "Skywork/Skywork-R1V-38B",
         "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
