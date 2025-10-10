@@ -21,10 +21,12 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def start_async_worker(state: "EplbState",
-                       model,
-                       rank_mapping: Optional[dict[int, int]] = None,
-                       is_profile: bool = False) -> threading.Thread:
+def start_async_worker(
+    state: "EplbState",
+    model,
+    rank_mapping: Optional[dict[int, int]] = None,
+    is_profile: bool = False,
+) -> threading.Thread:
     ep_group = get_ep_group().device_group
     rank = ep_group.rank()
     device_index = state.cuda_device_index
@@ -36,12 +38,15 @@ def start_async_worker(state: "EplbState",
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(
-                transfer_run_periodically(state=state,
-                                          model=model,
-                                          ep_group=ep_group,
-                                          is_profile=is_profile,
-                                          rank_mapping=rank_mapping,
-                                          device_index=device_index))
+                transfer_run_periodically(
+                    state=state,
+                    model=model,
+                    ep_group=ep_group,
+                    is_profile=is_profile,
+                    rank_mapping=rank_mapping,
+                    device_index=device_index,
+                )
+            )
         except Exception as exc:  # pragma: no cover - diagnostic path
             logger.exception("async loop error (Rank %d): %s", rank, str(exc))
         finally:
@@ -53,14 +58,18 @@ def start_async_worker(state: "EplbState",
 
 
 async def transfer_run_periodically(
-        state: "EplbState",
-        model,
-        ep_group: ProcessGroup,
-        is_profile: bool = False,
-        rank_mapping: Optional[dict[int, int]] = None,
-        device_index: Optional[int] = None) -> None:
-    experts_stream = (torch.cuda.Stream(device=device_index)
-                      if device_index is not None else torch.cuda.Stream())
+    state: "EplbState",
+    model,
+    ep_group: ProcessGroup,
+    is_profile: bool = False,
+    rank_mapping: Optional[dict[int, int]] = None,
+    device_index: Optional[int] = None,
+) -> None:
+    experts_stream = (
+        torch.cuda.Stream(device=device_index)
+        if device_index is not None
+        else torch.cuda.Stream()
+    )
 
     while not state.shutdown_event.is_set():
         await asyncio.to_thread(state.rearrange_event.wait)
@@ -69,8 +78,10 @@ async def transfer_run_periodically(
             break
 
         current_num_layers = model.num_moe_layers
-        while (state.layer_to_transfer < current_num_layers
-               and not state.shutdown_event.is_set()):
+        while (
+            state.layer_to_transfer < current_num_layers
+            and not state.shutdown_event.is_set()
+        ):
             if not state.ep_buffer_ready and state.rebalanced:
                 assert state.new_physical_to_logical_map is not None
                 await asyncio.to_thread(state.buffer_lock.acquire)
@@ -78,20 +89,21 @@ async def transfer_run_periodically(
                     if state.layer_to_transfer >= current_num_layers:
                         break
 
-                    (state.is_unchanged, state.is_received_locally,
-                     state.experts_recv_loc) = await transfer_layer(
-                         old_global_expert_indices=state.
-                         physical_to_logical_map,
-                         new_global_expert_indices=state.
-                         new_physical_to_logical_map,
-                         expert_weights=model.expert_weights,
-                         expert_weights_buffer=state.expert_buffer,
-                         ep_group=ep_group,
-                         is_profile=is_profile,
-                         layer=state.layer_to_transfer,
-                         cuda_stream=experts_stream,
-                         rank_mapping=rank_mapping,
-                     )
+                    (
+                        state.is_unchanged,
+                        state.is_received_locally,
+                        state.experts_recv_loc,
+                    ) = await transfer_layer(
+                        old_global_expert_indices=state.physical_to_logical_map,
+                        new_global_expert_indices=state.new_physical_to_logical_map,
+                        expert_weights=model.expert_weights,
+                        expert_weights_buffer=state.expert_buffer,
+                        ep_group=ep_group,
+                        is_profile=is_profile,
+                        layer=state.layer_to_transfer,
+                        cuda_stream=experts_stream,
+                        rank_mapping=rank_mapping,
+                    )
                     state.ep_buffer_ready = 1
                 finally:
                     state.buffer_lock.release()

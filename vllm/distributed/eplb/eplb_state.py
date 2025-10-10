@@ -45,8 +45,8 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .async_worker import start_async_worker
 from .rebalance_algo import rebalance_experts
-from .rebalance_execute import (move_from_buffer,
-                                rearrange_expert_weights_inplace)
+from .rebalance_execute import move_from_buffer, rearrange_expert_weights_inplace
+
 
 logger = init_logger(__name__)
 
@@ -518,9 +518,9 @@ class EplbState:
             all_ranks_buffer_ready = self._all_ranks_buffer_ready()
 
         if self.is_async and self.ep_buffer_ready and all_ranks_buffer_ready:
-            self.move_to_workspace(model=model,
-                                   ep_group=ep_group,
-                                   is_profile=is_profile)
+            self.move_to_workspace(
+                model=model, ep_group=ep_group, is_profile=is_profile
+            )
 
             # Check if all layers have been processed
             if self.layer_to_transfer >= model.num_moe_layers:
@@ -559,7 +559,10 @@ class EplbState:
             time_start = time.perf_counter()
             logger.info("Rearranging experts %s...", "(profile)" if is_profile else "")
         elif is_main_rank and self.is_async:
-            logger.info("Rearranging experts %s(async mode)...", "(profile)" if is_profile else "")
+            logger.info(
+                "Rearranging experts %s(async mode)...",
+                "(profile)" if is_profile else "",
+            )
 
         if global_expert_load is None:
             # Map the physical expert load to global logical experts
@@ -677,20 +680,22 @@ class EplbState:
 
         return None
 
-    def eplb_async_loop(self,
-                        model,
-                        rank_mapping: Optional[dict[int, int]] = None,
-                        is_profile: bool = False):
-
-        return start_async_worker(self,
-                                  model,
-                                  rank_mapping=rank_mapping,
-                                  is_profile=is_profile)
+    def eplb_async_loop(
+        self,
+        model,
+        rank_mapping: Optional[dict[int, int]] = None,
+        is_profile: bool = False,
+    ):
+        return start_async_worker(
+            self, model, rank_mapping=rank_mapping, is_profile=is_profile
+        )
 
     def _update_layer_mapping_from_new(self, layer: int) -> None:
-        if (self.new_physical_to_logical_map is None
-                or self.new_logical_to_physical_map is None
-                or self.new_logical_replica_count is None):
+        if (
+            self.new_physical_to_logical_map is None
+            or self.new_logical_to_physical_map is None
+            or self.new_logical_replica_count is None
+        ):
             return
 
         target_device = self.physical_to_logical_map.device
@@ -699,29 +704,31 @@ class EplbState:
             self.physical_to_logical_map = new_physical.to(target_device)
         else:
             self.physical_to_logical_map[layer].copy_(
-                new_physical[layer].to(target_device))
+                new_physical[layer].to(target_device)
+            )
 
         logical_device = self.logical_to_physical_map.device
-        new_logical = self.new_logical_to_physical_map[layer].to(
-            logical_device)
+        new_logical = self.new_logical_to_physical_map[layer].to(logical_device)
         max_slots = self.logical_to_physical_map.shape[-1]
         slot_delta = max_slots - new_logical.shape[-1]
         if slot_delta > 0:
-            new_logical = torch.nn.functional.pad(new_logical, (0, slot_delta),
-                                                  value=-1)
+            new_logical = torch.nn.functional.pad(
+                new_logical, (0, slot_delta), value=-1
+            )
         self.logical_to_physical_map[layer].copy_(new_logical)
 
         replica_device = self.logical_replica_count.device
         self.logical_replica_count[layer].copy_(
-            self.new_logical_replica_count[layer].to(replica_device))
+            self.new_logical_replica_count[layer].to(replica_device)
+        )
 
     def _all_ranks_buffer_ready(self) -> bool:
         parallel_state = get_ep_group()
         cpu_group = getattr(parallel_state, "cpu_group", None)
         if cpu_group is not None and cpu_group.size() > 1:
-            flag = torch.tensor((int(self.ep_buffer_ready), ),
-                                dtype=torch.int32,
-                                device="cpu")
+            flag = torch.tensor(
+                (int(self.ep_buffer_ready),), dtype=torch.int32, device="cpu"
+            )
             all_reduce(flag, group=cpu_group)
             return int(flag.item()) == cpu_group.size()
 
@@ -729,18 +736,16 @@ class EplbState:
         if device_group.size() <= 1:
             return bool(self.ep_buffer_ready)
 
-        device = getattr(parallel_state, "device",
-                         self.physical_to_logical_map.device)
-        flag = torch.tensor((int(self.ep_buffer_ready), ),
-                            dtype=torch.int32,
-                            device=device)
+        device = getattr(parallel_state, "device", self.physical_to_logical_map.device)
+        flag = torch.tensor(
+            (int(self.ep_buffer_ready),), dtype=torch.int32, device=device
+        )
         all_reduce(flag, group=device_group)
         return int(flag.item()) == device_group.size()
 
-    def move_to_workspace(self,
-                          model: MixtureOfExperts,
-                          ep_group: ProcessGroup,
-                          is_profile: bool = False):
+    def move_to_workspace(
+        self, model: MixtureOfExperts, ep_group: ProcessGroup, is_profile: bool = False
+    ):
         if not self.buffer_lock.acquire(blocking=False):
             return
         try:
@@ -752,8 +757,10 @@ class EplbState:
                 is_received_locally=self.is_received_locally,
                 experts_recv_loc=self.experts_recv_loc,
                 new_indices=self.new_physical_to_logical_map[
-                    self.layer_to_transfer].tolist(),
-                ep_group=ep_group)
+                    self.layer_to_transfer
+                ].tolist(),
+                ep_group=ep_group,
+            )
             transferred_layer = self.layer_to_transfer
             self._update_layer_mapping_from_new(transferred_layer)
             # After the main thread consumes, advance layer_to_transfer
@@ -765,11 +772,12 @@ class EplbState:
             except Exception as e:
                 logger.error(
                     "Rank %d: buffer_lock release failed in m_t_w: %s",
-                    ep_group.rank(), str(e))
+                    ep_group.rank(),
+                    str(e),
+                )
 
-    def post_eplb(self,
-                  model: MixtureOfExperts,
-                  is_profile: bool = False) -> None:
+    def post_eplb(self, model: MixtureOfExperts, is_profile: bool = False) -> None:
+
         assert self.new_physical_to_logical_map is not None
         assert self.new_logical_to_physical_map is not None
         assert self.new_logical_replica_count is not None
