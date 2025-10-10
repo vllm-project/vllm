@@ -430,7 +430,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
-# Copy over any remaining requirements files
+# Copy over remaining requirements files
 COPY requirements/ requirements/
 
 # install development dependencies (for testing)
