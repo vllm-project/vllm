@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Union
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionMetadata,
+    MultipleOf,
+)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata
@@ -46,6 +50,10 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     @staticmethod
     def get_kv_cache_stride_order() -> tuple[int, ...]:
         return (0, 1, 2)
+
+    @classmethod
+    def get_supported_kernel_block_size(cls) -> list[Union[int, MultipleOf]]:
+        return [64]
 
 
 @dataclass
