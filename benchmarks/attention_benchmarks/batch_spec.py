@@ -2,28 +2,32 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """
-Extended batch specification grammar for attention benchmarks.
+Simplified batch specification grammar for attention benchmarks.
 
 Grammar (underscore-separated segments):
-  Prefill:        (<count>?) q<q_len>(k?) (s<kv_len>(k?))?
-  Decode:         (<count>?) s<kv_len>(k?)
-  Spec decode:    (<count>?) spec<spec_len> s<kv_len>(k?)
-  Chunked prefill: (<count>?) chunk<chunk_size> q<q_len>(k?)
+  Format: (<count>?) q<q_len>(k?) (kv<kv_len>(k?))?
 
-  'k' suffix multiplies by 1024
+  - count: Number of identical requests (optional, default=1)
+  - q_len: Query length (number of new tokens)
+  - kv_len: Total KV cache length (optional, defaults to q_len for prefill)
+  - 'k' suffix: Multiplies value by 1024
+
+Common patterns:
+  - Prefill:  q_len == kv_len  (e.g., "q2k" → 2048 new tokens, 2048 KV)
+  - Decode:   q_len == 1        (e.g., "q1kv1k" → 1 token, 1024 KV cache)
+  - Extend:   q_len < kv_len    (e.g., "q4kv1k" → 4 tokens, 1024 KV cache)
 
 Examples:
-  q2k                    -> [(2048, 2048)]
-  8s1k                   -> [(1, 1024)] * 8
-  2q1k_32s1k             -> [(1024, 1024)] * 2 + [(1, 1024)] * 32
-  spec4s1k               -> [(4, 1024)]  # 4-token speculative decode
-  chunk8q16k             -> [(16384, 16384)] with chunking hint
-  2q1ks2k_spec4s1k_32s1k -> [(1024, 2048)] * 2 + [(4, 1024)] + [(1, 1024)] * 32
+  q2k              -> [(2048, 2048)]           # Prefill: 2048 tokens
+  q1kv1k           -> [(1, 1024)]              # Decode: 1 token, 1K KV cache
+  8q1kv1k          -> [(1, 1024)] * 8          # 8 decode requests
+  q4kv1k           -> [(4, 1024)]              # 4-token extend (spec decode)
+  2q1k_32q1kv1k    -> [(1024, 1024)] * 2 + [(1, 1024)] * 32  # Mixed batch
+  16q4kv1k         -> [(4, 1024)] * 16         # 16 spec decode requests
 """
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Optional
 
 import regex as re
 
@@ -32,22 +36,18 @@ import regex as re
 class BatchRequest:
     """Represents a single request in a batch."""
 
-    q_len: int  # Query length
-    kv_len: int  # KV cache length
-    is_speculative: bool = False  # Is this speculative decoding?
-    spec_length: int = 0  # Number of speculative tokens (if speculative)
-    is_chunked: bool = False  # Should use chunked prefill?
-    chunk_size: Optional[int] = None  # Chunk size for chunked prefill
+    q_len: int  # Query length (number of new tokens)
+    kv_len: int  # Total KV cache length
 
     @property
     def is_decode(self) -> bool:
         """True if this is a decode request (q_len == 1)."""
-        return self.q_len == 1 and self.kv_len > 1
+        return self.q_len == 1
 
     @property
     def is_prefill(self) -> bool:
         """True if this is a pure prefill (q_len == kv_len)."""
-        return self.q_len > 1 and self.kv_len == self.q_len
+        return self.q_len == self.kv_len
 
     @property
     def is_extend(self) -> bool:
@@ -100,6 +100,8 @@ def parse_batch_spec(spec: str) -> list[BatchRequest]:
     """
     Parse batch specification string into list of BatchRequest objects.
 
+    Grammar: (<count>?) q<q_len>(k?) (kv<kv_len>(k?))?
+
     Args:
         spec: Batch specification string (see module docstring for grammar)
 
@@ -112,59 +114,13 @@ def parse_batch_spec(spec: str) -> list[BatchRequest]:
     requests = []
 
     for seg in spec.split("_"):
-        # Try chunked prefill pattern: (<count>?) chunk<chunk_size> q<q_len>(k?)
-        m = re.match(r"^(?:(\d+))?chunk(\d+)q(\d+)(k?)$", seg)
-        if m:
-            cnt = int(m.group(1)) if m.group(1) else 1
-            chunk_size = int(m.group(2))
-            q_len = _parse_size(m.group(3), m.group(4))
-            requests.extend(
-                [
-                    BatchRequest(
-                        q_len=q_len,
-                        kv_len=q_len,
-                        is_chunked=True,
-                        chunk_size=chunk_size,
-                    )
-                ]
-                * cnt
-            )
-            continue
-
-        # Try speculative decode pattern: (<count>?) spec<spec_len> s<kv_len>(k?)
-        m = re.match(r"^(?:(\d+))?spec(\d+)s(\d+)(k?)$", seg)
-        if m:
-            cnt = int(m.group(1)) if m.group(1) else 1
-            spec_len = int(m.group(2))
-            kv_len = _parse_size(m.group(3), m.group(4))
-            requests.extend(
-                [
-                    BatchRequest(
-                        q_len=spec_len,
-                        kv_len=kv_len,
-                        is_speculative=True,
-                        spec_length=spec_len,
-                    )
-                ]
-                * cnt
-            )
-            continue
-
-        # Try prefill/extend pattern: (<count>?) q<q_len>(k?) (s<kv_len>(k?))?
-        m = re.match(r"^(?:(\d+))?q(\d+)(k?)(?:s(\d+)(k?))?$", seg)
+        # Unified pattern: (<count>?) q<q_len>(k?) (kv<kv_len>(k?))?
+        m = re.match(r"^(?:(\d+))?q(\d+)(k?)(?:kv(\d+)(k?))?$", seg)
         if m:
             cnt = int(m.group(1)) if m.group(1) else 1
             q_len = _parse_size(m.group(2), m.group(3))
             kv_len = _parse_size(m.group(4), m.group(5)) if m.group(4) else q_len
             requests.extend([BatchRequest(q_len=q_len, kv_len=kv_len)] * cnt)
-            continue
-
-        # Try decode pattern: (<count>?) s<kv_len>(k?)
-        m = re.match(r"^(?:(\d+))?s(\d+)(k?)$", seg)
-        if m:
-            cnt = int(m.group(1)) if m.group(1) else 1
-            kv_len = _parse_size(m.group(2), m.group(3))
-            requests.extend([BatchRequest(q_len=1, kv_len=kv_len)] * cnt)
             continue
 
         raise ValueError(f"Invalid batch spec segment: '{seg}'")
@@ -187,36 +143,20 @@ def format_batch_spec(requests: list[BatchRequest]) -> str:
     kinds = {
         "prefill": [],
         "extend": [],
-        "chunked_prefill": [],
-        "specdecode": [],
         "decode": [],
-        "unknown": [],
     }
 
     for req in requests:
         tup = (req.q_len, req.kv_len)
-        if req.is_chunked:
-            kinds["chunked_prefill"].append(tup)
-        elif req.is_speculative:
-            kinds["specdecode"].append(tup)
-        elif req.is_prefill:
+        if req.is_prefill:
             kinds["prefill"].append(tup)
         elif req.is_extend:
             kinds["extend"].append(tup)
         elif req.is_decode:
             kinds["decode"].append(tup)
-        else:
-            kinds["unknown"].append(tup)
 
     parts = []
-    for kind in [
-        "prefill",
-        "extend",
-        "chunked_prefill",
-        "specdecode",
-        "decode",
-        "unknown",
-    ]:
+    for kind in ["prefill", "extend", "decode"]:
         lst = kinds[kind]
         if not lst:
             continue
@@ -226,16 +166,16 @@ def format_batch_spec(requests: list[BatchRequest]) -> str:
         inner = []
 
         for (q, kv), cnt in ctr.items():
-            if kind in ("prefill", "chunked_prefill"):
+            if kind == "prefill":
                 size = f"{q // 1024}k" if q % 1024 == 0 else str(q)
                 inner.append(f"{cnt}x{size}")
             elif kind == "decode":
                 size = f"{kv // 1024}k" if kv % 1024 == 0 else str(kv)
                 inner.append(f"{cnt}x{size}")
-            else:  # extend, specdecode, unknown
+            else:  # extend
                 qstr = f"{q // 1024}k" if q % 1024 == 0 else str(q)
                 kstr = f"{kv // 1024}k" if kv % 1024 == 0 else str(kv)
-                inner.append(f"{cnt}xq{qstr}s{kstr}")
+                inner.append(f"{cnt}xq{qstr}kv{kstr}")
 
         parts.append(f"{cnt_total} {kind} ({', '.join(inner)})")
 
