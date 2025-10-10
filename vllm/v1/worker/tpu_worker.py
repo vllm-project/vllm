@@ -3,7 +3,7 @@
 """A TPU worker class."""
 
 import os
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 import torch
 import torch.distributed
@@ -11,28 +11,33 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment)
-from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
-                                          has_kv_transfer_group)
+from vllm.distributed import (
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+)
+from vllm.distributed.kv_transfer import (
+    ensure_kv_transfer_initialized,
+    has_kv_transfer_group,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
-from vllm.platforms.tpu import USE_TPU_COMMONS
+from vllm.platforms.tpu import USE_TPU_INFERENCE
 from vllm.tasks import SupportedTask
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.utils import bind_kv_cache
 
 logger = init_logger(__name__)
 
-if not USE_TPU_COMMONS:
-    logger.info("tpu_commons not found, using vLLM's TPUWorker.")
+_R = TypeVar("_R")
+
+if not USE_TPU_INFERENCE:
+    logger.info("tpu_inference not found, using vLLM's TPUWorker.")
     import torch_xla.core.xla_model as xm
     import torch_xla.debug.profiler as xp
     import torch_xla.runtime as xr
@@ -42,7 +47,6 @@ if not USE_TPU_COMMONS:
 
 
 class TPUWorker:
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -80,12 +84,12 @@ class TPUWorker:
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
-            self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
-                self.cache_config.cache_dtype]
+            self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[self.cache_config.cache_dtype]
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
+
             init_cached_hf_modules()
 
         # Delay profiler initialization to the start of the profiling.
@@ -98,14 +102,14 @@ class TPUWorker:
             # For TPU, we can only have 1 active profiler session for 1 profiler
             # server. So we only profile on rank0.
             self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info("Profiling enabled. Traces will be saved to: %s",
-                        self.profile_dir)
+            logger.info(
+                "Profiling enabled. Traces will be saved to: %s", self.profile_dir
+            )
 
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
@@ -116,9 +120,10 @@ class TPUWorker:
         # `xla_tpu_force_1d_allreduce_at_chunk_count` is a temporary solution to
         # fix this. It will be removed after the bug in XLA compiler is fixed.
         os.environ["LIBTPU_INIT_ARGS"] = (
-            os.environ.get("LIBTPU_INIT_ARGS", "") +
-            " --xla_tpu_force_1d_allreduce_at_chunk_count=1"
-            " --xla_jf_conv_input_fusion=False")
+            os.environ.get("LIBTPU_INIT_ARGS", "")
+            + " --xla_tpu_force_1d_allreduce_at_chunk_count=1"
+            " --xla_jf_conv_input_fusion=False"
+        )
         # --xla_jf_conv_input_fusion=False is used to improve the perf of
         # quantized matmul.
         torch.set_grad_enabled(False)
@@ -126,8 +131,8 @@ class TPUWorker:
 
         # Initialize the distributed environment.
         self._init_tpu_worker_distributed_environment(
-            self.vllm_config, self.rank, self.distributed_init_method,
-            self.local_rank)
+            self.vllm_config, self.rank, self.distributed_init_method, self.local_rank
+        )
 
         # Device initialization should happen after initializing
         # the distributed runtime.
@@ -156,14 +161,15 @@ class TPUWorker:
         # cache during development is recommended.We can disable it by
         # `export VLLM_XLA_CACHE_PATH=`
         if envs.VLLM_XLA_CACHE_PATH:
-            per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
-                                         f"tp{world_size}_rank{rank}")
+            per_rank_path = os.path.join(
+                envs.VLLM_XLA_CACHE_PATH, f"tp{world_size}_rank{rank}"
+            )
             xr.initialize_cache(per_rank_path, readonly=False)
 
         # Init ModelRunner here, so that we have access to self.device.
-        self.model_runner = \
-            TPUModelRunner(self.vllm_config, self.device,
-                           self.original_parallel_config)
+        self.model_runner = TPUModelRunner(
+            self.vllm_config, self.device, self.original_parallel_config
+        )
 
         if rank == 0:
             # If usage stat is enabled, collect relevant info.
@@ -182,13 +188,15 @@ class TPUWorker:
                 kv_caches[layer_name] = tpu_kv_cache
             else:
                 raise NotImplementedError(
-                    f"Unsupported KV cache spec '{type(layer_spec)}'")
+                    f"Unsupported KV cache spec '{type(layer_spec)}'"
+                )
 
         runner_kv_caches: list[torch.Tensor] = []
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
-            runner_kv_caches)
+            runner_kv_caches,
+        )
 
         # `max_num_tokens >= max_num_batched_tokens` due to padding.
         with self.model_runner.maybe_setup_dummy_loras(self.lora_config):
@@ -213,6 +221,7 @@ class TPUWorker:
             # TODO: use xm.get_memory_info for SPMD once it's supported in
             # PyTorch/XLA.
             import tpu_info
+
             chip_type, _ = tpu_info.device.get_local_chips()
             device_usage = tpu_info.metrics.get_chip_usage(chip_type)
             total_memory_size = device_usage[0].total_memory
@@ -229,20 +238,20 @@ class TPUWorker:
         profiled = current_mem * 1.02
 
         # Calculate the TPU KV cache size based on profiling.
-        usable_memory_size = int(total_memory_size *
-                                 self.cache_config.gpu_memory_utilization)
+        usable_memory_size = int(
+            total_memory_size * self.cache_config.gpu_memory_utilization
+        )
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
         head_size = self.model_config.get_head_size()
         if head_size > 0:
-            padded_head_size = cdiv(
-                head_size, TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
+            padded_head_size = (
+                cdiv(head_size, TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
+            )
             if padded_head_size != head_size:
-                logger.warning_once("head size is padded to %d",
-                                    padded_head_size)
+                logger.warning_once("head size is padded to %d", padded_head_size)
             # We adjust the usable memory size for the KV cache to prevent OOM
             # errors, even after padding the head_size.
-            tpu_kv_cache_bytes = (tpu_kv_cache_bytes * head_size //
-                                  padded_head_size)
+            tpu_kv_cache_bytes = tpu_kv_cache_bytes * head_size // padded_head_size
         return int(tpu_kv_cache_bytes)
 
     def execute_model(
@@ -251,8 +260,7 @@ class TPUWorker:
     ) -> Optional[ModelRunnerOutput]:
         output = self.model_runner.execute_model(scheduler_output)
         # every worker's output is needed when kv_transfer_group is set up
-        return output if self.is_driver_worker or has_kv_transfer_group(
-        ) else None
+        return output if self.is_driver_worker or has_kv_transfer_group() else None
 
     def profile(self, is_start: bool = True):
         if self.rank < 1:
@@ -325,16 +333,20 @@ class TPUWorker:
             backend=current_platform.dist_backend,
         )
         ensure_model_parallel_initialized(
-            parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size)
+            parallel_config.tensor_parallel_size, parallel_config.pipeline_parallel_size
+        )
 
         ensure_kv_transfer_initialized(vllm_config)
 
     def shutdown(self) -> None:
         self.model_runner.ensure_kv_transfer_shutdown()
 
+    def apply_model(self, fn: Callable[[nn.Module], _R]) -> _R:
+        """Apply a function on the model inside this worker."""
+        return fn(self.get_model())
 
-if USE_TPU_COMMONS:
-    from tpu_commons.worker import TPUWorker as TPUCommonsWorker
 
-    TPUWorker = TPUCommonsWorker  # type: ignore
+if USE_TPU_INFERENCE:
+    from tpu_inference.worker import TPUWorker as TpuInferenceWorker
+
+    TPUWorker = TpuInferenceWorker  # type: ignore

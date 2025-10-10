@@ -7,7 +7,7 @@
 #include "../cuda_compat.h"
 #include "dispatch_utils.h"
 
-#include "quantization/fp8/common.cuh"
+#include "quantization/w8a8/fp8/common.cuh"
 
 #include <c10/util/Float8_e4m3fn.h>
 
@@ -23,9 +23,14 @@
 typedef __hip_bfloat162 __nv_bfloat162;
 typedef __hip_bfloat16 __nv_bfloat16;
 typedef __hip_bfloat16_raw __nv_bfloat16_raw;
-
+  #if defined(HIP_FP8_TYPE_OCP)
 typedef __hip_fp8_e4m3 __nv_fp8_e4m3;
 typedef __hip_fp8x4_e4m3 __nv_fp8x4_e4m3;
+  #else
+// ROCm 6.2 fallback: only *_fnuz types exist
+typedef __hip_fp8_e4m3_fnuz __nv_fp8_e4m3;
+typedef __hip_fp8x4_e4m3_fnuz __nv_fp8x4_e4m3;
+  #endif
 #endif
 
 #include "core/registration.h"
@@ -365,7 +370,6 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   int32_t compute_pipeline_offset_64 = 0;
 
   for (int32_t t = n_tokens_lower; t < n_tokens_upper; ++t) {
-    __nv_bfloat16 y_max_bf16 = EPS;
     __nv_bfloat162 results_bf162[2];
 
     cp_async_wait<NUM_STAGES - 2>();
@@ -405,7 +409,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     auto _y_max2 =
         __hmax2(__habs2(results_bf162[0]), __habs2(results_bf162[1]));
 
-    y_max_bf16 = __hmax(_y_max2.x, _y_max2.y);
+    __nv_bfloat16 y_max_bf16 = __hmax(EPS, __hmax(_y_max2.x, _y_max2.y));
 
     // An entire group is assigned to a single warp, so a simple warp reduce
     // is used.

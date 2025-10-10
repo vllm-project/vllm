@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
+import os
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
@@ -29,6 +30,7 @@ else:
 
 logger = init_logger(__name__)
 
+ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 
 
@@ -102,6 +104,15 @@ class ParallelConfig:
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
+    expert_placement_strategy: ExpertPlacementStrategy = "linear"
+    """The expert placement strategy for MoE layers:\n
+    - "linear": Experts are placed in a contiguous manner. For example, with 4
+      experts and 2 ranks, rank 0 will have experts [0, 1] and rank 1 will have
+      experts [2, 3].\n
+    - "round_robin": Experts are placed in a round-robin manner. For example,
+      with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
+      will have experts [1, 3]. This strategy can help improve load balancing
+      for grouped expert models with no redundant experts."""
     num_redundant_experts: Optional[int] = None
     """`num_redundant_experts` is deprecated and has been replaced with
     `eplb_config.num_redundant_experts`. This will be removed in v0.12.0.
@@ -127,6 +138,24 @@ class ParallelConfig:
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
+    enable_dbo: bool = False
+    """Enable dual batch overlap for the model executor."""
+
+    dbo_decode_token_threshold: int = 32
+    """The threshold for dual batch overlap for batches only containing decodes.
+    If the number of tokens in the request is greater than this threshold,
+    microbatching will be used. Otherwise, the request will be processed in a
+    single batch."""
+    dbo_prefill_token_threshold: int = 512  # TODO(lucas): tune
+    """The threshold for dual batch overlap for batches that contain one or more
+    prefills. If the number of tokens in the request is greater than this
+    threshold, microbatching will be used. Otherwise, the request will be
+    processed in a single batch."""
+
+    disable_nccl_for_dp_synchronization: bool = False
+    """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
+    to use Gloo instead of NCCL for its all reduce"""
+
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 
@@ -136,9 +165,9 @@ class ParallelConfig:
     placement_group: Optional[PlacementGroup] = None
     """ray distributed model workers placement group."""
 
-    distributed_executor_backend: Optional[Union[str,
-                                                 DistributedExecutorBackend,
-                                                 type[ExecutorBase]]] = None
+    distributed_executor_backend: Optional[
+        Union[str, DistributedExecutorBackend, type[ExecutorBase]]
+    ] = None
     """Backend to use for distributed model
     workers, either "ray" or "mp" (multiprocessing). If the product
     of pipeline_parallel_size and tensor_parallel_size is less than
@@ -175,6 +204,25 @@ class ParallelConfig:
     not change by dcp, it simply reuse the GPUs of TP group, and tp_size
     needs to be divisible by dcp_size."""
 
+    _api_process_count: int = 1
+    """
+    The number of API processes initialized.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set by API server scale-out.
+    """
+
+    _api_process_rank: int = 0
+    """
+    The rank of this API process, or `-1` for engine core processes
+    under API server scale-out.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set by API server scale-out.
+    """
+
     @property
     def world_size_across_dp(self) -> int:
         """world_size_across_dp is TPxPPxDP, it is the size of the world
@@ -209,7 +257,8 @@ class ParallelConfig:
         from torch.distributed import DistNetworkError
 
         from vllm.distributed.utils import (
-            stateless_init_torch_distributed_process_group)
+            stateless_init_torch_distributed_process_group,
+        )
 
         max_retries = 5
         last_exc: Optional[Exception] = None
@@ -221,12 +270,12 @@ class ParallelConfig:
                     self.get_next_dp_init_port(),
                     self.data_parallel_rank,
                     self.data_parallel_size,
-                    backend="gloo")
+                    backend="gloo",
+                )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
                 if "EADDRINUSE" in str(e):
-                    logger.warning(
-                        "Address already in use. Retrying with a new port.")
+                    logger.warning("Address already in use. Retrying with a new port.")
                     last_exc = e
                     continue  # try again with a new port
                 raise e
@@ -235,12 +284,33 @@ class ParallelConfig:
         assert last_exc is not None
         raise last_exc
 
+    # The all_reduce at the end of attention (during o_proj) means that
+    # inputs are replicated across each rank of the tensor parallel group.
+    # If using expert-parallelism with DeepEP All2All ops, replicated
+    # tokens results in useless duplicate computation and communication.
+    #
+    # In this case, ensure the input to the experts is sequence parallel
+    # to avoid the excess work.
+    #
+    # Not needed for pplx-kernels as it can handle duplicate input tokens.
+    @property
+    def use_sequence_parallel_moe(self) -> bool:
+        return (
+            envs.VLLM_ALL2ALL_BACKEND
+            in (
+                "allgather_reducescatter",
+                "naive",
+                "deepep_high_throughput",
+                "deepep_low_latency",
+            )
+            and self.enable_expert_parallel
+            and self.tensor_parallel_size > 1
+            and self.data_parallel_size > 1
+        )
+
     @staticmethod
-    def has_unfinished_dp(dp_group: ProcessGroup,
-                          has_unfinished: bool) -> bool:
-        tensor = torch.tensor([has_unfinished],
-                              dtype=torch.int32,
-                              device="cpu")
+    def has_unfinished_dp(dp_group: ProcessGroup, has_unfinished: bool) -> bool:
+        tensor = torch.tensor([has_unfinished], dtype=torch.int32, device="cpu")
         # dp rank 0: has_unfinished_seqs=True
         # dp rank 1: has_unfinished_seqs=False
         # aggregated: has_unfinished_seqs=True
@@ -250,13 +320,10 @@ class ParallelConfig:
         return aggregated_has_unfinished
 
     @staticmethod
-    def sync_kv_cache_memory_size(dp_group: ProcessGroup,
-                                  kv_cache_memory: int) -> int:
+    def sync_kv_cache_memory_size(dp_group: ProcessGroup, kv_cache_memory: int) -> int:
         if kv_cache_memory == -1:
             kv_cache_memory = torch.iinfo(torch.int64).max
-        tensor = torch.tensor([kv_cache_memory],
-                              dtype=torch.int64,
-                              device="cpu")
+        tensor = torch.tensor([kv_cache_memory], dtype=torch.int64, device="cpu")
         # we cannot use broadcast for stateless dp group since it depends
         # on global rank
         torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
@@ -269,6 +336,9 @@ class ParallelConfig:
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
+
+        This hash is also used for DP worker configuration validation
+        to prevent hangs from mismatched collective communication patterns.
         """
         factors: list[Any] = []
         factors.append(self.pipeline_parallel_size)
@@ -276,60 +346,83 @@ class ParallelConfig:
         factors.append(self.enable_expert_parallel)
         factors.append(self.data_parallel_size)
         factors.append(envs.VLLM_ALL2ALL_BACKEND)
+        factors.append(self.enable_eplb)
+        if self.enable_eplb:
+            factors.append(self.eplb_config.log_balancedness)
+            factors.append(self.eplb_config.window_size)
+            factors.append(self.eplb_config.step_interval)
+            factors.append(self.eplb_config.num_redundant_experts)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
         # Forward deprecated fields to their new location
         if self.num_redundant_experts is not None:
-            self.eplb_config.num_redundant_experts = (
-                self.num_redundant_experts)
+            self.eplb_config.num_redundant_experts = self.num_redundant_experts
             logger.warning_once(
                 "num_redundant_experts is deprecated and has been replaced "
                 "with eplb_config.num_redundant_experts. This will be removed "
                 "in v0.12.0. Changing this field after initialization will "
-                "have no effect.")
+                "have no effect."
+            )
         if self.eplb_window_size is not None:
             self.eplb_config.window_size = self.eplb_window_size
             logger.warning_once(
                 "eplb_window_size is deprecated and has been replaced "
                 "with eplb_config.window_size. This will be removed "
                 "in v0.12.0. Changing this field after initialization will "
-                "have no effect.")
+                "have no effect."
+            )
         if self.eplb_step_interval is not None:
             self.eplb_config.step_interval = self.eplb_step_interval
             logger.warning_once(
                 "eplb_step_interval is deprecated and has been replaced "
                 "with eplb_config.step_interval. This will be removed "
                 "in v0.12.0. Changing this field after initialization will "
-                "have no effect.")
+                "have no effect."
+            )
         if self.eplb_log_balancedness is not None:
             self.eplb_config.log_balancedness = self.eplb_log_balancedness
             logger.warning_once(
                 "eplb_log_balancedness is deprecated and has been replaced "
                 "with eplb_config.log_balancedness. This will be removed "
                 "in v0.12.0. Changing this field after initialization will "
-                "have no effect.")
+                "have no effect."
+            )
 
         # Continue with the rest of the initialization
-        self.world_size = self.pipeline_parallel_size * \
-            self.tensor_parallel_size
+        self.world_size = self.pipeline_parallel_size * self.tensor_parallel_size
+
+        if self.distributed_executor_backend == "external_launcher":
+            logger.info("Using external launcher for distributed inference.")
+            self.world_size *= self.data_parallel_size
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
                 f"data_parallel_size_local ({self.data_parallel_size_local}) "
-                f"must be <= data_parallel_size ({self.data_parallel_size})")
+                f"must be <= data_parallel_size ({self.data_parallel_size})"
+            )
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
+            if self.distributed_executor_backend == "external_launcher":
+                # For external launcher,
+                # we need to set the data parallel rank automatically
+                self.data_parallel_rank = int(os.environ["RANK"]) // (
+                    self.world_size // self.data_parallel_size
+                )
+                logger.info(
+                    "Set data_parallel_rank to %d automatically.",
+                    self.data_parallel_rank,
+                )
             if not self._data_parallel_master_port_list:
                 self._data_parallel_master_port_list = get_open_ports_list(5)
-            self.data_parallel_master_port = \
-                self._data_parallel_master_port_list.pop()
+            self.data_parallel_master_port = self._data_parallel_master_port_list.pop()
 
             if not (0 <= self.data_parallel_rank < self.data_parallel_size):
                 raise ValueError(
                     f"data_parallel_rank ({self.data_parallel_rank})"
-                    f" must be in the range [0, {self.data_parallel_size})")
+                    f" must be in the range [0, {self.data_parallel_size})"
+                )
         else:
             # Otherwise fall back to env vars (e.g. for offline SPMD case).
             self.data_parallel_size = envs.VLLM_DP_SIZE
@@ -339,11 +432,12 @@ class ParallelConfig:
             self.data_parallel_master_port = envs.VLLM_DP_MASTER_PORT
 
             if self.data_parallel_external_lb:
-                raise ValueError("data_parallel_external_lb can only "
-                                 "be set when data_parallel_size > 1")
+                raise ValueError(
+                    "data_parallel_external_lb can only "
+                    "be set when data_parallel_size > 1"
+                )
 
         if self.distributed_executor_backend == "external_launcher":
-            import os
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 
@@ -351,14 +445,15 @@ class ParallelConfig:
             if not current_platform.is_cuda():
                 raise ValueError(
                     "Expert parallelism load balancing is only supported on "
-                    "CUDA devices now.")
+                    "CUDA devices now."
+                )
             if self.eplb_config.num_redundant_experts < 0:
                 raise ValueError(
                     "num_redundant_experts must be non-negative, but got "
-                    f"{self.eplb_config.num_redundant_experts}.")
+                    f"{self.eplb_config.num_redundant_experts}."
+                )
             if not self.enable_expert_parallel:
-                raise ValueError(
-                    "enable_expert_parallel must be True to use EPLB.")
+                raise ValueError("enable_expert_parallel must be True to use EPLB.")
             if self.tensor_parallel_size * self.data_parallel_size <= 1:
                 raise ValueError(
                     "EPLB requires tensor_parallel_size or data_parallel_size "
@@ -371,76 +466,102 @@ class ParallelConfig:
                     "num_redundant_experts is set to "
                     f"{self.eplb_config.num_redundant_experts} but EPLB is not "
                     "enabled. Either enable EPLB or unset "
-                    "num_redundant_experts.")
+                    "num_redundant_experts."
+                )
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
 
             from vllm.executor import ray_utils
+
             backend: DistributedExecutorBackend = "mp"
             ray_found = ray_utils.ray_is_available()
             if current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
                 backend = "uni"
-            elif (current_platform.is_cuda()
-                  and cuda_device_count_stateless() < self.world_size):
+            elif (
+                current_platform.is_cuda()
+                and cuda_device_count_stateless() < self.world_size
+            ):
                 if not ray_found:
-                    raise ValueError("Unable to load Ray: "
-                                     f"{ray_utils.ray_import_err}. Ray is "
-                                     "required for multi-node inference, "
-                                     "please install Ray with `pip install "
-                                     "ray`.")
+                    raise ValueError(
+                        "Unable to load Ray: "
+                        f"{ray_utils.ray_import_err}. Ray is "
+                        "required for multi-node inference, "
+                        "please install Ray with `pip install "
+                        "ray`."
+                    )
                 backend = "ray"
             elif self.data_parallel_backend == "ray":
-                logger.info("Using ray distributed inference because "
-                            "data_parallel_backend is ray")
+                logger.info(
+                    "Using ray distributed inference because "
+                    "data_parallel_backend is ray"
+                )
                 backend = "ray"
             elif ray_found:
                 if self.placement_group:
                     backend = "ray"
                 else:
                     from ray import is_initialized as ray_is_initialized
+
                     if ray_is_initialized():
                         from ray.util import get_current_placement_group
+
                         if get_current_placement_group():
                             backend = "ray"
             self.distributed_executor_backend = backend
-            logger.debug("Defaulting to use %s for distributed inference",
-                         backend)
+            logger.debug("Defaulting to use %s for distributed inference", backend)
 
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
+
+        if not -1 <= self._api_process_rank < self._api_process_count:
+            raise ValueError(
+                "Invalid value of `_api_process_rank`. "
+                f"Expected to be `-1` or `[0, {self._api_process_count})`, "
+                f"but found: {self._api_process_rank}"
+            )
 
     @property
     def use_ray(self) -> bool:
         return self.distributed_executor_backend == "ray" or (
             isinstance(self.distributed_executor_backend, type)
-            and getattr(self.distributed_executor_backend, "uses_ray", False))
+            and getattr(self.distributed_executor_backend, "uses_ray", False)
+        )
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def _verify_args(self) -> Self:
         # Lazy import to avoid circular import
         from vllm.executor.executor_base import ExecutorBase
         from vllm.platforms import current_platform
-        if self.distributed_executor_backend is not None and not isinstance(
-                self.distributed_executor_backend, str) and not (isinstance(
-                    self.distributed_executor_backend, type) and issubclass(
-                        self.distributed_executor_backend, ExecutorBase)):
+
+        if (
+            self.distributed_executor_backend is not None
+            and not isinstance(self.distributed_executor_backend, str)
+            and not (
+                isinstance(self.distributed_executor_backend, type)
+                and issubclass(self.distributed_executor_backend, ExecutorBase)
+            )
+        ):
             raise ValueError(
                 "Unrecognized distributed executor backend "
                 f"{self.distributed_executor_backend}. Supported "
                 "values are 'ray', 'mp' 'uni', 'external_launcher', "
-                " custom ExecutorBase subclass or its import path.")
+                " custom ExecutorBase subclass or its import path."
+            )
         if self.use_ray:
             from vllm.executor import ray_utils
+
             ray_utils.assert_ray_available()
 
         if not current_platform.use_custom_allreduce():
             self.disable_custom_all_reduce = True
             logger.debug(
                 "Disabled the custom all-reduce kernel because it is not "
-                "supported on current platform.")
+                "supported on current platform."
+            )
         if self.ray_workers_use_nsight and not self.use_ray:
-            raise ValueError("Unable to use nsight profiling unless workers "
-                             "run with Ray.")
+            raise ValueError(
+                "Unable to use nsight profiling unless workers run with Ray."
+            )
 
         return self

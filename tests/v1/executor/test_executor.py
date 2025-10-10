@@ -14,19 +14,19 @@ from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
 
-class Mock:
-    ...
+class Mock: ...
 
 
 class CustomMultiprocExecutor(MultiprocExecutor):
-
-    def collective_rpc(self,
-                       method: Union[str, Callable],
-                       timeout: Optional[float] = None,
-                       args: tuple = (),
-                       kwargs: Optional[dict] = None,
-                       non_block: bool = False,
-                       unique_reply_rank: Optional[int] = None) -> list[Any]:
+    def collective_rpc(
+        self,
+        method: Union[str, Callable],
+        timeout: Optional[float] = None,
+        args: tuple = (),
+        kwargs: Optional[dict] = None,
+        non_block: bool = False,
+        unique_reply_rank: Optional[int] = None,
+    ) -> list[Any]:
         # Drop marker to show that this was run
         with open(".marker", "w"):
             ...
@@ -47,17 +47,22 @@ def test_custom_executor_type_checking():
         )
         LLMEngine.from_engine_args(engine_args)
     with pytest.raises(ValueError):
-        engine_args = AsyncEngineArgs(model=MODEL,
-                                      gpu_memory_utilization=0.2,
-                                      max_model_len=8192,
-                                      distributed_executor_backend=Mock)
+        engine_args = AsyncEngineArgs(
+            model=MODEL,
+            gpu_memory_utilization=0.2,
+            max_model_len=8192,
+            distributed_executor_backend=Mock,
+        )
         AsyncLLM.from_engine_args(engine_args)
 
 
-@pytest.mark.parametrize("distributed_executor_backend", [
-    CustomMultiprocExecutor,
-    "tests.v1.executor.test_executor.CustomMultiprocExecutor"
-])
+@pytest.mark.parametrize(
+    "distributed_executor_backend",
+    [
+        CustomMultiprocExecutor,
+        "tests.v1.executor.test_executor.CustomMultiprocExecutor",
+    ],
+)
 def test_custom_executor(distributed_executor_backend, tmp_path):
     cwd = os.path.abspath(".")
     os.chdir(tmp_path)
@@ -82,10 +87,13 @@ def test_custom_executor(distributed_executor_backend, tmp_path):
         os.chdir(cwd)
 
 
-@pytest.mark.parametrize("distributed_executor_backend", [
-    CustomMultiprocExecutorAsync,
-    "tests.v1.executor.test_executor.CustomMultiprocExecutorAsync"
-])
+@pytest.mark.parametrize(
+    "distributed_executor_backend",
+    [
+        CustomMultiprocExecutorAsync,
+        "tests.v1.executor.test_executor.CustomMultiprocExecutorAsync",
+    ],
+)
 def test_custom_executor_async(distributed_executor_backend, tmp_path):
     cwd = os.path.abspath(".")
     os.chdir(tmp_path)
@@ -103,9 +111,9 @@ def test_custom_executor_async(distributed_executor_backend, tmp_path):
         sampling_params = SamplingParams(max_tokens=1)
 
         async def t():
-            stream = engine.generate(request_id="0",
-                                     prompt="foo",
-                                     sampling_params=sampling_params)
+            stream = engine.generate(
+                request_id="0", prompt="foo", sampling_params=sampling_params
+            )
             async for x in stream:
                 ...
 
