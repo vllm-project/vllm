@@ -268,7 +268,7 @@ def run_model(
             cudagraph_capture_sizes=[1, 2],
         )
         if split_attn:
-            compilation_config.splitting_ops = ["silly.attention"]
+            compilation_config.splitting_ops = ["silly::attention"]
         cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
     else:
         compilation_config = CompilationConfig(
@@ -438,7 +438,7 @@ def benchmark():
             compilation_config = CompilationConfig(
                 level=CompilationLevel.PIECEWISE,
                 use_cudagraph=True,
-                splitting_ops=["silly.attention"],
+                splitting_ops=["silly::attention"],
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
         else:

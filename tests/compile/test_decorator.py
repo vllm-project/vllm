@@ -71,7 +71,7 @@ def test_ignore_torch_compile_decorator():
         compilation_config=CompilationConfig(
             level=CompilationLevel.PIECEWISE,
             use_cudagraph=True,
-            splitting_ops=["silly.attention"],
+            splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
         )
     )
@@ -186,7 +186,7 @@ def test_conditional_compile_enable_if():
         compilation_config=CompilationConfig(
             level=CompilationLevel.PIECEWISE,
             use_cudagraph=True,
-            splitting_ops=["silly.attention"],
+            splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
         ),
     )
@@ -218,7 +218,7 @@ def test_conditional_compile_enable_if():
         compilation_config=CompilationConfig(
             level=CompilationLevel.PIECEWISE,
             use_cudagraph=True,
-            splitting_ops=["silly.attention"],
+            splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
         ),
     )
