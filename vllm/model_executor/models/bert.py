@@ -684,7 +684,7 @@ class SPLADESparsePooler(Pooler):
                 float("-inf"), device=scores.device, dtype=scores.dtype
             )
             masked = scores.masked_fill(~valid_mask.unsqueeze(-1), neg_inf)
-            pooled = masked.max(dim=1).values
+            pooled = masked.amax(dim=1)
             pooled = torch.where(
                 torch.isneginf(pooled), torch.zeros_like(pooled), pooled
             )
