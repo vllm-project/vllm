@@ -15,6 +15,11 @@ import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
+from vllm.compilation.inductor_pass import pass_context
+from vllm.compilation.partition_rules import (
+    inductor_partition_rule_context,
+    resolve_defined_ops,
+)
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -34,7 +39,7 @@ logger = init_logger(__name__)
 
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
-    if compilation_config.backend == "inductor":
+    if compilation_config.use_inductor:
         # Use standalone compile only if requested, version is new enough,
         # and the symbol actually exists in this PyTorch build.
         if (
@@ -48,10 +53,6 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
             logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
     else:
-        assert compilation_config.backend == "eager", (
-            "Custom backends not supported with CompilationLevel.PIECEWISE"
-        )
-
         logger.debug("Using EagerAdaptor")
         return EagerAdaptor()
 
@@ -79,6 +80,21 @@ class CompilerManager:
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
+
+    @contextmanager
+    def compile_context(self, runtime_shape: Optional[int] = None):
+        """Provide compilation context for the duration of compilation to set
+        any torch global properties we want to scope to a single Inductor
+        compilation (e.g. partition rules, pass context)."""
+        with pass_context(runtime_shape):
+            if self.compilation_config.use_inductor_graph_partition:
+                inductor_partition_ops = resolve_defined_ops(
+                    self.compilation_config.splitting_ops
+                )
+                with inductor_partition_rule_context(inductor_partition_ops):
+                    yield
+            else:
+                yield
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
@@ -201,9 +217,15 @@ class CompilerManager:
             maybe_key = None
         else:
             maybe_key = f"artifact_shape_{runtime_shape}_subgraph_{graph_index}"
-        compiled_graph, handle = self.compiler.compile(
-            graph, example_inputs, additional_inductor_config, runtime_shape, maybe_key
-        )
+
+        with self.compile_context(runtime_shape):
+            compiled_graph, handle = self.compiler.compile(
+                graph,
+                example_inputs,
+                additional_inductor_config,
+                runtime_shape,
+                maybe_key,
+            )
 
         assert compiled_graph is not None, "Failed to compile the graph"
 
@@ -262,7 +284,7 @@ class SplitItem:
 
 
 def split_graph(
-    graph: fx.GraphModule, ops: list[str]
+    graph: fx.GraphModule, resolved_ops: list[torch._ops.OpOverload]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
     # split graph by ops
     subgraph_id = 0
@@ -271,7 +293,12 @@ def split_graph(
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
             continue
-        if node.op == "call_function" and str(node.target) in ops:
+        # Match node.target against resolved_ops
+        # node.target can be OpOverloadPacket, need to check .default
+        if node.op == "call_function" and (
+            node.target in resolved_ops
+            or (hasattr(node.target, "default") and node.target.default in resolved_ops)
+        ):
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             split_op_graphs.append(subgraph_id)
@@ -619,9 +646,14 @@ class VllmBackend:
         self.graph = graph
         self.configure_post_pass()
 
-        self.split_gm, self.piecewise_graphs = split_graph(
-            graph, self.compilation_config.splitting_ops
-        )
+        if self.compilation_config.use_inductor_graph_partition:
+            # Let Inductor decide partitioning; avoid FX-level pre-splitting.
+            fx_split_ops: list[str] = []
+        else:
+            fx_split_ops = self.compilation_config.splitting_ops or []
+
+        resolved_split_ops = resolve_defined_ops(fx_split_ops)
+        self.split_gm, self.piecewise_graphs = split_graph(graph, resolved_split_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
 
