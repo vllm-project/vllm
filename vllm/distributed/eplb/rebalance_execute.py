@@ -101,10 +101,13 @@ def get_ep_ranks_with_expert(
 
 
 def move_to_buffer(
-        num_local_experts: int, old_indices: Sequence[int],
-        new_indices: Sequence[int], expert_weights: Iterable[torch.Tensor],
-        expert_weights_buffer: Sequence[torch.Tensor],
-        cuda_stream: Optional[torch.cuda.Stream], ep_group: ProcessGroup
+    num_local_experts: int,
+    old_indices: Sequence[int],
+    new_indices: Sequence[int],
+    expert_weights: Iterable[torch.Tensor],
+    expert_weights_buffer: Sequence[torch.Tensor],
+    cuda_stream: Optional[torch.cuda.Stream],
+    ep_group: ProcessGroup,
 ) -> tuple[list[bool], list[bool], dict[int, int]]:
     """
     Perform expert weights rearrangement of one layer.
@@ -249,9 +252,9 @@ def move_from_buffer(
     ep_rank = ep_group.rank()
     num_local_experts = len(is_unchanged)
 
-    local2global = partial(idx_local_to_global,
-                           local_cnt=num_local_experts,
-                           ep_rank=ep_rank)
+    local2global = partial(
+        idx_local_to_global, local_cnt=num_local_experts, ep_rank=ep_rank
+    )
 
     for dst in range(num_local_experts):
         if is_unchanged[dst]:
@@ -269,15 +272,16 @@ def move_from_buffer(
 
 
 async def transfer_layer(
-        old_global_expert_indices: torch.Tensor,
-        new_global_expert_indices: torch.Tensor,
-        expert_weights: Sequence[Iterable[torch.Tensor]],
-        expert_weights_buffer,
-        ep_group: ProcessGroup,
-        is_profile: bool = False,
-        layer: int = 0,
-        cuda_stream: Optional[torch.cuda.Stream] = None,
-        rank_mapping=None) -> tuple[list[bool], list[bool], dict[int, int]]:
+    old_global_expert_indices: torch.Tensor,
+    new_global_expert_indices: torch.Tensor,
+    expert_weights: Sequence[Iterable[torch.Tensor]],
+    expert_weights_buffer: Sequence[torch.Tensor],
+    ep_group: ProcessGroup,
+    is_profile: bool = False,
+    layer: int = 0,
+    cuda_stream: Optional[torch.cuda.Stream] = None,
+    rank_mapping=None,
+) -> tuple[list[bool], list[bool], dict[int, int]]:
     """
     Rearranges the expert weights in place according to the new expert indices.
 
@@ -300,27 +304,23 @@ async def transfer_layer(
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
             # scale down
-            new_global_expert_indices = \
-                _map_new_expert_indices_with_rank_mapping(
+            new_global_expert_indices = _map_new_expert_indices_with_rank_mapping(
                 new_global_expert_indices,
                 rank_mapping,
             )
         else:
             # scale up
-            old_global_expert_indices = \
-                _map_old_expert_indices_with_rank_mapping(
+            old_global_expert_indices = _map_old_expert_indices_with_rank_mapping(
                 old_global_expert_indices,
                 rank_mapping,
                 ep_group.size(),
             )
 
-    assert old_global_expert_indices.shape[
-        1] == new_global_expert_indices.shape[1]
+    assert old_global_expert_indices.shape[1] == new_global_expert_indices.shape[1]
     num_moe_layers, num_physical_experts = old_global_expert_indices.shape
     assert len(expert_weights) == num_moe_layers
     num_local_physical_experts = next(iter(expert_weights[0])).shape[0]
-    assert new_global_expert_indices.shape == (num_moe_layers,
-                                               num_physical_experts)
+    assert new_global_expert_indices.shape == (num_moe_layers, num_physical_experts)
     assert num_physical_experts == ep_size * num_local_physical_experts
     # A buffer to hold the expert weights in one layer during the exchange.
     # NOTE: Currently we assume the same weights across different layers
@@ -333,7 +333,8 @@ async def transfer_layer(
         expert_weights=expert_weights[layer],
         expert_weights_buffer=expert_weights_buffer,
         cuda_stream=cuda_stream,
-        ep_group=ep_group)
+        ep_group=ep_group,
+    )
     return is_unchanged, is_received_locally, experts_recv_loc
 
 
@@ -387,7 +388,6 @@ def rearrange_expert_weights_inplace(
     num_local_physical_experts = next(iter(expert_weights[0])).shape[0]
     assert new_global_expert_indices.shape == (num_moe_layers, num_physical_experts)
 
-    ep_rank = ep_group.rank()
     ep_size = ep_group.size()
     assert num_physical_experts == ep_size * num_local_physical_experts
 
@@ -424,15 +424,18 @@ def rearrange_expert_weights_inplace(
             expert_weights=expert_weights[layer],
             expert_weights_buffer=expert_weights_buffer,
             cuda_stream=None,
-            ep_group=ep_group)
+            ep_group=ep_group,
+        )
 
-        move_from_buffer(expert_weights=expert_weights[layer],
-                         expert_weights_buffer=expert_weights_buffer,
-                         is_unchanged=is_unchanged,
-                         is_received_locally=is_received_locally,
-                         experts_recv_loc=experts_recv_loc,
-                         new_indices=new_global_expert_indices[layer].tolist(),
-                         ep_group=ep_group)
+        move_from_buffer(
+            expert_weights=expert_weights[layer],
+            expert_weights_buffer=expert_weights_buffer,
+            is_unchanged=is_unchanged,
+            is_received_locally=is_received_locally,
+            experts_recv_loc=experts_recv_loc,
+            new_indices=new_global_expert_indices[layer].tolist(),
+            ep_group=ep_group,
+        )
 
 
 def _map_old_expert_indices_with_rank_mapping(
