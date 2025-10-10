@@ -60,30 +60,6 @@ Multiple vLLM dependencies indicate either a preference or requirement for using
 It is perhaps more accurate to say that there are known problems with using
 `fork` after initializing these dependencies.
 
-## Current State (v0)
-
-The environment variable `VLLM_WORKER_MULTIPROC_METHOD` can be used to control which method is used by vLLM. The current default is `fork`.
-
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/envs.py#L339-L342>
-
-When we know we own the process because the `vllm` command was used, we use
-`spawn` because it's the most widely compatible.
-
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/scripts.py#L123-L140>
-
-The `multiproc_xpu_executor` forces the use of `spawn`.
-
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/executor/multiproc_xpu_executor.py#L14-L18>
-
-There are other miscellaneous places hard-coding the use of `spawn`:
-
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/distributed/device_communicators/all_reduce_utils.py#L135>
-- <https://github.com/vllm-project/vllm/blob/d05f88679bedd73939251a17c3d785a354b2946c/vllm/entrypoints/openai/api_server.py#L184>
-
-Related PRs:
-
-- <gh-pr:8823>
-
 ## Prior State in v1
 
 There was an environment variable to control whether multiprocessing is used in
