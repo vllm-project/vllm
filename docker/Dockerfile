@@ -249,7 +249,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY --chmod=755 tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
 ENV CUDA_HOME=/usr/local/cuda
 RUN --mount=type=cache,target=/root/.cache/uv \
-    export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && export PIP_CMD="uv pip" && \
+    export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && \
     ./install_python_libraries.sh /tmp/ep_kernels_workspace wheel && \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
 
