@@ -464,16 +464,22 @@ class CoreEngineActorManager:
                 dp_size_to_allocate = dp_size_available
 
             for i in range(dp_size_to_allocate):
-                n_devices_per_bundle = world_size if nodes_per_pg == 0 else max_device_per_node
+                n_devices_per_bundle = (
+                    world_size if nodes_per_pg == 0 else max_device_per_node
+                )
                 bundles = [
                     {device_str: 1.0, "node:" + node_ip: 0.001}
                 ] * n_devices_per_bundle
 
                 # we only create a placement group if we've iterated
                 # over all nodes that we need
-                is_all_nodes_collected = ((node_idx + 1) % nodes_per_pg == 0) or (node_idx == len(nodes) - 1)
+                is_all_nodes_collected = ((node_idx + 1) % nodes_per_pg == 0) or (
+                    node_idx == len(nodes) - 1
+                )
                 if not is_all_nodes_collected:
-                    assert nodes_per_pg > 1, "Only multi-node placement groups can have prev_bundles"
+                    assert nodes_per_pg > 1, (
+                        "Only multi-node placement groups can have prev_bundles"
+                    )
                     prev_bundles += bundles
                     continue
 
