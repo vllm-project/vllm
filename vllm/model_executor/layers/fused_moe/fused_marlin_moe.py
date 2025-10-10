@@ -20,7 +20,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache, disable_inplace
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_moe_intermediate_size,
@@ -329,10 +329,7 @@ def fused_marlin_moe(
     ).view(-1, topk, K)
 
     if output is None:
-        if inplace and not disable_inplace():
-            output = hidden_states
-        else:
-            output = torch.empty_like(hidden_states)
+        output = hidden_states if inplace else torch.empty_like(hidden_states)
 
     if moe_sum is None:
         return torch.sum(moe_output.view(-1, topk, K), dim=1, out=output)

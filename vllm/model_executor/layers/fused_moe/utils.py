@@ -322,11 +322,3 @@ def _validate_scale_shape(
 
 def activation_without_mul(activation: str) -> str:
     return activation + "_no_mul"
-
-
-# Torch custom ops can't deal with outputs aliasing inputs so we need to
-# disable inplace for torch >= 2.9.
-# See https://github.com/vllm-project/vllm/issues/26378
-@functools.cache
-def disable_inplace() -> bool:
-    return is_torch_equal_or_newer("2.9")
