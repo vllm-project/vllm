@@ -45,7 +45,6 @@ class BaseLayerWithLoRA(nn.Module):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
     ):
         """Overwrites lora tensors at index."""
         ...

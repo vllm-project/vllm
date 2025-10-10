@@ -169,6 +169,10 @@ class ExecutorBase(ABC):
             assert s == sets[0], "All workers should have the same LORAs."
         return sets[0]
 
+    def reset_mm_cache(self) -> None:
+        """Reset the multi-modal cache in each worker."""
+        self.collective_rpc("reset_mm_cache")
+
     def start_profile(self) -> None:
         self.collective_rpc("start_profile")
 

@@ -126,6 +126,10 @@ class MultiModalBudget:
 
         return max_items_per_prompt, max_items_per_batch
 
+    def reset_cache(self) -> None:
+        if self.cache is not None:
+            self.cache.clear_cache()
+
 
 @dataclass
 class AttentionGroup:
