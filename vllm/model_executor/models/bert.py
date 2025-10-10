@@ -640,13 +640,12 @@ class SPLADESparsePooler(Pooler):
         max_len: int = int(lens_tensor.max().item())
 
         if isinstance(hidden_states, list):
-            hidden_states = torch.cat(hidden_states, dim=0)
-        assert isinstance(hidden_states, torch.Tensor) and hidden_states.dim() == 2
+            hs_list = hidden_states
+        else:
+            hs_list = torch.split(hidden_states, lens, dim=0)
 
-        device = hidden_states.device
-        H = int(self.mlm_head.dense.in_features)
-
-        hs_list = torch.split(hidden_states, lens, dim=0)
+        device = hs_list[0].device
+        H = hs_list[0].size(-1)
 
         padded = hidden_states.new_zeros((B, max_len, H))
         valid_mask = torch.zeros((B, max_len), dtype=torch.bool, device=device)
@@ -755,61 +754,44 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
                 layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-12),
             )
 
+        def _strip(name: str) -> str:
+            for p in ("model.", "bert."):
+                if name.startswith(p):
+                    name = name[len(p) :]
+            return name
+
         weights_list = list(weights)
-        loaded: set[str] = set()
-
         model_side: list[tuple[str, torch.Tensor]] = []
+        mlm_side: list[tuple[str, torch.Tensor]] = []
+
         for k, w in weights_list:
-            if k.startswith("cls.predictions."):
-                continue
-            name = k
-            if name.startswith("model."):
-                name = name[len("model.") :]
-            if name.startswith("bert."):
-                name = name[len("bert.") :]
-            model_side.append((name, w))
+            name = _strip(k)
+            if name.startswith("cls.predictions."):
+                mlm_side.append((name, w))
+            else:
+                model_side.append((name, w))
 
-        other, stacked = self.model._load_weights(model_side)
-        loaded.update({"model." + n for n in stacked})
+        loaded: set[str] = set()
+        loaded_model = self.model.load_weights(model_side)
+        loaded.update({"model." + n for n in loaded_model})
 
-        other_prefixed = [("model." + n, w) for (n, w) in other]
-        loader_top = AutoWeightsLoader(
-            self, skip_prefixes=["pooler.", "mlm_head.", "lm_head."]
-        )
-        loaded_other = loader_top.load_weights(other_prefixed)
-        loaded.update(loaded_other)
-
-        name_map = {
-            "cls.predictions.transform.dense.weight": "mlm_head.dense.weight",
-            "cls.predictions.transform.dense.bias": "mlm_head.dense.bias",
-            "cls.predictions.transform.LayerNorm.weight": "mlm_head.layer_norm.weight",
-            "cls.predictions.transform.LayerNorm.bias": "mlm_head.layer_norm.bias",
-            "cls.predictions.decoder.weight": "mlm_head.decoder.weight",
-            "cls.predictions.decoder.bias": "mlm_head.decoder.bias",
-        }
-        extras: list[tuple[str, torch.Tensor]] = []
-        for k, w in weights_list:
-            name = k
-            if name.startswith("model."):
-                name = name[len("model.") :]
-            if name.startswith("bert."):
-                name = name[len("bert.") :]
-            tgt = name_map.get(name)
-            if tgt is not None:
-                extras.append((tgt, w))
-
-        if extras:
-            mlm_loader = AutoWeightsLoader(self)
-            loaded_mlm = mlm_loader.load_weights(extras)
-            loaded.update(loaded_mlm)
-
-        try:
-            emb_w = self.model.embeddings.word_embeddings.weight
-            dec_w = self.mlm_head.decoder.weight
-            if dec_w.shape == emb_w.shape and dec_w.data_ptr() != emb_w.data_ptr():
-                self.mlm_head.decoder.weight = emb_w
-        except Exception:
-            pass
+        if mlm_side:
+            name_map = {
+                "cls.predictions.transform.dense.weight": "mlm_head.dense.weight",
+                "cls.predictions.transform.dense.bias": "mlm_head.dense.bias",
+                ("cls.predictions.transform.LayerNorm.weight"): (
+                    "mlm_head.layer_norm.weight"
+                ),
+                ("cls.predictions.transform.LayerNorm.bias"): (
+                    "mlm_head.layer_norm.bias"
+                ),
+                "cls.predictions.decoder.weight": "mlm_head.decoder.weight",
+                "cls.predictions.decoder.bias": "mlm_head.decoder.bias",
+            }
+            remapped = [(name_map[n], w) for n, w in mlm_side if n in name_map]
+            if remapped:
+                loaded_mlm = AutoWeightsLoader(self).load_weights(remapped)
+                loaded.update(loaded_mlm)
 
         return loaded
 
