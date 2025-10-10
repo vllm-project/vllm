@@ -25,6 +25,7 @@ total. And when deploying, we'll have 288 sets of linear layer weights for each
 MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
+
 import threading
 import time
 from collections.abc import Sequence
@@ -46,7 +47,6 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 from .async_worker import start_async_worker
 from .rebalance_algo import rebalance_experts
 from .rebalance_execute import move_from_buffer, rearrange_expert_weights_inplace
-
 
 logger = init_logger(__name__)
 
@@ -777,7 +777,6 @@ class EplbState:
                 )
 
     def post_eplb(self, model: MixtureOfExperts, is_profile: bool = False) -> None:
-
         assert self.new_physical_to_logical_map is not None
         assert self.new_logical_to_physical_map is not None
         assert self.new_logical_replica_count is not None
