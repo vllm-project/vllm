@@ -29,7 +29,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             vllm_config=vllm_config,
             device=device,
             pass_hidden_states_to_model=False,
-            pass_cudagraph_args_to_forward_ctx=True,
             runner=runner,
         )
         self._raise_if_multimodal()

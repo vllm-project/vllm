@@ -3,7 +3,7 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
-from typing import Optional, TypedDict
+from typing import Optional
 
 import numpy as np
 import torch
@@ -16,7 +16,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
@@ -54,7 +54,6 @@ class SpecDecodeBaseProposer:
         vllm_config: VllmConfig,
         device: torch.device,
         pass_hidden_states_to_model: bool,
-        pass_cudagraph_args_to_forward_ctx: bool,
         runner=None,
     ):
         self.vllm_config = vllm_config
@@ -63,7 +62,6 @@ class SpecDecodeBaseProposer:
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
-        self.pass_cudagraph_args_to_forward_ctx = pass_cudagraph_args_to_forward_ctx
 
         self.runner = runner
         self.device = device
@@ -507,16 +505,6 @@ class SpecDecodeBaseProposer:
 
     def model_returns_tuple(self) -> bool:
         return self.method not in ("mtp", "draft_model")
-
-    def cudagraph_args(self, num_tokens: int) -> "CudaGraphArgs":
-        batch_descriptor = BatchDescriptor(num_tokens=num_tokens, uniform_decode=False)
-        cudagraph_runtime_mode, batch_descriptor = (
-            self.runner.cudagraph_dispatcher.dispatch(batch_descriptor)
-        )
-        return CudaGraphArgs(
-            cudagraph_runtime_mode=cudagraph_runtime_mode,
-            batch_descriptor=batch_descriptor,
-        )
 
     def prepare_next_token_ids_cpu(
         self,
@@ -1168,11 +1156,6 @@ class SpecDecodeBaseProposer:
         ), "All eagle layers should belong to the same kv cache group"
 
 
-class CudaGraphArgs(TypedDict):
-    cudagraph_runtime_mode: CUDAGraphMode
-    batch_descriptor: BatchDescriptor
-
-
 class EagleProposer(SpecDecodeBaseProposer):
     def __init__(
         self,
@@ -1184,7 +1167,6 @@ class EagleProposer(SpecDecodeBaseProposer):
             vllm_config,
             device,
             pass_hidden_states_to_model=True,
-            pass_cudagraph_args_to_forward_ctx=False,
             runner=runner,
         )
 
