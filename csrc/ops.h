@@ -138,12 +138,12 @@ void silu_and_mul_nvfp4_quant(torch::Tensor& out,
                               torch::Tensor& input,
                               torch::Tensor& input_global_scale);
 #endif
-void silu_mul_fp8_quant_deep_gemm_cuda(
+void persistent_masked_m_silu_mul_quant(
     const at::Tensor& input,   // (E, T, 2*H)
     const at::Tensor& counts,  // (E)
     at::Tensor& y_q,           // (E, T, H) [OUT]
     at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
-    int64_t group_size, bool use_ue8m0, int64_t num_parallel_tokens);
+    bool use_ue8m0);
 
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 

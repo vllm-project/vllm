@@ -1643,7 +1643,7 @@ class OpenAIServingChat(OpenAIServing):
                 bytes=list(token.encode("utf-8", errors="replace")),
             )
             for i, p in enumerate(logprobs.items())
-            if top_logprobs and i < top_logprobs
+            if (top_logprobs and i < top_logprobs or top_logprobs == -1)
         ]
 
     def _create_chat_logprobs(
