@@ -31,6 +31,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
+from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
     Qwen3OmniMoeConfig,
     Qwen3OmniMoeThinkerConfig,
@@ -687,6 +688,67 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             ((feat_lengths - 1) // 2 + 1 - 1) // 2 + 1 + (input_lengths // 100) * 13
         )
         return feat_lengths, output_lengths
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        mm_data = dict(mm_data)
+        audios = mm_data.pop("audios", [])
+
+        def pad_to_hop_length(x: np.ndarray, hop_length: int) -> np.ndarray:
+            length = x.shape[-1]
+            if length % hop_length != 0:
+                pad_length = hop_length - (length % hop_length)
+                x = np.pad(x, (0, pad_length), mode="constant", constant_values=0)
+            return x
+
+        # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
+        if audios:
+            # NOTE: Qwen3-Omni processor accept "audio"
+            # To make sure the cache works with padding=True, we pre-padded
+            # the audio to multiple of hop_length.
+            hop_length = self.info.get_feature_extractor().hop_length
+            mm_data["audio"] = [
+                pad_to_hop_length(audio, hop_length)
+                if isinstance(audio, np.ndarray)
+                else (pad_to_hop_length(audio[0], hop_length), audio[1])
+                for audio in audios
+            ]
+            mm_kwargs = dict(
+                **mm_kwargs,
+            )
+
+        hf_inputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
+
+        if (
+            "audio_feature_lengths" in hf_inputs
+            and "feature_attention_mask" in hf_inputs
+            and (audios := mm_data.get("audio", []))
+        ):
+            hop_length = self.info.get_feature_extractor().hop_length
+            audio_num_frames = []
+            for _, audio in enumerate(audios):
+                audio_length = len(audio[0]) if isinstance(audio, tuple) else len(audio)
+                num_frame = (
+                    (audio_length // hop_length)
+                    if audio_length % hop_length == 0
+                    else (audio_length // hop_length - 1)
+                )
+                audio_num_frames.append(num_frame)
+            hf_inputs["feature_attention_mask"] = [
+                torch.ones(num_frame) for num_frame in audio_num_frames
+            ]
+            hf_inputs["audio_feature_lengths"] = torch.tensor(audio_num_frames)
+        return hf_inputs
 
     def _maybe_apply_prompt_updates(
         self,
