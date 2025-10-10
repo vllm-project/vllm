@@ -380,7 +380,7 @@ class Attention(nn.Module, AttentionLayerBase):
         else:
             assert self.attn_backend.forward_includes_kv_cache, (
                 "Attention backend does not support kv cache"
-            )  # noqa: E501
+            )
             if self.use_direct_call:
                 return unified_attention(query, key, value, self.layer_name)
             else:
@@ -706,8 +706,6 @@ def unified_kv_cache_update_fake(
     return
 
 
-# TODO call a method on backend and this method should be in superclass of
-# all backends
 direct_register_custom_op(
     op_name="unified_kv_cache_update",
     op_func=unified_kv_cache_update,

@@ -209,6 +209,15 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
 
 class ForceAttention(enum.Enum):
+    """
+    This enum determines whether we want to force compilation of attention
+    metadata when we do a dummy run of the model.
+    ALL means that we always force compilation of attention metadata.
+    SEPARATE_KV_UPDATE_ONLY means that we force compilation of attention
+    metadata only for backends that split KV Cache update and attention op.
+    NONE means that we don't force compilation of attention metadata.
+    """
+
     ALL = enum.auto()
     SEPARATE_KV_UPDATE_ONLY = enum.auto()
     NONE = enum.auto()
@@ -3341,6 +3350,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # for all backends. If it's SEPARATE_KV_UPDATE_ONLY, we capture
         # attention only for backends that split KV Cache update and
         # attention op.
+        # TODO get rid of build_for_cudagraph_capture
+        # https://github.com/vllm-project/vllm/issues/22945
         if (
             force_attention != ForceAttention.NONE
             or cudagraph_runtime_mode == CUDAGraphMode.FULL
