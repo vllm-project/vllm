@@ -69,6 +69,7 @@ class ChunkedLocalAttention(Attention):
         kv_sharing_target_layer_name: str | None = None,
         prefix: str = "",
     ):
+        self.attention_chunk_size = attention_chunk_size
         dtype = torch.get_default_dtype()
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
