@@ -284,6 +284,68 @@ def test_prompt_less_than_block_size():
     assert len(kv_connector_metadata.reqs_to_recv) == 1
     assert len(scheduler_output.scheduled_new_reqs) == 0
 
+def test_kv_transfer_metadata():
+    """Unit test for basic NixlConnector interface functionality."""
+
+    # Test setup, we creates a scheduler that contains a NixlConnector
+    # of role SCHEDULER, and expect it to be serving NixlAgentMetadata from
+    # all workers of the instance.
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+
+    # Create two NixlConnector of role WORKER, one is the worker of
+    # the scheduler (prefill), the other is a worker of decode instance.
+    prefill_connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    # gather connector metadata from all workers, the scheduler connector
+    # expects metadata to be in Dict[int, Dict[int, KVConnectorHandshakeMetadata]],
+    # where the first key is the dp_rank, the second key is the tp_rank.
+    metadata = {0: {0: prefill_connector.get_handshake_metadata()}}
+    scheduler.get_kv_connector().set_xfer_handshake_metadata(metadata)
+
+    # 2 Full Blocks and 1 Half Block.
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    NUM_EXTERNAL_FULL_BLOCKS = 2
+    NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
+
+    request = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=NUM_TOKENS,
+        do_remote_prefill=True,
+    )
+    request_id = request.request_id
+
+    scheduler.add_request(request)
+
+    # Remote Prefill, triggers NixlConnectorMetadata for handshake.
+    scheduler_output = scheduler.schedule()
+    kv_connector_metadata = scheduler_output.kv_connector_metadata
+    assert kv_connector_metadata is not None
+    assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
+
+    # Decode connector will be able to create handshake with the prefill connector.    
+    decode_connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    # Here we are testing the retrieval of NIXLAgentMetadata,
+    # by knowing the implementation detail, we override the add_remote_agent
+    # to validate the metadata received is the same as the one in prefill_connector.
+    
+    received_metadata = None
+    def mock_add_remote_agent(self, agent_metadata: NixlAgentMetadata, remote_tp_rank: int, remote_tp_size: int):
+        nonlocal received_metadata
+        received_metadata = (agent_metadata, remote_tp_rank, remote_tp_size)
+        return "remote_agent"
+    decode_connector.connector_worker.add_remote_agent = mock_add_remote_agent
+
+    meta = kv_connector_metadata.reqs_to_recv[request_id]
+    decode_connector.connector_worker._nixl_handshake(meta.remote_host,
+                meta.remote_port,
+                meta.tp_size,
+                meta.remote_engine_id)
+    assert received_metadata is not None
+    assert received_metadata[1] == 0  # remote_tp_rank
+    assert received_metadata[2] == 1  # remote_tp_size
+    assert metadata[0][0] == received_metadata[0]
+
 
 class FakeNixlConnectorWorker(NixlConnectorWorker):
     REMOTE_ENGINE_ID = "remote_engine"
