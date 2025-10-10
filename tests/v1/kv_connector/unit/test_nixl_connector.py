@@ -28,6 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     NixlAgentMetadata,
     NixlConnector,
     NixlConnectorMetadata,
+    NixlConnectorScheduler,
     NixlConnectorWorker,
     NixlKVConnectorStats,
 )
@@ -317,7 +318,8 @@ def test_kv_transfer_metadata(dist_init):
     # expects metadata to be in Dict[int, Dict[int, KVConnectorHandshakeMetadata]],
     # where the first key is the dp_rank, the second key is the tp_rank.
     metadata = {0: {0: prefill_connector.get_handshake_metadata()}}
-    scheduler.get_kv_connector().set_xfer_handshake_metadata(metadata)
+    scheduler_connector = scheduler.get_kv_connector()
+    scheduler_connector.set_xfer_handshake_metadata(metadata)
 
     # Simulate a request that finishes prefill, which returns
     # corresponding NixlConnectorMetadata for decode instance.
@@ -366,6 +368,9 @@ def test_kv_transfer_metadata(dist_init):
     assert received_metadata[1] == 0  # remote_tp_rank
     assert received_metadata[2] == 1  # remote_tp_size
     assert metadata[0][0] == received_metadata[0]
+
+    # Need to shutdown the background thread to release NIXL side channel port
+    scheduler_connector.shutdown()
 
 
 class FakeNixlConnectorWorker(NixlConnectorWorker):
@@ -958,6 +963,8 @@ def _run_abort_timeout_test(llm_kwargs: dict, timeout: int):
     _ = llm.generate([f"What is the capital of France? {padding}"], sampling_params)
     # Request-0 times out and is cleared!
     assert "0" not in req_to_blocks
+    # Need to shutdown the background thread to release NIXL side channel port
+    llm.llm_engine.engine_core.shutdown()
 
 
 def test_register_kv_caches(dist_init):
@@ -1127,12 +1134,15 @@ def test_shutdown_cleans_up_resources(dist_init):
     """Test that shutdown() properly cleans up all resources."""
     vllm_config = create_vllm_config()
 
+    scheduler = NixlConnectorScheduler(
+        vllm_config, vllm_config.kv_transfer_config.engine_id
+    )
     worker = NixlConnectorWorker(vllm_config, vllm_config.kv_transfer_config.engine_id)
     nixl_wrapper = worker.nixl_wrapper
 
     with (
         patch.object(worker, "_handshake_initiation_executor") as mock_exec,
-        patch.object(worker, "_nixl_handshake_listener_t") as mock_listener,
+        patch.object(scheduler, "_nixl_handshake_listener_t") as mock_listener,
         patch.object(nixl_wrapper, "release_xfer_handle") as mock_rel_xfer,
         patch.object(nixl_wrapper, "release_dlist_handle") as mock_rel_dlist,
         patch.object(nixl_wrapper, "remove_remote_agent") as mock_rem_agent,
@@ -1151,7 +1161,12 @@ def test_shutdown_cleans_up_resources(dist_init):
         worker.shutdown()
 
         mock_exec.shutdown.assert_called_with(wait=False)
-        mock_listener.join.assert_called_once_with(timeout=0)
+
+        # Same sequence on scheduler.shutdown()
+        scheduler.shutdown()
+        scheduler.shutdown()
+        scheduler.shutdown()
+        mock_listener.join.assert_called_once()
 
         mock_rel_xfer.assert_called_once_with(123)
         assert mock_rel_dlist.call_count == 2

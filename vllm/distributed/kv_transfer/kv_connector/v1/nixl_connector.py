@@ -315,6 +315,7 @@ class NixlConnectorScheduler:
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
         self._encoded_xfer_handshake_metadata: dict[int, dict[int, Any]] = {}
+        self._stop_event = threading.Event()
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -329,8 +330,9 @@ class NixlConnectorScheduler:
         self._reqs_not_processed: set[ReqId] = set()
 
     def shutdown(self):
+        self._stop_event.set()
         if self._nixl_handshake_listener_t is not None:
-            self._nixl_handshake_listener_t.join(timeout=0)
+            self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
 
     def set_xfer_handshake_metadata(self, metadata: dict[int, dict[int, dict]]) -> None:
@@ -359,7 +361,12 @@ class NixlConnectorScheduler:
             ready_event = threading.Event()
             self._nixl_handshake_listener_t = threading.Thread(
                 target=self._nixl_handshake_listener,
-                args=(encoded_data, ready_event, self.side_channel_port),
+                args=(
+                    encoded_data,
+                    ready_event,
+                    self._stop_event,
+                    self.side_channel_port,
+                ),
                 daemon=True,
                 name="nixl_handshake_listener",
             )
@@ -370,6 +377,7 @@ class NixlConnectorScheduler:
     def _nixl_handshake_listener(
         encoded_data: dict[int, dict[int, Any]],
         ready_event: threading.Event,
+        stop_event: threading.Event,
         port: int,
     ):
         """Background thread for getting new NIXL handshakes."""
@@ -381,9 +389,15 @@ class NixlConnectorScheduler:
         path = make_zmq_path("tcp", host, port)
         logger.debug("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
+            sock.setsockopt(zmq.RCVTIMEO, 1000)
             ready_event.set()
             while True:
-                identity, _, msg = sock.recv_multipart()
+                try:
+                    identity, _, msg = sock.recv_multipart()
+                except zmq.Again:
+                    if stop_event.is_set():
+                        break
+                    continue
                 # Decode the message which contains (GET_META_MSG, rank)
                 msg, target_dp_rank, target_tp_rank = msgspec.msgpack.decode(msg)
                 logger.debug(
