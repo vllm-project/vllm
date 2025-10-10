@@ -166,7 +166,7 @@ def load_v1_op_config(op_type: str,
             f'{user_defined_config_folder}/{config_fname}'
         )
         if not config_path.exists():
-            logger.warning_once(f"No LoRA kernel config files found in the provided folder")
+            logger.warning_once(f"No LoRA kernel configs founded in {config_path}")
             return None
 
         # Load json
