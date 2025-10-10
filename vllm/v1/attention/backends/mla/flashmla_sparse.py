@@ -18,7 +18,7 @@ from vllm.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
 )
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -279,16 +279,14 @@ def triton_convert_req_index_to_global_index(
     return out, prefill_unique_out
 
 
-@dataclass
 class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
         self,
-        *,
-        vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
         layer_names: list[str],
+        vllm_config: VllmConfig,
         device: torch.device,
     ) -> None:
         self.vllm_config = vllm_config
@@ -299,9 +297,9 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         parallel_config = vllm_config.parallel_config
         self.device = device
 
-        # Treat requests with query length <= 128 as decodes so the scheduler
-        # can group them at the front of the batch when permitted.
-        self._init_reorder_batch_threshold(128)
+        # Treat requests with query length <= 1 as decodes to match the
+        # DeepGEMM indexer constraint (fp8_paged_mqa_logits only supports next_n <= 2)
+        self._init_reorder_batch_threshold(1)
 
         props = torch.cuda.get_device_properties(device)
         sm_count = props.multi_processor_count
@@ -481,31 +479,18 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         self.topk_indices_buffer = indexer.topk_indices_buffer
         self.padding = 128 if current_platform.is_device_capability(100) else 64
 
-        self.prefill_bf16_workspace: Optional[torch.Tensor] = None
+        # Store workspace spec for prefill_bf16_workspace
+        # (will be allocated via get_workspace)
+        from vllm.v1.worker.workspace import PerKVCacheTokenWorkspace
+
+        self.prefill_bf16_workspace_spec = PerKVCacheTokenWorkspace(
+            shape=(head_size,), dtype=torch.bfloat16, name="prefill_bf16_workspace"
+        )
+
+        # Small buffers allocated directly
         self.prefill_seen_buffer: Optional[torch.Tensor] = None
         self.prefill_unique_output: Optional[torch.Tensor] = None
         self.prefill_unique_count: Optional[torch.Tensor] = None
-
-    def _allocate_prefill_workspaces(self, device: torch.device) -> None:
-        # Allocate workspace for converting indices to global slots
-        if self.prefill_bf16_workspace is None:
-            vllm_config = get_current_vllm_config()
-            cache_config = vllm_config.cache_config
-            model_config = vllm_config.model_config
-            kv_cache_size_in_tokens = (
-                cache_config.num_gpu_blocks * cache_config.block_size
-            )
-            self.prefill_bf16_workspace = torch.empty(
-                (kv_cache_size_in_tokens, self.head_size),
-                dtype=torch.bfloat16,
-                device=device,
-            )
-            self.prefill_seen_buffer = torch.zeros(
-                (model_config.max_model_len,), dtype=torch.int32, device=device
-            )
-            self.prefill_unique_count = torch.zeros(
-                (1,), dtype=torch.int32, device=device
-            )
 
     def _forward_bf16_kv(
         self,
@@ -586,9 +571,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             )
 
         if attn_metadata is None:
-            # In a prefill run allocate the workspace for prefill handling
-            self._allocate_prefill_workspaces(q.device)
-
+            # Dummy run - no need to allocate buffers
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
             # same expert outputs.
@@ -624,6 +607,21 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                 raise RuntimeError(
                     "Expected non-empty kv_cache for fp8_ds_mla prefill handling"
                 )
+
+            # Lazy allocation of small buffers on first use
+            # Use a conservative size of 65536 tokens (256KB per buffer)
+            if self.prefill_unique_count is None:
+                max_buffer_size = 65536
+                self.prefill_unique_count = torch.zeros(
+                    (1,), dtype=torch.int32, device=q.device
+                )
+                self.prefill_seen_buffer = torch.zeros(
+                    (max_buffer_size,), dtype=torch.int32, device=q.device
+                )
+                self.prefill_unique_output = torch.zeros(
+                    (max_buffer_size,), dtype=torch.int32, device=q.device
+                )
+
             # Scheduler places decode tokens first, so the remaining suffix maps
             # to prefills for the masked unique-index gather.
             prefill_token_mask = torch.zeros(
@@ -700,27 +698,39 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                     unique_prefill_indices is not None
                     and unique_prefill_indices.numel() > 0
                 ):
+                    # Get workspace for prefill_bf16_workspace
+                    from vllm.v1.worker.workspace import get_workspace
+
+                    prefill_bf16_workspace = get_workspace(
+                        self.prefill_bf16_workspace_spec, device=q.device
+                    )
+
                     indices_for_upconvert = unique_prefill_indices.to(
                         dtype=torch.int32, copy=False
                     )
                     print("upconverting cache")
                     ops.upconvert_ds_mla_tokens(
                         kv_cache,
-                        self.prefill_bf16_workspace,
+                        prefill_bf16_workspace,
                         indices_for_upconvert.contiguous(),
                         self.prefill_unique_count,
                     )
-                # Zero the bitmap wholesale; cheaper than selectively
-                # clearing the visited slots and keeps next call ready.
-                assert self.prefill_seen_buffer is not None
-                self.prefill_seen_buffer.zero_()
-                print("bf16 prefill")
-                attn_out[prefill_start:] = self._forward_bf16_kv(
-                    q[prefill_start:],
-                    self.prefill_bf16_workspace,
-                    topk_prefill,
-                    attn_metadata,
-                )
+                    # Zero the bitmap wholesale; cheaper than selectively
+                    # clearing the visited slots and keeps next call ready.
+                    assert self.prefill_seen_buffer is not None
+                    self.prefill_seen_buffer.zero_()
+                    print("bf16 prefill")
+                    attn_out[prefill_start:] = self._forward_bf16_kv(
+                        q[prefill_start:],
+                        prefill_bf16_workspace,
+                        topk_prefill,
+                        attn_metadata,
+                    )
+                else:
+                    # Zero the bitmap wholesale; cheaper than selectively
+                    # clearing the visited slots and keeps next call ready.
+                    assert self.prefill_seen_buffer is not None
+                    self.prefill_seen_buffer.zero_()
 
         self._v_up_proj(attn_out, out=output[:num_actual_toks])
         return output

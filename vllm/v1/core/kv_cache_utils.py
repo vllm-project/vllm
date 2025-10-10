@@ -862,7 +862,45 @@ def get_num_blocks(
         available_memory: Memory available for KV cache in bytes.
         page_size: The page size of the KV cache.
     """
-    num_blocks = int(available_memory // page_size // num_layers)
+    # Account for per-KV-cache-token workspace memory (e.g., prefill_bf16_workspace)
+    from vllm.v1.worker.workspace import (
+        adjust_available_memory_to_account_for_workspaces,
+        per_kv_cache_token_workspace_size_bytes,
+    )
+
+    per_token_workspace_bytes = per_kv_cache_token_workspace_size_bytes()
+
+    if per_token_workspace_bytes > 0:
+        block_size = vllm_config.cache_config.block_size
+        workspace_per_block = per_token_workspace_bytes * block_size
+
+        # Total memory per block = KV cache memory + workspace memory
+        # KV cache memory per block across all layers = page_size * num_layers
+        # Total per block = (page_size * num_layers) + workspace_per_block
+        total_memory_per_block = (page_size * num_layers) + workspace_per_block
+
+        # Estimate the max KV cache tokens based on available memory
+        estimated_max_kv_tokens = (
+            available_memory // (page_size * num_layers) * block_size
+        )
+
+        # Adjust available memory accounting for reserved workspace
+        adjusted_available_memory = adjust_available_memory_to_account_for_workspaces(
+            available_memory, per_token_workspace_bytes, estimated_max_kv_tokens
+        )
+
+        num_blocks = int(adjusted_available_memory // total_memory_per_block)
+
+        logger.info(
+            "Per-token workspace: %.4f GB, workspace per block: %.4f GB, "
+            "total memory per block: %.4f GB",
+            per_token_workspace_bytes / GiB_bytes,
+            workspace_per_block / GiB_bytes,
+            total_memory_per_block / GiB_bytes,
+        )
+    else:
+        num_blocks = int(available_memory // page_size // num_layers)
+
     num_blocks = max(num_blocks, 0)
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     return num_blocks

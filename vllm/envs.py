@@ -200,6 +200,7 @@ if TYPE_CHECKING:
     GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
     VLLM_PATTERN_MATCH_DEBUG: Optional[str] = None
     VLLM_DEBUG_DUMP_PATH: Optional[str] = None
+    VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
     VLLM_USE_NCCL_SYMM_MEM: bool = False
@@ -493,6 +494,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Dump fx graphs to the given directory.
     # It will override CompilationConfig.debug_dump_path if set.
     "VLLM_DEBUG_DUMP_PATH": lambda: os.environ.get("VLLM_DEBUG_DUMP_PATH", None),
+    # Debug workspace allocations. Set to "1", "true", "yes", or "all" to enable
+    # logging of workspace resize operations.
+    "VLLM_DEBUG_WORKSPACE": lambda: os.environ.get("VLLM_DEBUG_WORKSPACE", "0").lower()
+    in ("1", "true", "yes", "all"),
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),

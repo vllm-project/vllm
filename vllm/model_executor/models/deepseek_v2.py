@@ -619,15 +619,24 @@ def sparse_attn_indexer(
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = attn_metadata.prefill
+
+        # Get workspaces for k_fp8 and k_scale
+        from vllm.v1.worker.workspace import WorkspaceSpec, get_workspace
+
         for chunk in prefill_metadata.chunks:
-            k_fp8 = torch.empty(
-                [chunk.total_seq_lens, head_dim],
-                device=k.device,
+            # Use workspace instead of torch.empty
+            k_fp8_spec = WorkspaceSpec(
+                shape=(chunk.total_seq_lens, head_dim),
                 dtype=torch.float8_e4m3fn,
+                name="k_fp8_chunk",
             )
-            k_scale = torch.empty(
-                [chunk.total_seq_lens, 1], device=k.device, dtype=torch.float32
+            k_scale_spec = WorkspaceSpec(
+                shape=(chunk.total_seq_lens, 1),
+                dtype=torch.float32,
+                name="k_scale_chunk",
             )
+            k_fp8 = get_workspace(k_fp8_spec, device=k.device)
+            k_scale = get_workspace(k_scale_spec, device=k.device)
             cp_gather_indexer_k_quant_cache(
                 kv_cache,
                 k_fp8,
@@ -835,6 +844,27 @@ class Indexer(nn.Module):
         from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
         self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
+
+        # Register workspaces for k_fp8 and k_scale buffers
+        # These will be allocated lazily on first use since we don't have device yet
+        from vllm.v1.worker.workspace import WorkspaceSpec, reserve_workspace
+
+        # k_fp8: [max_total_seq_len, head_dim], dtype=float8_e4m3fn
+        self.k_fp8_spec = WorkspaceSpec(
+            shape=(self.max_total_seq_len, self.head_dim),
+            dtype=torch.float8_e4m3fn,
+            name=f"{prefix}.k_fp8",
+        )
+        # k_scale: [max_total_seq_len, 1], dtype=float32
+        self.k_scale_spec = WorkspaceSpec(
+            shape=(self.max_total_seq_len, 1),
+            dtype=torch.float32,
+            name=f"{prefix}.k_scale",
+        )
+
+        # Reserve workspaces (allocation will happen on first get_workspace call)
+        reserve_workspace(self.k_fp8_spec)
+        reserve_workspace(self.k_scale_spec)
 
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
