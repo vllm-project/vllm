@@ -30,6 +30,7 @@ from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import GiB_bytes, direct_register_custom_op
 
+FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
 try:
@@ -276,10 +277,11 @@ class Attention(nn.Module, AttentionLayerBase):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
-        if self.calculate_kv_scales:
-            attn_metadata = get_forward_context().attn_metadata
-            if attn_metadata.enable_kv_scales_calculation:
-                self.calc_kv_scales(query, key, value)
+
+        attn_metadata = get_forward_context().attn_metadata
+        if (self.calculate_kv_scales
+                and attn_metadata.enable_kv_scales_calculation):
+            self.calc_kv_scales(query, key, value)
 
         output_dtype = query.dtype
         if self.query_quant is not None:
@@ -289,7 +291,10 @@ class Attention(nn.Module, AttentionLayerBase):
             # Otherwise queries are quantized using custom ops
             # which causes decoding overheads
             assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
-            query, _ = self.query_quant(query, self._q_scale)
+            if not hasattr(
+                    attn_metadata,
+                    'q_data_type') or attn_metadata.q_data_type == FP8_DTYPE:
+                query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
             output_shape = (output_shape

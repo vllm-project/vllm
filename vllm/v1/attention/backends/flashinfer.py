@@ -143,7 +143,11 @@ def trtllm_prefill_attn_kvfp8_dequant(
 
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
-    supports_quant_query_input: bool = True
+
+    @property
+    def supports_quant_query_input(self) -> bool:
+        return supports_trtllm_attention(
+        ) and not flashinfer_disable_q_quantization()
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
