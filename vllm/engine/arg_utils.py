@@ -1240,10 +1240,12 @@ class EngineArgs:
         self.model = model_config.model
         self.tokenizer = model_config.tokenizer
 
+        # After ModelConfig init, tokenizer must be resolved (never None).
+        assert self.tokenizer is not None
         (self.model, self.tokenizer, self.speculative_config) = (
             maybe_override_with_speculators(
                 model=self.model,
-                tokenizer=self.tokenizer if self.tokenizer is not None else self.model,
+                tokenizer=self.tokenizer,
                 revision=self.revision,
                 trust_remote_code=self.trust_remote_code,
                 vllm_speculative_config=self.speculative_config,

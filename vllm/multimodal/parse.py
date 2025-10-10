@@ -13,7 +13,6 @@ from typing import (
     Optional,
     TypeVar,
     Union,
-    cast,
 )
 
 import numpy as np
@@ -367,8 +366,7 @@ class MultiModalDataParser:
         if isinstance(data, torch.Tensor):
             return data.ndim == 3
         if is_list_of(data, torch.Tensor):
-            tensors = cast(list[torch.Tensor], data)
-            return tensors[0].ndim == 2
+            return data[0].ndim == 2
 
         return False
 
@@ -426,6 +424,8 @@ class MultiModalDataParser:
         if self._is_embeddings(data):
             return AudioEmbeddingItems(data)
 
+        # Normalize into a list of audio items
+        data_items: list[AudioItem]
         if (
             is_list_of(data, float)
             or isinstance(data, (np.ndarray, torch.Tensor))
@@ -436,7 +436,7 @@ class MultiModalDataParser:
         elif isinstance(data, (np.ndarray, torch.Tensor)):
             data_items = [elem for elem in data]
         else:
-            data_items = data  # type: ignore[assignment]
+            data_items = data
 
         new_audios = list[np.ndarray]()
         for data_item in data_items:

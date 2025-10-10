@@ -4,7 +4,7 @@
 
 from collections.abc import Iterable
 from functools import reduce
-from typing import TYPE_CHECKING, Callable, TypeVar, Union, cast, overload
+from typing import TYPE_CHECKING, Any, Callable, TypeVar, Union, overload
 
 if TYPE_CHECKING:
     import torch
@@ -94,7 +94,7 @@ def json_map_leaves(
             for k, v in value.items()
         }
     elif isinstance(value, list):
-        return [json_map_leaves(func, v) for v in value]
+        return [json_map_leaves(func, v) for v in value]  # type: ignore[return-value]
     elif isinstance(value, tuple):
         return tuple(json_map_leaves(func, v) for v in value)
     else:
@@ -143,11 +143,11 @@ def json_reduce_leaves(
 
 
 def json_reduce_leaves(
-    func: Callable[..., Union[_T, _U]],
-    value: _JSONTree[_T],
-    initial: _U = cast(_U, ...),  # noqa: B008
+    func: Callable[..., Any],
+    value: _JSONTree[Any],
+    initial: Any = ...,  # noqa: B008
     /,
-) -> Union[_T, _U]:
+) -> Any:
     """
     Apply a function of two arguments cumulatively to each leaf in a
     nested JSON structure, from left to right, so as to reduce the
