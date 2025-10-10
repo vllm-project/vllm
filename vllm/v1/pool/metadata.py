@@ -40,6 +40,7 @@ class PoolingMetadata:
     prompt_token_ids: Optional[torch.Tensor]
     pooling_params: list[PoolingParams]
     pooling_cursor: Optional[PoolingCursor] = None
+    activate_loras: Optional[list[int]] = None
 
     def __getitem__(self, indices: slice):
         return PoolingMetadata(
@@ -51,6 +52,9 @@ class PoolingMetadata:
             pooling_cursor=None
             if self.pooling_cursor is None
             else self.pooling_cursor[indices],
+            activate_loras=list(self.activate_loras[indices])
+            if self.activate_loras is not None
+            else None,
         )
 
     def build_pooling_cursor(

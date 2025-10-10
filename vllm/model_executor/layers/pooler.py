@@ -131,7 +131,9 @@ def get_prompt_lens(
     return pooling_metadata.prompt_lens
 
 
-def get_prompt_token_ids(pooling_metadata: PoolingMetadata) -> list[torch.Tensor]:
+def get_prompt_token_ids(
+    pooling_metadata: PoolingMetadata,
+) -> list[torch.Tensor]:
     assert pooling_metadata.prompt_token_ids is not None, (
         "Please set `requires_token_ids=True` in `get_pooling_updates`"
     )
@@ -142,7 +144,9 @@ def get_prompt_token_ids(pooling_metadata: PoolingMetadata) -> list[torch.Tensor
     ]
 
 
-def get_pooling_params(pooling_metadata: PoolingMetadata) -> list[PoolingParams]:
+def get_pooling_params(
+    pooling_metadata: PoolingMetadata,
+) -> list[PoolingParams]:
     pooling_params = pooling_metadata.pooling_params
     return pooling_params
 
@@ -652,7 +656,12 @@ class ClassifierPooler(Pooler):
         pooled_data = pooled_data.to(self.head_dtype)
 
         if self.classifier is not None:
-            pooled_data = self.classifier(pooled_data)
+            # When setting enable_lora=True, activate_lora must not be None
+            activate_loras = pooling_metadata.activate_loras
+            pooled_data = self.classifier(
+                pooled_data,
+                **{"activate_lora_id": activate_loras} if activate_loras else {},
+            )
         # pooled_data shape: [batchsize, num_labels]
 
         if self.logit_bias is not None:

@@ -810,13 +810,16 @@ class InputBatch:
         assert len(self.req_ids) == len(self.pooling_params)
         return [self.pooling_params[req_id] for req_id in self.req_ids]
 
-    def get_pooling_metadata(self) -> PoolingMetadata:
+    def get_pooling_metadata(self, enable_lora: bool = False) -> PoolingMetadata:
         pooling_params = self.get_pooling_params()
 
         return PoolingMetadata(
             prompt_lens=torch.from_numpy(self.num_prompt_tokens[: self.num_reqs]),
             prompt_token_ids=self.sampling_metadata.prompt_token_ids,
             pooling_params=pooling_params,
+            activate_loras=list(self.request_lora_mapping[: self.num_reqs])
+            if enable_lora
+            else None,
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
