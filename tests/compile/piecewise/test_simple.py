@@ -142,7 +142,7 @@ def test_simple_piecewise_compile(use_inductor):
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("splitting_ops", [["silly.attention"], []])
+@pytest.mark.parametrize("splitting_ops", [["silly::attention"], []])
 def test_simple_inductor_graph_partition(splitting_ops, monkeypatch):
     if not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
