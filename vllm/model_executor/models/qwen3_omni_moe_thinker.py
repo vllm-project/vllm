@@ -714,17 +714,37 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             assert "audio" in mm_item_counts
             mm_item_counts["audio"] -= mm_item_counts["video"]
 
-        if is_update_applied:
-            prompt_ids = self._get_raw_input_ids(prompt_ids, use_audio_in_video)
-
-        (
-            prompt_ids,
-            mm_placeholders,
-        ) = self._apply_prompt_updates(
-            prompt_ids,
-            mm_prompt_updates,
-        )
-        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+        # Special case with `use_audio_in_video=True`
+        if use_audio_in_video:
+            if is_update_applied:
+                prompt_ids = self._get_raw_input_ids(prompt_ids, use_audio_in_video)
+            (
+                prompt_ids,
+                mm_placeholders,
+            ) = self._apply_prompt_updates(
+                prompt_ids,
+                mm_prompt_updates,
+            )
+            self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+        # normal case with `use_audio_in_video=False`
+        elif is_update_applied:
+            mm_placeholders = self._find_mm_placeholders(
+                prompt_ids,
+                mm_prompt_updates,
+            )
+            self._validate_mm_placeholders(
+                mm_placeholders,
+                mm_item_counts,
+            )
+        else:
+            prompt_ids, mm_placeholders = self._apply_prompt_updates(
+                prompt_ids,
+                mm_prompt_updates,
+            )
+            self._validate_mm_placeholders(
+                mm_placeholders,
+                mm_item_counts,
+            )
 
         return prompt_ids, mm_placeholders
 
