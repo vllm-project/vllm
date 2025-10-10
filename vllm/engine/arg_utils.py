@@ -54,6 +54,7 @@ from vllm.config import (
 )
 from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
 from vllm.config.device import Device
+from vllm.config.lora import LoRAExtraVocabSize, MaxLoRARanks
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -65,7 +66,11 @@ from vllm.config.model import (
 )
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
 from vllm.config.observability import DetailedTraceModules
-from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
+from vllm.config.parallel import (
+    DataParallelBackend,
+    DistributedExecutorBackend,
+    ExpertPlacementStrategy,
+)
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
@@ -366,7 +371,7 @@ class EngineArgs:
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
     data_parallel_hybrid_lb: bool = False
-    data_parallel_backend: str = ParallelConfig.data_parallel_backend
+    data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_dbo: bool = ParallelConfig.enable_dbo
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
@@ -436,17 +441,17 @@ class EngineArgs:
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
-    video_pruning_rate: float = MultiModalConfig.video_pruning_rate
+    video_pruning_rate: Optional[float] = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
     max_loras: int = LoRAConfig.max_loras
-    max_lora_rank: int = LoRAConfig.max_lora_rank
+    max_lora_rank: MaxLoRARanks = LoRAConfig.max_lora_rank
     default_mm_loras: Optional[dict[str, str]] = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
-    lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
+    lora_extra_vocab_size: LoRAExtraVocabSize = LoRAConfig.lora_extra_vocab_size
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[int] = CacheConfig.num_gpu_blocks_override
@@ -502,7 +507,7 @@ class EngineArgs:
         ModelConfig, "override_generation_config"
     )
     model_impl: str = ModelConfig.model_impl
-    override_attention_dtype: str = ModelConfig.override_attention_dtype
+    override_attention_dtype: Optional[str] = ModelConfig.override_attention_dtype
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
@@ -511,7 +516,7 @@ class EngineArgs:
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
-    pt_load_map_location: str = LoadConfig.pt_load_map_location
+    pt_load_map_location: Union[str, dict[str, str]] = LoadConfig.pt_load_map_location
 
     # DEPRECATED
     enable_multimodal_encoder_data_parallel: bool = False
@@ -1095,13 +1100,12 @@ class EngineArgs:
 
             self.mm_encoder_tp_mode = "data"
 
-        return ModelConfig(
+        model_config_kwargs: dict[str, Any] = dict(
             model=self.model,
             hf_config_path=self.hf_config_path,
             runner=self.runner,
             convert=self.convert,
             task=self.task,
-            tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
@@ -1115,7 +1119,6 @@ class EngineArgs:
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
             tokenizer_revision=self.tokenizer_revision,
-            max_model_len=self.max_model_len,
             quantization=self.quantization,
             enforce_eager=self.enforce_eager,
             max_logprobs=self.max_logprobs,
@@ -1147,6 +1150,11 @@ class EngineArgs:
             video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
         )
+        if self.tokenizer is not None:
+            model_config_kwargs["tokenizer"] = self.tokenizer
+        if self.max_model_len is not None:
+            model_config_kwargs["max_model_len"] = self.max_model_len
+        return ModelConfig(**model_config_kwargs)
 
     def validate_tensorizer_args(self):
         from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -1488,10 +1496,8 @@ class EngineArgs:
         if speculative_config is not None:
             num_lookahead_slots = speculative_config.num_lookahead_slots
 
-        scheduler_config = SchedulerConfig(
+        scheduler_kwargs: dict[str, Any] = dict(
             runner_type=model_config.runner_type,
-            max_num_batched_tokens=self.max_num_batched_tokens,
-            max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
             cuda_graph_sizes=self.cuda_graph_sizes,
             num_lookahead_slots=num_lookahead_slots,
@@ -1508,6 +1514,11 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
         )
+        if self.max_num_batched_tokens is not None:
+            scheduler_kwargs["max_num_batched_tokens"] = self.max_num_batched_tokens
+        if self.max_num_seqs is not None:
+            scheduler_kwargs["max_num_seqs"] = self.max_num_seqs
+        scheduler_config = SchedulerConfig(**scheduler_kwargs)
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
             raise ValueError(
@@ -1545,17 +1556,15 @@ class EngineArgs:
         # Forward the deprecated CLI args to the StructuredOutputsConfig
         so_config = self.structured_outputs_config
         if self.guided_decoding_backend is not None:
-            so_config.guided_decoding_backend = self.guided_decoding_backend
+            so_config.backend = self.guided_decoding_backend
         if self.guided_decoding_disable_fallback is not None:
-            so_config.guided_decoding_disable_fallback = (
-                self.guided_decoding_disable_fallback
-            )
+            so_config.disable_fallback = self.guided_decoding_disable_fallback
         if self.guided_decoding_disable_any_whitespace is not None:
-            so_config.guided_decoding_disable_any_whitespace = (
+            so_config.disable_any_whitespace = (
                 self.guided_decoding_disable_any_whitespace
             )
         if self.guided_decoding_disable_additional_properties is not None:
-            so_config.guided_decoding_disable_additional_properties = (
+            so_config.disable_additional_properties = (
                 self.guided_decoding_disable_additional_properties
             )
 
@@ -1599,7 +1608,7 @@ class EngineArgs:
         # No Mamba or Encoder-Decoder so far.
         if not model_config.is_v1_compatible:
             _raise_or_fallback(
-                feature_name=model_config.architectures, recommend_to_remove=False
+                feature_name=str(model_config.architectures), recommend_to_remove=False
             )
             return False
 
@@ -1715,6 +1724,7 @@ class EngineArgs:
                 else:
                     self.enable_prefix_caching = True
         else:
+            assert model_config.pooler_config is not None
             pooling_type = model_config.pooler_config.pooling_type
             is_causal = getattr(model_config.hf_config, "is_causal", True)
             incremental_prefill_supported = (
