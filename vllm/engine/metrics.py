@@ -51,11 +51,8 @@ class Metrics:
 
         # Use this flag to hide metrics that were deprecated in
         # a previous release and which will be removed future
-        self.show_hidden_metrics = (
-            vllm_config.observability_config.show_hidden_metrics
-            if vllm_config.observability_config is not None
-            else False
-        )
+        assert vllm_config.observability_config is not None
+        self.show_hidden_metrics = vllm_config.observability_config.show_hidden_metrics
 
         # System stats
         #   Scheduler State
@@ -455,11 +452,11 @@ class LoggingStatLogger(StatLoggerBase):
 
     def __init__(self, local_interval: float, vllm_config: VllmConfig) -> None:
         super().__init__(local_interval, vllm_config)
-        # Explicitly annotate attributes for mypy when follow-imports=skip
-        self.num_prompt_tokens: list[int] = []
-        self.num_generation_tokens: list[int] = []
-        self.last_local_log: float = time.time()
-        self.local_interval: float = local_interval
+
+        self.num_prompt_tokens: list[int]
+        self.num_generation_tokens: list[int]
+        self.last_local_log: float
+        self.local_interval: float
         self.last_prompt_throughput: Optional[float] = None
         self.last_generation_throughput: Optional[float] = None
 
@@ -542,11 +539,11 @@ class PrometheusStatLogger(StatLoggerBase):
         self, local_interval: float, labels: dict[str, str], vllm_config: VllmConfig
     ) -> None:
         super().__init__(local_interval, vllm_config)
-        # Explicitly annotate attributes for mypy when follow-imports=skip
-        self.num_prompt_tokens: list[int] = []
-        self.num_generation_tokens: list[int] = []
-        self.last_local_log: float = time.time()
-        self.local_interval: float = local_interval
+
+        self.num_prompt_tokens: list[int]
+        self.num_generation_tokens: list[int]
+        self.last_local_log: float
+        self.local_interval: float
         # Prometheus metrics
         self.labels = labels
         self.metrics = self._metrics_cls(
