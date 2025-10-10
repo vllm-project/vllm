@@ -14,10 +14,12 @@ from vllm.attention.backends.abstract import (
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig
+from vllm.config.vllm import VllmConfig
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     subclass_attention_backend,
 )
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 
 @functools.lru_cache
@@ -98,3 +100,7 @@ class EncoderOnlyAttention(Attention):
             attn_type=AttentionType.ENCODER_ONLY,
             **kwargs,
         )
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> Optional[KVCacheSpec]:
+        # Does not need KV cache
+        return None
