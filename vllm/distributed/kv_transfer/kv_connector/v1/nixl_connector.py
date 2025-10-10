@@ -1067,6 +1067,10 @@ class NixlConnectorWorker:
 
         remote_block_len = nixl_agent_meta.block_lens[0]
         if nixl_agent_meta.kv_cache_layout == "HND" and self.kv_cache_layout == "NHD":
+            logger.info(
+                "Remote is HND and local is NHD, enabled additional permute "
+                "on local device KV."
+            )
             self.enable_permute_local_kv = True
         if self.use_mla or is_kv_replicated:
             # With replicated KV cache, only the number of blocks can differ.
@@ -1204,23 +1208,24 @@ class NixlConnectorWorker:
             )
 
     def permute_device_kv(self, block_ids: list[int]):
+        """Transforms the layout of received KV cache blocks to the local format.
+
+        This method corrects layout mismatches from direct memory copies by
+        permuting the tensor dimensions.
+
+        - **Source Layout:** `[num_blocks, n_kv_head, block_size, head_dim]`
+        - **Target Layout:** `[num_blocks, block_size, n_kv_head, head_dim]`
+
+        Args:
+            block_ids: A list of block IDs to update and permute.
+
+        Implementation:
+        - x = blocks_to_update.reshape(src_shape) # view local kv with sender layout
+        - permuted_blocks = x.permute(*inv_order) # transpose n_kv_heads, block_size
+        - cache.index_copy_(0, indices, permuted_blocks) # copy permuted kv back
+
         """
-        update local KV cache with NHD when actually received data is HND
-
-        nixl_connector is simply copy data buffer to specified data_ptr. If
-        sender and receiver are with different layout, we can permute in place.
-
-        Imagine received kv is a big memory chunk of
-        (num_block * block_size * n_kv_head * head_dim)
-        and actual layout is what sender layout is like:
-        [num_block, n_kv_head, block_size, head_dim]
-
-        To get all data to right dimension:
-        - x = blocks_to_update.reshape(src_shape) => view with sender layout
-        - x = x.permute(*inv_order) => transpose for (n_kv_heads, block_size)
-        - x = x.reshape(target_shape) => so we can copy back
-
-        """
+        split_k_and_v = not (self.use_mla or self._use_pallas or self._use_flashinfer)
         inv_order = [0, 2, 1, 3]
         sample_cache = list(self.device_kv_caches.values())[0][0]
         target_shape = list(sample_cache.shape)
@@ -1228,13 +1233,12 @@ class NixlConnectorWorker:
         src_shape = tuple(target_shape[i] for i in inv_order)
         indices = torch.tensor(block_ids, device=sample_cache.device)
 
-        for _, per_layer_kv_cache in self.device_kv_caches.items():
-            for _, cache in enumerate(per_layer_kv_cache):
+        for _, cache_or_caches in self.device_kv_caches.items():
+            cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+            for cache in cache_list:
                 blocks_to_update = cache.index_select(0, indices)
-                permuted_blocks = (
-                    blocks_to_update.reshape(src_shape)
-                    .permute(*inv_order)
-                    .reshape(target_shape)
+                permuted_blocks = blocks_to_update.reshape(src_shape).permute(
+                    *inv_order
                 )
                 cache.index_copy_(0, indices, permuted_blocks)
 
@@ -1280,11 +1284,7 @@ class NixlConnectorWorker:
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
 
-        if (
-            not self.use_host_buffer
-            and self.enable_permute_local_kv
-            and len(done_recving) > 0
-        ):
+        if self.enable_permute_local_kv and len(done_recving) > 0:
             block_ids = []
             for req_id in done_recving:
                 meta = self._recving_metadata.pop(req_id)
