@@ -398,6 +398,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.max_num_reqs + 1, dtype=torch.int32
         )
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        if self.dcp_world_size > 1:
+            self.dcp_local_seq_lens = self._make_buffer(
+                self.max_num_reqs, dtype=torch.int32
+            )
         # Because inputs_embeds may be bfloat16 and we don't need a numpy
         # version of this tensor, avoid a RuntimeError by not creating a
         # numpy buffer.
@@ -581,7 +585,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE(lucas): currently no backend supports the custom masking
             #  required for DCP with q_len > 1, so we assert here. Remove this
             #  assert once the custom mask is support is added to FA3.
-            if self.dcp_world_size > 1:
+            if (
+                self.dcp_world_size > 1
+                and envs.VLLM_ATTENTION_BACKEND != "FLASH_ATTN_MLA"
+            ):
                 assert self.reorder_batch_threshold == 1, (
                     "DCP not support reorder_batch_threshold > 1 now."
                 )
@@ -701,6 +708,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Update the cached states.
 
             req_state.num_computed_tokens = num_computed_tokens
+            req_index = self.input_batch.req_id_to_index.get(req_id)
 
             if not is_last_rank:
                 # When using PP, the scheduler sends the sampled tokens back,
@@ -721,19 +729,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Some output tokens were discarded due to a sync-KV-load
                 # failure. Align the cached state.
                 del req_state.output_token_ids[num_output_tokens:]
-
-                req_index = self.input_batch.req_id_to_index.get(req_id)
                 if req_index is not None:
-                    old_end_idx = self.input_batch.num_tokens_no_spec[req_index]
                     end_idx = (
                         self.input_batch.num_prompt_tokens[req_index]
                         + num_output_tokens
                     )
                     self.input_batch.num_tokens[req_index] = end_idx
                     self.input_batch.num_tokens_no_spec[req_index] = end_idx
-                    self.input_batch.is_token_ids[req_index, end_idx:old_end_idx] = (
-                        False
-                    )
 
             # Update the block IDs.
             if not resumed_from_preemption:
@@ -742,12 +744,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     for block_ids, new_ids in zip(req_state.block_ids, new_block_ids):
                         block_ids.extend(new_ids)
             else:
+                assert req_index is None
                 assert new_block_ids is not None
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
 
-            req_index = self.input_batch.req_id_to_index.get(req_id)
             if req_index is None:
                 # The request is not in the persistent batch.
                 # The request was either preempted and resumed later, or was not
@@ -1335,6 +1337,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_logits_indices=logits_indices.size(0),
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
+                dcp_local_seq_lens=self.dcp_local_seq_lens.gpu[:num_reqs]
+                if self.dcp_world_size > 1
+                else None,
             )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
@@ -2295,9 +2300,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # These will be copied into input_ids in the next step
             # when preparing inputs.
             self.input_batch.prev_sampled_token_ids = sampled_token_ids
-            self.input_batch.prev_sampled_token_ids_invalid_indices = (
-                invalid_req_indices_set
-            )
             self.input_batch.prev_req_id_to_index = {
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids)
@@ -3310,6 +3312,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         kv_cache_group_id
                     ].slot_mapping.gpu[:num_tokens],
                     causal=True,
+                    dcp_local_seq_lens=self.dcp_local_seq_lens.gpu[:num_reqs]
+                    if self.dcp_world_size > 1
+                    else None,
                 )
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     if ubatch_slices is not None:
@@ -3436,7 +3441,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
-                self.drafter.dummy_run(num_tokens)
+                use_cudagraphs = cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+                self.drafter.dummy_run(num_tokens, use_cudagraphs=use_cudagraphs)
 
         # This is necessary to avoid blocking DP.
         # For dummy runs, we typically skip EPLB since we don't have any real
