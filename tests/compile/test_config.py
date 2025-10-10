@@ -197,16 +197,22 @@ def test_splitting_ops_dynamic():
 def test_resolve_operator_overload():
     import torch
 
-    from vllm.compilation.partition_rules import _resolve_operator_overload
+    from vllm.compilation.partition_rules import resolve_defined_ops
 
-    # Test valid operator names in PyTorch's :: notation
-    assert _resolve_operator_overload("aten::mm.default") is torch.ops.aten.mm.default
-    assert (
-        _resolve_operator_overload("aten::addmm.default")
-        is torch.ops.aten.addmm.default
+    # Test valid operator names
+    resolved = resolve_defined_ops(["aten::mm.default", "aten::addmm.default"])
+    assert len(resolved) == 2
+    assert resolved[0] is torch.ops.aten.mm.default
+    assert resolved[1] is torch.ops.aten.addmm.default
+
+    # Test that invalid operators are skipped (not raising exceptions)
+    resolved = resolve_defined_ops(
+        [
+            "aten::mm.default",
+            "aten::nonexistent_op.default",  # This should be skipped
+            "aten::addmm.default",
+        ]
     )
-
-    # Test invalid operator names
-    with pytest.raises(ValueError):
-        # Non-existent operator
-        _resolve_operator_overload("aten::nonexistent_op.default")
+    assert len(resolved) == 2  # Only 2 valid ops
+    assert resolved[0] is torch.ops.aten.mm.default
+    assert resolved[1] is torch.ops.aten.addmm.default
