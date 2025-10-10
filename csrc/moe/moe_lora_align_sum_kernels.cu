@@ -21,6 +21,7 @@ __device__ __forceinline__ int32_t index(int32_t total_col, int32_t row,
 
 }  // namespace
 
+// TODO: Refactor common parts with moe_align_sum_kernels
 template <typename scalar_t, typename token_cnts_t>
 __global__ void moe_lora_align_sum_kernel(
     scalar_t* __restrict__ topk_ids, scalar_t* __restrict__ token_lora_mapping,
