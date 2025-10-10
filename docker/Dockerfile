@@ -440,6 +440,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv pip install --system -r requirements/dev.txt; \
     fi
 
+# Move host vLLM workspace into image
+ADD . /vllm-workspace/
+
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -e tests/vllm_test_utils
@@ -464,7 +467,6 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 RUN mkdir src
 RUN mv vllm src/vllm
 
-ADD . /vllm-workspace/
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
