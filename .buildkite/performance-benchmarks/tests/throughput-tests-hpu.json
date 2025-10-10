@@ -3,6 +3,7 @@
         "test_name": "throughput_llama8B_tp1",
         "environment_variables": {
             "PT_HPU_LAZY_MODE": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
             "VLLM_DEFRAG": 1
         },
         "parameters": {
@@ -22,6 +23,7 @@
         "environment_variables": {
             "PT_HPU_LAZY_MODE": 1,
             "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
             "VLLM_DEFRAG": 1
         },
         "parameters": {
@@ -41,6 +43,7 @@
         "environment_variables": {
             "PT_HPU_LAZY_MODE": 1,
             "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
             "VLLM_DEFRAG": 1
         },
         "parameters": {
