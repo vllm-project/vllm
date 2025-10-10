@@ -410,8 +410,8 @@ class EngineCore:
         # The cache either exists in EngineCore or WorkerWrapperBase
         if self.mm_receiver_cache is not None:
             self.mm_receiver_cache.clear_cache()
-        else:
-            self.model_executor.reset_mm_cache()
+
+        self.model_executor.reset_mm_cache()
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
