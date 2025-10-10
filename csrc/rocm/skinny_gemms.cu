@@ -11,7 +11,7 @@
 
 #include "../cuda_compat.h"
 #include "dispatch_utils.h"
-#include "quantization/fp8/common.cuh"
+#include "quantization/w8a8/fp8/common.cuh"
 
 #if defined(__HIPCC__) && \
     (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
