@@ -3,7 +3,6 @@
 
 import contextlib
 import copy
-import json
 import os
 import warnings
 from functools import lru_cache
@@ -11,10 +10,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import huggingface_hub
-from typing_extensions import assert_never
 from tokenizers.tiktoken import TikTokenTokenizer
-from transformers import (AutoTokenizer, PreTrainedTokenizer,
-                          PreTrainedTokenizerFast)
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from typing_extensions import assert_never
 
 from vllm import envs
 from vllm.logger import init_logger
@@ -203,6 +201,10 @@ def get_tokenizer(
         tokenizer = MistralTokenizer.from_pretrained(
             str(tokenizer_name), revision=revision
         )
+    elif tokenizer_mode == "tiktoken":
+        tokenizer = TikTokenTokenizer.from_pretrained(
+            str(tokenizer_name), revision=revision
+        )
     elif tokenizer_mode == "custom":
         from vllm.transformers_utils.tokenizer_base import TokenizerRegistry
 
@@ -226,30 +228,20 @@ def get_tokenizer(
             # If the error pertains to the tokenizer class not existing or not
             # currently being imported,
             # suggest using the --trust-remote-code flag.
-
-            # TODO(HelloWorldU): The IO operation could be very slow and
-            # we should find a better way to do this.
-            config_path = Path(tokenizer_name) / "tokenizer_config.json"
-            if config_path.exists():
-                with open(config_path) as f:
-                    if json.load(f).get("tokenizer_class") == (
-                            "TikTokenTokenizer"):
-                        tokenizer = TikTokenTokenizer(tokenizer_name, **kwargs)
+            if not trust_remote_code and (
+                "does not exist or is not currently imported." in str(e)
+                or "requires you to execute the tokenizer file" in str(e)
+            ):
+                err_msg = (
+                    "Failed to load the tokenizer. If the tokenizer "
+                    "is a custom tokenizer not yet available in the "
+                    "HuggingFace transformers library, consider "
+                    "setting `trust_remote_code=True` in LLM or using "
+                    "the `--trust-remote-code` flag in the CLI."
+                )
+                raise RuntimeError(err_msg) from e
             else:
-                if not trust_remote_code and (
-                        "does not exist or is not currently imported."
-                        in str(e)
-                        or "requires you to execute the tokenizer file"
-                        in str(e)):
-                    err_msg = (
-                        "Failed to load the tokenizer. If the tokenizer "
-                        "is a custom tokenizer not yet available in the "
-                        "HuggingFace transformers library, consider "
-                        "setting `trust_remote_code=True` in LLM or using "
-                        "the `--trust-remote-code` flag in the CLI.")
-                    raise RuntimeError(err_msg) from e
-                else:
-                    raise e
+                raise e
 
         # The special_tokens in tokenizer should also be
         # controlled by do_lower_case in encoder_config
