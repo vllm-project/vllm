@@ -60,14 +60,14 @@ def _render_table(title: str, headers: Sequence[str],
 
     logger.info("")
     logger.info(title)
-    separator = "-" * sum(widths) + "-" * (len(widths) - 1)
+    separator = "-" * (sum(widths) + 3 * (len(widths) - 1))
     logger.info(separator)
 
     def _fmt(row: Sequence[str]) -> str:
-        return " ".join(cell.ljust(widths[i]) for i, cell in enumerate(row))
+        return " | ".join(cell.ljust(widths[i]) for i, cell in enumerate(row))
 
     logger.info(_fmt(table[0]))
-    logger.info(" ".join("-" * w for w in widths))
+    logger.info(" | ".join("-" * w for w in widths))
     for row in table[1:]:
         logger.info(_fmt(row))
 
