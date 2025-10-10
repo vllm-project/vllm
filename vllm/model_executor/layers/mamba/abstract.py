@@ -44,7 +44,7 @@ class MambaBase(AttentionLayerBase):
         pass
 
     @abstractmethod
-    def get_state_dtype(self) -> tuple[torch.dtype]:
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         pass
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> Optional[KVCacheSpec]:
