@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import atexit
+import multiprocessing
 import os
 import time
 from contextlib import suppress
@@ -15,31 +16,16 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-_LOG_PATH = envs.VLLM_LITE_PROFILER_LOG_PATH
 
-
-def _get_process_rank() -> int | None:
-    """Get the current process rank in distributed/multi-process environments.
-
-    In distributed setups, multiple processes are spawned across different
-    GPUs/nodes. Each process has a unique rank (0, 1, 2, ...). To avoid
-    duplicate profiling data and file contention, we typically want only
-    rank 0 (the main process) to perform profiling and logging.
-
-    This function checks the LOCAL_RANK environment variable to determine
-    the process rank within a single node.
+def _should_log_results() -> int | None:
+    """Check if the current process should log results.
+    For multiprocessing, only the main process and the first worker 
+    should log results, as other worker processes duplicate the same
+    work.
     """
-    value = os.environ.get("LOCAL_RANK")
-    if value is not None:
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None
+    process = multiprocessing.current_process()
+    return process.name in ("EngineCore_DP0", "VllmWorker-0")
 
-
-_process_rank = _get_process_rank()
-_SHOULD_LOG = _LOG_PATH and (_process_rank is None or _process_rank == 0)
 
 # Cache for log file handles
 _log_file_cache: dict[str, TextIO] = {}
@@ -56,12 +42,21 @@ def _write_log_entry(name: str, elapsed_us: int) -> None:
 
     The cached file handles are automatically closed on program exit via atexit.
     """
-    if not _SHOULD_LOG or _LOG_PATH is None:
+    global _log_file_cache
+    _LOG_PATH = envs.VLLM_LITE_PROFILER_LOG_PATH
+
+    if not _should_log_results() or _LOG_PATH is None:
         return
 
-    # Ensure only rank 0 writes (only one log file should be used)
-    assert len(_log_file_cache) <= 1, \
-        "Multiple log files detected - only rank 0 should write"
+    # Handle case where file handle was opened in parent but we're in child
+    # The file descriptor may be invalid after fork
+    if _log_file_cache.get(_LOG_PATH) is not None:
+        try:
+            # Test if the file handle is still valid
+            _log_file_cache[_LOG_PATH].tell()
+        except (OSError, ValueError):
+            # File handle is stale, clear and reopen
+            _log_file_cache.clear()
 
     log_line = f"{name}|{elapsed_us}\n"
     log_file = _log_file_cache.get(_LOG_PATH)
@@ -106,32 +101,6 @@ class LiteScope:
         return False
 
 
-def clear_profiler_log() -> None:
-    """Clear the profiler log file to start fresh for a new benchmark run.
-
-    This function truncates the existing log file (if any) and removes any
-    cached file handles to ensure a clean state. This is typically called at
-    the beginning of benchmark runs to avoid accumulating data from previous
-    runs.
-    """
-    if not _LOG_PATH:
-        return
-
-    # Close and remove any existing cached file handle
-    if _LOG_PATH in _log_file_cache:
-        with suppress(OSError):
-            _log_file_cache[_LOG_PATH].close()
-        del _log_file_cache[_LOG_PATH]
-
-    # Truncate the log file by opening in write mode
-    with suppress(OSError):
-        directory = os.path.dirname(_LOG_PATH)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        with open(_LOG_PATH, 'w'):
-            pass
-
-
 def maybe_emit_lite_profiler_report() -> None:
     """Generate and display a summary report of profiling data if available.
 
@@ -160,7 +129,16 @@ def maybe_emit_lite_profiler_report() -> None:
     logger.info("")
     logger.info("Lite profiler summary (%s):", log_path)
     try:
+        # Generate and display the summary report
         lite_profiler_report.summarize_log(log_path)
+
+        # Clear the log file to avoid accumulating data from multiple runs
+        with suppress(OSError):
+            directory = os.path.dirname(log_path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(log_path, "w"):
+                pass
     except Exception as exc:  # pragma: no cover - avoid crashing benchmarks
         logger.error("Failed to summarize lite profiler log %s: %s", log_path,
                      exc)
