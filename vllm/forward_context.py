@@ -161,6 +161,17 @@ class DPMetadata:
         assert self.local_sizes is not None
         return self.local_sizes
 
+    # Get the cumulative tokens across sequence parallel ranks.
+    # In this case the input to the MoEs will be distributed w.r.t both
+    # DP and TP rank.
+    # When sp_size==1, this is just the cummulative num tokens across DP.
+    def cu_tokens_across_sp(self, sp_size: int) -> torch.Tensor:
+        num_tokens_across_sp_cpu = (
+            self.num_tokens_across_dp_cpu - 1 + sp_size
+        ) // sp_size
+        num_tokens_across_sp_cpu = num_tokens_across_sp_cpu.repeat_interleave(sp_size)
+        return torch.cumsum(num_tokens_across_sp_cpu, dim=0)
+
 
 @dataclass
 class ForwardContext:
@@ -271,6 +282,12 @@ def set_forward_context(
         dp_metadata = DPMetadata.make(
             vllm_config.parallel_config, num_tokens or 0, num_tokens_across_dp
         )
+
+    # Convenience: if cudagraph is used and num_tokens is given, we can just
+    # create a batch descriptor here if not given (there's no harm since if it
+    # doesn't match in the wrapper it'll fall through).
+    if cudagraph_runtime_mode != CUDAGraphMode.NONE and num_tokens is not None:
+        batch_descriptor = batch_descriptor or BatchDescriptor(num_tokens=num_tokens)
 
     forward_context = create_forward_context(
         attn_metadata,
