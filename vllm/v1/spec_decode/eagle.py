@@ -215,7 +215,11 @@ class EagleProposer:
 
         assert self.runner is not None
 
-        attn_metadata_builder = self._get_attention_metadata_builder()
+        if self.attn_metadata_builder is None:
+            attn_metadata_builder = self._get_attention_metadata_builder()
+        else:
+            attn_metadata_builder = self.attn_metadata_builder
+
         attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0
         )
