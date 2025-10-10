@@ -772,7 +772,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # Add spec_token_ids to token_ids_cpu.
             spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
-                req_id, ()
+                req_id, []
             )
             if spec_token_ids:
                 num_spec_tokens = len(spec_token_ids)
@@ -784,12 +784,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # NOTE(woosuk): `num_tokens` here may include spec tokens.
                 self.input_batch.num_tokens[req_index] += num_spec_tokens
 
-            # Note: When speculative decoding and structured output are enabled
-            # simultaneously, the scheduler can drop draft tokens that do not
-            # meet the structural schema. This means that
-            # scheduler_output.scheduled_spec_decode_tokens might be empty,
-            # even when speculative decoding is enabled. So, we moved this line
-            # from the 'if' block above.
+            # When speculative decoding is used with structured output,
+            # the scheduler can drop draft tokens that do not
+            # conform to the schema. This can result in
+            # scheduler_output.scheduled_spec_decode_tokens being empty,
+            # even when speculative decoding is enabled.
             self.input_batch.spec_token_ids[req_index] = spec_token_ids
 
         # Add the new or resumed requests to the persistent batch.
