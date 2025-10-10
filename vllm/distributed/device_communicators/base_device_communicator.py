@@ -27,9 +27,6 @@ class Cache:
 
 
 class All2AllManagerBase:
-    rank: int
-    world_size: int
-
     def __init__(self, cpu_group):
         self.cpu_group = cpu_group
 
@@ -48,8 +45,8 @@ class All2AllManagerBase:
         # when we create this object
         self.dp_rank = self.dp_group.rank_in_group
         self.dp_world_size = self.dp_group.world_size
-        self.rank = dist.get_rank(cpu_group)
-        self.world_size = dist.get_world_size(cpu_group)
+        self.rank: int = dist.get_rank(cpu_group)
+        self.world_size: int = dist.get_world_size(cpu_group)
 
         # all2all communication often has separate implementations for
         # intra-node and inter-node communication

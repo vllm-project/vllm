@@ -27,7 +27,7 @@ def pplx_hidden_dim_scale_bytes(
     quant_dtype: Union[torch.dtype, str, None],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]],
-):
+) -> tuple[int, int]:
     # All pplx byte sizes must be 16-byte aligned.
     align = 16
 
@@ -62,10 +62,41 @@ def pplx_hidden_dim_scale_bytes(
     )
 
 
+def pplx_hidden_dim_scale(
+    hidden_dim: int,
+    quant_dtype: Union[torch.dtype, str, None],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]],
+) -> int:
+    # For blocked per token: set to
+    #   ceil_div(hidden_dim, block_size) * sizeof(float32)
+    # For per-token: set to 4 * sizeof(float32) (x4 for alignment)
+    if quant_dtype is not None:
+        assert isinstance(quant_dtype, torch.dtype)
+        assert quant_dtype.itemsize == 1
+        hidden_dim = hidden_dim
+
+        if per_act_token_quant:
+            # per-token (M x 1)
+            assert block_shape is None
+            hidden_dim_scale = 1
+        elif block_shape is not None:
+            # per-group (M x K_tiles)
+            block_size = block_shape[1]
+            hidden_dim_scale = cdiv(hidden_dim, block_size)
+        else:
+            # per-tensor (1 x 1)
+            hidden_dim_scale = 1
+    else:
+        hidden_dim_scale = 0
+
+    return hidden_dim_scale
+
+
 class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(
         self,
-        a2a: pplx.AllToAll,
+        a2a: Union[pplx.AllToAll, pplx.AllToAllKernel],
         max_num_tokens: int,
         num_local_experts: int,
         num_dispatchers: int,
@@ -330,6 +361,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             bound_m=bound_m,
             do_send=True,
             do_recv=False,
+            # Note: new kernels allow accumulate.
         )
 
         return lambda: self.a2a.combine(
@@ -340,6 +372,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             bound_m=bound_m,
             do_send=False,
             do_recv=True,
+            # Note: new kernels allow accumulate.
         )
 
     def finalize(

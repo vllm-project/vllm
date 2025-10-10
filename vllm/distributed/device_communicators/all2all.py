@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
+from pathlib import Path
 from typing import Any, Optional
 
 import torch
@@ -187,6 +189,99 @@ class PPLXAll2AllManager(All2AllManagerBase):
         return self.handle_cache.get_or_create(
             kwargs,
             pplx.AllToAll.internode if self.internode else pplx.AllToAll.intranode,
+        )
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
+    def combine(
+        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def destroy(self):
+        with self.handle_cache._lock:
+            for _, handle in self.handle_cache._cache.items():
+                handle.destroy()
+
+        if self.internode:
+            from pplx_kernels.nvshmem import nvshmem_finalize
+
+            logger.debug("PPLX NVSHMEM finalize")
+            nvshmem_finalize()
+
+
+@functools.cache
+def _count_pci_efa() -> int:
+    return len(list(Path("/sys/bus/pci/drivers/efa/").glob("0000:*")))
+
+
+@functools.cache
+def _count_pci_cuda() -> int:
+    return len(list(Path("/sys/bus/pci/drivers/nvidia/").glob("0000:*")))
+
+
+def _nets_per_gpu() -> int:
+    num_efa = _count_pci_efa()
+    if num_efa == 0:
+        return 1
+
+    num_cuda = _count_pci_cuda()
+    return num_efa // num_cuda
+
+
+class PPLXEfaAll2AllManager(All2AllManagerBase):
+    """
+    All2All communication based on PPLX EFA kernels.
+    """
+
+    def __init__(self, cpu_group, device):
+        assert has_pplx(), (
+            "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md"
+            " to install pplx_kernels."
+        )
+        super().__init__(cpu_group)
+        self.device = device
+        self.handle_cache = Cache()
+
+    def get_handle(self, kwargs):
+        import pplx_kernels as pplx
+
+        ep_group = get_ep_group()
+        dp_group = get_dp_group()
+
+        global_group = pplx.rose.distributed.torch_group.TorchParallelGroup(
+            device=self.device,
+            node_rank=ep_group.rank_in_group,
+            local_rank=ep_group.local_rank,
+            global_rank=ep_group.rank,
+            ranks=ep_group.ranks,
+        )
+
+        tp_group = pplx.rose.distributed.torch_group.TorchParallelGroup(
+            device=self.device,
+            node_rank=dp_group.rank_in_group,
+            local_rank=dp_group.local_rank,
+            global_rank=dp_group.rank,
+            ranks=dp_group.ranks,
+        )
+
+        kwargs["nets_per_gpu"] = _nets_per_gpu()
+        kwargs["dp_group"] = tp_group
+        kwargs["node_group"] = (
+            global_group if getattr(kwargs, "nvlink", False) else None
+        )
+        kwargs["global_group"] = global_group
+        kwargs["device"] = self.device
+
+        return self.handle_cache.get_or_create(
+            kwargs,
+            pplx.EfaAllToAll,
         )
 
     def dispatch(
