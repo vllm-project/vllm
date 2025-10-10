@@ -65,6 +65,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
             if input_ids[i] == self.end_token_id:
                 return True
         return False
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
         Extract the content after the end tokens
