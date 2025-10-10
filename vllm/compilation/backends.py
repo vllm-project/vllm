@@ -293,7 +293,12 @@ def split_graph(
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
             continue
-        if node.op == "call_function" and node.target in resolved_ops:
+        # Match node.target against resolved_ops
+        # node.target can be OpOverloadPacket, need to check .default
+        if node.op == "call_function" and (
+            node.target in resolved_ops
+            or (hasattr(node.target, "default") and node.target.default in resolved_ops)
+        ):
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             split_op_graphs.append(subgraph_id)
