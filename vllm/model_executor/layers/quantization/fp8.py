@@ -1222,7 +1222,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                inplace=False if self.moe.use_mori_kernels else True,
+                inplace=not self.moe.use_mori_kernels,
                 activation=activation,
                 global_num_experts=global_num_experts,
                 apply_router_weight_on_input=apply_router_weight_on_input,
