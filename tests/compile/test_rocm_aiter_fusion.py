@@ -119,10 +119,7 @@ def test_fusion_rmsnorm_quant(
             pass_config=PassConfig(enable_fusion=True, enable_noop=True),
         )
     )
-
-    with (
-        vllm.config.set_current_vllm_config(vllm_config) and monkeypatch.context() as m
-    ):
+    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         m.setenv("VLLM_ROCM_USE_AITER_RMSNORM", "1")
 
