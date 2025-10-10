@@ -9,12 +9,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.attention.layer import Attention
-from vllm.config import CompilationLevel, VllmConfig, get_layers_from_vllm_config
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config import (
+    CompilationLevel,
+    CUDAGraphMode,
+    VllmConfig,
+    get_layers_from_vllm_config,
+)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
@@ -89,12 +93,25 @@ class SpecDecodeBaseProposer:
         self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
 
-        self.use_cuda_graph = (
-            not current_platform.is_xpu()
-            and self.vllm_config.compilation_config.level == CompilationLevel.PIECEWISE
-            and not self.vllm_config.model_config.enforce_eager
-            and not self.speculative_config.enforce_eager
-        )
+        self.use_cuda_graph = False
+
+        compilation_config = self.vllm_config.compilation_config
+        if compilation_config.level == CompilationLevel.PIECEWISE:
+            cudagraph_mode = compilation_config.cudagraph_mode
+            if cudagraph_mode != CUDAGraphMode.NONE and not cudagraph_mode.has_mode(
+                CUDAGraphMode.PIECEWISE
+            ):
+                logger.warning(
+                    "Currently the eagle proposer only supports cudagraph_mode "
+                    "PIECEWISE, if you want the drafter to use cuda graphs, "
+                    "please set compilation_config.cudagraph_mode to PIECEWISE "
+                    "or FULL_AND_PIECEWISE"
+                )
+            self.use_cuda_graph = (
+                cudagraph_mode.has_mode(CUDAGraphMode.PIECEWISE)
+                and not self.speculative_config.enforce_eager
+            )
+
         self.cudagraph_batch_sizes = (
             list(reversed(self.vllm_config.compilation_config.cudagraph_capture_sizes))
             if self.use_cuda_graph
@@ -245,12 +262,15 @@ class SpecDecodeBaseProposer:
         per_layer_attn_metadata = {}
         for layer_name in self.attn_layer_names:
             per_layer_attn_metadata[layer_name] = attn_metadata
+
         for layer_name in self.indexer_layer_names:
             assert draft_indexer_metadata is not None
             per_layer_attn_metadata[layer_name] = draft_indexer_metadata
 
+        cudagraph_runtime_mode = CUDAGraphMode.NONE
         if self.use_cuda_graph and num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+            cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
             num_input_tokens = num_tokens
         # copy inputs to buffer for cudagraph
@@ -283,16 +303,12 @@ class SpecDecodeBaseProposer:
         if self.pass_hidden_states_to_model:
             model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
 
-        forward_ctx_kwargs = dict(
-            attn_metadata=per_layer_attn_metadata,
-            vllm_config=self.vllm_config,
+        with set_forward_context(
+            per_layer_attn_metadata,
+            self.vllm_config,
             num_tokens=num_input_tokens,
-        )
-        if self.pass_cudagraph_args_to_forward_ctx:
-            cudagraph_args = self.cudagraph_args(num_tokens=num_input_tokens)
-            forward_ctx_kwargs.update(cudagraph_args)
-
-        with set_forward_context(**forward_ctx_kwargs):
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+        ):
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
                 last_hidden_states = ret_hidden_states
@@ -346,8 +362,10 @@ class SpecDecodeBaseProposer:
 
         if self.use_cuda_graph and batch_size <= self.cudagraph_batch_sizes[-1]:
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
+            cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
             input_batch_size = batch_size
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
 
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
@@ -451,16 +469,12 @@ class SpecDecodeBaseProposer:
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = self.hidden_states[:input_batch_size]
 
-            forward_ctx_kwargs = dict(
-                attn_metadata=per_layer_attn_metadata,
-                vllm_config=self.vllm_config,
+            with set_forward_context(
+                per_layer_attn_metadata,
+                self.vllm_config,
                 num_tokens=input_batch_size,
-            )
-            if self.pass_cudagraph_args_to_forward_ctx:
-                cudagraph_args = self.cudagraph_args(num_tokens=input_batch_size)
-                forward_ctx_kwargs.update(cudagraph_args)
-
-            with set_forward_context(**forward_ctx_kwargs):
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+            ):
                 ret_hidden_states = self.model(**model_kwargs)
                 if not self.model_returns_tuple():
                     last_hidden_states = ret_hidden_states
@@ -655,6 +669,7 @@ class SpecDecodeBaseProposer:
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
+            dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
         )
 
         token_indices_to_sample = (
@@ -788,11 +803,16 @@ class SpecDecodeBaseProposer:
 
             if self.use_cuda_graph and num_tokens <= self.cudagraph_batch_sizes[-1]:
                 num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+                cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
             else:
                 num_input_tokens = num_tokens
+                cudagraph_runtime_mode = CUDAGraphMode.NONE
             # Run the model.
             with set_forward_context(
-                per_layer_attn_metadata, self.vllm_config, num_tokens=num_input_tokens
+                per_layer_attn_metadata,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
@@ -926,6 +946,7 @@ class SpecDecodeBaseProposer:
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
+            dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
         )
 
         return spec_common_attn_metadata, token_indices
@@ -938,7 +959,7 @@ class SpecDecodeBaseProposer:
     def load_model(self, target_model: nn.Module) -> None:
         draft_model_config = self.vllm_config.speculative_config.draft_model_config
         target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys()
+            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
         )
         # FIXME: support hybrid kv for draft model
         target_indexer_layer_names = set(
@@ -955,7 +976,7 @@ class SpecDecodeBaseProposer:
             )
 
         draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys()
+            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
             - target_attn_layer_names
         )
         indexer_layers = get_layers_from_vllm_config(
@@ -1071,8 +1092,19 @@ class SpecDecodeBaseProposer:
     def dummy_run(
         self,
         num_tokens: int,
+        use_cudagraphs=True,
     ) -> None:
-        with set_forward_context(None, self.vllm_config, num_tokens=num_tokens):
+        if use_cudagraphs and num_tokens <= self.cudagraph_batch_sizes[-1]:
+            num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+
+        with set_forward_context(
+            None,
+            self.vllm_config,
+            num_tokens=num_tokens,
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+            if use_cudagraphs
+            else CUDAGraphMode.NONE,
+        ):
             if self.supports_mm_inputs:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
