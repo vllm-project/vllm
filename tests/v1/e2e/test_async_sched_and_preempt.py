@@ -6,8 +6,8 @@ import pytest
 
 from vllm import SamplingParams
 
-from conftest import VllmRunner
-from models.utils import check_outputs_equal
+from ...conftest import VllmRunner
+from ...models.utils import check_outputs_equal
 
 MODEL = "Qwen/Qwen3-0.6B"
 
