@@ -426,6 +426,8 @@ class CompilationConfig:
         from vllm.config.utils import get_hash_factors, hash_factors
 
         factors = get_hash_factors(self, ignored_factors)
+        if hasattr(self.pass_config, "uuid"):
+            factors["pass_config"] = self.pass_config.uuid()
         return hash_factors(factors)
 
     def __repr__(self) -> str:

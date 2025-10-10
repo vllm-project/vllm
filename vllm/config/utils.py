@@ -207,6 +207,12 @@ def normalize_value(x):
         module = getattr(x, "__module__", "")
         qual = getattr(x, "__qualname__", getattr(x, "__name__", ""))
         return ".".join([p for p in (module, qual) if p]) or repr(x)
+
+    # Prefer stable uuid identifiers for objects that provide them, even if
+    # they are callable instances (e.g., InductorPass wrappers).
+    if hasattr(x, "uuid") and callable(getattr(x, "uuid", None)):
+        return x.uuid()
+
     if callable(x):
         raise TypeError("normalize_value: function or callable instance unsupported")
 
@@ -230,6 +236,15 @@ def normalize_value(x):
         except Exception:
             return str(x)
 
+    # Dataclasses: represent as (FQN, sorted(field,value) tuple) for stability.
+    if is_dataclass(x):
+        type_fqn = f"{x.__class__.__module__}.{x.__class__.__qualname__}"
+        items = tuple(
+            (f.name, normalize_value(getattr(x, f.name)))
+            for f in sorted(fields(x), key=lambda f: f.name)
+        )
+        return (type_fqn, items)
+
     # Containers (generic)
     if isinstance(x, Mapping):
         return tuple(sorted((str(k), normalize_value(v)) for k, v in x.items()))
@@ -237,10 +252,6 @@ def normalize_value(x):
         return tuple(sorted(repr(normalize_value(v)) for v in x))
     if isinstance(x, Sequence) and not isinstance(x, (str, bytes, bytearray)):
         return tuple(normalize_value(v) for v in x)
-
-    # Nested configs which provide a uuid() method
-    if hasattr(x, "uuid") and callable(x.uuid):
-        return x.uuid()
 
     # PretrainedConfig
     if hasattr(x, "to_json_string") and callable(x.to_json_string):
