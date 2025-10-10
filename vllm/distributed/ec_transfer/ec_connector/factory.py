@@ -39,22 +39,16 @@ class ECConnectorFactory:
         config: "VllmConfig",
         role: ECConnectorRole,
     ) -> ECConnectorBase:
-        if not envs.VLLM_USE_V1:
-            raise ValueError("Attempting to initialize a V1 Connector, "
-                             f"but found {envs.VLLM_USE_V1=}")
-
         ec_transfer_config = config.ec_transfer_config
         connector_cls = cls.get_connector_class(ec_transfer_config)
-        logger.info("Creating v1 connector with name: %s and engine_id: %s",
+        logger.info("Creating connector with name: %s and engine_id: %s",
                     connector_cls.__name__, ec_transfer_config.engine_id)
-        # NOTE(Kuntai): v1 connector is explicitly separated into two roles.
+        # Connector is explicitly separated into two roles.
         # Scheduler connector:
         # - Co-locate with scheduler process
         # - Should only be used inside the Scheduler class
         # Worker connector:
         # - Co-locate with worker process
-        # - Should only be used inside the forward context & attention layer
-        # We build separately to enforce strict separation
         return connector_cls(config, role)
 
     @classmethod
