@@ -754,6 +754,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
 
+                if self.use_async_scheduling and num_output_tokens > 0:
+                    # We must recover the output token ids for resumed requests in the
+                    # async scheduling case, so that correct input_ids are obtained.
+                    resumed_token_ids = req_data.resumed_req_token_ids[i]
+                    assert resumed_token_ids is not None
+                    req_state.output_token_ids = resumed_token_ids[-num_output_tokens:]
             if req_index is None:
                 # The request is not in the persistent batch.
                 # The request was either preempted and resumed later, or was not
@@ -991,7 +997,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
         if num_commmon_tokens == 0:
             # No requests in common with the previous iteration
-            # So input_ids_cpu will have all the input ids.
+            # So input_ids.cpu will have all the input ids.
             return
         if indices_match and max_flattened_index == (num_commmon_tokens - 1):
             # Common-case optimization: the batch is unchanged
@@ -1005,8 +1011,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.enable_prompt_embeds:
                 self.is_token_ids.gpu[:num_commmon_tokens] = True
             return
-        # Upload the index tensors asynchronously
-        # so the scatter can be non-blocking.
+        # Upload the index tensors asynchronously so the scatter can be non-blocking.
         input_ids_index_tensor = torch.tensor(
             flattened_indices, dtype=torch.int64, pin_memory=self.pin_memory
         ).to(self.device, non_blocking=True)
