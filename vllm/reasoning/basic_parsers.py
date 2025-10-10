@@ -59,12 +59,8 @@ class BaseThinkingReasoningParser(ReasoningParser):
             )
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        if not input_ids:
-            return False
-        for i in range(len(input_ids) - 1, -1, -1):
-            if input_ids[i] == self.end_token_id:
-                return True
-        return False
+        end_token_id = self.end_token_id
+        return any(input_id == end_token_id for input_id in reversed(input_ids))
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
