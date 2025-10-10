@@ -354,7 +354,8 @@ class VllmConfig:
                         logger.warning(
                             "Decode context parallel (DCP) is enabled, which is "
                             "incompatible with full CUDA graphs. Set "
-                            "cudagraph_mode to PIECEWISE.")
+                            "cudagraph_mode to PIECEWISE."
+                        )
                         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
                 else:
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
