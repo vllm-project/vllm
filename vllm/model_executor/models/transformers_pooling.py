@@ -137,7 +137,7 @@ class TransformersEmbeddingModel(TransformersPoolingBase):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_embed": Pooler.for_token_embed(pooler_config),
                 "embed": Pooler.for_embed(pooler_config),
             }
         )
@@ -192,20 +192,14 @@ class TransformersForSequenceClassification(TransformersPoolingBase):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config, classifier=self.classifier
+                ),
                 "classify": ClassifierPooler(
-                    pooling=CLSPool(),
-                    classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                        vllm_config.model_config
-                    ),
+                    pooling=CLSPool(), classifier=self.classifier, act_fn="classify"
                 ),
                 "score": ClassifierPooler(
-                    pooling=CLSPool(),
-                    classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                        vllm_config.model_config
-                    ),
+                    pooling=CLSPool(), classifier=self.classifier, act_fn="score"
                 ),
             }
         )

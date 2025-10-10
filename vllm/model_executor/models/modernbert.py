@@ -323,26 +323,17 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config, classifier=self.classifier
+                ),
                 "classify": ClassifierPooler(
-                    pooling=self.pooling,
-                    classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                        vllm_config.model_config
-                    ),
+                    pooling=self.pooling, classifier=self.classifier, act_fn="classify"
                 ),
                 "score": ClassifierPooler(
-                    pooling=self.pooling,
-                    classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                        vllm_config.model_config
-                    ),
+                    pooling=self.pooling, classifier=self.classifier, act_fn="score"
                 ),
             }
         )
-
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         self_weights = []
@@ -422,7 +413,7 @@ class ModernBertForTokenClassification(nn.Module):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_embed": Pooler.for_token_embed(pooler_config),
             }
         )
 
