@@ -554,13 +554,12 @@ class EplbState:
 
         time_start = None
         is_main_rank = ep_rank == 0
-        if is_main_rank and not self.is_async:
+        if is_main_rank:
             torch.cuda.synchronize()
             time_start = time.perf_counter()
-            logger.info("Rearranging experts %s...", "(profile)" if is_profile else "")
-        elif is_main_rank and self.is_async:
             logger.info(
-                "Rearranging experts %s(async mode)...",
+                "Rearranging experts %s %s...",
+                "(async mode)" if self.is_async else "sync mode",
                 "(profile)" if is_profile else "",
             )
 
