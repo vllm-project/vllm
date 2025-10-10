@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -162,6 +163,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         return logits
 
 
+@support_torch_compile
 class DeepSeekMTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
