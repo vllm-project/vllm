@@ -480,7 +480,7 @@ class Qwen3_VisionTransformer(nn.Module):
             w11 = dh_grid * dw_grid
             w10 = dh_grid - w11
             w01 = dw_grid - w11
-            w00 = 1 - dh_grid - dw_grid + w11
+            w00 = 1 - dh_grid - w01
 
             idx00 = h_floor_grid_idx + w_floor_grid
             idx01 = h_floor_grid_idx + w_ceil_grid
@@ -489,14 +489,11 @@ class Qwen3_VisionTransformer(nn.Module):
 
             indices = torch.stack([idx00, idx01, idx10, idx11], dim=0).reshape(4, -1)
             weights = torch.stack([w00, w01, w10, w11], dim=0).reshape(4, -1, 1)
-            weights = weights.to(
-                dtype=self.dtype, device=self.device, non_blocking=True
-            )
+            weights = weights.to(dtype=self.dtype)
 
             embeds = self.pos_embed(indices)
             weighted_embeds = embeds * weights
-            p0, p1, p2, p3 = weighted_embeds.unbind(dim=0)
-            combined = p0 + p1 + p2 + p3
+            combined = weighted_embeds.sum(dim=0)
 
             combined = combined.view(h * w, hidden_dim)
             repeated = combined.unsqueeze(0).expand(t, -1, -1).contiguous()
