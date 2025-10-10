@@ -17,8 +17,13 @@ logger = init_logger(__name__)
 try:
     import flashinfer.sampling
 
+    flashinfer.sampling.get_sampling_module()
     is_flashinfer_available = True
-except ImportError:
+except (ImportError, RuntimeError, AttributeError) as e:
+    logger.warning("FlashInfer is not available. for an known error: %s", e)
+    is_flashinfer_available = False
+except Exception as e:
+    logger.warning("Failed to import FlashInfer. for an unknown error: %s", e)
     is_flashinfer_available = False
 
 
