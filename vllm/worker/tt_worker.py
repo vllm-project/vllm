@@ -126,7 +126,7 @@ class TTCacheEngine:
         if (model_config.override_tt_config
                 and "data_parallel" in model_config.override_tt_config):
             data_parallel = model_config.override_tt_config["data_parallel"]
-        num_devices = device_config.device.get_num_devices() // data_parallel
+        num_devices = device_config.num_devices // data_parallel
         num_kv_heads = model_config.get_num_kv_heads(parallel_config)
 
         # TP = num_devices if num_devices < num_kv_heads
@@ -188,6 +188,8 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.mesh_device = open_mesh_device(
             self.model_config.override_tt_config, self.trace_mode)
         self.device_config.device = self.mesh_device
+        assert self.mesh_device is not None
+        self.device_config.num_devices = self.mesh_device.get_num_devices()
 
     def load_model(self):
         self.model_runner.load_model()
@@ -398,14 +400,16 @@ def get_num_available_blocks_tt(vllm_config: VllmConfig) -> int:
     scheduler_config = vllm_config.scheduler_config
     cache_config = vllm_config.cache_config
 
-    data_parallel = 1
-    if (model_config.override_tt_config
-            and "data_parallel" in model_config.override_tt_config):
-        data_parallel = model_config.override_tt_config["data_parallel"]
+    if envs.VLLM_USE_V1:
+        data_parallel = vllm_config.parallel_config.data_parallel_size
+    else:
+        data_parallel = 1
+        if (model_config.override_tt_config
+                and "data_parallel" in model_config.override_tt_config):
+            data_parallel = model_config.override_tt_config["data_parallel"]
 
     is_wormhole = "wormhole_b0" in ttnn.get_arch_name()
-    num_devices_per_model = (device_config.device.get_num_devices() //
-                             data_parallel)
+    num_devices_per_model = (device_config.num_devices // data_parallel)
 
     if (("Llama-3.1-8B" in model_config.model or "Mistral-7B"
          in model_config.model or "gemma-3-4b" in model_config.model)
@@ -542,7 +546,7 @@ def device_params_from_override_tt_config(override_tt_config, trace_mode):
     return device_params
 
 
-def open_mesh_device(override_tt_config, trace_mode):
+def get_mesh_grid():
     num_devices_available = len(ttnn.get_device_ids())
     mesh_grid_dict = {
         "N150": (1, 1),
@@ -568,6 +572,12 @@ def open_mesh_device(override_tt_config, trace_mode):
     if mesh_grid[0] * mesh_grid[1] > num_devices_available:
         assert (f"Requested mesh grid shape {mesh_grid} is larger than "
                 f"number of available devices {num_devices_available}")
+
+    return mesh_grid
+
+
+def open_mesh_device(override_tt_config, trace_mode):
+    mesh_grid = get_mesh_grid()
 
     device_params = device_params_from_override_tt_config(
         override_tt_config, trace_mode)

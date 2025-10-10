@@ -72,7 +72,7 @@ To measure performance (Llama70B on QuietBox) for a single batch of 32 prompts (
 MESH_DEVICE=T3K python examples/offline_inference_tt.py --measure_perf
 ```
 
-> **⚠️ Enabling V1 Backend**: Experimental V1 support has been added for text-only models. This can be enabled by setting `VLLM_USE_V1=1` and `--num_scheduler_steps 1`, though it may still have limitations compared to the default V0 backend. To disable multiprocessing in V1 (to step through code or make scheduling deterministic), set `VLLM_ENABLE_V1_MULTIPROCESSING=0`.
+> **⚠️ Enabling V1 Backend**: V1 support has been added for text-only models. This can be enabled by setting `VLLM_USE_V1=1` and `--num_scheduler_steps 1`, though it may still have limitations compared to the default V0 backend. To disable multiprocessing in V1 (to step through code or make scheduling deterministic), set `VLLM_ENABLE_V1_MULTIPROCESSING=0` (note: not compatible with DP models). To run a model with DP attention, set the DP factor with `--data_parallel_size`, set the max batch size as the max batch per DP group, and set `--async_engine` (only for offline script) for proper load balancing.
 
 **Note 1**: Custom TT options can be set using `--override_tt_config` with a json string, e.g. `--override_tt_config '{"sample_on_device_mode": "all"}'`, however these shouldn't be used unless the model supports them (most currently do not). Supported parameters are:
 - `sample_on_device_mode`: ["all", "decode_only"]

@@ -8,7 +8,7 @@
 import time
 from collections import deque
 from collections.abc import Iterable
-from typing import Union
+from typing import Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVEventBatch
@@ -42,6 +42,13 @@ class AscendScheduler(Scheduler):
                          include_finished_set, log_stats)
         self.scheduled_req_ids: set[str] = set()
         self.running: list[Request] = []
+        # Optional execution mode gate (None=auto, 1=prefill, 0=decode)
+        self._forced_mode: Optional[int] = None
+
+    def set_forced_mode(self, mode: Optional[int]) -> None:
+        # mode must be None, 0 (decode) or 1 (prefill)
+        assert mode in (None, 0, 1)
+        self._forced_mode = mode
 
     def schedule(self) -> SchedulerOutput:
         if self.scheduler_config.chunked_prefill_enabled:
@@ -67,8 +74,8 @@ class AscendScheduler(Scheduler):
         # and put back at the head of the waiting queue later
         skipped_waiting_requests: deque[Request] = deque()
 
-        # Schedule prefill requests first.
-        while self.waiting and token_budget > 0:
+        # Schedule prefill requests first (unless decode is forced).
+        while self.waiting and token_budget > 0 and self._forced_mode != 0:
             if len(self.running) == self.max_num_running_reqs:
                 break
 
@@ -224,9 +231,9 @@ class AscendScheduler(Scheduler):
         if skipped_waiting_requests:
             self.waiting.extendleft(skipped_waiting_requests)  # type: ignore
 
-        # If no prefill requests are scheduled,
-        # Schedule decode requests next.
-        if len(self.scheduled_req_ids) == 0:
+        # If no prefill requests are scheduled (or prefill skipped),
+        # schedule decode requests next (unless prefill is forced).
+        if len(self.scheduled_req_ids) == 0 and self._forced_mode != 1:
             req_index = 0
             while req_index < len(self.running) and token_budget > 0:
                 request = self.running[req_index]

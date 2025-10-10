@@ -1000,6 +1000,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, EngineIdentity] = {}
 
+        # Temporary: round-robin counter for startup distribution
+        # Delete this feature after pulling upstream #21617 and #22910
+        self.lb_rr_enabled = True
+        if self.lb_rr_enabled:
+            self.rr_counter: int = 0
+
         super().__init__(vllm_config, executor_class, log_stats,
                          client_addresses, client_index)
 
@@ -1010,7 +1016,17 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Engines are in rank order.
         if (eng_index := request.data_parallel_rank) is None:
             if not self.lb_engines:
-                return self.core_engine
+                if self.lb_rr_enabled:
+                    # No stats yet: distribute via round-robin across engines
+                    num_engines = len(self.core_engines)
+                    eng_index = self.rr_counter % max(1, num_engines)
+                    self.rr_counter += 1
+                    chosen_engine = self.core_engines[eng_index]
+                    # Record which engine is chosen for this request.
+                    self.reqs_in_flight[request.request_id] = chosen_engine
+                    return chosen_engine
+                else:
+                    return self.core_engine
             # TODO use P2C alg for larger DP sizes
             num_engines = len(self.lb_engines)
             min_counts = [sys.maxsize, sys.maxsize]

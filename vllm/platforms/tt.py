@@ -156,6 +156,12 @@ class TTPlatform(Platform):
         # The sampling code tries to use pinned memory in case we're using GPUs.
         return False
 
+    # Require DP ranks to gather batches to a single driver
+    # before executing (used by core.py to gate DP-gather behavior).
+    @classmethod
+    def requires_gathered_batch_dp(cls) -> bool:
+        return True
+
     @classmethod
     def validate_request(
         cls,

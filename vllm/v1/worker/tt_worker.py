@@ -12,7 +12,8 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.tt_model_runner import TTModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
-from vllm.worker.tt_worker import (close_mesh_device,
+from vllm.worker.tt_model_runner import TTModelInput
+from vllm.worker.tt_worker import (close_mesh_device, get_mesh_grid,
                                    get_num_available_blocks_tt,
                                    open_mesh_device)
 
@@ -48,10 +49,18 @@ class TTWorker(WorkerBase):
             self.trace_mode = override_tt_config[trace_key]
 
     def init_device(self) -> None:
-        self.mesh_device = open_mesh_device(
-            self.model_config.override_tt_config, self.trace_mode)
-        self.device_config.device = self.mesh_device
-
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+        if dp_rank == 0:
+            self.mesh_device = open_mesh_device(
+                self.model_config.override_tt_config, self.trace_mode)
+            self.device_config.device = self.mesh_device
+            assert self.mesh_device is not None
+            self.device_config.num_devices = self.mesh_device.get_num_devices()
+        else:
+            mesh_grid = get_mesh_grid()
+            self.mesh_device = None
+            # Num devices is required for determining num blocks in KV cache.
+            self.device_config.num_devices = mesh_grid[0] * mesh_grid[1]
         # Init ModelRunner here, so that we have access to self.mesh_device.
         self.model_runner: TTModelRunner = TTModelRunner(
             vllm_config=self.vllm_config,
@@ -60,7 +69,9 @@ class TTWorker(WorkerBase):
         )
 
     def load_model(self):
-        self.model_runner.load_model()
+        # Only DP rank 0 loads the model
+        if self.vllm_config.parallel_config.data_parallel_rank == 0:
+            self.model_runner.load_model()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -122,7 +133,9 @@ class TTWorker(WorkerBase):
         return 1 << 64
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
-        """Allocate TT KV cache with the specified kv_cache_config."""
+        """Allocate TT KV cache (only DP rank 0) and initialize persistent
+        input batch (all DP ranks) with the specified kv_cache_config.
+        """
         self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def initialize_cache(self, num_gpu_blocks: int,
@@ -147,7 +160,34 @@ class TTWorker(WorkerBase):
         # Worker will always be healthy as long as it's running.
         return
 
-    ## Destructor (used to close devices)
+    # ---- DP gather hooks called by DPEngineCoreProc in core.py ----
+
+    def build_dp_model_input(
+            self,
+            scheduler_output: "SchedulerOutput") -> Optional[TTModelInput]:
+        """Called by each DP rank to build TTModelInput from scheduler output.
+        Returns None if there is no scheduled work in this step.
+        """
+        return self.model_runner.build_model_input(scheduler_output)
+
+    def concat_and_execute_dp(
+            self,
+            inputs: list[Optional[TTModelInput]]) -> list[list[list[int]]]:
+        """Called only by DP rank 0 to concatenate DP-sized inputs and execute.
+        Returns per-DP sampled ids."""
+        assert self.vllm_config.parallel_config.data_parallel_rank == 0, \
+            "concat_and_execute_dp must run on DP rank 0"
+        assert self.is_driver_worker, "concat_and_execute_dp must run on driver"
+        merged = self.model_runner.concat_model_inputs(inputs)
+        return self.model_runner.execute_with_model_input(merged)
+
+    def apply_dp_execution_result(
+            self, sampled_token_ids: list[list[int]]) -> ModelRunnerOutput:
+        """Called by each DP rank to apply sampled tokens to internal caches.
+        """
+        return self.model_runner.generate_runner_output(sampled_token_ids)
+
+    # ---- Destructor (used to close devices) ----
 
     def __del__(self):
         # Delete model runner first in case there are model artifacts

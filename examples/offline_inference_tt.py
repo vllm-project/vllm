@@ -15,6 +15,7 @@ from pkg_resources import resource_filename
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
+import vllm.envs as envs
 from vllm import LLM, ModelRegistry, SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
@@ -314,6 +315,7 @@ def run_inference(
     override_tt_config=None,
     max_model_len=None,
     max_num_batched_tokens=None,
+    data_parallel_size=1,
 ):
     check_tt_model_supported(model)
 
@@ -328,6 +330,9 @@ def run_inference(
             f"currently only supports {supported_models} models"
         )
 
+    if data_parallel_size > 1:
+        assert envs.VLLM_USE_V1, "Data parallel size > 1 is only supported with V1"
+
     # LLM args
     engine_kw_args = {
         "model": model,
@@ -339,6 +344,7 @@ def run_inference(
         "log_global_stats": measure_perf,
         "num_scheduler_steps": num_scheduler_steps,
         "disable_async_output_proc": disable_async_output_proc,
+        "data_parallel_size": data_parallel_size,
     }
 
     try:
@@ -412,7 +418,7 @@ def run_inference(
         if not multi_modal:
             prompts = [
                 {"prompt_token_ids": prompt_token_ids_user}
-                for _ in range(max_seqs_in_batch)
+                for _ in range(max_seqs_in_batch * data_parallel_size)
             ]
         else:
             if "Llama-3.2" in model:
@@ -460,18 +466,31 @@ def run_inference(
         print("Using async engine")
         engine_args = AsyncEngineArgs(**engine_kw_args)
 
+        # For DP > 1, send prompts round-robin to DP ranks
+        if data_parallel_size > 1:
+            print("Will send prompts round-robin to DP ranks")
+            dp_ranks = [i % data_parallel_size for i in range(len(prompts))]
+        else:
+            dp_ranks = None
+
         async def _run_inference_async():
             async with build_async_engine_client_from_engine_args(engine_args) as llm:
                 if not measure_perf:
                     await generate_tokens_async(
-                        llm, prompts, sampling_params, print_output=True
+                        llm,
+                        prompts,
+                        sampling_params,
+                        dp_ranks=dp_ranks,
+                        print_output=True,
                     )
                 else:
                     max_model_len = llm.model_config.max_model_len
                     check_valid_perf_prompt_len(
                         max_model_len, perf_prompt_len, sampling_params
                     )
-                    await run_inference_perf_async(llm, prompts, sampling_params)
+                    await run_inference_perf_async(
+                        llm, prompts, sampling_params, dp_ranks=dp_ranks
+                    )
 
         uvloop.run(_run_inference_async())
 
@@ -506,11 +525,14 @@ async def run_inference_perf_async(
     sampling_params,
     N_warmup=1,
     N_inference=3,
+    dp_ranks=None,
 ):
     for i in tqdm(range(N_inference), desc="Inference runs"):
         if i == N_warmup:
             start_time = time.perf_counter()
-        await generate_tokens_async(llm, prompts, sampling_params, print_output=False)
+        await generate_tokens_async(
+            llm, prompts, sampling_params, dp_ranks=dp_ranks, print_output=False
+        )
     avg_time = (time.perf_counter() - start_time) / (N_inference - N_warmup)
     print(f"Average time taken per inference run: {avg_time:.2f} s")
 
@@ -542,6 +564,7 @@ async def generate_tokens_async(
     llm: MQLLMEngineClient,
     prompts,
     sampling_params,
+    dp_ranks=None,
     prompt_token_ids=None,
     print_output=True,
 ):
@@ -554,19 +577,31 @@ async def generate_tokens_async(
     if not isinstance(sampling_params, list):
         sampling_params = [sampling_params] * len(prompts)
 
+    if dp_ranks:
+        assert envs.VLLM_USE_V1, "DP ranks are only supported with V1"
+        assert len(dp_ranks) == len(prompts), (
+            "DP ranks must be the same length as prompts"
+        )
+
     generators = []
     for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
-        generator = llm.generate(prompt, sp, request_id=f"test{i}")
+        if dp_ranks:
+            generator = llm.generate(
+                prompt, sp, request_id=f"test{i}", data_parallel_rank=dp_ranks[i]
+            )
+        else:
+            generator = llm.generate(prompt, sp, request_id=f"test{i}")
         generators.append(generator)
     all_gens = merge_async_iterators(*generators)
     async for i, res in all_gens:
+        request_id = res.request_id
         prompt = res.prompt
         generated_text = res.outputs[0].text
         num_tokens_prompt = len(res.prompt_token_ids)
         num_tokens_output = len(res.outputs[0].token_ids)
         if print_output and res.finished:
             print(
-                f"Prompt "
+                f"Prompt {request_id} "
                 f"({num_tokens_prompt} tokens): {prompt!r}, "
                 "Generated text "
                 f"({num_tokens_output} tokens): {generated_text!r}\n"
@@ -652,6 +687,12 @@ if __name__ == "__main__":
         default=None,
         help="Multi-modal processor kwargs",
     )
+    parser.add_argument(
+        "--data_parallel_size",
+        type=int,
+        default=1,
+        help="Data parallel size",
+    )
 
     args = parser.parse_args()
 
@@ -674,4 +715,5 @@ if __name__ == "__main__":
         override_tt_config=args.override_tt_config,
         max_model_len=args.max_model_len,
         max_num_batched_tokens=args.max_num_batched_tokens,
+        data_parallel_size=args.data_parallel_size,
     )

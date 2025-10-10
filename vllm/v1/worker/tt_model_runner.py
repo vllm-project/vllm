@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -116,15 +117,16 @@ class TTModelRunner:
             block_sizes=[kv_cache_spec.block_size],
         )
 
+        # Only DP rank 0 allocates KV cache
+        if self.parallel_config.data_parallel_rank != 0:
+            return
+
         # Make the assumption that we are tensor parallel by
         # min(number of devices, number of KV heads).
         # TODO: move this into model.allocate_kv_cache.
         model_config = self.model_config
-        data_parallel = 1
-        if (self.model_config.override_tt_config
-                and "data_parallel" in model_config.override_tt_config):
-            data_parallel = model_config.override_tt_config["data_parallel"]
-        num_devices = self.mesh_device.get_num_devices() // data_parallel
+        data_parallel = self.parallel_config.data_parallel_size
+        num_devices = self.device_config.num_devices // data_parallel
         total_kv_heads = kv_cache_spec.num_kv_heads
         num_kv_heads = total_kv_heads // min(num_devices, total_kv_heads)
 
@@ -364,66 +366,242 @@ class TTModelRunner:
             cross_block_tables=None  # Not yet supported in V1
         )
 
+    def concat_model_inputs(
+            self, inputs: list[Optional["TTModelInput"]]) -> "TTModelInput":
+        """
+        Concatenate a DP-sized list of TTModelInput (some may be None) into
+        a single TTModelInput. For None slots, uses zeros for input_tokens and
+        block_tables and -1 for input_positions.
+        """
+        assert inputs, "No inputs to concatenate"
+        active_inputs: list[TTModelInput] = [mi for mi in inputs if mi]
+        if not active_inputs:
+            raise ValueError("All inputs are None; nothing to concatenate")
+
+        batch_size_per_dp = [
+            mi.unpadded_batch_size if mi else 0 for mi in inputs
+        ]
+        if os.environ.get("DP_GATHER_DEBUG") == "1":
+            logger.info("batch_size_per_dp=%s", batch_size_per_dp)
+
+        sampling_params_per_dp = [
+            mi.tt_sampling_params if mi else None for mi in inputs
+        ]
+
+        is_decode = active_inputs[0].prompt_lens is None
+        for mi in active_inputs:
+            assert (
+                mi.prompt_lens
+                is None) == is_decode, "All inputs must be for the same mode"
+
+        if not is_decode:
+            # Determine max token width across slots.
+            max_tok_width = 0
+            for mi in active_inputs:
+                assert mi.input_tokens.dim() == 2, "Input tokens must be 2D"
+                max_tok_width = max(max_tok_width, mi.input_tokens.shape[1])
+            assert max_tok_width > 0, "At least one input must have tokens"
+
+        # For block tables, assume each slot is already padded to the max
+        # number of blocks, so we do not pad widths further.
+        max_bt_width = int(active_inputs[0].block_tables.shape[1])
+
+        # Iterate over DP inputs and build segments for concatenation.
+        toks_segments: list[torch.Tensor] = []  # input tokens
+        bt_segments: list[torch.Tensor] = []  # block tables
+        if is_decode:
+            pos_segments: list[torch.Tensor] = []  # input positions
+        else:
+            pl_segments: list[torch.Tensor] = []  # prompt lengths
+        for mi in inputs:
+            if mi is None:
+                # For decode, keep fixed stride by padding with max_batch.
+                # For prefill, skip None slots entirely (do not append rows).
+                if is_decode:
+                    max_batch = self.scheduler_config.max_num_seqs
+                    toks_segments.append(
+                        torch.zeros((max_batch, 1), dtype=torch.int32))
+                    bt_segments.append(
+                        torch.zeros((max_batch, max_bt_width),
+                                    dtype=torch.int32))
+                    pos_segments.append(
+                        torch.full((max_batch, ), -1, dtype=torch.int32))
+            else:
+                # Right-pad tokens and block tables to max widths across slots
+                toks = mi.input_tokens
+                if not is_decode and toks.shape[1] < max_tok_width:
+                    pad_w = max_tok_width - toks.shape[1]
+                    toks = torch.cat([
+                        toks,
+                        torch.zeros((toks.shape[0], pad_w), dtype=toks.dtype)
+                    ],
+                                     dim=1)
+                toks_segments.append(toks)
+                bt_segments.append(mi.block_tables)
+                if is_decode:
+                    pos_segments.append(mi.input_positions)
+                else:
+                    assert mi.prompt_lens is not None
+                    pl_segments.append(mi.prompt_lens)
+
+        input_tokens = torch.cat(toks_segments, dim=0)
+        block_tables = torch.cat(bt_segments, dim=0)
+        if is_decode:
+            input_positions = torch.cat(pos_segments, dim=0)
+            prompt_lens = None
+        else:
+            input_positions = 0
+            prompt_lens = np.concatenate(pl_segments, axis=0)
+
+        assert not TTPlatform.compat_sampling_possible, (
+            "Compatibility sampling is not yet supported in V1 TT backend")
+        sampling_params_list: list[Any] = []
+        compat_sampling_used = False
+        sampling_metadata = None
+
+        merged = TTModelInput(
+            input_tokens=input_tokens,
+            input_positions=input_positions,
+            prompt_lens=prompt_lens,
+            seq_groups=None,
+            block_tables=block_tables,
+            unpadded_batch_size=batch_size_per_dp,
+            tt_sampling_params=sampling_params_per_dp,
+            sampling_params_list=sampling_params_list,
+            compat_sampling_used=compat_sampling_used,
+            sampling_metadata=sampling_metadata,
+            multi_modal_kwargs={},  # Not yet supported in V1
+            cross_block_tables=None  # Not yet supported in V1
+        )
+        return merged
+
+    def build_model_input(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> Optional[TTModelInput]:
+        """
+        Update internal state with the scheduler output and build
+        TTModelInput without executing the model.
+        Returns None if there is no scheduled work in this step.
+        
+        For data parallel, this function is called by each DP rank to build
+        TTModelInput from it's own scheduler output.
+        """
+        # Update cached state
+        self._update_states(scheduler_output)
+        if not scheduler_output.total_num_scheduled_tokens:
+            return None
+
+        # Prepare model inputs only
+        model_input = self._prepare_model_inputs(scheduler_output)
+        return model_input
+
     @torch.no_grad()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        ''' Execute the model with the given scheduler output.
-            Note: currently does not support chunked prefill.'''
+        ''' Execution path for non-DP case.
+            Execute the model with the given scheduler output.'''
 
-        # Update cached state
-        self._update_states(scheduler_output)
-        if not scheduler_output.total_num_scheduled_tokens:
-            # Return empty ModelRunnerOutput if there's no work to do.
+        # Update cached state and prepare model inputs
+        model_input = self.build_model_input(scheduler_output)
+        if model_input is None:
             return EMPTY_MODEL_RUNNER_OUTPUT
 
-        # Prepare model inputs
-        model_input = self._prepare_model_inputs(scheduler_output)
+        # Only 1 DP rank here
+        sampled_token_ids = self.execute_with_model_input(model_input)[0]
+        output = self.generate_runner_output(sampled_token_ids)
+        return output
+
+    def execute_with_model_input(
+        self,
+        model_input: TTModelInput,
+    ) -> list[list[list[int]]]:
+        """
+        Execute with a prebuilt input and return per-DP sampled ids without
+        mutating internal state. In DP case, called by DP rank 0 to run merged
+        batch. Note: currently does not support chunked prefill.
+        """
         is_decode = model_input.prompt_lens is None
-        execute_model_kwargs = {
+
+        batch_size_per_dp = model_input.unpadded_batch_size
+        if not isinstance(batch_size_per_dp, list):
+            batch_size_per_dp = [batch_size_per_dp]
+
+        sampling_params_per_dp = model_input.tt_sampling_params
+        if not isinstance(sampling_params_per_dp, list):
+            sampling_params_per_dp = [sampling_params_per_dp]
+
+        kwargs = {
             "tokens": model_input.input_tokens,
             "page_table": model_input.block_tables,
             "kv_cache": self.kv_caches,
             **(model_input.multi_modal_kwargs or {}),
         }
         if not is_decode:
-            execute_model_kwargs["prompt_lens"] = model_input.prompt_lens
+            kwargs["prompt_lens"] = model_input.prompt_lens
+            if len(batch_size_per_dp) > 1:
+                # TODO: the model should only require DP ranks, but passing
+                # "global" user ids instead for backwards compatibility.
+                stride = int(self.scheduler_config.max_num_seqs)
+                empty_slots = []
+                for dp_rank, sz in enumerate(batch_size_per_dp):
+                    for i in range(int(sz)):
+                        empty_slots.append(dp_rank * stride + i)
+                kwargs["empty_slots"] = empty_slots
         else:
-            execute_model_kwargs["start_pos"] = model_input.input_positions
+            kwargs["start_pos"] = model_input.input_positions
         if self.sample_on_device_mode == "all" or (
                 self.sample_on_device_mode == "decode_only" and is_decode):
-            execute_model_kwargs[
-                "sampling_params"] = model_input.tt_sampling_params
+            # Check that sampling params are the same for all DP ranks.
+            # TODO: Remove this restriction and concat sampling params in
+            # concat_model_inputs once models can support mixed params.
+            non_none_params = [
+                sp for sp in sampling_params_per_dp if sp is not None
+            ]
+            assert all(sp == non_none_params[0] for sp in non_none_params), (
+                "Sampling params must be the same for all active DP ranks")
+            kwargs["sampling_params"] = non_none_params[0]
 
         # Execute model
         if not is_decode:
-            outputs = self.model.prefill_forward(**execute_model_kwargs)
-            tt_out = outputs  # [batch_size, seq_len, vocab_size]
+            tt_out = self.model.prefill_forward(**kwargs)
         else:
             # TODO: Add encoder-decoder support
             enc_dec_kwargs: dict[str, Any] = {}
-            tt_out = self.model.decode_forward(**execute_model_kwargs,
+            tt_out = self.model.decode_forward(**kwargs,
                                                **enc_dec_kwargs,
                                                enable_trace=self.trace_mode,
                                                read_from_device=True)
 
-        if not self.sample_on_device_mode or (
-                self.sample_on_device_mode == "decode_only" and not is_decode):
-            next_logits = tt_out[:self.input_batch.num_reqs,
-                                 -1, :]  # unpadded batch, vocab of last token
-            next_token_ids = sample_tokens(next_logits,
-                                           model_input.tt_sampling_params)
-        else:
-            next_token_ids = tt_out
+        sampled_token_ids_per_dp: list[list[list[int]]] = []
+        start = 0
+        for dp_rank, sz in enumerate(batch_size_per_dp):
+            if sz <= 0:
+                sampled_token_ids_per_dp.append([])
+                continue
+            if (not self.sample_on_device_mode
+                    or (self.sample_on_device_mode == "decode_only"
+                        and not is_decode)):
+                logits = tt_out[start:start + sz, -1, :]
+                next_token_ids = sample_tokens(logits,
+                                               sampling_params_per_dp[dp_rank])
+            else:
+                next_token_ids = tt_out[start:start + sz]
+            sampled_token_ids_per_dp.append([[int(t)] for t in next_token_ids])
 
-        sampled_token_ids = [[int(next_token_ids[i])]
-                             for i in range(self.input_batch.num_reqs)]
-        output = self._generate_runner_output(sampled_token_ids)
-        return output
+            if is_decode:
+                # Fixed stride segments per DP rank for decode
+                start += self.scheduler_config.max_num_seqs
+            else:
+                # Prefill packed contiguously
+                start += sz
 
-    def _generate_runner_output(self, sampled_token_ids: list[list[int]]):
+        return sampled_token_ids_per_dp
+
+    def generate_runner_output(self, sampled_token_ids: list[list[int]]):
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
         for req_idx, sampled_ids in enumerate(sampled_token_ids):

@@ -12,9 +12,11 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, Callable, Optional, TypeVar, Union, cast
 
 import msgspec
+import torch
+import torch.distributed as dist
 import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
@@ -40,7 +42,7 @@ from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
@@ -236,6 +238,10 @@ class EngineCore:
 
     def execute_model(self, scheduler_output: SchedulerOutput):
         try:
+            if hasattr(self, "requires_gather") and self.requires_gather:
+                # Different execution path for gathered batch DP.
+                assert hasattr(self, "_execute_model_dp_gather")
+                return self._execute_model_dp_gather(scheduler_output)
             return self.model_executor.execute_model(scheduler_output)
         except Exception as err:
             # We do not want to catch BaseException here since we're only
@@ -254,11 +260,70 @@ class EngineCore:
         was executed.
         """
 
+        # For gathered DP execution, agree on mode BEFORE any early returns,
+        # and only apply it if we will schedule locally.
+        forced_mode: Optional[int] = None
+        requires_gather = hasattr(self,
+                                  "requires_gather") and self.requires_gather
+        if requires_gather:
+            assert hasattr(self, "dp_max_consec_decodes")
+            assert hasattr(self, "dp_decode_streak")
+            assert hasattr(self, "dlog")
+            assert hasattr(self, "dp_group")
+            # Max-consecutive-decoding guard: if there are waiting prefills
+            # and we decoded for dp_max_consec_decodes steps consecutively,
+            # force one prefill step. Otherwise, prefer decode while running.
+            # Can't automatically set intent to be prefill if there are any
+            # waiting requests since we could get stuck in a loop where intent
+            # is prefill but it doesn't get scheduled.
+            has_running = bool(getattr(self.scheduler, "running", []))
+            has_waiting = bool(getattr(self.scheduler, "waiting", False))
+            must_prefill = (
+                has_waiting and self.dp_decode_streak  # type: ignore[has-type]
+                >= self.dp_max_consec_decodes)
+            local_prefill_intent = 1 if (
+                has_waiting and (must_prefill or not has_running)) else 0
+            intent_tensor = torch.tensor([local_prefill_intent],
+                                         dtype=torch.int32)
+            self.dlog("before_intent_allreduce intent_tensor=%s",
+                      intent_tensor)
+            dist.all_reduce(intent_tensor,
+                            op=dist.ReduceOp.MAX,
+                            group=self.dp_group)
+            forced_mode = int(intent_tensor.item())  # 1=prefill, 0=decode
+            self.dlog("after_intent_allreduce forced_mode=%d", forced_mode)
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
+            if requires_gather:
+                # Enter DP-gather every iteration, let execute_model
+                # handle global has-work sync to keep collectives ordered.
+                _ = self.execute_model(None)  # type: ignore[arg-type]
             return {}, False
+
+        # Apply the forced mode only for ranks that will call schedule().
+        if requires_gather and forced_mode is not None:
+            set_mode = getattr(self.scheduler, "set_forced_mode", None)
+            if callable(set_mode):
+                set_mode(forced_mode)
+
         scheduler_output = self.scheduler.schedule()
+
+        if requires_gather and forced_mode is not None:
+            # Reset forced mode after scheduling to leave no residual state.
+            set_mode = getattr(self.scheduler, "set_forced_mode", None)
+            if callable(set_mode):
+                set_mode(None)
+
+            # Update decode streak: increment only when decode scheduled tokens;
+            # reset to 0 when prefill runs OR when nothing was scheduled.
+            if (scheduler_output.total_num_scheduled_tokens > 0
+                    and forced_mode == 0):
+                self.dp_decode_streak += 1  # type: ignore[has-type]
+            else:
+                self.dp_decode_streak = 0
+
         model_output = self.execute_model(scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
@@ -637,11 +702,20 @@ class EngineCoreProc(EngineCore):
 
         waited = False
         while not self.engines_running and not self.scheduler.has_requests():
-            if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
-                logger.debug("EngineCore waiting for work.")
-                waited = True
-            req = self.input_queue.get()
-            self._handle_client_request(*req)
+            if hasattr(self, "requires_gather") and self.requires_gather:
+                # Non-blocking input polling so idle ranks can progress
+                try:
+                    req = self.input_queue.get_nowait()
+                    self._handle_client_request(*req)
+                    waited = True
+                except queue.Empty:
+                    break
+            else:
+                if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
+                    logger.debug("EngineCore waiting for work.")
+                    waited = True
+                req = self.input_queue.get()
+                self._handle_client_request(*req)
 
         if waited:
             logger.debug("EngineCore loop active.")
@@ -857,6 +931,24 @@ class DPEngineCoreProc(EngineCoreProc):
         self.current_wave = 0
         self.last_counts = (0, 0)
 
+        from vllm.platforms import current_platform
+        self.requires_gather = current_platform.requires_gathered_batch_dp()
+        if self.requires_gather:
+            # Track decode streak for DP gather fairness policy.
+            self.dp_decode_streak: int = 0
+            # Max consecutive decode iterations allowed before we must
+            # admit at least one prefill if there are waiting requests.
+            self.dp_max_consec_decodes: int = 16
+
+            DEBUG_DPG = os.environ.get("DP_GATHER_DEBUG") == "1"
+
+            def dlog_logger(msg: str, *a: object) -> None:
+                if DEBUG_DPG:
+                    formatted = (msg % a) if a else msg
+                    logger.info("dp_gather r%d: %s", self.dp_rank, formatted)
+
+            self.dlog = dlog_logger
+
         # Initialize the engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
         super().__init__(vllm_config, local_client, handshake_address,
@@ -966,7 +1058,10 @@ class DPEngineCoreProc(EngineCoreProc):
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
-            if not executed:
+
+            # In gathered-DP mode, avoid early-continue to keep
+            # the global finish all-reduce aligned across ranks.
+            if not executed and not self.requires_gather:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.
                     continue
@@ -991,6 +1086,15 @@ class DPEngineCoreProc(EngineCoreProc):
                     self.output_queue.put_nowait(
                         (client_index,
                          EngineCoreOutputs(wave_complete=self.current_wave)))
+                    # Mirror to client only for gathered-DP path when
+                    # a coordinator is present, without altering regular path.
+                    if (self.has_coordinator and self.requires_gather
+                            and client_index == -1):
+                        self.output_queue.put_nowait(
+                            (0,
+                             EngineCoreOutputs(
+                                 wave_complete=self.current_wave,
+                                 scheduler_stats=self.scheduler.make_stats())))
                 self.current_wave += 1
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
@@ -1047,6 +1151,62 @@ class DPEngineCoreProc(EngineCoreProc):
         else:
             logger.info("Distributed environment reinitialized for DP rank %s",
                         self.dp_rank)
+
+    def _execute_model_dp_gather(self, scheduler_output: SchedulerOutput):
+        group = self.dp_group
+        rank = self.dp_rank
+        world = self.vllm_config.parallel_config.data_parallel_size
+
+        # 0) Check if any rank has work this iteration.
+        local_has = 1 if scheduler_output is not None else 0
+        has_t = torch.tensor([local_has], dtype=torch.int32)
+        dist.all_reduce(has_t, op=dist.ReduceOp.SUM, group=group)
+        if int(has_t.item()) == 0:
+            # Nobody has work this iteration; return empty output
+            return EMPTY_MODEL_RUNNER_OUTPUT
+        if scheduler_output is not None:
+            self.dlog("enter_gather tokens=%d",
+                      scheduler_output.total_num_scheduled_tokens)
+
+        # Build local dp model input (or None). Scheduler already enforces a
+        # single mode across ranks, so no further filtering is required here.
+        local_input = None
+        if scheduler_output is not None:
+            local_input_list = self.model_executor.collective_rpc(
+                "build_dp_model_input", args=(scheduler_output, ))
+            local_input = local_input_list[0]
+
+        # Gather python-serializable inputs
+        gathered = [None for _ in range(world)]
+        dist.all_gather_object(gathered, local_input, group=group)
+        self.dlog("after_inputs_gather")
+
+        # DP0: concat and execute once using worker hook
+        if rank == 0:
+            if any(x is not None for x in gathered):
+                per_rank = self.model_executor.collective_rpc(
+                    "concat_and_execute_dp", args=(gathered, ))[0]
+            else:
+                per_rank = [[] for _ in range(world)]
+            # per_rank[i] is a list[list[int]] containing sampled token ids
+            self.dlog("split_counts=%s",
+                      [len(per_rank[i]) for i in range(world)])
+            send_obj = {i: per_rank[i] for i in range(world)}
+        else:
+            send_obj = {}
+
+        # Share results via gather of dicts (avoid broadcast on stateless dp)
+        gathered = [None for _ in range(world)]
+        dist.all_gather_object(gathered, send_obj, group=group)
+        # Only rank 0 sends a non-empty dict; it's always at index 0.
+        merged = cast(dict[int, list[Any]], gathered[0] or {})
+        my_ids = merged.get(rank, [])
+        self.dlog("after_results_gather my_ids_len=%d", len(my_ids))
+
+        # Apply results locally and return output
+        output = self.model_executor.collective_rpc(
+            "apply_dp_execution_result", args=(my_ids, ))[0]
+        return output
 
 
 class DPEngineCoreActor(DPEngineCoreProc):

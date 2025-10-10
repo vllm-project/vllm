@@ -502,6 +502,14 @@ class Platform:
         return False
 
     @classmethod
+    def requires_gathered_batch_dp(cls) -> bool:
+        """
+        Whether DP ranks must gather batches to a single driver
+        before executing. Defaults to False; platforms can override.
+        """
+        return False
+
+    @classmethod
     def validate_request(
         cls,
         prompt: PromptType,
