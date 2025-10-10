@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import base64
 from collections.abc import AsyncGenerator, Mapping
-from typing import Any, Final, Literal, Optional, Union, cast
+from typing import Any, Final, Optional, Union, cast
 
 import torch
 from fastapi import Request
-from typing_extensions import assert_never, override
+from typing_extensions import override
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
@@ -29,6 +28,7 @@ from vllm.entrypoints.openai.serving_engine import (
     TextTokensPrompt,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.utils import encoding_pooling_output
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
@@ -42,29 +42,6 @@ from vllm.pooling_params import PoolingParams
 from vllm.utils import chunk_list
 
 logger = init_logger(__name__)
-
-
-def _get_embedding(
-    output: PoolingRequestOutput,
-    encoding_format: Literal["float", "base64"],
-    embed_dtype: str,
-) -> Union[list[float], str]:
-    if encoding_format == "float":
-        return output.outputs.data.tolist()
-    elif encoding_format == "base64":
-        assert embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE
-        torch_dtype = EMBED_DTYPE_TO_TORCH_DTYPE[embed_dtype]
-        embedding_bytes = (
-            output.outputs.data.to(torch_dtype)
-            .flatten()
-            .contiguous()
-            .view(torch.uint8)
-            .numpy()
-            .tobytes()
-        )
-        return base64.b64encode(embedding_bytes).decode("utf-8")
-
-    assert_never(encoding_format)
 
 
 class EmbeddingMixin(OpenAIServing):
@@ -153,7 +130,7 @@ class EmbeddingMixin(OpenAIServing):
         for idx, final_res in enumerate(final_res_batch_checked):
             item = EmbeddingResponseData(
                 index=idx,
-                embedding=_get_embedding(
+                embedding=encoding_pooling_output(
                     final_res, ctx.request.encoding_format, ctx.request.embed_dtype
                 ),
             )
