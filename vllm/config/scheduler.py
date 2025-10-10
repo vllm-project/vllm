@@ -37,13 +37,13 @@ class SchedulerConfig:
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_num_seqs: int = Field(default=None, validate_default=True, ge=1)
+    max_num_seqs: int = Field(default=None, ge=1)
     """Maximum number of sequences to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_model_len: int = Field(default=None, validate_default=True, ge=1)
+    max_model_len: int = Field(default=None, ge=1)
     """Maximum length of a sequence (including prompt and generated text). This
     is primarily set in `ModelConfig` and that value should be manually
     duplicated here."""
@@ -171,7 +171,7 @@ class SchedulerConfig:
 
     @field_validator("max_num_seqs", mode="before")
     @classmethod
-    def _validate_max_num_seqs(cls, max_num_seqs: Any | None) -> Any:
+    def _validate_max_num_seqs(cls, max_num_seqs: int | None) -> int:
         if max_num_seqs is None:
             logger.warning("max_num_seqs is not set, using arbitrary value 128.")
             return 128
@@ -179,7 +179,7 @@ class SchedulerConfig:
 
     @field_validator("max_model_len", mode="before")
     @classmethod
-    def _validate_max_model_len(cls, max_model_len: Any | None) -> Any:
+    def _validate_max_model_len(cls, max_model_len: int | None) -> int:
         if max_model_len is None:
             logger.warning("max_model_len is not set, using arbitrary value 8192.")
             return 8192
@@ -292,12 +292,10 @@ class SchedulerConfig:
                 self.max_num_seqs * self.max_model_len,
             )
 
-        if self.max_num_partial_prefills > 1:
-            if not self.chunked_prefill_enabled:
-                raise ValueError(
-                    "Chunked prefill must be enabled to set "
-                    "max_num_partial_prefills > 1."
-                )
+        if self.max_num_partial_prefills > 1 and not self.chunked_prefill_enabled:
+            raise ValueError(
+                "Chunked prefill must be enabled to set max_num_partial_prefills > 1."
+            )
 
             if self.long_prefill_token_threshold > self.max_model_len:
                 raise ValueError(
