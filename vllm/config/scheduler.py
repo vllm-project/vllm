@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from dataclasses import field
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+from dataclasses import InitVar, field
+from typing import Any, Literal, Union
 
 from pydantic import SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
@@ -11,18 +11,15 @@ from typing_extensions import Self
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
-                        MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
-                        POOLING_MODEL_MAX_NUM_BATCHED_TOKENS)
-
-if TYPE_CHECKING:
-    from vllm.config import RunnerType
-else:
-    RunnerType = Any
+from vllm.utils import (
+    DEFAULT_MAX_NUM_BATCHED_TOKENS,
+    MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
+    POOLING_MODEL_MAX_NUM_BATCHED_TOKENS,
+)
 
 logger = init_logger(__name__)
 
-PreemptionMode = Literal["swap", "recompute"]
+RunnerType = Literal["generate", "pooling", "draft"]
 SchedulerPolicy = Literal["fcfs", "priority"]
 
 
@@ -82,16 +79,19 @@ class SchedulerConfig:
     3. more than one value (e.g. 1 2 128) is provided, then the capture list
     will follow the provided list."""
 
-    delay_factor: float = 0.0
-    """Apply a delay (of delay factor multiplied by previous
-    prompt latency) before scheduling next prompt."""
-
     enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
 
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
+
+    is_encoder_decoder: InitVar[bool] = False
+    """True if the model is an encoder-decoder model.
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    disable chunked prefill and prefix caching for encoder-decoder models.
+    """
 
     # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = field(init=False)
@@ -106,14 +106,6 @@ class SchedulerConfig:
 
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
-
-    preemption_mode: Optional[PreemptionMode] = None
-    """Whether to perform preemption by swapping or
-    recomputation. If not specified, we determine the mode as follows:
-    We use recomputation by default since it incurs lower overhead than
-    swapping. However, when the sequence group has multiple sequences
-    (e.g., beam search), recomputation is not currently supported. In
-    such a case, we use swapping instead."""
 
     send_delta_data: bool = False
     """Private API. If used, scheduler sends delta data to
@@ -174,16 +166,26 @@ class SchedulerConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, is_encoder_decoder: bool) -> None:
         if self.max_model_len is None:
             self.max_model_len = 8192
 
         if self.max_num_seqs is None:
             self.max_num_seqs = 128
+
+        if is_encoder_decoder:
+            # Chunked prefill should be disabled for encoder-decoder models.
+            self.disable_chunked_mm_input = True
+            self.chunked_prefill_enabled = False
+            self.enable_chunked_prefill = False
+            self.long_prefill_token_threshold = 0
+            logger.info(
+                "Encoder-decoder models do not support chunked prefill nor"
+                " prefix caching; disabling both."
+            )
 
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
@@ -193,7 +195,8 @@ class SchedulerConfig:
                 # DEFAULT_MAX_NUM_BATCHED_TOKENS as the default value
                 # for higher throughput.
                 self.max_num_batched_tokens = max(
-                    self.max_model_len, DEFAULT_MAX_NUM_BATCHED_TOKENS)
+                    self.max_model_len, DEFAULT_MAX_NUM_BATCHED_TOKENS
+                )
 
             if self.runner_type == "pooling":
                 # Choose specific value for higher throughput
@@ -212,8 +215,8 @@ class SchedulerConfig:
             # Ensure max_num_batched_tokens does not exceed model limit.
             # Some models (e.g., Whisper) have embeddings tied to max length.
             self.max_num_batched_tokens = min(
-                self.max_num_seqs * self.max_model_len,
-                self.max_num_batched_tokens)
+                self.max_num_seqs * self.max_model_len, self.max_num_batched_tokens
+            )
 
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
@@ -221,20 +224,22 @@ class SchedulerConfig:
         if self.enable_chunked_prefill:
             logger.info(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
-                self.max_num_batched_tokens)
+                self.max_num_batched_tokens,
+            )
 
         self.chunked_prefill_enabled = self.enable_chunked_prefill
         if self.max_num_partial_prefills > 1:
             if self.long_prefill_token_threshold == 0:
-                self.long_prefill_token_threshold = int(self.max_model_len *
-                                                        0.04)
+                self.long_prefill_token_threshold = int(self.max_model_len * 0.04)
 
             logger.info(
                 "Concurrent partial prefills enabled with "
                 "max_num_partial_prefills=%d, max_long_partial_prefills=%d, "
                 "long_prefill_token_threshold=%d",
-                self.max_num_partial_prefills, self.max_long_partial_prefills,
-                self.long_prefill_token_threshold)
+                self.max_num_partial_prefills,
+                self.max_long_partial_prefills,
+                self.long_prefill_token_threshold,
+            )
 
         # NOTE: Default set cuda_graph_sizes to [min(max_num_seqs * 2, 512)].
         # This avoids OOM in tight memory scenarios with small max_num_seqs,
@@ -244,61 +249,71 @@ class SchedulerConfig:
             self.cuda_graph_sizes = [min(self.max_num_seqs * 2, 512)]
 
         if self.async_scheduling:
-            self.scheduler_cls = (
-                "vllm.v1.core.sched.async_scheduler.AsyncScheduler")
+            self.scheduler_cls = "vllm.v1.core.sched.async_scheduler.AsyncScheduler"
 
-    @model_validator(mode='after')
+    @model_validator(mode="after")
     def _verify_args(self) -> Self:
-        if (self.max_num_batched_tokens < self.max_model_len
-                and not self.chunked_prefill_enabled):
+        if (
+            self.max_num_batched_tokens < self.max_model_len
+            and not self.chunked_prefill_enabled
+        ):
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
                 f"smaller than max_model_len ({self.max_model_len}). "
                 "This effectively limits the maximum sequence length to "
                 "max_num_batched_tokens and makes vLLM reject longer "
                 "sequences. Please increase max_num_batched_tokens or "
-                "decrease max_model_len.")
+                "decrease max_model_len."
+            )
 
         if self.max_num_batched_tokens < self.max_num_seqs:
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
                 "be greater than or equal to max_num_seqs "
-                f"({self.max_num_seqs}).")
+                f"({self.max_num_seqs})."
+            )
 
         if self.max_num_batched_tokens > self.max_num_seqs * self.max_model_len:
             logger.warning(
                 "max_num_batched_tokens (%d) exceeds max_num_seqs "
                 "* max_model_len (%d). This may lead to unexpected behavior.",
                 self.max_num_batched_tokens,
-                self.max_num_seqs * self.max_model_len)
+                self.max_num_seqs * self.max_model_len,
+            )
 
         if self.num_lookahead_slots < 0:
             raise ValueError(
                 "num_lookahead_slots "
                 f"({self.num_lookahead_slots}) must be greater than or "
-                "equal to 0.")
+                "equal to 0."
+            )
 
         if self.max_num_partial_prefills < 1:
             raise ValueError(
                 f"max_num_partial_prefills ({self.max_num_partial_prefills}) "
-                "must be greater than or equal to 1.")
+                "must be greater than or equal to 1."
+            )
         elif self.max_num_partial_prefills > 1:
             if not self.chunked_prefill_enabled:
-                raise ValueError("Chunked prefill must be enabled to set "
-                                 "max_num_partial_prefills > 1.")
+                raise ValueError(
+                    "Chunked prefill must be enabled to set "
+                    "max_num_partial_prefills > 1."
+                )
 
             if self.long_prefill_token_threshold > self.max_model_len:
                 raise ValueError(
                     "long_prefill_token_threshold "
                     f"({self.long_prefill_token_threshold}) cannot be greater "
-                    f"than the max_model_len ({self.max_model_len}).")
+                    f"than the max_model_len ({self.max_model_len})."
+                )
 
-        if (self.max_long_partial_prefills
-                < 1) or (self.max_long_partial_prefills
-                         > self.max_num_partial_prefills):
+        if (self.max_long_partial_prefills < 1) or (
+            self.max_long_partial_prefills > self.max_num_partial_prefills
+        ):
             raise ValueError(
                 f"max_long_partial_prefills ({self.max_long_partial_prefills}) "
                 "must be greater than or equal to 1 and less than or equal to "
-                f"max_num_partial_prefills ({self.max_num_partial_prefills}).")
+                f"max_num_partial_prefills ({self.max_num_partial_prefills})."
+            )
 
         return self

@@ -18,7 +18,7 @@ vllm bench throughput --input-len 256 --output-len 256 --output-json throughput_
 bench_throughput_exit_code=$?
 
 # run server-based benchmarks and upload the result to buildkite
-python3 -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-2-7b-chat-hf &
+vllm serve meta-llama/Llama-2-7b-chat-hf &
 server_pid=$!
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 

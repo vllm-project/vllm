@@ -31,6 +31,12 @@ cd vllm
 
 You must set the following variables at the top of the script before execution.
 
+   Note: You can also override the default values below via environment variables when running the script.
+
+```bash
+MODEL=meta-llama/Llama-3.3-70B-Instruct SYSTEM=TPU TP=8 DOWNLOAD_DIR='' INPUT_LEN=128 OUTPUT_LEN=2048 MAX_MODEL_LEN=2300 MIN_CACHE_HIT_PCT=0 MAX_LATENCY_ALLOWED_MS=100000000000 NUM_SEQS_LIST="128 256" NUM_BATCHED_TOKENS_LIST="1024 2048 4096" VLLM_LOGGING_LEVEL=DEBUG bash auto_tune.sh
+```
+
 | Variable | Description | Example Value |
 | --- | --- | --- |
 | `BASE` | **Required.** The absolute path to the parent directory of your vLLM repository directory. | `"$HOME"` |
@@ -143,3 +149,70 @@ The script follows a systematic process to find the optimal parameters:
 4. **Track Best Result**: Throughout the process, the script tracks the parameter combination that has yielded the highest valid throughput so far.
 
 5. **Profile Collection**: For the best-performing run, the script saves the vLLM profiler output, which can be used for deep-dive performance analysis with tools like TensorBoard.
+
+## Batched `auto_tune`
+
+The `batch_auto_tune.sh` script allows you to run multiple `auto_tune.sh` experiments sequentially from a single configuration file. It iterates through a list of parameter sets, executes `auto_tune.sh` for each, and records the results back into the input file.
+
+### Prerequisites
+
+- **jq**: This script requires `jq` to parse the JSON configuration file.
+- **gcloud**: If you plan to upload results to Google Cloud Storage, the `gcloud` CLI must be installed and authenticated.
+
+### How to Run
+
+1. **Create a JSON configuration file**: Create a file (e.g., `runs_config.json`) containing an array of JSON objects. Each object defines the parameters for a single `auto_tune.sh` run.
+
+2. **Execute the script**:
+
+    ```bash
+    bash batch_auto_tune.sh <path_to_json_file> [gcs_upload_path]
+    ```
+
+    - `<path_to_json_file>`: **Required.** Path to your JSON configuration file.
+    - `[gcs_upload_path]`: **Optional.** A GCS path (e.g., `gs://my-bucket/benchmark-results`) where the detailed results and profiles for each run will be uploaded. If this is empty, the results will be available on the local filesystem (see the log for `RESULT_FILE=/path/to/results/file.txt`).
+
+### Configuration File
+
+The JSON configuration file should contain an array of objects. Each object's keys correspond to the configuration variables for `auto_tune.sh` (see the [Configuration table above](#configuration)). These keys will be converted to uppercase environment variables for each run.
+
+Here is an example `runs_config.json` with two benchmark configurations:
+
+```json
+[
+  {
+    "base": "/home/user",
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "system": "TPU", # OR GPU
+    "tp": 8,
+    "input_len": 128,
+    "output_len": 2048,
+    "max_model_len": 2300,
+    "num_seqs_list": "128 256",
+    "num_batched_tokens_list": "8192 16384"
+  },
+  {
+    "base": "/home/user",
+    "model": "meta-llama/Llama-3.1-70B-Instruct",
+    "system": "TPU", # OR GPU
+    "tp": 8,
+    "input_len": 4000,
+    "output_len": 16,
+    "max_model_len": 4096,
+    "num_seqs_list": "64 128",
+    "num_batched_tokens_list": "4096 8192",
+    "max_latency_allowed_ms": 500
+  }
+]
+```
+
+### Output
+
+The script modifies the input JSON file in place, adding the results of each run to the corresponding object. The following fields are added:
+
+- `run_id`: A unique identifier for the run, derived from the timestamp.
+- `status`: The outcome of the run (`SUCCESS`, `FAILURE`, or `WARNING_NO_RESULT_FILE`).
+- `results`: The content of the `result.txt` file from the `auto_tune.sh` run.
+- `gcs_results`: The GCS URL where the run's artifacts are stored (if a GCS path was provided).
+
+A summary of successful and failed runs is also printed to the console upon completion.

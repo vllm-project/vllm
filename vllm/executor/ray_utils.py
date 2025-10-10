@@ -4,7 +4,7 @@
 import os
 import time
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import msgspec
 
@@ -16,7 +16,8 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import get_ip
-from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.v1.outputs import AsyncModelRunnerOutput
+from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -29,11 +30,13 @@ try:
     import ray
     from ray.util import placement_group_table
     from ray.util.placement_group import PlacementGroup
+
     try:
         from ray._private.state import available_resources_per_node
     except ImportError:
         # Ray 2.9.x doesn't expose `available_resources_per_node`
         from ray._private.state import state as _state
+
         available_resources_per_node = _state._available_resources_per_node
 
     class RayWorkerWrapper(WorkerWrapperBase):
@@ -48,27 +51,28 @@ try:
             # that thread.
             self.compiled_dag_cuda_device_set = False
 
-            self.input_decoder = msgspec.msgpack.Decoder(ExecuteModelRequest,
-                                                         dec_hook=decode_hook)
+            self.input_decoder = msgspec.msgpack.Decoder(
+                ExecuteModelRequest, dec_hook=decode_hook
+            )
             self.output_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
 
         def get_node_ip(self) -> str:
             return get_ip()
 
-        def get_node_and_gpu_ids(self) -> Tuple[str, List[int]]:
+        def get_node_and_gpu_ids(self) -> tuple[str, list[int]]:
             node_id = ray.get_runtime_context().get_node_id()
             device_key = vllm.platforms.current_platform.ray_device_key
             if not device_key:
-                raise RuntimeError("current platform %s does not support ray.",
-                                   vllm.platforms.current_platform.device_name)
-            gpu_ids = ray.get_runtime_context().get_accelerator_ids(
-            )[device_key]
+                raise RuntimeError(
+                    "current platform %s does not support ray.",
+                    vllm.platforms.current_platform.device_name,
+                )
+            gpu_ids = ray.get_runtime_context().get_accelerator_ids()[device_key]
             return node_id, gpu_ids
 
         def execute_model_spmd(
-            self, req_or_tuple: Union[bytes,
-                                      Tuple[bytes,
-                                            Optional[IntermediateTensors]]]
+            self,
+            req_or_tuple: Union[bytes, tuple[bytes, Optional[IntermediateTensors]]],
         ) -> bytes:
             """Execute model in SPMD fashion: used only when SPMD worker and
             compiled DAG are both enabled.
@@ -93,8 +97,9 @@ try:
                 current_platform.set_device(self.worker.device)
                 self.compiled_dag_cuda_device_set = True
 
-            output = self.worker._execute_model_spmd(execute_model_req,
-                                                     intermediate_tensors)
+            output = self.worker._execute_model_spmd(
+                execute_model_req, intermediate_tensors
+            )
             # Pipeline model request and output to the next pipeline stage.
             if isinstance(output, IntermediateTensors):
                 output = serialized_req, output
@@ -120,11 +125,12 @@ try:
 
         def execute_model_ray(
             self,
-            scheduler_output: Union["SchedulerOutput",
-                                    Tuple["SchedulerOutput",
-                                          "IntermediateTensors"]],
-        ) -> Union["ModelRunnerOutput", Tuple["SchedulerOutput",
-                                              "IntermediateTensors"]]:
+            scheduler_output: Union[
+                "SchedulerOutput", tuple["SchedulerOutput", "IntermediateTensors"]
+            ],
+        ) -> Union[
+            "ModelRunnerOutput", tuple["SchedulerOutput", "IntermediateTensors"]
+        ]:
             # This method is used by Ray Compiled Graph to execute the model,
             # and it needs a special logic of self.setup_device_if_necessary()
             self.setup_device_if_necessary()
@@ -134,7 +140,8 @@ try:
             else:
                 scheduler_output, intermediate_tensors = scheduler_output, None
             output = self.worker.model_runner.execute_model(
-                scheduler_output, intermediate_tensors)
+                scheduler_output, intermediate_tensors
+            )
             if isinstance(output, IntermediateTensors):
                 output = scheduler_output, output
             elif not get_pp_group().is_last_rank:
@@ -142,9 +149,14 @@ try:
                 # but may still be finished requests.
                 assert not output or not output.req_ids
                 output = scheduler_output, None
+            # Ensure outputs crossing Ray compiled DAG are serializable.
+            # AsyncModelRunnerOutput holds CUDA events and cannot be
+            # pickled.
+            if isinstance(output, AsyncModelRunnerOutput):
+                output = output.get_output()
             return output
 
-        def override_env_vars(self, vars: Dict[str, str]):
+        def override_env_vars(self, vars: dict[str, str]):
             os.environ.update(vars)
 
     ray_import_err = None
@@ -165,12 +177,15 @@ def ray_is_available() -> bool:
 def assert_ray_available():
     """Raise an exception if Ray is not available."""
     if ray is None:
-        raise ValueError(f"Failed to import Ray: {ray_import_err}."
-                         "Please install Ray with `pip install ray`.")
+        raise ValueError(
+            f"Failed to import Ray: {ray_import_err}."
+            "Please install Ray with `pip install ray`."
+        )
 
 
-def _verify_bundles(placement_group: "PlacementGroup",
-                    parallel_config: ParallelConfig, device_str: str):
+def _verify_bundles(
+    placement_group: "PlacementGroup", parallel_config: ParallelConfig, device_str: str
+):
     """Verify a given placement group has bundles located in the right place.
 
     There are 2 rules.
@@ -178,14 +193,15 @@ def _verify_bundles(placement_group: "PlacementGroup",
     - Fail if driver node is not included in a placement group.
     """
     assert ray.is_initialized(), (
-        "Ray is not initialized although distributed-executor-backend is ray.")
+        "Ray is not initialized although distributed-executor-backend is ray."
+    )
     pg_data = placement_group_table(placement_group)
     # bundle_idx -> node_id
     bundle_to_node_ids = pg_data["bundles_to_node_id"]
     # bundle_idx -> bundle (e.g., {"GPU": 1})
     bundles = pg_data["bundles"]
     # node_id -> List of bundle (e.g., {"GPU": 1})
-    node_id_to_bundle: Dict[str, List[Dict[str, float]]] = defaultdict(list)
+    node_id_to_bundle: dict[str, list[dict[str, float]]] = defaultdict(list)
 
     for bundle_idx, node_id in bundle_to_node_ids.items():
         node_id_to_bundle[node_id].append(bundles[bundle_idx])
@@ -211,8 +227,13 @@ def _verify_bundles(placement_group: "PlacementGroup",
                 "unless you have fast interconnect across nodes, like "
                 "Infiniband. To resolve this issue, make sure you have more "
                 "than %d GPUs available at each node.",
-                parallel_config.tensor_parallel_size, device_str, len(bundles),
-                device_str, node_id, parallel_config.tensor_parallel_size)
+                parallel_config.tensor_parallel_size,
+                device_str,
+                len(bundles),
+                device_str,
+                node_id,
+                parallel_config.tensor_parallel_size,
+            )
 
 
 def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
@@ -244,7 +265,9 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
             " and make sure the IP addresses used by ray cluster"
             " are the same as VLLM_HOST_IP environment variable"
             " specified in each node if you are running on a multi-node.",
-            int(time.time() - s), placement_group_specs)
+            int(time.time() - s),
+            placement_group_specs,
+        )
 
     try:
         ray.get(pg_ready_ref, timeout=0)
@@ -253,7 +276,8 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
             "Cannot provide a placement group of "
             f"{placement_group_specs=} within {PG_WAIT_TIMEOUT} seconds. See "
             "`ray status` and `ray list nodes` to make sure the cluster has "
-            "enough resources.") from None
+            "enough resources."
+        ) from None
 
 
 def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
@@ -268,8 +292,9 @@ def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
         # Exponential backoff for warning print.
         wait_interval *= 2
         logger.info(
-            "Waiting for removing a placement group of specs for "
-            "%d seconds.", int(time.time() - s))
+            "Waiting for removing a placement group of specs for %d seconds.",
+            int(time.time() - s),
+        )
         time.sleep(wait_interval)
 
 
@@ -300,19 +325,21 @@ def initialize_ray_cluster(
         except ConnectionError:
             logger.warning(
                 "No existing RAY instance detected. "
-                "A new instance will be launched with current node resources.")
-            ray.init(address=ray_address,
-                     num_gpus=parallel_config.world_size,
-                     runtime_env=parallel_config.ray_runtime_env)
+                "A new instance will be launched with current node resources."
+            )
+            ray.init(
+                address=ray_address,
+                num_gpus=parallel_config.world_size,
+                runtime_env=parallel_config.ray_runtime_env,
+            )
     else:
-        ray.init(address=ray_address,
-                 runtime_env=parallel_config.ray_runtime_env)
+        ray.init(address=ray_address, runtime_env=parallel_config.ray_runtime_env)
 
     device_str = current_platform.ray_device_key
     if not device_str:
         raise ValueError(
-            f"current platform {current_platform.device_name} does not "
-            "support ray.")
+            f"current platform {current_platform.device_name} does not support ray."
+        )
 
     # Create or get the placement group for worker processes
     if parallel_config.placement_group:
@@ -331,8 +358,8 @@ def initialize_ray_cluster(
             bundle_devices = bundle.get(device_str, 0)
             if bundle_devices > 1:
                 raise ValueError(
-                    "Placement group bundle cannot have more than 1 "
-                    f"{device_str}.")
+                    f"Placement group bundle cannot have more than 1 {device_str}."
+                )
             if bundle_devices:
                 device_bundles += 1
         if parallel_config.world_size > device_bundles:
@@ -340,10 +367,10 @@ def initialize_ray_cluster(
                 f"The number of required {device_str}s exceeds the total "
                 f"number of available {device_str}s in the placement group. "
                 f"Required number of devices: {parallel_config.world_size}. "
-                f"Total number of devices: {device_bundles}.")
+                f"Total number of devices: {device_bundles}."
+            )
     else:
-        logger.info("No current placement group found. "
-                    "Creating a new placement group.")
+        logger.info("No current placement group found. Creating a new placement group.")
         num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
         # Log a warning message and delay resource allocation failure response.
         # Avoid immediate rejection to allow user-initiated placement group
@@ -351,12 +378,14 @@ def initialize_ray_cluster(
         if parallel_config.world_size > num_devices_in_cluster:
             logger.warning(
                 "The number of required %ss exceeds the total "
-                "number of available %ss in the placement group.", device_str,
-                device_str)
+                "number of available %ss in the placement group.",
+                device_str,
+                device_str,
+            )
         # Create a new placement group
-        placement_group_specs: List[Dict[str, float]] = ([{
-            device_str: 1.0
-        } for _ in range(parallel_config.world_size)])
+        placement_group_specs: list[dict[str, float]] = [
+            {device_str: 1.0} for _ in range(parallel_config.world_size)
+        ]
 
         # vLLM engine is also a worker to execute model with an accelerator,
         # so it requires to have the device in a current node. Check if
@@ -369,14 +398,16 @@ def initialize_ray_cluster(
                 f"Current node has no {device_str} available. "
                 f"{current_node_resource=}. vLLM engine cannot start without "
                 f"{device_str}. Make sure you have at least 1 {device_str} "
-                f"available in a node {current_node_id=} {current_ip=}.")
+                f"available in a node {current_node_id=} {current_ip=}."
+            )
         # This way, at least bundle is required to be created in a current
         # node.
         placement_group_specs[0][f"node:{current_ip}"] = 0.001
 
         # By default, Ray packs resources as much as possible.
         current_placement_group = ray.util.placement_group(
-            placement_group_specs, strategy="PACK")
+            placement_group_specs, strategy="PACK"
+        )
         _wait_until_pg_ready(current_placement_group)
 
     assert current_placement_group is not None
@@ -387,6 +418,7 @@ def initialize_ray_cluster(
 
 def get_num_tpu_nodes() -> int:
     from ray._private.accelerators import TPUAcceleratorManager
+
     cluster_resources = ray.cluster_resources()
     total_tpus = int(cluster_resources["TPU"])
     tpus_per_node = TPUAcceleratorManager.get_current_node_num_accelerators()

@@ -3,7 +3,7 @@
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -15,15 +15,22 @@ if TYPE_CHECKING:
 @dataclass
 class PrefixCacheStats:
     """Stores prefix cache hit statistics."""
+
     # Whether reset_prefix_cache was invoked.
     reset: bool = False
-    # The number of requests in this update.
+    # The number of new requests in this update.
     requests: int = 0
     # The number of queries in these requests. Note that "queries" here
     # means the number of tokens that were queried from the cache.
     queries: int = 0
     # The number of hits in these requests.
     hits: int = 0
+    # The number of previously preempted requests in this update.
+    preempted_requests: int = 0
+    # The `queries` number for preempted requests.
+    preempted_queries: int = 0
+    # The `hits` number for preempted requests.
+    preempted_hits: int = 0
 
 
 @dataclass
@@ -39,10 +46,10 @@ class SchedulerStats:
 
     kv_cache_usage: float = 0.0
 
-    prefix_cache_stats: PrefixCacheStats = field(
-        default_factory=PrefixCacheStats)
+    prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
 
     spec_decoding_stats: Optional[SpecDecodingStats] = None
+    kv_connector_stats: Optional[dict[str, Any]] = None
 
     num_corrupted_reqs: int = 0
 
@@ -68,6 +75,9 @@ class RequestStateStats:
     first_token_ts: float = 0.0
     last_token_ts: float = 0.0
 
+    # first token latency
+    first_token_latency: float = 0.0
+
 
 @dataclass
 class FinishedRequestStats:
@@ -82,6 +92,7 @@ class FinishedRequestStats:
     prefill_time: float = 0.0
     inference_time: float = 0.0
     decode_time: float = 0.0
+    mean_time_per_output_token: float = 0.0
 
 
 class IterationStats:
@@ -100,14 +111,23 @@ class IterationStats:
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
 
+    def __repr__(self) -> str:
+        field_to_value_str = ", ".join(f"{k}={v}" for k, v in vars(self).items())
+        return f"{self.__class__.__name__}({field_to_value_str})"
+
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
         return self.iteration_timestamp - start
 
-    def update_from_output(self, output: "EngineCoreOutput",
-                           engine_core_timestamp: float, is_prefilling: bool,
-                           prompt_len: int, req_stats: RequestStateStats,
-                           lora_stats: Optional[LoRAStats]):
+    def update_from_output(
+        self,
+        output: "EngineCoreOutput",
+        engine_core_timestamp: float,
+        is_prefilling: bool,
+        prompt_len: int,
+        req_stats: RequestStateStats,
+        lora_stats: Optional[LoRAStats],
+    ):
         num_new_generation_tokens = len(output.new_token_ids)
 
         self.num_generation_tokens += num_new_generation_tokens
@@ -116,13 +136,15 @@ class IterationStats:
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
+            req_stats.first_token_latency = first_token_latency
 
         req_stats.num_generation_tokens += num_new_generation_tokens
 
         # Process request-level engine core events
         if output.events is not None:
-            self.update_from_events(output.request_id, output.events,
-                                    is_prefilling, req_stats, lora_stats)
+            self.update_from_events(
+                output.request_id, output.events, is_prefilling, req_stats, lora_stats
+            )
 
         # Process the batch-level "new tokens" engine core event
         if is_prefilling:
@@ -133,11 +155,17 @@ class IterationStats:
 
         req_stats.last_token_ts = engine_core_timestamp
 
-    def update_from_events(self, req_id: str, events: list["EngineCoreEvent"],
-                           is_prefilling: bool, req_stats: RequestStateStats,
-                           lora_stats: Optional[LoRAStats]):
+    def update_from_events(
+        self,
+        req_id: str,
+        events: list["EngineCoreEvent"],
+        is_prefilling: bool,
+        req_stats: RequestStateStats,
+        lora_stats: Optional[LoRAStats],
+    ):
         # Avoid circular dependency
         from vllm.v1.engine import EngineCoreEventType
+
         for event in events:
             if event.type == EngineCoreEventType.QUEUED:
                 req_stats.queued_ts = event.timestamp
@@ -151,10 +179,13 @@ class IterationStats:
                 self.num_preempted_reqs += 1
                 LoRARequestStates.preempted_request(lora_stats, req_id)
 
-    def update_from_finished_request(self, finish_reason: "FinishReason",
-                                     num_prompt_tokens: int,
-                                     max_tokens_param: Optional[int],
-                                     req_stats: RequestStateStats):
+    def update_from_finished_request(
+        self,
+        finish_reason: "FinishReason",
+        num_prompt_tokens: int,
+        max_tokens_param: Optional[int],
+        req_stats: RequestStateStats,
+    ):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
         # Queued interval is from first QUEUED event to first SCHEDULED
@@ -172,16 +203,25 @@ class IterationStats:
         # Any preemptions during prefill or decode are included
         inference_time = req_stats.last_token_ts - req_stats.scheduled_ts
 
-        finished_req = \
-            FinishedRequestStats(finish_reason=finish_reason,
-                                 e2e_latency=e2e_latency,
-                                 num_prompt_tokens=num_prompt_tokens,
-                                 num_generation_tokens=req_stats.num_generation_tokens,
-                                 max_tokens_param=max_tokens_param,
-                                 queued_time=queued_time,
-                                 prefill_time=prefill_time,
-                                 inference_time=inference_time,
-                                 decode_time=decode_time)
+        # Do not count the token generated by the prefill phase
+        mean_time_per_output_token = (
+            decode_time / (req_stats.num_generation_tokens - 1)
+            if req_stats.num_generation_tokens - 1 > 0
+            else 0
+        )
+
+        finished_req = FinishedRequestStats(
+            finish_reason=finish_reason,
+            e2e_latency=e2e_latency,
+            num_prompt_tokens=num_prompt_tokens,
+            num_generation_tokens=req_stats.num_generation_tokens,
+            max_tokens_param=max_tokens_param,
+            queued_time=queued_time,
+            prefill_time=prefill_time,
+            inference_time=inference_time,
+            decode_time=decode_time,
+            mean_time_per_output_token=mean_time_per_output_token,
+        )
         self.finished_requests.append(finished_req)
 
 
@@ -191,24 +231,24 @@ class LoRARequestStates:
     def __init__(self):
         self.lora_name_to_stats: dict[str, LoRAStats] = {}
 
-    def get_stats(self, req_state: 'RequestState') -> Optional[LoRAStats]:
+    def get_stats(self, req_state: "RequestState") -> Optional[LoRAStats]:
         if req_state.lora_name is None:
             return None
         if req_state.lora_name not in self.lora_name_to_stats:
             self.lora_name_to_stats[req_state.lora_name] = LoRAStats()
         return self.lora_name_to_stats[req_state.lora_name]
 
-    def add_request(self, req_state: 'RequestState'):
+    def add_request(self, req_state: "RequestState"):
         if (lora_stats := self.get_stats(req_state)) is not None:
             lora_stats.waiting_requests.add(req_state.request_id)
 
-    def finish_request(self, req_state: 'RequestState'):
+    def finish_request(self, req_state: "RequestState"):
         if req_state.lora_name is None:
             return
         lora_stats = self.lora_name_to_stats[req_state.lora_name]
         lora_stats.running_requests.remove(req_state.request_id)
 
-    def abort_request(self, req_state: 'RequestState'):
+    def abort_request(self, req_state: "RequestState"):
         if req_state.lora_name is None:
             return
         lora_stats = self.lora_name_to_stats[req_state.lora_name]
@@ -231,14 +271,15 @@ class LoRARequestStates:
         lora_stats.running_requests.remove(request_id)
         lora_stats.waiting_requests.add(request_id)
 
-    def update_iteration_stats(self,
-                               iteration_stats: Optional[IterationStats]):
+    def update_iteration_stats(self, iteration_stats: Optional[IterationStats]):
         if iteration_stats is None:
             return
         for lora_name, stats in self.lora_name_to_stats.items():
             if stats.waiting_requests:
-                iteration_stats.waiting_lora_adapters[lora_name] = \
-                    len(stats.waiting_requests)
+                iteration_stats.waiting_lora_adapters[lora_name] = len(
+                    stats.waiting_requests
+                )
             if stats.running_requests:
-                iteration_stats.running_lora_adapters[lora_name] = \
-                    len(stats.running_requests)
+                iteration_stats.running_lora_adapters[lora_name] = len(
+                    stats.running_requests
+                )

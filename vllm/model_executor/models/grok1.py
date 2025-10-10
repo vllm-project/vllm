@@ -22,6 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Grok1 model."""
+
 from collections.abc import Iterable
 from itertools import islice
 from typing import Optional, Union
@@ -36,23 +37,33 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (QKVParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+    DEFAULT_VOCAB_PADDING_SIZE,
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+from .utils import (
+    AutoWeightsLoader,
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+)
 
 # Default Grok1-specific constants, overridden by config values if present
 DEFAULT_ATTN_OUTPUT_MULTIPLIER = 0.08838834764831845
@@ -69,37 +80,43 @@ class Grok1MoE(nn.Module):
     across ranks.
     """
 
-    def __init__(self,
-                 num_experts: int,
-                 top_k: int,
-                 hidden_size: int,
-                 intermediate_size: int,
-                 params_dtype: Optional[torch.dtype] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 tp_size: Optional[int] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        num_experts: int,
+        top_k: int,
+        hidden_size: int,
+        intermediate_size: int,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        tp_size: Optional[int] = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.hidden_size = hidden_size
 
         # Gate always runs at half / full precision for now.
-        self.gate = ReplicatedLinear(hidden_size,
-                                     num_experts,
-                                     bias=False,
-                                     params_dtype=params_dtype,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate")
+        self.gate = ReplicatedLinear(
+            hidden_size,
+            num_experts,
+            bias=False,
+            params_dtype=params_dtype,
+            quant_config=None,
+            prefix=f"{prefix}.gate",
+        )
 
-        self.experts = FusedMoE(num_experts=num_experts,
-                                top_k=top_k,
-                                hidden_size=hidden_size,
-                                intermediate_size=intermediate_size,
-                                params_dtype=params_dtype,
-                                reduce_results=True,
-                                renormalize=True,
-                                quant_config=quant_config,
-                                tp_size=tp_size,
-                                activation="gelu",
-                                prefix=f"{prefix}.experts")
+        self.experts = FusedMoE(
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            params_dtype=params_dtype,
+            reduce_results=True,
+            renormalize=True,
+            quant_config=quant_config,
+            tp_size=tp_size,
+            activation="gelu",
+            prefix=f"{prefix}.experts",
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
@@ -113,18 +130,17 @@ class Grok1MoE(nn.Module):
 
 
 class Grok1Attention(nn.Module):
-
     def __init__(
-            self,
-            hidden_size: int,
-            num_heads: int,
-            num_kv_heads: int,
-            max_position: int = 4096 * 32,
-            rope_theta: float = 10000,
-            cache_config: Optional[CacheConfig] = None,
-            quant_config: Optional[QuantizationConfig] = None,
-            prefix: str = "",
-            config=None,  # Added config parameter
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        max_position: int = 4096 * 32,
+        rope_theta: float = 10000,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        config=None,  # Added config parameter
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -173,19 +189,21 @@ class Grok1Attention(nn.Module):
             is_neox_style=True,
         )
 
-        attn_logits_soft_cap = max(
-            getattr(config, "attn_logit_softcapping", 30.0), 0.0)
+        attn_logits_soft_cap = max(getattr(config, "attn_logit_softcapping", 30.0), 0.0)
 
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              logits_soft_cap=attn_logits_soft_cap,
-                              prefix=f"{prefix}.attn")
-        self.attn_multiplier = getattr(self.config, "attn_output_multiplier",
-                                       1.0) if self.config else 1.0
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            logits_soft_cap=attn_logits_soft_cap,
+            prefix=f"{prefix}.attn",
+        )
+        self.attn_multiplier = (
+            getattr(self.config, "attn_output_multiplier", 1.0) if self.config else 1.0
+        )
 
     def forward(
         self,
@@ -202,7 +220,6 @@ class Grok1Attention(nn.Module):
 
 
 class Grok1DecoderLayer(nn.Module):
-
     def __init__(
         self,
         config,
@@ -215,8 +232,7 @@ class Grok1DecoderLayer(nn.Module):
         # Check for fp8 quantization
         self.use_fp8 = False
         if quant_config is not None:
-            self.use_fp8 = getattr(quant_config, "is_fp8_w8a8",
-                                   lambda: False)()
+            self.use_fp8 = getattr(quant_config, "is_fp8_w8a8", lambda: False)()
             if not self.use_fp8 and hasattr(quant_config, "is_fp8"):
                 self.use_fp8 = quant_config.is_fp8
 
@@ -232,27 +248,26 @@ class Grok1DecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            config=config)  # Pass config to Grok1Attention
+            config=config,
+        )  # Pass config to Grok1Attention
 
         # Grok1 uses "num_experts" in its config
         num_experts = getattr(config, "num_experts", 8)
         num_experts_per_tok = getattr(config, "num_experts_per_tok", 2)
 
-        self.moe_block = Grok1MoE(num_experts=num_experts,
-                                  top_k=num_experts_per_tok,
-                                  hidden_size=config.hidden_size,
-                                  intermediate_size=config.intermediate_size,
-                                  quant_config=quant_config,
-                                  prefix=f"{prefix}.moe_block")
+        self.moe_block = Grok1MoE(
+            num_experts=num_experts,
+            top_k=num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.moe_block",
+        )
 
-        self.pre_attn_norm = RMSNorm(config.hidden_size,
-                                     eps=config.rms_norm_eps)
-        self.post_attn_norm = RMSNorm(config.hidden_size,
-                                      eps=config.rms_norm_eps)
-        self.pre_moe_norm = RMSNorm(config.hidden_size,
-                                    eps=config.rms_norm_eps)
-        self.post_moe_norm = RMSNorm(config.hidden_size,
-                                     eps=config.rms_norm_eps)
+        self.pre_attn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.pre_moe_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_moe_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -265,8 +280,7 @@ class Grok1DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.pre_attn_norm(hidden_states)
         else:
-            hidden_states, residual = self.pre_attn_norm(
-                hidden_states, residual)
+            hidden_states, residual = self.pre_attn_norm(hidden_states, residual)
 
         hidden_states = self.attn(
             positions=positions,
@@ -286,7 +300,6 @@ class Grok1DecoderLayer(nn.Module):
 
 @support_torch_compile
 class Grok1Model(nn.Module):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -298,13 +311,16 @@ class Grok1Model(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.padding_idx = config.pad_token_id
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
+        lora_vocab = (
+            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
+            if lora_config
+            else 0
+        )
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
         self.embedding_multiplier_scale = getattr(
-            config, "embedding_multiplier_scale",
-            DEFAULT_EMBEDDING_MULTIPLIER_SCALE)
+            config, "embedding_multiplier_scale", DEFAULT_EMBEDDING_MULTIPLIER_SCALE
+        )
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
@@ -318,12 +334,13 @@ class Grok1Model(nn.Module):
             lambda prefix: Grok1DecoderLayer(
                 config, cache_config, quant_config=quant_config, prefix=prefix
             ),
-            prefix=f"{prefix}.layers")
+            prefix=f"{prefix}.layers",
+        )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
@@ -352,10 +369,9 @@ class Grok1Model(nn.Module):
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-                "residual": residual
-            })
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
@@ -368,10 +384,10 @@ class Grok1Model(nn.Module):
             ckpt_gate_proj_name="linear",  # Grok1 specific
             ckpt_down_proj_name="linear_1",  # Grok1 specific
             ckpt_up_proj_name="linear_v",  # Grok1 specific
-            num_experts=num_experts)
+            num_experts=num_experts,
+        )
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -383,25 +399,27 @@ class Grok1Model(nn.Module):
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if self.quant_config is not None and (
+                scale_name := self.quant_config.get_cache_scale(name)
+            ):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (
+                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
+                )
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
 
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
-                if ((name.endswith(".bias") or name.endswith("_bias"))
-                        and name not in params_dict):
+                if (
+                    name.endswith(".bias") or name.endswith("_bias")
+                ) and name not in params_dict:
                     continue
                 # Skip layers on other devices.
                 if is_pp_missing_parameter(name, self):
@@ -424,21 +442,25 @@ class Grok1Model(nn.Module):
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
-                    if ((name.endswith(".bias") or name.endswith("_bias"))
-                            and name not in params_dict):
+                    if (
+                        name.endswith(".bias") or name.endswith("_bias")
+                    ) and name not in params_dict:
                         continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    weight_loader(param,
-                                  loaded_weight,
-                                  name,
-                                  shard_id=shard_id,
-                                  expert_id=expert_id)
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                    )
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
-                    if ((name.endswith(".bias") or name.endswith("_bias"))
-                            and name not in params_dict):
+                    if (
+                        name.endswith(".bias") or name.endswith("_bias")
+                    ) and name not in params_dict:
                         continue
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
@@ -454,8 +476,9 @@ class Grok1Model(nn.Module):
                         name = name.replace("scale", "weight")
 
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -483,8 +506,9 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.lora_config = lora_config
         self.quant_config = quant_config
 
-        self.model = Grok1Model(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "model"))
+        self.model = Grok1Model(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
 
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
@@ -503,13 +527,15 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.lm_head.weight = self.model.embed_tokens.weight
 
         self.output_multiplier_scale = getattr(
-            config, "output_multiplier_scale", DEFAULT_OUTPUT_MULTIPLIER_SCALE)
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                config.vocab_size,
-                                                self.output_multiplier_scale)
+            config, "output_multiplier_scale", DEFAULT_OUTPUT_MULTIPLIER_SCALE
+        )
+        self.logits_processor = LogitsProcessor(
+            self.unpadded_vocab_size, config.vocab_size, self.output_multiplier_scale
+        )
 
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
+            self.model.make_empty_intermediate_tensors
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -521,24 +547,21 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
         return hidden_states
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Skip lm_head when tie_word_embeddings is True
-        skip_prefixes = (["lm_head"]
-                         if self.config.tie_word_embeddings else None)
+        skip_prefixes = ["lm_head"] if self.config.tie_word_embeddings else None
 
         loader = AutoWeightsLoader(
             self,

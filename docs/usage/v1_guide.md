@@ -83,7 +83,7 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 | Model Type                  | Status                                                                             |
 |-----------------------------|------------------------------------------------------------------------------------|
 | **Decoder-only Models**     | <nobr>🚀 Optimized</nobr>                                                          |
-| **Encoder-Decoder Models**  | <nobr>🟠 Delayed</nobr>                                                            |
+| **Encoder-Decoder Models**  | <nobr>🟢 Whisper only</nobr>                                                       |
 | **Embedding Models**        | <nobr>🟢 Functional</nobr>                                                         |
 | **Mamba Models**            | <nobr>🟢 (Mamba-2), 🟢 (Mamba-1)</nobr>                                            |
 | **Multimodal Models**       | <nobr>🟢 Functional</nobr>                                                         |
@@ -118,8 +118,9 @@ Please note that prefix caching is not yet supported for any of the above models
 
 #### Encoder-Decoder Models
 
-Models requiring cross-attention between separate encoder and decoder (e.g., `BartForConditionalGeneration`, `MllamaForConditionalGeneration`)
-are not yet supported.
+Whisper is supported. Other models requiring cross-attention between separate
+encoder and decoder (e.g., `BartForConditionalGeneration`,
+`MllamaForConditionalGeneration`) are not supported.
 
 ### Features
 

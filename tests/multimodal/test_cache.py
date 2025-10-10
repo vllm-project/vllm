@@ -7,17 +7,24 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
-from vllm.multimodal.cache import (MultiModalCache,
-                                   MultiModalProcessorCacheItem,
-                                   MultiModalProcessorCacheItemMetadata,
-                                   processor_cache_from_config,
-                                   receiver_cache_from_config)
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import (
+    MultiModalCache,
+    MultiModalProcessorCacheItem,
+    MultiModalProcessorCacheItemMetadata,
+    engine_receiver_cache_from_config,
+    processor_cache_from_config,
+)
 from vllm.multimodal.hasher import MultiModalHasher
-from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargsItem,
-                                    MultiModalKwargsItems,
-                                    MultiModalSharedField)
+from vllm.multimodal.inputs import (
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    MultiModalSharedField,
+)
 from vllm.multimodal.processing import PromptInsertion
-from vllm.multimodal.registry import MultiModalRegistry
+
+pytestmark = pytest.mark.cpu_test
 
 
 def _dummy_elem(
@@ -28,9 +35,9 @@ def _dummy_elem(
     rng: Optional[np.random.RandomState] = None,
 ):
     if rng is None:
-        data = torch.empty((size, ), dtype=torch.int8)
+        data = torch.empty((size,), dtype=torch.int8)
     else:
-        data = torch.from_numpy(rng.randint(4, size=(size, ), dtype=np.int8))
+        data = torch.from_numpy(rng.randint(4, size=(size,), dtype=np.int8))
 
     return MultiModalFieldElem(
         modality=modality,
@@ -46,10 +53,9 @@ def _dummy_item(
     *,
     rng: Optional[np.random.RandomState] = None,
 ):
-    return MultiModalKwargsItem.from_elems([
-        _dummy_elem(modality, key, size, rng=rng)
-        for key, size in size_by_key.items()
-    ])
+    return MultiModalKwargsItem.from_elems(
+        [_dummy_elem(modality, key, size, rng=rng) for key, size in size_by_key.items()]
+    )
 
 
 def _dummy_items(
@@ -57,31 +63,35 @@ def _dummy_items(
     *,
     rng: Optional[np.random.RandomState] = None,
 ):
-    return MultiModalKwargsItems.from_seq([
-        _dummy_item(modality, size_by_key, rng=rng)
-        for modality, size_by_key in size_by_key_modality.items()
-    ])
+    return MultiModalKwargsItems.from_seq(
+        [
+            _dummy_item(modality, size_by_key, rng=rng)
+            for modality, size_by_key in size_by_key_modality.items()
+        ]
+    )
 
 
-# yapf: disable
 @pytest.mark.parametrize(
     ("item", "expected_size"),
     [
         (_dummy_item("a", {"a1": 100}), 100),
         (_dummy_item("a", {"a1": 100, "a2": 110}), 210),
         (_dummy_items({"a": {"a1": 100, "a2": 110}, "b": {"b1": 120, "b2": 130}}), 460),  # noqa: E501
-        (_dummy_items({"a": {"a1": 100, "a2": 110}, "b": {"b1": 120, "b2": 130}}).get_data(), 460),  # noqa: E501
+        (
+            _dummy_items(
+                {"a": {"a1": 100, "a2": 110}, "b": {"b1": 120, "b2": 130}}
+            ).get_data(),
+            460,
+        ),  # noqa: E501
     ],
 )
-# yapf: enable
 def test_cache_item_size(item, expected_size):
     cache = MultiModalCache.get_lru_cache(2048, type(item))
 
     cache[""] = item
     assert cache.currsize == expected_size
 
-    prompt_update = PromptInsertion("dummy", "target", "insertion") \
-        .resolve(0)
+    prompt_update = PromptInsertion("dummy", "target", "insertion").resolve(0)
 
     cache[""] = MultiModalProcessorCacheItem(item, [prompt_update])
     assert cache.currsize == expected_size
@@ -96,9 +106,11 @@ def _create_vllm_config(
     enable_ipc: bool,
 ):
     return VllmConfig(
-        model_config=ModelConfig(mm_processor_cache_gb=mm_processor_cache_gb),
-        parallel_config=ParallelConfig(
-            data_parallel_size=1 if enable_ipc else 2),
+        model_config=ModelConfig(
+            model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+            mm_processor_cache_gb=mm_processor_cache_gb,
+        ),
+        parallel_config=ParallelConfig(data_parallel_size=1 if enable_ipc else 2),
     )
 
 
@@ -113,15 +125,14 @@ def _compare_caches(
     n_iter: int = 100,
     seed: int = 0,
 ):
-    mm_registry = MultiModalRegistry()
-    cache_0_p0 = processor_cache_from_config(config_0, mm_registry)
-    cache_0_p1 = receiver_cache_from_config(config_0, mm_registry)
-    cache_1_p0 = processor_cache_from_config(config_1, mm_registry)
-    cache_1_p1 = receiver_cache_from_config(config_1, mm_registry)
+    cache_0_p0 = processor_cache_from_config(config_0, MULTIMODAL_REGISTRY)
+    cache_0_p1 = engine_receiver_cache_from_config(config_0, MULTIMODAL_REGISTRY)
+    cache_1_p0 = processor_cache_from_config(config_1, MULTIMODAL_REGISTRY)
+    cache_1_p1 = engine_receiver_cache_from_config(config_1, MULTIMODAL_REGISTRY)
 
     cache_size_gb = max(
-        config_0.model_config.mm_processor_cache_gb,
-        config_1.model_config.mm_processor_cache_gb,
+        config_0.model_config.multimodal_config.mm_processor_cache_gb,
+        config_1.model_config.multimodal_config.mm_processor_cache_gb,
     )
     item_size_gb = int(cache_size_gb / item_capacity)
 
@@ -131,8 +142,7 @@ def _compare_caches(
         for _ in range(int(item_capacity / hit_rate))
     ]
     all_hashes = [
-        MultiModalHasher.hash_kwargs(item=item.get_data())
-        for item in all_items
+        MultiModalHasher.hash_kwargs(item=item.get_data()) for item in all_items
     ]
 
     # Should not be used since there is nothing to convert to text
@@ -151,7 +161,8 @@ def _compare_caches(
             for _ in range(is_cached_calls_per_iter):
                 cache_0_p0.is_cached(selected_hashes)
             cache_0_p0_out = [
-                item for item, _ in cache_0_p0.get_and_update(
+                item
+                for item, _ in cache_0_p0.get_and_update(
                     [(item, prompt_update.content) for item in selected_items],
                     selected_hashes,
                 )
@@ -163,7 +174,8 @@ def _compare_caches(
             for _ in range(is_cached_calls_per_iter):
                 cache_1_p0.is_cached(selected_hashes)
             cache_1_p0_out = [
-                item for item, _ in cache_1_p0.get_and_update(
+                item
+                for item, _ in cache_1_p0.get_and_update(
                     [(item, prompt_update.content) for item in selected_items],
                     selected_hashes,
                 )
@@ -172,14 +184,12 @@ def _compare_caches(
         if cache_0_p1 is None:
             cache_0_p1_out = cache_0_p0_out
         else:
-            cache_0_p1_out = cache_0_p1.get_and_update(cache_0_p0_out,
-                                                       selected_hashes)
+            cache_0_p1_out = cache_0_p1.get_and_update(cache_0_p0_out, selected_hashes)
 
         if cache_1_p1 is None:
             cache_1_p1_out = cache_1_p0_out
         else:
-            cache_1_p1_out = cache_1_p1.get_and_update(cache_1_p0_out,
-                                                       selected_hashes)
+            cache_1_p1_out = cache_1_p1.get_and_update(cache_1_p0_out, selected_hashes)
 
         assert cache_0_p1_out == cache_1_p1_out, f"Failed at {it=}"
 

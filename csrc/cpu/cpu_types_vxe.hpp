@@ -12,7 +12,7 @@ namespace vec_op {
 #define vec_sub(a, b) ((a) - (b))
 #define vec_mul(a, b) ((a) * (b))
 #define vec_div(a, b) ((a) / (b))
-#define vec_sr(a, b) ((a) >> (b))  // Vector Shift Right Algebaic
+#define vec_sr(a, b) ((a) >> (b))  // Vector Shift Right Algebraic
 #define vec_sl(a, b) ((a) << (b))  // Vector Shift Left
 
 // FIXME: FP16 is not fully supported in Torch-CPU

@@ -45,10 +45,12 @@ class ModelRequestData(NamedTuple):
 # Voxtral
 def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
     from mistral_common.audio import Audio
-    from mistral_common.protocol.instruct.messages import (
+    from mistral_common.protocol.instruct.chunk import (
         AudioChunk,
         RawAudio,
         TextChunk,
+    )
+    from mistral_common.protocol.instruct.messages import (
         UserMessage,
     )
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
@@ -117,7 +119,7 @@ def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
 
 # Granite Speech
 def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
-    # NOTE - the setting in this example are somehat different than what is
+    # NOTE - the setting in this example are somewhat different from what is
     # optimal for granite speech, and it is generally recommended to use beam
     # search. Check the model README for suggested settings.
     # https://huggingface.co/ibm-granite/granite-speech-3.3-8b

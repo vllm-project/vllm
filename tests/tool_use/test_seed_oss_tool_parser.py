@@ -8,13 +8,18 @@ from typing import Optional
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              ChatCompletionToolsParam,
-                                              DeltaMessage, FunctionCall,
-                                              ToolCall)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+    DeltaMessage,
+    FunctionCall,
+    ToolCall,
+)
 from vllm.entrypoints.openai.tool_parsers import SeedOssToolParser
-from vllm.transformers_utils.detokenizer import detokenize_incrementally
+from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+
+pytestmark = pytest.mark.cpu_test
 
 # Use a common model that is likely to be available
 MODEL = "ByteDance-Seed/Seed-OSS-36B-Instruct"
@@ -43,51 +48,56 @@ def sample_tools():
                     "properties": {
                         "location": {
                             "type": "string",
-                            "description":
-                            "City and country e.g. Bogotá, Colombia"
+                            "description": "City and country e.g. Bogotá, Colombia",
                         },
                         "unit": {
                             "type": "string",
-                            "description": "this is the unit of temperature"
-                        }
+                            "description": "this is the unit of temperature",
+                        },
                     },
                     "required": ["location"],
-                    "additionalProperties": False
+                    "additionalProperties": False,
                 },
                 "returns": {
                     "type": "object",
                     "properties": {
                         "temperature": {
                             "type": "number",
-                            "description": "temperature in celsius"
+                            "description": "temperature in celsius",
                         }
                     },
                     "required": ["temperature"],
-                    "additionalProperties": False
+                    "additionalProperties": False,
                 },
-                "strict": True
-            }),
+                "strict": True,
+            },
+        ),
     ]
 
 
-def assert_tool_calls(actual_tool_calls: list[ToolCall],
-                      expected_tool_calls: list[ToolCall]):
+def assert_tool_calls(
+    actual_tool_calls: list[ToolCall], expected_tool_calls: list[ToolCall]
+):
     assert len(actual_tool_calls) == len(expected_tool_calls)
 
-    for actual_tool_call, expected_tool_call in zip(actual_tool_calls,
-                                                    expected_tool_calls):
+    for actual_tool_call, expected_tool_call in zip(
+        actual_tool_calls, expected_tool_calls
+    ):
         # Seed-OSS tool call will not generate id
         assert actual_tool_call.type == "function"
         assert actual_tool_call.function == expected_tool_call.function
 
         assert actual_tool_call.function.name == expected_tool_call.function.name
-        assert actual_tool_call.function.arguments == expected_tool_call.function.arguments
+        assert (
+            actual_tool_call.function.arguments == expected_tool_call.function.arguments
+        )
 
 
 def test_extract_tool_calls_no_tools(seed_oss_tool_parser):
     model_output = "This is a test response without any tool calls"
     extracted_tool_calls = seed_oss_tool_parser.extract_tool_calls(
-        model_output, request=None)  # type: ignore[arg-type]
+        model_output, request=None
+    )  # type: ignore[arg-type]
 
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
@@ -102,17 +112,24 @@ def test_extract_tool_calls_no_tools(seed_oss_tool_parser):
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
-        ("""<seed:tool_call>\n<function=get_weather>\n"""
-         """<parameter=location>Barcelona, Spain</parameter>\n</function>\n</seed:tool_call>""",
-         [
-             ToolCall(function=FunctionCall(
-                 name="get_weather",
-                 arguments=json.dumps({
-                     "location": "Barcelona, Spain",
-                 }, ),
-             ),
-                      type='function')
-         ], None),
+        (
+            """<seed:tool_call>\n<function=get_weather>\n"""
+            """<parameter=location>Barcelona, Spain</parameter>\n</function>\n</seed:tool_call>""",
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_weather",
+                        arguments=json.dumps(
+                            {
+                                "location": "Barcelona, Spain",
+                            },
+                        ),
+                    ),
+                    type="function",
+                )
+            ],
+            None,
+        ),
         (
             """<seed:think>The user\'s current thinking budget is 512.</seed:cot_budget_reflect>\nLet me analyze the """
             """question. The user wants to know the weather in Barcelona, Spain. Looking at the functions available, """
@@ -129,13 +146,17 @@ def test_extract_tool_calls_no_tools(seed_oss_tool_parser):
             """<seed:tool_call>\n<function=get_weather>\n<parameter=location>Barcelona, Spain</parameter>\n</function>"""
             """\n</seed:tool_call>""",
             [
-                ToolCall(function=FunctionCall(
-                    name="get_weather",
-                    arguments=json.dumps({
-                        "location": "Barcelona, Spain",
-                    }, ),
-                ),
-                         type='function')
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_weather",
+                        arguments=json.dumps(
+                            {
+                                "location": "Barcelona, Spain",
+                            },
+                        ),
+                    ),
+                    type="function",
+                )
             ],
             """<seed:think>The user\'s current thinking budget is 512.</seed:cot_budget_reflect>\nLet me analyze the """
             """question. The user wants to know the weather in Barcelona, Spain. Looking at the functions available, """
@@ -167,15 +188,18 @@ def test_extract_tool_calls_no_tools(seed_oss_tool_parser):
             """temperature in Celsius.</seed:think><seed:tool_call>\n<function=get_weather>\n<parameter=location>"""
             """Barcelona, Spain</parameter>\n<parameter=unit>celsius</parameter>\n</function>\n</seed:tool_call>""",
             [
-                ToolCall(function=FunctionCall(
-                    name="get_weather",
-                    arguments=json.dumps(
-                        {
-                            "location": "Barcelona, Spain",
-                            "unit": "celsius",
-                        }, ),
-                ),
-                         type='function')
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_weather",
+                        arguments=json.dumps(
+                            {
+                                "location": "Barcelona, Spain",
+                                "unit": "celsius",
+                            },
+                        ),
+                    ),
+                    type="function",
+                )
             ],
             """<seed:think>\nGot it, let\'s see. The user asked for the weather in Barcelona, Spain. """
             """First, I need to remember the function I can use: get_weather. The function requires a """
@@ -194,13 +218,17 @@ def test_extract_tool_calls_no_tools(seed_oss_tool_parser):
         ),
     ],
 )
-def test_extract_tool_calls(seed_oss_tool_parser, sample_tools, model_output,
-                            expected_tool_calls, expected_content):
-    request = ChatCompletionRequest(model=MODEL,
-                                    messages=[],
-                                    tools=sample_tools)
+def test_extract_tool_calls(
+    seed_oss_tool_parser,
+    sample_tools,
+    model_output,
+    expected_tool_calls,
+    expected_content,
+):
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
     extracted_tool_calls = seed_oss_tool_parser.extract_tool_calls(
-        model_output, request=request)  # type: ignore[arg-type]
+        model_output, request=request
+    )  # type: ignore[arg-type]
     assert extracted_tool_calls.tools_called
 
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
@@ -223,7 +251,7 @@ def test_streaming_tool_calls_no_tools(seed_oss_tool_parser):
 
     # Should return the delta text as content
     assert result is not None
-    assert hasattr(result, 'content')
+    assert hasattr(result, "content")
     assert result.content == " without any tool calls."
 
 
@@ -231,10 +259,9 @@ def stream_delta_message_generator(
     seed_oss_tool_parser: SeedOssToolParser,
     seed_oss_tokenizer: AnyTokenizer,
     model_output: str,
-    request: Optional[ChatCompletionRequest] = None
+    request: Optional[ChatCompletionRequest] = None,
 ) -> Generator[DeltaMessage, None, None]:
-    all_token_ids = seed_oss_tokenizer.encode(model_output,
-                                              add_special_tokens=False)
+    all_token_ids = seed_oss_tokenizer.encode(model_output, add_special_tokens=False)
 
     previous_text = ""
     previous_tokens = None
@@ -243,18 +270,19 @@ def stream_delta_message_generator(
     for i, delta_token in enumerate(all_token_ids):
         delta_token_ids = [delta_token]
         previous_token_ids = all_token_ids[:i]
-        current_token_ids = all_token_ids[:i + 1]
+        current_token_ids = all_token_ids[: i + 1]
 
-        (new_tokens, delta_text, new_prefix_offset,
-         new_read_offset) = detokenize_incrementally(
-             tokenizer=seed_oss_tokenizer,
-             all_input_ids=current_token_ids,
-             prev_tokens=previous_tokens,
-             prefix_offset=prefix_offset,
-             read_offset=read_offset,
-             skip_special_tokens=False,
-             spaces_between_special_tokens=True,
-         )
+        (new_tokens, delta_text, new_prefix_offset, new_read_offset) = (
+            detokenize_incrementally(
+                tokenizer=seed_oss_tokenizer,
+                all_input_ids=current_token_ids,
+                prev_tokens=previous_tokens,
+                prefix_offset=prefix_offset,
+                read_offset=read_offset,
+                skip_special_tokens=False,
+                spaces_between_special_tokens=True,
+            )
+        )
 
         current_text = previous_text + delta_text
 
@@ -271,8 +299,9 @@ def stream_delta_message_generator(
             yield delta_message
 
         previous_text = current_text
-        previous_tokens = (previous_tokens +
-                           new_tokens if previous_tokens else new_tokens)
+        previous_tokens = (
+            previous_tokens + new_tokens if previous_tokens else new_tokens
+        )
         prefix_offset = new_prefix_offset
         read_offset = new_read_offset
 
@@ -285,22 +314,27 @@ def stream_delta_message_generator(
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
-        ("""<seed:think>\n</seed:cot_budget_reflect>\n</seed:cot_budget_reflect>\n"""
-         """The current thinking budget is 0, so I will directly start answering the question.\n</seed:think>\n"""
-         """<seed:tool_call>\n<function=get_weather>\n"""
-         """<parameter=location>Barcelona, Spain</parameter>\n</function>\n</seed:tool_call>""",
-         [
-             ToolCall(function=FunctionCall(
-                 name="get_weather",
-                 arguments=json.dumps({
-                     "location": "Barcelona, Spain",
-                 }, ),
-             ),
-                      type='function')
-         ],
-         """<seed:think>\n</seed:cot_budget_reflect>\n</seed:cot_budget_reflect>\n"""
-         """The current thinking budget is 0, so I will directly start answering the question.\n</seed:think>\n"""
-         ),
+        (
+            """<seed:think>\n</seed:cot_budget_reflect>\n</seed:cot_budget_reflect>\n"""
+            """The current thinking budget is 0, so I will directly start answering the question.\n</seed:think>\n"""
+            """<seed:tool_call>\n<function=get_weather>\n"""
+            """<parameter=location>Barcelona, Spain</parameter>\n</function>\n</seed:tool_call>""",
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_weather",
+                        arguments=json.dumps(
+                            {
+                                "location": "Barcelona, Spain",
+                            },
+                        ),
+                    ),
+                    type="function",
+                )
+            ],
+            """<seed:think>\n</seed:cot_budget_reflect>\n</seed:cot_budget_reflect>\n"""
+            """The current thinking budget is 0, so I will directly start answering the question.\n</seed:think>\n""",
+        ),
         (
             """<seed:think>The user\'s current thinking budget is 512.</seed:cot_budget_reflect>\nLet me analyze the """
             """question. The user wants to know the weather in Barcelona, Spain. Looking at the functions available, """
@@ -317,13 +351,17 @@ def stream_delta_message_generator(
             """<seed:tool_call>\n<function=get_weather>\n<parameter=location>Barcelona, Spain</parameter>\n</function>"""
             """\n</seed:tool_call>""",
             [
-                ToolCall(function=FunctionCall(
-                    name="get_weather",
-                    arguments=json.dumps({
-                        "location": "Barcelona, Spain",
-                    }, ),
-                ),
-                         type='function')
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_weather",
+                        arguments=json.dumps(
+                            {
+                                "location": "Barcelona, Spain",
+                            },
+                        ),
+                    ),
+                    type="function",
+                )
             ],
             """<seed:think>The user\'s current thinking budget is 512.</seed:cot_budget_reflect>\nLet me analyze the """
             """question. The user wants to know the weather in Barcelona, Spain. Looking at the functions available, """
@@ -355,15 +393,18 @@ def stream_delta_message_generator(
             """temperature in Celsius.</seed:think><seed:tool_call>\n<function=get_weather>\n<parameter=location>"""
             """Barcelona, Spain</parameter>\n<parameter=unit>celsius</parameter>\n</function>\n</seed:tool_call>""",
             [
-                ToolCall(function=FunctionCall(
-                    name="get_weather",
-                    arguments=json.dumps(
-                        {
-                            "location": "Barcelona, Spain",
-                            "unit": "celsius",
-                        }, ),
-                ),
-                         type='function')
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_weather",
+                        arguments=json.dumps(
+                            {
+                                "location": "Barcelona, Spain",
+                                "unit": "celsius",
+                            },
+                        ),
+                    ),
+                    type="function",
+                )
             ],
             """<seed:think>\nGot it, let\'s see. The user asked for the weather in Barcelona, Spain. """
             """First, I need to remember the function I can use: get_weather. The function requires a """
@@ -382,19 +423,23 @@ def stream_delta_message_generator(
         ),
     ],
 )
-def test_streaming_tool_calls(seed_oss_tool_parser, seed_oss_tokenizer,
-                              sample_tools, model_output, expected_tool_calls,
-                              expected_content):
+def test_streaming_tool_calls(
+    seed_oss_tool_parser,
+    seed_oss_tokenizer,
+    sample_tools,
+    model_output,
+    expected_tool_calls,
+    expected_content,
+):
     """Test incremental streaming behavior"""
-    request = ChatCompletionRequest(model=MODEL,
-                                    messages=[],
-                                    tools=sample_tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
 
-    other_content = ''
+    other_content = ""
     tool_states = {}  # Track state per tool index
 
     for delta_message in stream_delta_message_generator(
-            seed_oss_tool_parser, seed_oss_tokenizer, model_output, request):
+        seed_oss_tool_parser, seed_oss_tokenizer, model_output, request
+    ):
         # role should never be streamed from tool parser
         assert not delta_message.role
 
@@ -411,7 +456,7 @@ def test_streaming_tool_calls(seed_oss_tool_parser, seed_oss_tokenizer,
                         "id": None,
                         "name": None,
                         "arguments": "",
-                        "type": None
+                        "type": None,
                     }
 
                 # First chunk should have id, name, and type
@@ -430,8 +475,7 @@ def test_streaming_tool_calls(seed_oss_tool_parser, seed_oss_tokenizer,
 
                     if tool_call.function.arguments is not None:
                         # Accumulate arguments incrementally
-                        tool_states[idx][
-                            "arguments"] += tool_call.function.arguments
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
 
     # Verify final content
     assert other_content == expected_content

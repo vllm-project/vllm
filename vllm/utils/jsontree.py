@@ -4,7 +4,12 @@
 
 from collections.abc import Iterable
 from functools import reduce
-from typing import Callable, TypeVar, Union, overload
+from typing import TYPE_CHECKING, Callable, TypeVar, Union, cast, overload
+
+if TYPE_CHECKING:
+    import torch
+
+    from vllm.multimodal.inputs import BatchedTensorInputs
 
 _T = TypeVar("_T")
 _U = TypeVar("_U")
@@ -16,6 +21,19 @@ JSONTree = Union[
     _T,
 ]
 """A nested JSON structure where the leaves need not be JSON-serializable."""
+
+_JSONTree = Union[
+    dict[str, "JSONTree[_T]"],
+    list["JSONTree[_T]"],
+    tuple["JSONTree[_T]", ...],
+    dict[str, _T],
+    list[_T],
+    tuple[_T, ...],
+    _T,
+]
+"""
+Same as `JSONTree` but with additional `Union` members to satisfy overloads.
+"""
 
 
 def json_iter_leaves(value: JSONTree[_T]) -> Iterable[_T]:
@@ -30,13 +48,51 @@ def json_iter_leaves(value: JSONTree[_T]) -> Iterable[_T]:
         yield value
 
 
+@overload
+def json_map_leaves(
+    func: Callable[["torch.Tensor"], "torch.Tensor"],
+    value: "BatchedTensorInputs",
+) -> "BatchedTensorInputs": ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[_T], _U],
+    value: Union[_T, dict[str, _T]],
+) -> Union[_U, dict[str, _U]]: ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[_T], _U],
+    value: Union[_T, list[_T]],
+) -> Union[_U, list[_U]]: ...
+
+
+@overload
+def json_map_leaves(
+    func: Callable[[_T], _U],
+    value: Union[_T, tuple[_T, ...]],
+) -> Union[_U, tuple[_U, ...]]: ...
+
+
+@overload
 def json_map_leaves(
     func: Callable[[_T], _U],
     value: JSONTree[_T],
-) -> JSONTree[_U]:
+) -> JSONTree[_U]: ...
+
+
+def json_map_leaves(
+    func: Callable[[_T], _U],
+    value: Union["BatchedTensorInputs", _JSONTree[_T]],
+) -> Union["BatchedTensorInputs", _JSONTree[_U]]:
     """Apply a function to each leaf in a nested JSON structure."""
     if isinstance(value, dict):
-        return {k: json_map_leaves(func, v) for k, v in value.items()}
+        return {
+            k: json_map_leaves(func, v)  # type: ignore[arg-type]
+            for k, v in value.items()
+        }
     elif isinstance(value, list):
         return [json_map_leaves(func, v) for v in value]
     elif isinstance(value, tuple):
@@ -48,10 +104,33 @@ def json_map_leaves(
 @overload
 def json_reduce_leaves(
     func: Callable[[_T, _T], _T],
+    value: Union[_T, dict[str, _T]],
+    /,
+) -> _T: ...
+
+
+@overload
+def json_reduce_leaves(
+    func: Callable[[_T, _T], _T],
+    value: Union[_T, list[_T]],
+    /,
+) -> _T: ...
+
+
+@overload
+def json_reduce_leaves(
+    func: Callable[[_T, _T], _T],
+    value: Union[_T, tuple[_T, ...]],
+    /,
+) -> _T: ...
+
+
+@overload
+def json_reduce_leaves(
+    func: Callable[[_T, _T], _T],
     value: JSONTree[_T],
     /,
-) -> _T:
-    ...
+) -> _T: ...
 
 
 @overload
@@ -60,14 +139,13 @@ def json_reduce_leaves(
     value: JSONTree[_T],
     initial: _U,
     /,
-) -> _U:
-    ...
+) -> _U: ...
 
 
 def json_reduce_leaves(
     func: Callable[..., Union[_T, _U]],
-    value: JSONTree[_T],
-    initial: _U = ...,  # type: ignore[assignment]
+    value: _JSONTree[_T],
+    initial: _U = cast(_U, ...),  # noqa: B008
     /,
 ) -> Union[_T, _U]:
     """

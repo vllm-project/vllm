@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Types for writing multimodal model tests."""
+
 from collections.abc import Iterable
 from enum import Enum
 from pathlib import PosixPath
@@ -11,13 +12,20 @@ from pytest import MarkDecorator
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-from vllm.config import RunnerOption
-from vllm.sequence import SampleLogprobs
+from vllm.config.model import RunnerOption
+from vllm.logprobs import SampleLogprobs
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from .....conftest import (AUDIO_ASSETS, IMAGE_ASSETS, HfRunner, ImageAsset,
-                           ImageTestAssets, PromptAudioInput, PromptImageInput,
-                           PromptVideoInput)
+from .....conftest import (
+    AUDIO_ASSETS,
+    IMAGE_ASSETS,
+    HfRunner,
+    ImageAsset,
+    ImageTestAssets,
+    PromptAudioInput,
+    PromptImageInput,
+    PromptVideoInput,
+)
 from ....utils import check_logprobs_close
 
 # meta image tag; will be replaced by the appropriate tag for the model
@@ -25,28 +33,31 @@ TEST_IMG_PLACEHOLDER = "<vlm_image>"
 TEST_VIDEO_PLACEHOLDER = "<vlm_video>"
 TEST_AUDIO_PLACEHOLDER = "<lmm_audio>"
 
-# yapf: disable
-SINGLE_IMAGE_BASE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign": f"{TEST_IMG_PLACEHOLDER}What's the content of the image?",
-    "cherry_blossom": f"{TEST_IMG_PLACEHOLDER}What is the season?",
-})
-SINGLE_AUDIO_BASE_PROMPT = AUDIO_ASSETS.prompts({
-    "mary_had_lamb": f"{TEST_AUDIO_PLACEHOLDER}Transcribe this audio into English.",    # noqa: E501
-    "winning_call": f"{TEST_AUDIO_PLACEHOLDER}What is happening in this audio clip?",     # noqa: E501
-})
+SINGLE_IMAGE_BASE_PROMPTS = IMAGE_ASSETS.prompts(
+    {
+        "stop_sign": f"{TEST_IMG_PLACEHOLDER}What's the content of the image?",
+        "cherry_blossom": f"{TEST_IMG_PLACEHOLDER}What is the season?",
+    }
+)
+SINGLE_AUDIO_BASE_PROMPT = AUDIO_ASSETS.prompts(
+    {
+        "mary_had_lamb": f"{TEST_AUDIO_PLACEHOLDER}Transcribe this audio into English.",  # noqa: E501
+        "winning_call": f"{TEST_AUDIO_PLACEHOLDER}What is happening in this audio clip?",  # noqa: E501
+    }
+)
 
 MULTI_IMAGE_BASE_PROMPT = f"Image-1: {TEST_IMG_PLACEHOLDER}Image-2: {TEST_IMG_PLACEHOLDER}Describe the two images in detail.\n"  # noqa: E501
 VIDEO_BASE_PROMPT = f"{TEST_VIDEO_PLACEHOLDER}Why is this video funny?"
 
 
-IMAGE_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0)]
-EMBEDDING_SIZE_FACTORS = [(), (1.0, ), (1.0, 1.0, 1.0)]
+IMAGE_SIZE_FACTORS = [(), (1.0,), (1.0, 1.0, 1.0), (0.25, 0.5, 1.0)]
+EMBEDDING_SIZE_FACTORS = [(), (1.0,), (1.0, 1.0, 1.0)]
 RunnerOutput = tuple[list[int], str, Optional[SampleLogprobs]]
-# yapf: enable
 
 
 class PromptWithMultiModalInput(NamedTuple):
     """Holds the multimodal input for a single test case."""
+
     prompts: list[str]
     image_data: Optional[PromptImageInput] = None
     video_data: Optional[PromptVideoInput] = None
@@ -100,8 +111,9 @@ class VLMTestInfo(NamedTuple):
 
     # Function for converting ImageAssets to image embeddings;
     # We need to define this explicitly for embedding tests
-    convert_assets_to_embeddings: Optional[Callable[[ImageTestAssets],
-                                                    torch.Tensor]] = None
+    convert_assets_to_embeddings: Optional[
+        Callable[[ImageTestAssets], list[torch.Tensor]]
+    ] = None
 
     # Exposed options for vLLM runner; we change these in a several tests,
     # but the defaults are derived from VllmRunner & the engine defaults
@@ -137,12 +149,12 @@ class VLMTestInfo(NamedTuple):
     # Default expandable params per test; these defaults can be overridden in
     # instances of this object; the complete set of test cases for the model
     # is all combinations of .models + all fields below
-    max_tokens: Union[int, tuple[int]] = 128
-    num_logprobs: Union[int, tuple[int]] = 5
-    dtype: Union[str, Union[list[str], tuple[str, ...]]] = "auto"
-    distributed_executor_backend: Optional[Union[str, Iterable[str]]] = None
+    max_tokens: int = 128
+    num_logprobs: int = 5
+    dtype: str = "auto"
+    distributed_executor_backend: Optional[str] = None
     # Only expanded in video tests
-    num_video_frames: Union[int, tuple[int]] = 16
+    num_video_frames: int = 16
 
     # Fixed image sizes / image size factors; most tests use image_size_factors
     # The values provided for these two fields will be stacked and expanded
@@ -156,8 +168,8 @@ class VLMTestInfo(NamedTuple):
     # for Qwen-VL, which requires encoding the image path / url into the prompt
     # for HF runner
     prompt_path_encoder: Optional[
-        Callable[[PosixPath, str, Union[list[ImageAsset], ImageTestAssets]],
-                 str]] = None  # noqa: E501
+        Callable[[PosixPath, str, Union[list[ImageAsset], ImageTestAssets]], str]
+    ] = None  # noqa: E501
 
     # Allows configuring a test to run with custom inputs
     custom_test_opts: Optional[list[CustomTestOptions]] = None
@@ -190,6 +202,7 @@ class VLMTestInfo(NamedTuple):
 
 class ExpandableVLMTestArgs(NamedTuple):
     """The expanded kwargs which correspond to a single test case."""
+
     model: str
     max_tokens: int
     num_logprobs: int

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from concurrent.futures import Future
-from typing import Callable, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -10,10 +10,11 @@ import torch.distributed as dist
 from vllm.config import VllmConfig
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.uniproc_executor import (  # noqa
-    ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0)
-from vllm.executor.uniproc_executor import (  # noqa
-    UniProcExecutor as UniProcExecutorV0)
+    ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0,
+)
+from vllm.executor.uniproc_executor import UniProcExecutor as UniProcExecutorV0  # noqa
 from vllm.utils import resolve_obj_by_qualname
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
@@ -29,21 +30,24 @@ class Executor(ExecutorBase):
     def get_class(vllm_config: VllmConfig) -> type["Executor"]:
         executor_class: type[Executor]
         parallel_config = vllm_config.parallel_config
-        distributed_executor_backend = (
-            parallel_config.distributed_executor_backend)
+        distributed_executor_backend = parallel_config.distributed_executor_backend
         # distributed_executor_backend must be set in VllmConfig.__post_init__
         if isinstance(distributed_executor_backend, type):
             if not issubclass(distributed_executor_backend, ExecutorBase):
                 raise TypeError(
                     "distributed_executor_backend must be a subclass of "
-                    f"ExecutorBase. Got {distributed_executor_backend}.")
+                    f"ExecutorBase. Got {distributed_executor_backend}."
+                )
             executor_class = distributed_executor_backend
         elif distributed_executor_backend == "ray":
             from vllm.v1.executor.ray_distributed_executor import (  # noqa
-                RayDistributedExecutor)
+                RayDistributedExecutor,
+            )
+
             executor_class = RayDistributedExecutor
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
             executor_class = MultiprocExecutor
         elif distributed_executor_backend == "uni":
             executor_class = UniProcExecutor
@@ -52,25 +56,24 @@ class Executor(ExecutorBase):
             # to support external launcher
             executor_class = ExecutorWithExternalLauncher
         elif isinstance(distributed_executor_backend, str):
-            executor_class = resolve_obj_by_qualname(
-                distributed_executor_backend)
+            executor_class = resolve_obj_by_qualname(distributed_executor_backend)
             if not issubclass(executor_class, ExecutorBase):
                 raise TypeError(
                     "distributed_executor_backend must be a subclass of "
-                    f"ExecutorBase. Got {executor_class}.")
+                    f"ExecutorBase. Got {executor_class}."
+                )
         else:
-            raise ValueError("Unknown distributed executor backend: "
-                             f"{distributed_executor_backend}")
+            raise ValueError(
+                f"Unknown distributed executor backend: {distributed_executor_backend}"
+            )
         return executor_class
 
-    def initialize_from_config(self,
-                               kv_cache_configs: list[KVCacheConfig]) -> None:
+    def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
         """
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        self.collective_rpc("initialize_from_config",
-                            args=(kv_cache_configs, ))
+        self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
         self.collective_rpc("compile_or_warm_up_model")
 
     def register_failure_callback(self, callback: FailureCallback):
@@ -86,12 +89,24 @@ class Executor(ExecutorBase):
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         return self.collective_rpc("get_kv_cache_spec")
 
+    def collective_rpc(
+        self,
+        method: Union[str, Callable],
+        timeout: Optional[float] = None,
+        args: tuple = (),
+        kwargs: Optional[dict] = None,
+        non_block: bool = False,
+    ) -> list[Any]:
+        raise NotImplementedError
+
     def execute_model(
         self,
-        scheduler_output,
+        scheduler_output: SchedulerOutput,
+        non_block: bool = False,
     ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
-        output = self.collective_rpc("execute_model",
-                                     args=(scheduler_output, ))
+        output = self.collective_rpc(
+            "execute_model", args=(scheduler_output,), non_block=non_block
+        )
         return output[0]
 
     def execute_dummy_batch(self) -> None:
@@ -106,7 +121,7 @@ class Executor(ExecutorBase):
         return 1
 
     def profile(self, is_start: bool = True):
-        self.collective_rpc("profile", args=(is_start, ))
+        self.collective_rpc("profile", args=(is_start,))
 
 
 class UniProcExecutor(UniProcExecutorV0, Executor):
@@ -114,12 +129,12 @@ class UniProcExecutor(UniProcExecutorV0, Executor):
 
 
 class ExecutorWithExternalLauncher(ExecutorWithExternalLauncherV0, Executor):
-
     def determine_available_memory(self) -> list[int]:  # in bytes
         # same as determine_num_available_blocks in v0,
         # we need to get the min across all ranks.
         memory = super().determine_available_memory()
         from vllm.distributed.parallel_state import get_world_group
+
         cpu_group = get_world_group().cpu_group
         memory_tensor = torch.tensor([memory], device="cpu", dtype=torch.int64)
         dist.all_reduce(memory_tensor, group=cpu_group, op=dist.ReduceOp.MIN)

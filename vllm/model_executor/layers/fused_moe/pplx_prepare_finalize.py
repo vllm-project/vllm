@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import pplx_kernels as pplx
 import torch
@@ -9,9 +9,12 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceDelegate)
+    TopKWeightAndReduceDelegate,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
-    _validate_scale_shape, moe_kernel_quantize_input)
+    _validate_scale_shape,
+    moe_kernel_quantize_input,
+)
 from vllm.utils import cdiv, round_up
 
 logger = init_logger(__name__)
@@ -60,7 +63,6 @@ def pplx_hidden_dim_scale_bytes(
 
 
 class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
-
     def __init__(
         self,
         a2a: pplx.AllToAll,
@@ -89,21 +91,22 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
 
+    def output_is_reduced(self) -> bool:
+        return True
+
     def supports_async(self) -> bool:
         return True
 
     def prepare_async(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> mk.ReceiverType:
+    ) -> tuple[Callable, mk.ReceiverType]:
         num_tokens = a1.size(0)  # M
         hidden_dim = a1.size(-1)  # K
 
@@ -115,8 +118,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if expert_map is not None:
             logger.warning_once(
                 "The PPLX backend does not support expert mapping. "
-                "The provided `expert_map` will be ignored.")
-        expert_map = None  #noqa: F841
+                "The provided `expert_map` will be ignored."
+            )
+        expert_map = None  # noqa: F841
 
         # Is this always going to be a1.device?
         device = a1.device
@@ -125,19 +129,24 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk = topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
             assert topk == 1, (
-                "apply_router_weight_on_input is only implemented for topk=1")
+                "apply_router_weight_on_input is only implemented for topk=1"
+            )
             a1 = a1 * topk_weights.to(a1.dtype)
 
         repeat_cols = 4
         repeat_rows = 1 if quant_config.per_act_token_quant else a1.size(0)
+        # TODO(bnell): always pass quant_config.a1_scale?
         a1q, a1q_scale = moe_kernel_quantize_input(
-            a1, (None if quant_config.per_act_token_quant else a1_scale),
+            a1,
+            (None if quant_config.per_act_token_quant else quant_config.a1_scale),
             quant_dtype=quant_config.quant_dtype,
             per_act_token_quant=quant_config.per_act_token_quant,
-            block_shape=quant_config.block_shape)
+            block_shape=quant_config.block_shape,
+        )
 
-        _validate_scale_shape(a1q, a1q_scale, quant_config.per_act_token_quant,
-                              quant_config.block_shape)
+        _validate_scale_shape(
+            a1q, a1q_scale, quant_config.per_act_token_quant, quant_config.block_shape
+        )
 
         orig_a_scale_block_shape: Optional[int] = None
 
@@ -155,8 +164,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 # TODO (bnell): use group_broadcast instead?
                 a1q_scale = a1q_scale.repeat(repeat_rows, repeat_cols)
 
-        assert a1q_scale is None or a1q_scale.ndim == 2, \
+        assert a1q_scale is None or a1q_scale.ndim == 2, (
             f"{0 if a1q_scale is None else (a1q_scale.ndim, a1q_scale.shape)}"
+        )
 
         expert_num_tokens = torch.empty(
             self.num_local_experts,
@@ -165,8 +175,11 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
 
         expert_x = torch.empty(
-            (self.num_local_experts,
-             self.max_num_tokens * self.num_dispatchers(), hidden_dim),
+            (
+                self.num_local_experts,
+                self.max_num_tokens * self.num_dispatchers(),
+                hidden_dim,
+            ),
             dtype=a1q.dtype,
             device=device,
         )
@@ -182,14 +195,13 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             else:
                 # (M x K_tiles) -> (E x M x K_tiles)
                 assert quant_config.block_shape is not None
-                num_blocks = cdiv(expert_x.size(2),
-                                  quant_config.block_shape[1])
+                num_blocks = cdiv(expert_x.size(2), quant_config.block_shape[1])
                 final_dim = num_blocks
 
             expert_x_scale_shape = (
                 self.num_local_experts,
                 expert_x.size(1),
-                round_up(final_dim, 4)  # round up for alignment
+                round_up(final_dim, 4),  # round up for alignment
             )
 
             expert_x_scale = torch.empty(
@@ -214,30 +226,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             do_recv=False,
         )
 
-        return lambda: self._receiver(
-            expert_num_tokens,
-            expert_x,
-            expert_x_scale,
-            a1q,
-            a1q_scale,
-            topk_ids,
-            bound_m,
-            orig_a_scale_block_shape,
-        )
-
-    def _receiver(
-        self,
-        expert_num_tokens: torch.Tensor,
-        expert_x: torch.Tensor,
-        expert_x_scale: Optional[torch.Tensor],
-        a1q: torch.Tensor,
-        a1q_scale: Optional[torch.Tensor],
-        topk_ids: torch.Tensor,
-        bound_m: Optional[torch.Tensor],
-        orig_a_scale_block_shape: Optional[int],
-    ) -> mk.PrepareResultType:
-
-        self.a2a.dispatch(
+        hook = lambda: self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
             out_expert_x=expert_x,
             out_expert_x_scale=expert_x_scale,
@@ -249,20 +238,36 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             do_recv=True,
         )
 
+        return (
+            hook,
+            lambda: self._receiver(
+                expert_num_tokens,
+                expert_x,
+                expert_x_scale,
+                orig_a_scale_block_shape,
+            ),
+        )
+
+    def _receiver(
+        self,
+        expert_num_tokens: torch.Tensor,
+        expert_x: torch.Tensor,
+        expert_x_scale: Optional[torch.Tensor],
+        orig_a_scale_block_shape: Optional[int],
+    ) -> mk.PrepareResultType:
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
             assert expert_x_scale.ndim == 3
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
-            expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)
+            expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None
+        )
 
         return expert_x, expert_x_scale, expert_tokens_meta, None, None
 
     def prepare(
         self,
         a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
@@ -270,10 +275,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        receiver = self.prepare_async(
+        hook, receiver = self.prepare_async(
             a1,
-            a1_scale,
-            a2_scale,
             topk_weights,
             topk_ids,
             num_experts,
@@ -281,7 +284,63 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             apply_router_weight_on_input,
             quant_config,
         )
+        hook()
         return receiver()
+
+    def finalize_async(
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+    ) -> Callable:
+        assert isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate), (
+            "Weight application and reduction happens in the combine kernel."
+        )
+
+        # This argument is optional
+        # There's not much point setting this unless it is != topk_ids.size(0)
+        bound_m: Optional[torch.Tensor] = None
+
+        # TODO (bnell): fails in test_pplx_moe.py, figure out what's going on
+        # num_tokens = output.size(0)  # M
+        # assert topk_ids.size(0) == num_tokens, (
+        #    f"{topk_ids.size(0)} == {num_tokens}")
+        assert topk_ids.size() == topk_weights.size(), (
+            f"{topk_ids.size()} == {topk_weights.size()}"
+        )
+        assert output.size(0) <= self.max_num_tokens, (
+            f"{output.size(0)} <= {self.max_num_tokens}"
+        )
+        assert output.size(1) == fused_expert_output.size(-1)
+
+        # Set weights to 1 if we did them in dispatch. This is hacky.
+        if apply_router_weight_on_input:
+            topk_weights = torch.ones_like(topk_weights)
+
+        topk_ids_u32 = topk_ids.view(dtype=torch.uint32)
+
+        self.a2a.combine(
+            out_tokens=output,
+            indices=topk_ids_u32,
+            weights=topk_weights,
+            expert_y=fused_expert_output,
+            bound_m=bound_m,
+            do_send=True,
+            do_recv=False,
+        )
+
+        return lambda: self.a2a.combine(
+            out_tokens=output,
+            indices=topk_ids_u32,
+            weights=topk_weights,
+            expert_y=fused_expert_output,
+            bound_m=bound_m,
+            do_send=False,
+            do_recv=True,
+        )
 
     def finalize(
         self,
@@ -292,30 +351,12 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        assert isinstance(
-            weight_and_reduce_impl, TopKWeightAndReduceDelegate
-        ), ("Weight application and reduction happens in the combine kernel.")
-
-        # This argument is optional
-        # There's not much point setting this unless it is != topk_ids.size(0)
-        bound_m: Optional[torch.Tensor] = None
-
-        # TODO (bnell): fails in test_pplx_moe.py, figure out what's going on
-        #num_tokens = output.size(0)  # M
-        #assert topk_ids.size(0) == num_tokens, (
-        #    f"{topk_ids.size(0)} == {num_tokens}")
-        assert topk_ids.size() == topk_weights.size(), (
-            f"{topk_ids.size()} == {topk_weights.size()}")
-        assert output.size(0) <= self.max_num_tokens, (
-            f"{output.size(0)} <= {self.max_num_tokens}")
-        assert output.size(1) == fused_expert_output.size(-1)
-
-        # Set weights to 1 if we did them in dispatch. This is hacky.
-        if apply_router_weight_on_input:
-            topk_weights = torch.ones_like(topk_weights)
-
-        self.a2a.combine(out_tokens=output,
-                         indices=topk_ids.view(dtype=torch.uint32),
-                         weights=topk_weights,
-                         expert_y=fused_expert_output,
-                         bound_m=bound_m)
+        receiver = self.finalize_async(
+            output,
+            fused_expert_output,
+            topk_weights,
+            topk_ids,
+            apply_router_weight_on_input,
+            weight_and_reduce_impl,
+        )
+        receiver()

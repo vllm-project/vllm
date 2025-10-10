@@ -10,21 +10,20 @@ from vllm.sampling_params import SamplingParams
 
 
 @pytest.mark.parametrize("model_name", ["Qwen/Qwen2.5-1.5B-Instruct"])
-@pytest.mark.skipif(not current_platform.is_tpu(),
-                    reason="This test needs a TPU")
+@pytest.mark.skipif(not current_platform.is_tpu(), reason="This test needs a TPU")
 def test_sampler_different(model_name: str):
     """
-    Test significantly different sampling params to assert the model produces 
+    Test significantly different sampling params to assert the model produces
     different results.
     """
-    llm = LLM(model_name,
-              enforce_eager=False,
-              max_num_seqs=1,
-              max_model_len=512,
-              max_num_batched_tokens=256)
-    prompts = [
-        "Write a short story about a robot that dreams for the first time."
-    ]
+    llm = LLM(
+        model_name,
+        enforce_eager=False,
+        max_num_seqs=1,
+        max_model_len=512,
+        max_num_batched_tokens=256,
+    )
+    prompts = ["Write a short story about a robot that dreams for the first time."]
     sampling_params = SamplingParams(temperature=0.9, min_p=0.2, max_tokens=64)
     output = llm.generate(prompts, sampling_params)
 
@@ -47,7 +46,9 @@ def test_sampler_different(model_name: str):
                 max_tokens=64,
                 # Vary number of ks
                 top_k=random.randint(4, 12),
-                top_p=random.random()) for _ in range(B)
+                top_p=random.random(),
+            )
+            for _ in range(B)
         ]
         # Make sure first two reqs have the same K/P
         sampling_params[0] = sampling_params[1]
@@ -61,20 +62,18 @@ def test_sampler_different(model_name: str):
 @pytest.mark.parametrize("model_name", ["Qwen/Qwen2.5-1.5B-Instruct"])
 # TODO TPU will appear busy if we fan-out test params here
 @pytest.mark.parametrize("n_prompts", [1])
-@pytest.mark.skipif(not current_platform.is_tpu(),
-                    reason="This test needs a TPU")
+@pytest.mark.skipif(not current_platform.is_tpu(), reason="This test needs a TPU")
 def test_logprobs(model_name: str, n_prompts: int):
     """
     Request top logprobs with different sampling settings and check
-    that results contains the requested number, ordered ascendingly.  
+    that results contains the requested number, ordered ascendingly.
     """
 
     def check_num_logprobs(logprobs, expected_num: int):
         for step in logprobs:
             prev_logp = 1.0
             # order by rank
-            sorted_step = dict(
-                sorted(step.items(), key=lambda item: item[1].rank))
+            sorted_step = dict(sorted(step.items(), key=lambda item: item[1].rank))
 
             # Can contain the sampled token
             assert len(step) == expected_num or len(step) == expected_num + 1
@@ -84,23 +83,23 @@ def test_logprobs(model_name: str, n_prompts: int):
                 prev_logp = logp.logprob
                 assert logp.rank == rankno + 1
 
-    llm = LLM(model_name,
-              enforce_eager=False,
-              max_num_seqs=1,
-              max_model_len=128,
-              max_num_batched_tokens=128)
+    llm = LLM(
+        model_name,
+        enforce_eager=False,
+        max_num_seqs=1,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+    )
     prompts = [
         "Write a short story about a robot that dreams for the first time."
     ] * n_prompts
-    greedy_sampling_params = SamplingParams(temperature=0.0, max_tokens=64,\
-         logprobs=4)
-    regular_sampling_params = SamplingParams(temperature=0.4, max_tokens=64,\
-         logprobs=4)
-    topkp_sampling_params = SamplingParams(temperature=0.4, max_tokens=64,\
-         logprobs=4, top_k=12, top_p=0.5)
+    greedy_sampling_params = SamplingParams(temperature=0.0, max_tokens=64, logprobs=4)
+    regular_sampling_params = SamplingParams(temperature=0.4, max_tokens=64, logprobs=4)
+    topkp_sampling_params = SamplingParams(
+        temperature=0.4, max_tokens=64, logprobs=4, top_k=12, top_p=0.5
+    )
 
-    for sp in [greedy_sampling_params, regular_sampling_params, \
-               topkp_sampling_params]:
+    for sp in [greedy_sampling_params, regular_sampling_params, topkp_sampling_params]:
         output = llm.generate(prompts, sp)
         for o in output:
             check_num_logprobs(o.outputs[0].logprobs, 4)

@@ -20,7 +20,7 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ## Requirements
 
-- Python: 3.9 -- 3.12
+- Python: 3.10 -- 3.13
 
 === "Intel/AMD x86"
 
@@ -180,7 +180,7 @@ Inference batch size is an important parameter for the performance. Larger batch
     - Offline Inference: `256 * world_size`
     - Online Serving: `128 * world_size`
 
-vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel (PP) to leverage multiple CPU sockets and memory nodes. For more details of tuning DP, TP and PP, please refer to [Optimization and Tuning](../../configuration/optimization.md). For vLLM CPU, it is recommend to use DP, TP and PP together if there are enough CPU sockets and memory nodes.
+vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel (PP) to leverage multiple CPU sockets and memory nodes. For more details of tuning DP, TP and PP, please refer to [Optimization and Tuning](../../configuration/optimization.md). For vLLM CPU, it is recommended to use DP, TP and PP together if there are enough CPU sockets and memory nodes.
 
 ### Which quantization configs does vLLM CPU support?
 

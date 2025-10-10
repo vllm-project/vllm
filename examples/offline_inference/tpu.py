@@ -42,7 +42,7 @@ def main():
         llm_args["model"] = "meta-llama/Llama-3.1-8B-Instruct"
 
     # Set `enforce_eager=True` to avoid ahead-of-time compilation.
-    # In real workloads, `enforace_eager` should be `False`.
+    # In real workloads, `enforce_eager` should be `False`.
     llm = LLM(**llm_args)
     outputs = llm.generate(prompts, sampling_params)
     print("-" * 50)

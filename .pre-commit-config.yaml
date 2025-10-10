@@ -6,28 +6,16 @@ default_stages:
   - manual # Run in CI
 exclude: 'vllm/third_party/.*'
 repos:
-- repo: https://github.com/google/yapf
-  rev: v0.43.0
-  hooks:
-  - id: yapf
-    args: [--in-place, --verbose]
-    # Keep the same list from yapfignore here to avoid yapf failing without any inputs
-    exclude: '(.buildkite|benchmarks|build|examples)/.*'
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.11.7
+  rev: v0.13.3
   hooks:
-  - id: ruff
+  - id: ruff-check
     args: [--output-format, github, --fix]
   - id: ruff-format
-    files: ^(.buildkite|benchmarks|examples)/.*
 - repo: https://github.com/crate-ci/typos
   rev: v1.35.5
   hooks:
   - id: typos
-- repo: https://github.com/PyCQA/isort
-  rev: 6.0.1
-  hooks:
-  - id: isort
 - repo: https://github.com/pre-commit/mirrors-clang-format
   rev: v20.1.3
   hooks:
@@ -49,7 +37,7 @@ repos:
   rev: 0.6.17
   hooks:
     - id: pip-compile
-      args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu128]
+      args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu128, --python-platform, x86_64-manylinux_2_28]
       files: ^requirements/test\.(in|txt)$
 - repo: local
   hooks:
@@ -60,38 +48,32 @@ repos:
     files: ^requirements/test\.(in|txt)$
   - id: mypy-local
     name: Run mypy for local Python installation
-    entry: tools/mypy.sh 0 "local"
-    language: python
-    types: [python]
-    additional_dependencies: &mypy_deps [mypy==1.11.1, types-cachetools, types-setuptools, types-PyYAML, types-requests, pydantic]
+    entry: python tools/pre_commit/mypy.py 0 "local"
     stages: [pre-commit] # Don't run in CI
-  - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.9
-    entry: tools/mypy.sh 1 "3.9"
-    language: python
-    types: [python]
-    additional_dependencies: *mypy_deps
-    stages: [manual] # Only run in CI
+    <<: &mypy_common
+      language: python
+      types_or: [python, pyi]
+      require_serial: true
+      additional_dependencies: [mypy==1.11.1, regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
-    entry: tools/mypy.sh 1 "3.10"
-    language: python
-    types: [python]
-    additional_dependencies: *mypy_deps
+    entry: python tools/pre_commit/mypy.py 1 "3.10"
+    <<: *mypy_common
     stages: [manual] # Only run in CI
   - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.11
-    entry: tools/mypy.sh 1 "3.11"
-    language: python
-    types: [python]
-    additional_dependencies: *mypy_deps
+    entry: python tools/pre_commit/mypy.py 1 "3.11"
+    <<: *mypy_common
     stages: [manual] # Only run in CI
   - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.12
-    entry: tools/mypy.sh 1 "3.12"
-    language: python
-    types: [python]
-    additional_dependencies: *mypy_deps
+    entry: python tools/pre_commit/mypy.py 1 "3.12"
+    <<: *mypy_common
+    stages: [manual] # Only run in CI
+  - id: mypy-3.13 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for Python 3.13
+    entry: python tools/pre_commit/mypy.py 1 "3.13"
+    <<: *mypy_common
     stages: [manual] # Only run in CI
   - id: shellcheck
     name: Lint shell scripts
@@ -155,18 +137,15 @@ repos:
     additional_dependencies: [regex]
   - id: check-pickle-imports
     name: Prevent new pickle/cloudpickle imports
-    entry: python tools/check_pickle_imports.py
+    entry: python tools/pre_commit/check_pickle_imports.py
     language: python
     types: [python]
-    pass_filenames: false
-    additional_dependencies: [pathspec, regex]
+    additional_dependencies: [regex]
   - id: validate-config
     name: Validate configuration has default values and that each field has a docstring
     entry: python tools/validate_config.py
     language: python
-    types: [python]
-    pass_filenames: true
-    files: vllm/config.py|tests/test_config.py|vllm/entrypoints/openai/cli_args.py
+    additional_dependencies: [regex]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

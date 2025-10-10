@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import base64
+import math
 from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -21,8 +21,9 @@ from .image import ImageMediaIO
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
     num_frames, _, _, channels = frames.shape
     new_height, new_width = size
-    resized_frames = np.empty((num_frames, new_height, new_width, channels),
-                              dtype=frames.dtype)
+    resized_frames = np.empty(
+        (num_frames, new_height, new_width, channels), dtype=frames.dtype
+    )
     # lazy import cv2 to avoid bothering users who only use text models
     import cv2
 
@@ -40,8 +41,7 @@ def rescale_video_size(frames: npt.NDArray, size_factor: float) -> npt.NDArray:
     return resize_video(frames, (new_height, new_width))
 
 
-def sample_frames_from_video(frames: npt.NDArray,
-                             num_frames: int) -> npt.NDArray:
+def sample_frames_from_video(frames: npt.NDArray, num_frames: int) -> npt.NDArray:
     total_frames = frames.shape[0]
     if num_frames == -1:
         return frames
@@ -52,23 +52,19 @@ def sample_frames_from_video(frames: npt.NDArray,
 
 
 class VideoLoader:
-
     @classmethod
     @abstractmethod
-    def load_bytes(cls,
-                   data: bytes,
-                   num_frames: int = -1,
-                   **kwargs) -> tuple[npt.NDArray, dict[str, Any]]:
+    def load_bytes(
+        cls, data: bytes, num_frames: int = -1, **kwargs
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
         raise NotImplementedError
 
 
 class VideoLoaderRegistry:
-
     def __init__(self) -> None:
         self.name2class: dict[str, type] = {}
 
     def register(self, name: str):
-
         def wrap(cls_to_register):
             self.name2class[name] = cls_to_register
             return cls_to_register
@@ -87,7 +83,6 @@ VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
 
 @VIDEO_LOADER_REGISTRY.register("opencv")
 class OpenCVVideoBackend(VideoLoader):
-
     def get_cv2_video_api(self):
         import cv2.videoio_registry as vr
 
@@ -104,10 +99,12 @@ class OpenCVVideoBackend(VideoLoader):
         return api_pref
 
     @classmethod
-    def load_bytes(cls,
-                   data: bytes,
-                   num_frames: int = -1,
-                   **kwargs) -> tuple[npt.NDArray, dict[str, Any]]:
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
         import cv2
 
         backend = cls().get_cv2_video_api()
@@ -119,15 +116,15 @@ class OpenCVVideoBackend(VideoLoader):
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         duration = total_frames_num / original_fps if original_fps > 0 else 0
 
+        # resample video to target num_frames
         full_read = num_frames == -1 or total_frames_num < num_frames
         if full_read:
             num_frames = total_frames_num
             frame_idx = list(range(0, num_frames))
         else:
-            uniform_sampled_frames = np.linspace(0,
-                                                 total_frames_num - 1,
-                                                 num_frames,
-                                                 dtype=int)
+            uniform_sampled_frames = np.linspace(
+                0, total_frames_num - 1, num_frames, dtype=int
+            )
             frame_idx = uniform_sampled_frames.tolist()
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -145,22 +142,112 @@ class OpenCVVideoBackend(VideoLoader):
                     frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     i += 1
 
-        assert i == num_frames, (f"Expected reading {num_frames} frames, "
-                                 f"but only loaded {i} frames from video.")
+        assert i == num_frames, (
+            f"Expected reading {num_frames} frames, "
+            f"but only loaded {i} frames from video."
+        )
+
+        # Use transformers transformers.video_utils.VideoMetadata format
+        # NOTE(Isotr0py): For models like Qwen3-VL/GLM4.5V, this metadata
+        # can cause incorrect timestamp calculation without num_frames=-1.
+        metadata = {
+            "total_num_frames": num_frames,
+            "fps": num_frames / duration,
+            "duration": duration,
+            "video_backend": "opencv",
+            "frames_indices": list(range(num_frames)),
+            # extra field used to control hf processor's video
+            # sampling behavior
+            "do_sample_frames": num_frames == total_frames_num,
+        }
+
+        return frames, metadata
+
+
+@VIDEO_LOADER_REGISTRY.register("opencv_dynamic")
+class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 2,
+        max_duration: int = 300,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        import cv2
+
+        backend = cls().get_cv2_video_api()
+        cap = cv2.VideoCapture(BytesIO(data), backend, [])
+        if not cap.isOpened():
+            raise ValueError("Could not open video stream")
+
+        total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        original_fps = cap.get(cv2.CAP_PROP_FPS)
+        duration = total_frames_num / original_fps if original_fps > 0 else 0
+
+        # resample video to target num_frames
+        max_frame_idx = total_frames_num - 1
+        duration = duration or round(max_frame_idx / original_fps) + 1
+
+        # Refer to:
+        # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
+        frame_indices: Union[range, list[int]]
+        if duration <= max_duration:
+            n = int(math.floor(duration * fps))
+            frame_indices = sorted(
+                {
+                    min(max_frame_idx, int(math.ceil(i * original_fps / fps)))
+                    for i in range(n)
+                }
+            )
+        else:
+            num_samples = int(max_duration * fps)
+            if num_samples >= total_frames_num:
+                frame_indices = range(total_frames_num)
+            else:
+                target_seconds = np.linspace(0, duration, num_samples, endpoint=True)
+                frame_indices = sorted(
+                    {
+                        min(max_frame_idx, int(math.ceil(t * original_fps)))
+                        for t in target_seconds
+                    }
+                )
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frames = np.empty((len(frame_indices), height, width, 3), dtype=np.uint8)
+
+        i = 0
+        for idx in range(total_frames_num):
+            ok = cap.grab()
+            if not ok:
+                break
+            if idx in frame_indices:
+                ret, frame = cap.retrieve()
+                if ret:
+                    frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    i += 1
+
+        assert i == len(frame_indices), (
+            f"Expected reading {len(frame_indices)} frames, "
+            f"but only loaded {i} frames from video."
+        )
 
         # Use transformers transformers.video_utils.VideoMetadata format
         metadata = {
             "total_num_frames": total_frames_num,
             "fps": original_fps,
             "duration": duration,
-            "video_backend": "opencv"
+            "video_backend": "opencv_dynamic",
+            "frames_indices": list(frame_indices),
+            "do_sample_frames": False,
         }
 
         return frames, metadata
 
 
 class VideoMediaIO(MediaIO[npt.NDArray]):
-
     def __init__(
         self,
         image_io: ImageMediaIO,
@@ -181,22 +268,22 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
-        return self.video_loader.load_bytes(data,
-                                            num_frames=self.num_frames,
-                                            **self.kwargs)
+        return self.video_loader.load_bytes(
+            data, num_frames=self.num_frames, **self.kwargs
+        )
 
-    def load_base64(self, media_type: str,
-                    data: str) -> tuple[npt.NDArray, dict[str, Any]]:
+    def load_base64(
+        self, media_type: str, data: str
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
         if media_type.lower() == "video/jpeg":
             load_frame = partial(
                 self.image_io.load_base64,
                 "image/jpeg",
             )
 
-            return np.stack([
-                np.asarray(load_frame(frame_data))
-                for frame_data in data.split(",")
-            ]), {}
+            return np.stack(
+                [np.asarray(load_frame(frame_data)) for frame_data in data.split(",")]
+            ), {}
 
         return self.load_bytes(base64.b64decode(data))
 
@@ -220,8 +307,7 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
                 image_format=video_format,
             )
 
-            return ",".join(
-                encode_frame(Image.fromarray(frame)) for frame in video)
+            return ",".join(encode_frame(Image.fromarray(frame)) for frame in video)
 
         msg = "Only JPEG format is supported for now."
         raise NotImplementedError(msg)

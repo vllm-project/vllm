@@ -7,14 +7,18 @@ from typing import Optional
 import pytest
 import torch
 
-from tests.kernels.moe.utils import (batched_moe,
-                                     make_quantized_test_activations,
-                                     make_test_weights, naive_batched_moe)
+from tests.kernels.moe.utils import (
+    batched_moe,
+    make_quantized_test_activations,
+    make_test_weights,
+    naive_batched_moe,
+)
 from tests.kernels.quant_utils import native_batched_masked_quant_matmul
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    invoke_moe_batched_triton_kernel)
+    invoke_moe_batched_triton_kernel,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
@@ -68,23 +72,32 @@ class BatchedMMTensors:
 
     @staticmethod
     def make_tensors(config: BatchedMMConfig):
-        A = torch.randn(
-            (config.num_experts, config.max_tokens_per_expert, config.K),
+        A = (
+            torch.randn(
+                (config.num_experts, config.max_tokens_per_expert, config.K),
+                device="cuda",
+                dtype=config.in_dtype,
+            )
+            / 10
+        )
+        B = torch.randn(
+            (config.num_experts, config.N, config.K),
             device="cuda",
-            dtype=config.in_dtype) / 10
-        B = torch.randn((config.num_experts, config.N, config.K),
-                        device="cuda",
-                        dtype=config.in_dtype)
+            dtype=config.in_dtype,
+        )
         C = torch.zeros(
             (config.num_experts, config.max_tokens_per_expert, config.N),
             device="cuda",
-            dtype=config.out_dtype)
+            dtype=config.out_dtype,
+        )
 
-        num_expert_tokens = torch.randint(low=0,
-                                          high=config.max_tokens_per_expert,
-                                          size=(config.num_experts, ),
-                                          device="cuda",
-                                          dtype=torch.int32)
+        num_expert_tokens = torch.randint(
+            low=0,
+            high=config.max_tokens_per_expert,
+            size=(config.num_experts,),
+            device="cuda",
+            dtype=torch.int32,
+        )
 
         return BatchedMMTensors(A, B, C, num_expert_tokens)
 
@@ -96,10 +109,15 @@ class BatchedMMTensors:
 @pytest.mark.parametrize("dtype", [torch.float8_e4m3fn, torch.bfloat16])
 @pytest.mark.parametrize("block_shape", [None, [128, 128]])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
-def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
-                    N: int, dtype: torch.dtype,
-                    block_shape: Optional[list[int]],
-                    per_act_token_quant: bool):
+def test_batched_mm(
+    num_experts: int,
+    max_tokens_per_expert: int,
+    K: int,
+    N: int,
+    dtype: torch.dtype,
+    block_shape: Optional[list[int]],
+    per_act_token_quant: bool,
+):
     current_platform.seed_everything(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
@@ -117,11 +135,13 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         act_dtype = dtype
         quant_dtype = None
 
-    num_expert_tokens = torch.randint(low=0,
-                                      high=max_tokens_per_expert,
-                                      size=(num_experts, ),
-                                      device="cuda",
-                                      dtype=torch.int32)
+    num_expert_tokens = torch.randint(
+        low=0,
+        high=max_tokens_per_expert,
+        size=(num_experts,),
+        device="cuda",
+        dtype=torch.int32,
+    )
 
     A, A_q, A_scale = make_quantized_test_activations(
         num_experts,
@@ -140,7 +160,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         in_dtype=act_dtype,
         quant_dtype=quant_dtype,
         block_shape=block_shape,
-        per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant,
     )
 
     out_shape = (num_experts, max_tokens_per_expert, N)
@@ -151,7 +171,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
     compute_tl_dtype = {
         torch.float16: tl.float16,
         torch.bfloat16: tl.bfloat16,
-        torch.float32: tl.float32
+        torch.float32: tl.float32,
     }[test_output.dtype]
 
     assert A_q.dtype == B_q.dtype
@@ -173,7 +193,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         config={
             "BLOCK_SIZE_M": 16,
             "BLOCK_SIZE_N": 16,
-            "BLOCK_SIZE_K": 16 if dtype.itemsize > 1 else 32
+            "BLOCK_SIZE_K": 16 if dtype.itemsize > 1 else 32,
         },
         per_act_token_quant=per_act_token_quant,
         block_shape=block_shape,
@@ -186,11 +206,16 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         num_expert_tokens,
     )
 
-    q_ref_output = native_batched_masked_quant_matmul(A_q, B_q, q_ref_output,
-                                                      num_expert_tokens,
-                                                      A_scale, B_scale,
-                                                      block_shape,
-                                                      per_act_token_quant)
+    q_ref_output = native_batched_masked_quant_matmul(
+        A_q,
+        B_q,
+        q_ref_output,
+        num_expert_tokens,
+        A_scale,
+        B_scale,
+        block_shape,
+        per_act_token_quant,
+    )
 
     rtol, atol = {
         torch.float16: (6e-2, 6e-2),
@@ -250,7 +275,7 @@ def test_fused_moe_batched_experts(
         block_shape=block_shape,
         in_dtype=act_dtype,
         quant_dtype=quant_dtype,
-        per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant,
     )
 
     if input_scales and quant_dtype is not None:
@@ -308,12 +333,6 @@ def test_fused_moe_batched_experts(
             block_shape=block_shape,
         )
 
-    torch.testing.assert_close(batched_output,
-                               baseline_output,
-                               atol=3e-2,
-                               rtol=2e-2)
+    torch.testing.assert_close(batched_output, baseline_output, atol=3e-2, rtol=2e-2)
 
-    torch.testing.assert_close(triton_output,
-                               batched_output,
-                               atol=2e-2,
-                               rtol=2e-2)
+    torch.testing.assert_close(triton_output, batched_output, atol=2e-2, rtol=2e-2)
