@@ -18,7 +18,12 @@ from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import CompilationLevel, VllmConfig, get_current_vllm_config, set_current_vllm_config
+from vllm.config import (
+    CompilationLevel, 
+    VllmConfig, 
+    get_current_vllm_config, 
+    set_current_vllm_config,
+)
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import resolve_obj_by_qualname
