@@ -1,0 +1,15 @@
+Timestamp: 2025-10-10T18:32:00Z (approx). Agent: GitHub Copilot (GPT-5).
+Context recap:
+- WSL sparse-VHD gating still blocks `podman machine init` when using the Rocky 10 `.wsl` archive.
+- Command used: `pwsh extras/tools/enable-podman-wsl-gpu.ps1 -Reset -Rootful -AllowSparseUnsafe`.
+- Host WSL build 2.6.1.0 does **not** recognize `--allow-unsafe`, so helper now recommends updating WSL or converting the image.
+
+Next boot checklist:
+1. Run `wsl.exe --update --pre-release`, reboot Windows.
+2. Re-run the helper command above and ensure sparse toggle proceeds without errors.
+3. If still blocked, manually convert the Rocky `.wsl` archive to a fixed `.vhdx` (per Rocky docs) and rerun the helper with `-ImagePath <converted.vhdx>`.
+
+Side notes for future agent:
+- Cached archive lives at `%LOCALAPPDATA%\vllm-podman-images\Rocky-10-WSL-Base.latest.x86_64.wsl`.
+- Any manual conversion should be stored alongside and referenced via the `-ImagePath` flag.
+- Podman machine name in use: `podman-machine-default`.

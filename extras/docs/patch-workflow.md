@@ -79,7 +79,13 @@ and keeps the Windows-mounted repository free of unexpected modifications.
   to restart it manually later. Use `-ImagePath <file-or-url>` to override the default image; HTTP(S) URLs are
   downloaded into `%LOCALAPPDATA%\vllm-podman-images` on first use. Pass `-Rootful` to enable rootful
   mode automatically. Add `-Reset` to wipe and reinitialize the Podman machine (the helper removes the
-  existing VM and re-runs `podman machine init`) when you want to start from a clean slate.
+  existing VM and re-runs `podman machine init`) when you want to start from a clean slate. If WSL stops
+  the import with "Sparse VHD support is currently disabled", rerun the helper with `-AllowSparseUnsafe` to
+  let it attempt the `wsl.exe --manage <machine> --set-sparse --allow-unsafe` toggle that Microsoft suggests.
+  On hosts where `--allow-unsafe` is unavailable, the helper automatically extracts the Rocky `.wsl` archive and
+  converts its VHDX to fixed size (requires the Hyper-V PowerShell module). If Hyper-V tooling is missing, update
+  WSL (`wsl.exe --update --pre-release`) or convert the archive manually before re-running the helper with
+  `-ImagePath <converted.vhdx>`.
 
 1. After the script restarts the machine, launch `extras/podman/run.ps1 -GPUCheck` (or `run.sh --gpu-check`)
    to confirm that `/dev/dxg` and the CUDA libraries are visible from inside the dev container. If the helper

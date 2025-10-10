@@ -1,0 +1,44 @@
+[
+  {
+    "id": 3,
+    "title": "Relocate todo tracking",
+    "description": "Move the .todo directory under extras/ per fork policy.",
+    "status": "done"
+  },
+  {
+    "id": 4,
+    "title": "Handle sparse VHD error output",
+    "description": "Capture podman stderr so the helper can detect the sparse VHD warning and retry automatically.",
+    "status": "done"
+  },
+  {
+    "id": 5,
+    "title": "Retry after enabling sparse support",
+    "description": "Ensure -AllowSparseUnsafe triggers wsl.exe before re-running podman machine init and surfaces meaningful errors.",
+    "status": "done"
+  },
+  {
+    "id": 6,
+    "title": "Fix allow-unsafe argument",
+    "description": "Append explicit boolean when calling wsl.exe --allow-unsafe to satisfy updated CLI syntax.",
+    "status": "done"
+  },
+  {
+    "id": 7,
+    "title": "Fallback WSL manage syntaxes",
+    "description": "Try multiple --set-sparse/--allow-unsafe flag combinations to handle differing WSL CLI expectations.",
+    "status": "done"
+  },
+  {
+    "id": 8,
+    "title": "Auto-convert Rocky archive",
+    "description": "Add helper logic to extract the .wsl archive and convert its VHDX to fixed when sparse toggle unsupported.",
+    "status": "done"
+  },
+  {
+    "id": 9,
+    "title": "Doc conversion fallback",
+    "description": "Document the automated conversion path and requirements (Hyper-V cmdlets).",
+    "status": "done"
+  }
+]
