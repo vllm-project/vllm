@@ -260,8 +260,10 @@ def parse_chat_input(chat_msg) -> list[Message]:
             # Handle array format for tool message content
             # by concatenating all text parts.
             content = "".join(
-                item.get("text", "") for item in content
-                if isinstance(item, dict) and item.get("type") == "text")
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
 
         msg = Message.from_author_and_content(
             Author.new(Role.TOOL, f"functions.{name}"), content
