@@ -90,6 +90,7 @@ _TEXT_GENERATION_MODELS = {
     "Exaone4ForCausalLM": ("exaone4", "Exaone4ForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
+    "FlexOlmoForCausalLM": ("flex_olmo", "FlexOlmoForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
@@ -353,6 +354,10 @@ _MULTIMODAL_MODELS = {
     "Qwen2_5OmniForConditionalGeneration": (
         "qwen2_5_omni_thinker",
         "Qwen2_5OmniThinkerForConditionalGeneration",
+    ),
+    "Qwen3OmniMoeForConditionalGeneration": (
+        "qwen3_omni_moe_thinker",
+        "Qwen3OmniMoeThinkerForConditionalGeneration",
     ),
     "Qwen3VLForConditionalGeneration": ("qwen3_vl", "Qwen3VLForConditionalGeneration"),  # noqa: E501
     "Qwen3VLMoeForConditionalGeneration": (
