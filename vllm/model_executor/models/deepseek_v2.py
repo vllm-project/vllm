@@ -24,7 +24,6 @@
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
-import typing
 from collections.abc import Iterable
 from itertools import islice
 from typing import Any, Optional, Union
@@ -1286,7 +1285,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
         self.num_expert_groups = config.n_group
 
         self.moe_layers: list[SharedFusedMoE] = []
-        example_moe = None
+        self.example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
@@ -1302,8 +1301,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
 
         self.num_logical_experts = self.example_moe.n_logical_experts
         self.num_physical_experts = self.example_moe.n_physical_experts
-        self.num_local_physical_experts = \
-            self.example_moe.n_local_physical_experts
+        self.num_local_physical_experts = self.example_moe.n_local_physical_experts
         self.num_routed_experts = self.example_moe.n_routed_experts
         self.num_shared_experts = self.example_moe.n_shared_experts
         self.num_redundant_experts = self.example_moe.n_redundant_experts
@@ -1339,7 +1337,9 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
         from vllm.distributed.eplb.gpu_model_register import (
-            get_expert_mapping, load_expert_weight)
+            get_expert_mapping,
+            load_expert_weight,
+        )
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
@@ -1392,9 +1392,11 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
                 is_expert_weight = False
                 is_continue = False
                 for mapping in expert_params_mapping:
-                    expert_matched, is_continue, success, name_mapped = \
-                        load_expert_weight(self, mapping, name,
-                                           loaded_weight, params_dict)
+                    expert_matched, is_continue, success, name_mapped = (
+                        load_expert_weight(
+                            self, mapping, name, loaded_weight, params_dict
+                        )
+                    )
                     if expert_matched:
                         is_expert_weight = True
 

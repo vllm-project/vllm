@@ -60,8 +60,7 @@ class BaseAdaptor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def do_update_expert_map(self, layer_id: Any,
-                             updated_expert_map: Any) -> Any:
+    def do_update_expert_map(self, layer_id: Any, updated_expert_map: Any) -> Any:
         """
         Abstract method: Performs an update of the expert map.
 
@@ -82,9 +81,9 @@ class BaseAdaptor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def do_update_expert_weight(self, layer_id: Any,
-                                local_expert_to_replace: Any,
-                                buffer_tensor_id: Any) -> Any:
+    def do_update_expert_weight(
+        self, layer_id: Any, local_expert_to_replace: Any, buffer_tensor_id: Any
+    ) -> Any:
         """
         Abstract method: Performs an update of expert weights.
 

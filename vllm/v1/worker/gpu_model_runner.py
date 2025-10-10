@@ -35,8 +35,8 @@ from vllm.config import (
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.eplb.gpu_model_register import model_register
 from vllm.distributed.kv_transfer import (
-  get_kv_transfer_group,
-  has_kv_transfer_group,
+    get_kv_transfer_group,
+    has_kv_transfer_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (

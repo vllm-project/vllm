@@ -7,7 +7,7 @@ from typing import Callable
 
 import torch
 
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.models.utils import is_pp_missing_parameter
 
 
@@ -36,8 +36,7 @@ def update_physical_experts_metadata(
     assert self.num_local_physical_experts == num_local_physical_experts
     self.num_physical_experts = num_physical_experts
     self.num_local_physical_experts = num_local_physical_experts
-    self.num_redundant_experts = (num_physical_experts -
-                                  self.num_logical_experts)
+    self.num_redundant_experts = num_physical_experts - self.num_logical_experts
     for layer in self.model.layers:
         if isinstance(layer.mlp, self.example_moe):
             moe = layer.mlp
@@ -50,23 +49,32 @@ def update_physical_experts_metadata(
 def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
     # Params for weights, fp8 weight scales, fp8 activation scales
     # (param_name, weight_name, expert_id, shard_id)
-    return FusedMoE.make_expert_params_mapping(
+    return SharedFusedMoE.make_expert_params_mapping(
         ckpt_gate_proj_name="gate_proj",
         ckpt_down_proj_name="down_proj",
         ckpt_up_proj_name="up_proj",
         num_experts=self.config.n_routed_experts,
-        num_redundant_experts=self.num_redundant_experts)
+        num_redundant_experts=self.num_redundant_experts,
+    )
 
 
 def load_expert_weight(self, mapping, name, loaded_weight, params_dict):
-    ignore_suffixes = (".bias", "_bias", ".k_scale", "_k_scale", ".v_scale",
-                       "_v_scale", ".weight_scale", "_weight_scale",
-                       ".input_scale", "_input_scale")
-
+    ignore_suffixes = (
+        ".bias",
+        "_bias",
+        ".k_scale",
+        "_k_scale",
+        ".v_scale",
+        "_v_scale",
+        ".weight_scale",
+        "_weight_scale",
+        ".input_scale",
+        "_input_scale",
+    )
     expert_matched = False
     is_continue = False
     success = False
-    name_mapped = ''
+    name_mapped = ""
     param_name, weight_name, expert_id, shard_id = mapping
     if weight_name not in name:
         is_continue = True
@@ -85,8 +93,7 @@ def load_expert_weight(self, mapping, name, loaded_weight, params_dict):
         return expert_matched, is_continue, success, name_mapped
 
     # Skip loading extra parameters for GPTQ/modelopt models.
-    if name_mapped.endswith(ignore_suffixes) \
-            and name_mapped not in params_dict:
+    if name_mapped.endswith(ignore_suffixes) and name_mapped not in params_dict:
         is_continue = True
         return expert_matched, is_continue, success, name_mapped
 
@@ -95,12 +102,14 @@ def load_expert_weight(self, mapping, name, loaded_weight, params_dict):
     # here since otherwise we may skip experts with other
     # available replicas.
     weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
-    success = weight_loader(param,
-                            loaded_weight,
-                            name_mapped,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
-                            return_success=True)
+    success = weight_loader(
+        param,
+        loaded_weight,
+        name_mapped,
+        shard_id=shard_id,
+        expert_id=expert_id,
+        return_success=True,
+    )
     return expert_matched, is_continue, success, name_mapped
 
 
@@ -115,8 +124,8 @@ def model_register(model):
     """
     model.set_eplb_state = types.MethodType(set_eplb_state, model)
     model.load_expert_weight = types.MethodType(load_expert_weight, model)
-    model.update_physical_experts_metadata = \
-        types.MethodType(update_physical_experts_metadata, model)
-    model.model.get_expert_mapping = \
-        types.MethodType(get_expert_mapping, model.model)
+    model.update_physical_experts_metadata = types.MethodType(
+        update_physical_experts_metadata, model
+    )
+    model.model.get_expert_mapping = types.MethodType(get_expert_mapping, model.model)
     print("register complete")

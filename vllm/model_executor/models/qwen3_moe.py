@@ -23,7 +23,6 @@
 # limitations under the License.
 """Inference-only Qwen3MoE model compatible with HuggingFace weights."""
 
-import typing
 from collections.abc import Iterable
 from itertools import islice
 from typing import Any, Optional, Union
@@ -452,8 +451,7 @@ class Qwen3MoeModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -476,9 +474,12 @@ class Qwen3MoeModel(nn.Module):
             ".input_scale",
             "_input_scale",
         )
-  
+
         from vllm.distributed.eplb.gpu_model_register import (
-            get_expert_mapping, load_expert_weight)
+            get_expert_mapping,
+            load_expert_weight,
+        )
+
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         expert_params_mapping = get_expert_mapping(self)
@@ -523,9 +524,11 @@ class Qwen3MoeModel(nn.Module):
                 is_expert_weight = False
                 is_continue = False
                 for mapping in expert_params_mapping:
-                    expert_matched, is_continue, success, name_mapped = \
-                        load_expert_weight(self, mapping, name,
-                                           loaded_weight, params_dict)
+                    expert_matched, is_continue, success, name_mapped = (
+                        load_expert_weight(
+                            self, mapping, name, loaded_weight, params_dict
+                        )
+                    )
                     if expert_matched:
                         is_expert_weight = True
 
@@ -630,8 +633,7 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExperts)
         self.num_shared_experts = 0
         self.num_logical_experts = self.example_moe.n_logical_experts
         self.num_physical_experts = self.example_moe.n_physical_experts
-        self.num_local_physical_experts = \
-            self.example_moe.n_local_physical_experts
+        self.num_local_physical_experts = self.example_moe.n_local_physical_experts
         self.num_routed_experts = self.example_moe.n_routed_experts
         self.num_redundant_experts = self.example_moe.n_redundant_experts
 
