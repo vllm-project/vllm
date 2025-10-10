@@ -455,7 +455,10 @@ class Qwen3MoeModel(nn.Module):
         ):
             # Collect auxiliary hidden states if specified
             if layer_idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states)
+                aux_hidden_state = (
+                    hidden_states + residual if residual is not None else hidden_states
+                )
+                aux_hidden_states.append(aux_hidden_state)
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
