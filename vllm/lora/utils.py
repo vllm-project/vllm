@@ -112,7 +112,7 @@ def replace_submodule(
 
 def parse_fine_tuned_lora_name(
     name: str, weights_mapper: Optional["WeightsMapper"] = None
-) -> tuple[str, bool, bool]:
+) -> tuple[str, bool]:
     """Parse the name of lora weights.
 
     args:
@@ -124,7 +124,6 @@ def parse_fine_tuned_lora_name(
         tuple(module_name, is_lora_a):
             module_name: the name of the module, e.g. model.dense1,
             is_lora_a whether the tensor is lora_a or lora_b.
-            is_bias whether the tensor is lora bias.
     """
 
     # LoRA weight qualified name usually starts with `base_model.model.`,
@@ -146,15 +145,11 @@ def parse_fine_tuned_lora_name(
     parts = name.split(".")
     if parts[-1] == "weight" and (parts[-2] == "lora_A" or parts[-2] == "lora_B"):
         new_name = ".".join(parts[start_index:-2])
-        return new_name, parts[-2] == "lora_A", False
+        return new_name, parts[-2] == "lora_A"
 
     if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
         new_name = ".".join(parts[start_index:-1])
-        return new_name, parts[-1] == "lora_embedding_A", False
-
-    if parts[-1] == "bias":
-        new_name = ".".join(parts[start_index:-2])
-        return new_name, False, True
+        return new_name, parts[-1] == "lora_embedding_A"
 
     raise ValueError(f"{name} is unsupported LoRA weight")
 

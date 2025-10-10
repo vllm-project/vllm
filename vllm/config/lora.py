@@ -70,12 +70,6 @@ class LoRAConfig:
     per prompt. When run in offline mode, the lora IDs for n modalities
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
-    bias_enabled: bool = Field(
-        default=False,
-        deprecated="`bias_enabled` is deprecated and will be removed in v0.12.0.",
-    )
-    """[DEPRECATED] Enable bias for LoRA adapters. This option will be
-    removed in v0.12.0."""
 
     def compute_hash(self) -> str:
         """
@@ -96,7 +90,7 @@ class LoRAConfig:
         factors.append(self.lora_dtype)
         factors.append(self.lora_extra_vocab_size)
         factors.append(self.lora_vocab_padding_size)
-        factors.append(self.bias_enabled)
+
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
