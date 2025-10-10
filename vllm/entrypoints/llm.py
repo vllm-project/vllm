@@ -335,7 +335,6 @@ class LLM:
 
         supported_tasks = self.llm_engine.get_supported_tasks()
         logger.info("Supported tasks: %s", supported_tasks)
-
         self.supported_tasks = supported_tasks
 
         self.model_config = self.llm_engine.model_config
