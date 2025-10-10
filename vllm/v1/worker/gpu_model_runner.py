@@ -2347,24 +2347,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f"{self.max_model_len}"
             )
 
-            n_tokens_cache = len(sampled_ids)
-
-            # Sampled token IDs exceed the max model length by 1. This is
-            # legitimate as we can still sample 1 last token when the context
-            # length equals the max model length. Note that we do not need to
-            # cache this token ID as the sequence finishes after this step.
-            # Additionally, the buffers token_ids_cpu and is_token_ids are of
-            # size max model length only.
-            if end_idx == self.max_model_len + 1:
-                n_tokens_cache -= 1
-
             # TODO(Jialin): batchify the update to token_ids_cpu and is_token_ids
-            self.input_batch.token_ids_cpu[
-                req_idx, start_idx : (start_idx + n_tokens_cache)
-            ] = sampled_ids[:n_tokens_cache]
-            self.input_batch.is_token_ids[
-                req_idx, start_idx : (start_idx + n_tokens_cache)
-            ] = True
+            self.input_batch.token_ids_cpu[req_idx, start_idx:end_idx] = sampled_ids
+            self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
 
             # Collect updates to num_tokens and num_tokens_no_spec,
             # which is equivilent to
@@ -2380,9 +2365,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Apply tensor / numpy array updates in batch
         if num_tokens_indices_to_update:
             # Batch update num_tokens arrays
-            self.input_batch.num_tokens[num_tokens_indices_to_update] = num_tokens_values_to_update
-            self.input_batch.num_tokens_no_spec[
-                num_tokens_indices_to_update] = num_tokens_values_to_update
+            self.input_batch.num_tokens[num_tokens_indices_to_update] = (
+                num_tokens_values_to_update
+            )
+            self.input_batch.num_tokens_no_spec[num_tokens_indices_to_update] = (
+                num_tokens_values_to_update
+            )
 
         return (
             num_nans_in_logits,
