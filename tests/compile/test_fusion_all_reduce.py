@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import vllm.envs as envs
+from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.collective_fusion import AllReduceFusionPass
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.compilation.noop_elimination import NoOpEliminationPass
@@ -41,34 +42,30 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
-        self.norm = RMSNorm(hidden_size, eps)
+        self.norm = [RMSNorm(hidden_size, eps) for i in range(4)]
+        self.w = [torch.rand(hidden_size, hidden_size) for _ in range(3)]
 
     def forward(self, x):
+        # avoid having graph input be an arg to a pattern directly
         z = torch.relu(x)
-        all_reduce = tensor_model_parallel_all_reduce(z)
-        norm = self.norm(all_reduce)
-        return norm
+        x = resid = tensor_model_parallel_all_reduce(z)
+        y = self.norm[0](x)
 
-    def ops_in_model_before(self):
-        return [torch.ops.vllm.all_reduce.default]
+        z2 = torch.mm(y, self.w[0])
+        x2 = tensor_model_parallel_all_reduce(z2)
 
-    def ops_in_model_after(self):
-        return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
+        y2, resid = self.norm[1](x2, resid)
 
+        z3 = torch.mm(y2, self.w[1])
+        x3 = tensor_model_parallel_all_reduce(z3)
 
-class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
-    def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.eps = eps
-        self.norm = RMSNorm(hidden_size, eps)
+        y3, resid = self.norm[2](x3, resid)
 
-    def forward(self, hidden_states):
-        z = residual = torch.relu(hidden_states)
-        all_reduce = tensor_model_parallel_all_reduce(z)
-        norm, res = self.norm(all_reduce, residual)
+        z4 = torch.mm(y3, self.w[2])
+        x4 = tensor_model_parallel_all_reduce(z4)
 
-        return norm, res
+        y4, resid = self.norm[3](x4, resid)
+        return y4
 
     def ops_in_model_before(self):
         return [torch.ops.vllm.all_reduce.default]
@@ -142,24 +139,48 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
-        self.norm = RMSNorm(hidden_size, eps)
-        self.scale = torch.rand(1, dtype=torch.float32)
-        self.output = torch.empty((token_num, hidden_size), dtype=torch.float32)
+        self.norm = [RMSNorm(hidden_size, eps) for i in range(4)]
 
-        round_up = lambda x, y: (x + y - 1) // y * y
-        rounded_m = round_up(token_num, 128)
-        scale_n = hidden_size // 16
-        rounded_n = round_up(scale_n, 4)
-        self.output_scale = torch.empty((rounded_m, rounded_n // 4), dtype=torch.int32)
+        self.w = [torch.rand(hidden_size, hidden_size) for _ in range(3)]
+        self.agscale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
+        wgscale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
+        self.alpha = [1 / (w * a) for w, a in zip(wgscale, self.agscale)]
+
+        wq_gen, wscale_gen = zip(
+            *(scaled_fp4_quant(w, wg) for w, wg in zip(self.w, wgscale))
+        )
+        self.wq, self.wscale = list(wq_gen), list(wscale_gen)
+        print(f"{self.wq=}, {self.wscale=}")
 
     def forward(self, hidden_states):
-        z = residual = torch.relu(hidden_states)
-        all_reduce = tensor_model_parallel_all_reduce(z)
-        norm_output, residual_output = self.norm(all_reduce, residual)
-        torch.ops._C.scaled_fp4_quant(
-            self.output, norm_output, self.output_scale, self.scale
+        # avoid having graph input be an arg to a pattern directly
+        z = torch.relu(hidden_states)
+        x = resid = tensor_model_parallel_all_reduce(z)
+        y = self.norm[0](x)
+
+        yq, y_scale = scaled_fp4_quant(y, self.agscale[0])
+        z2 = cutlass_scaled_fp4_mm(
+            yq, self.wq[0], y_scale, self.wscale[0], self.alpha[0], out_dtype=y.dtype
         )
-        return self.output, residual_output, self.output_scale
+
+        x2 = tensor_model_parallel_all_reduce(z2)
+        y2, resid = self.norm[1](x2, resid)
+
+        yq2, y_scale2 = scaled_fp4_quant(y2, self.agscale[1])
+        z3 = cutlass_scaled_fp4_mm(
+            yq2, self.wq[1], y_scale2, self.wscale[1], self.alpha[1], out_dtype=y2.dtype
+        )
+
+        x3 = tensor_model_parallel_all_reduce(z3)
+        y3, resid = self.norm[2](x3, resid)  # use resid here
+
+        yq3, y_scale3 = scaled_fp4_quant(y3, self.agscale[2])
+        z4 = cutlass_scaled_fp4_mm(
+            yq3, self.wq[2], y_scale3, self.wscale[2], self.alpha[2], out_dtype=y3.dtype
+        )
+        x4 = tensor_model_parallel_all_reduce(z4)
+        y4, resid = self.norm[3](x4, resid)  # use resid here
+        return y4
 
     def ops_in_model_after(self):
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
@@ -176,7 +197,6 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
     "test_model, enable_quant_fp8",
     [
         (TestAllReduceRMSNormModel, False),
-        (TestAllReduceFusedAddRMSNormModel, False),
         (TestAllReduceRMSNormStaticQuantFP8Model, True),
         (TestAllReduceRMSNormStaticQuantFP8Model, False),
         (TestAllReduceFusedAddRMSNormStaticQuantFP4Model, False),
@@ -184,7 +204,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
 )
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [8])
-@pytest.mark.parametrize("hidden_size", [16])
+@pytest.mark.parametrize("hidden_size", [64])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("enable_rms_norm", [True, False])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
@@ -304,11 +324,8 @@ def all_reduce_fusion_pass_on_test_model(
         compiled_model = torch.compile(model, backend=backend)
         compiled_model(hidden_states)
 
-        # TODO cleanup
-        expected = 4 if test_model_cls is TestAllReduceRMSNormStaticQuantFP8Model else 1
-
-        assert all_reduce_fusion_pass.matched_count == expected, (
-            f"{all_reduce_fusion_pass.matched_count=}, {expected=}"
+        assert all_reduce_fusion_pass.matched_count == 4, (
+            f"{all_reduce_fusion_pass.matched_count=}"
         )
         backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
         backend.check_after_ops(model.ops_in_model_after())

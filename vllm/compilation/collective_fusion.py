@@ -960,10 +960,6 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
     def register(self, pm_pass: PatternMatcherPass):
         def get_inputs():
             input = torch.empty([1, 16, 16], device=self.device, dtype=self.dtype)
-
-            rmsnorm_result = torch.empty(
-                [1, 16, 16], device=self.device, dtype=self.dtype
-            )
             quant_result = torch.empty((16, 8), device=self.device, dtype=torch.uint8)
             input_global_scale = torch.empty(
                 [1, 1], device=self.device, dtype=torch.float32
@@ -971,18 +967,10 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
             weight = torch.empty([16], device=self.device, dtype=self.dtype)
             output_scale = torch.empty([128, 4], device=self.device, dtype=torch.int32)
 
-            return [
-                input,
-                rmsnorm_result,
-                quant_result,
-                weight,
-                input_global_scale,
-                output_scale,
-            ]
+            return [input, quant_result, weight, input_global_scale, output_scale]
 
         def pattern(
             input: torch.Tensor,
-            rmsnorm_result: torch.Tensor,
             quant_result: torch.Tensor,
             weight: torch.Tensor,
             input_global_scale: torch.Tensor,
@@ -1003,13 +991,13 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
 
         def replacement(
             input: torch.Tensor,
-            result_rms: torch.Tensor,
             quant_result: torch.Tensor,
             weight: torch.Tensor,
             input_global_scale: torch.Tensor,
             output_scale: torch.Tensor,
         ):
             residual = torch.zeros_like(input)
+            result_rms = torch.empty_like(input)
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
