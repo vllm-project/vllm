@@ -1345,6 +1345,8 @@ class NixlConnectorWorker:
         # Remove all requests that are not to be processed (eg aborted).
         for req_id in metadata.reqs_not_processed:
             self._reqs_to_process.discard(req_id)
+            # We should never get an abort after setting an expiry timer
+            assert req_id not in self._reqs_to_send
 
         # Add to requests that are waiting to be read and track expiration.
         for req_id, expiration_time in metadata.reqs_to_send.items():
