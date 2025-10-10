@@ -633,7 +633,6 @@ def main(args: argparse.Namespace):
     if args.seed is None:
         args.seed = 0
     random.seed(args.seed)
-
     # Sample the requests.
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code)

@@ -17,11 +17,11 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def _should_log_results() -> int | None:
+def _should_log_results() -> bool:
     """Check if the current process should log results.
-    For multiprocessing, only the main process and the first worker 
-    should log results, as other worker processes duplicate the same
-    work.
+    Only the data-parallel rank 0 engine core and worker 0 should emit logs in
+    multi-process deployments so that we avoid duplicating identical timing
+    data.
     """
     process = multiprocessing.current_process()
     return process.name in ("EngineCore_DP0", "VllmWorker-0")
@@ -29,6 +29,7 @@ def _should_log_results() -> int | None:
 
 # Cache for log file handles
 _log_file_cache: dict[str, TextIO] = {}
+log_results = _should_log_results()
 
 
 def _write_log_entry(name: str, elapsed_us: int) -> None:
@@ -45,7 +46,7 @@ def _write_log_entry(name: str, elapsed_us: int) -> None:
     global _log_file_cache
     _LOG_PATH = envs.VLLM_LITE_PROFILER_LOG_PATH
 
-    if not _should_log_results() or _LOG_PATH is None:
+    if not log_results or _LOG_PATH is None:
         return
 
     # Handle case where file handle was opened in parent but we're in child
