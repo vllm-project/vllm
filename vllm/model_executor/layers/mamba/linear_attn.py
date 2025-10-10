@@ -322,8 +322,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
             if attn_metadata is not None:
                 assert isinstance(attn_metadata, LinearAttentionMetadata)
                 num_actual_tokens = (
-                    attn_metadata.num_prefill_tokens +
-                    attn_metadata.num_decode_tokens
+                    attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens
                 )
             else:
                 num_actual_tokens = hidden_states.shape[0]
