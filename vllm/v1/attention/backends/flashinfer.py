@@ -587,34 +587,70 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
                 if self.dcp_world_size > 1:
                     # init custom mask for interleave kv cache
-                    mask_arr = []
-                    q_lens = (qo_indptr_cpu[1:] -
-                              qo_indptr_cpu[:-1]).cpu().tolist()
+                    # |-------total_lens----------|
+                    # |--context_lens--|--q_lens--|
+                    # Example: dcp_size=2, dcp_rank=0
+                    # For a SINGLE prefill seq, q_lens=3, total_lens=5
+                    # k_lens on RANK1 is (5 - 1 - 0) // 2 + 1 = 3
+                    # mask.shape = [q_lens, k_lens] = [3,3]
+                    # mask [[True, True, False],
+                    #       [True, True, False],
+                    #       [True, True, True]]
+                    dcp_rank = self.dcp_rank
+                    dcp_size = self.dcp_world_size
+
+                    q_lens = (qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]).to(
+                         dtype=torch.int64, device=self.device)
                     total_lens = seq_lens_cpu[prefill_start:prefill_start +
-                                              num_prefills].to(
-                                                  torch.int64).tolist()
-                    r = self.dcp_rank
-                    p = self.dcp_world_size
-                    for i in range(num_prefills):
-                        Q = int(q_lens[i])
-                        T = int(total_lens[i])
-                        if Q <= 0:
-                            mask_arr.append(torch.zeros(0, dtype=torch.bool))
-                            continue
-                        L = T - Q
-                        rightmost = L + Q - 1
-                        if rightmost < r:
-                            mask_arr.append(torch.zeros(0, dtype=torch.bool))
-                            continue
-                        K = ((rightmost - r) // p) + 1
-                        j = torch.arange(K)
-                        t = torch.arange(Q)
-                        upper = (L + t - r) // p
-                        upper = torch.clamp(upper, min=-1)
-                        mask_i = (j.unsqueeze(0) <= upper.unsqueeze(1)) & (
-                            upper.unsqueeze(1) >= 0)
-                        mask_arr.append(mask_i.flatten())
-                    custom_mask = torch.cat(mask_arr, dim=0).to(self.device)
+                                              num_prefills].to(dtype=torch.int64,
+                                                               device=self.device)
+                    context_lens = total_lens - q_lens
+                    # max indices for global sequences
+                    max_indices = total_lens - 1
+                    # if max_indices are smaller than dcp_rank,
+                    # current rank has no kv cache, is invalid,
+                    # the mask is skipped
+                    valid = (max_indices >= dcp_rank)
+                    assert torch.any(valid), "There is no valid sequence"
+
+                    # local kv lens on current dcp_rank
+                    k_lens = torch.div(max_indices - dcp_rank, 
+                                       dcp_size, 
+                                       rounding_mode="floor") + 1
+                    k_lens = torch.where(
+                        valid,
+                        k_lens,
+                        torch.zeros_like(k_lens))
+                    # vectorize operation
+                    # obtain the max length of all prefill reqs
+                    max_q = int(q_lens[valid].max().item())
+                    max_k = int(k_lens[valid].max().item())
+                    # generate local q and k indices
+                    q_indices = torch.arange(max_q, device=self.device)
+                    k_indices = torch.arange(max_k, device=self.device)
+                    # valid q and k indices of each reqs
+                    valid_q = valid[:, None] & \
+                        (q_indices[None, :] < q_lens[:, None])
+                    valid_k = valid[:, None] & \
+                        (k_indices[None, :] < k_lens[:, None])
+                    # where global q_indices >= global k_indices,
+                    # the mask is True
+                    # global q_indices = context_lens + local q_indices
+                    # global k_indices = local k_indcies * dcp_size + dcp_rank
+                    # ====> local k_indcies must be smaller or equal k_upper
+                    # k_upper=(context_lens + local q_indices - dcp_rank) // dcp_size
+                    k_upper = torch.div(
+                        context_lens[:, None] + q_indices - dcp_rank,
+                        dcp_size, rounding_mode="floor")
+                    k_upper = torch.where(
+                            valid_q,
+                            torch.clamp(k_upper, min=-1),
+                            k_upper.new_full(k_upper.shape, -1))
+                    mask = (k_indices[None, None, :] <= k_upper[:, :, None]) \
+                            & (k_upper[:, :, None] >= 0)
+                    valid_positions = valid_q[:, :, None] & valid_k[:, None, :]
+                    # flashinfer backend needs flattened format
+                    custom_mask = torch.masked_select(mask, valid_positions)
                 else:
                     custom_mask = None
 
