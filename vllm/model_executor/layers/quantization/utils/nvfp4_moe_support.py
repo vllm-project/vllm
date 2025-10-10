@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+    is_flashinfer_fp4_cutedsl_moe_available,
     is_flashinfer_fp4_cutlass_moe_available,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
@@ -32,7 +33,10 @@ def detect_nvfp4_moe_support(class_name: str = "") -> NvFp4Support:
     """Detect platform support for NV-FP4 fused-MoE path"""
     cutlass_supported = cutlass_fp4_supported()
 
-    allow_flashinfer = cutlass_supported and is_flashinfer_fp4_cutlass_moe_available()
+    allow_flashinfer = cutlass_supported and (
+        is_flashinfer_fp4_cutlass_moe_available()
+        or is_flashinfer_fp4_cutedsl_moe_available()
+    )
 
     if allow_flashinfer:
         _logger.info_once(
