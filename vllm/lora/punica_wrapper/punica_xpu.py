@@ -114,7 +114,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         **kwargs,
     ) -> None:
         """
-        Performs GEMM and bias addition for multiple slices of lora_b.
+        Performs GEMM for multiple slices of lora_b.
 
         Semantics:
             for i in range(len(lora_b_stacked)):

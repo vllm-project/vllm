@@ -145,7 +145,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         **kwargs,
     ) -> torch.Tensor:
         """
-        Performs GEMM and bias addition for multiple slices of lora_b.
+        Performs GEMM for multiple slices of lora_b.
 
         Semantics:
             for i in range(len(lora_b_stacked)):
@@ -283,30 +283,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         buffer = bgmv_shrink(x, lora_a_stacked, sampler_indices, scale)
         y = bgmv_expand(buffer, lora_b_stacked, y, sampler_indices, add_inputs=True)
         return y.view_as(y_org)
-
-    def _apply_bias(
-        self,
-        indices: torch.Tensor,
-        output: torch.Tensor,
-        output_slices: tuple[int, ...],
-    ):
-        """Applies bias to output
-
-        Input shapes:
-            indices:           (batch_size)
-            output:            (batch_size, q_slice_size + 2*kv_slice_size)
-            output_slices:     n-1 element tuple of (slice_size...),
-                            where n is number of slices
-        """
-        org_output = output
-        output = output.view(-1, output.shape[-1])
-        indices = indices.view(-1)
-
-        offset_left = 0
-        for slice_idx, slice in enumerate(output_slices):
-            offset_left += slice
-
-        return output.view_as(org_output)
 
     # This performs the same tensor ops as the base method, except it does them
     # on the CPU then transfers the results to the TPU

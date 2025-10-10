@@ -119,8 +119,6 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             lora_b = lora_b[start_idx:end_idx, :]
         return lora_b
 
-    # slice_bias removed
-
     def forward(
         self, input_: torch.Tensor
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
@@ -227,7 +225,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             )
             for output_size in self.output_slices
         )
-        # lora_bias_stacked allocation removed
 
     def slice_lora_a(
         self, lora_a: list[Union[torch.Tensor, None]]
@@ -246,8 +243,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                     shard_size * shard_id : shard_size * (shard_id + 1), :
                 ]
         return sliced_lora_b
-
-    # slice_bias removed
 
     def set_lora(
         self,

@@ -29,7 +29,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.tp_size = self.base_layer.tp_size
         self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(self.base_layer)
-        # lora_bias_stacked removed
         self.output_slices: tuple[int, ...]
         self.output_size: int
         self.n_slices: int
@@ -86,14 +85,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             )
             for _ in range(self.n_slices)
         )
-        # lora_bias_stacked allocation removed
         self.output_slices = (self.lora_b_stacked[0].shape[2],)
 
     def reset_lora(self, index: int):
         for s_index in range(self.n_slices):
             self.lora_a_stacked[s_index][index] = 0
             self.lora_b_stacked[s_index][index] = 0
-            # lora_bias_stacked reset removed
 
     def set_lora(
         self,
