@@ -410,7 +410,7 @@ def create_combined_plot(all_results):
 
         # Add speedup labels over each bar trio
         for i in range(len(x)):
-            triton_v2_speedup = flat_ratios[i][1]  # triton/v2
+            triton_v2_speedup = flat_ratios[i]  # triton/v2
             max_height = max(silu_v2_bandwidths[i], triton_bandwidths[i])
 
             # Triton/V2 speedup
@@ -612,7 +612,7 @@ def create_total_tokens_plot(all_results):
             total_tokens_values = config_x_axis[config_idx]
 
             # Extract speedup ratios
-            triton_v2_ratios = [ratio[1] for ratio in ratios]
+            triton_v2_ratios = [ratio for ratio in ratios]
 
             # Extract bandwidth percentages for all implementations
             v2_bandwidth_percentages = [
