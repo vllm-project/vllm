@@ -379,6 +379,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY --from=build /tmp/ep_kernels_workspace/nvshmem /opt/nvshmem
 ENV LD_LIBRARY_PATH=/opt/nvshmem/lib:$LD_LIBRARY_PATH
 
+# Install EP kernels wheels (pplx-kernels and DeepEP) that have been built in the `build` stage
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
