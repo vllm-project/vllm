@@ -93,7 +93,8 @@ class TestReasoningStructuredOutput:
     ):
         """Test should_fill_bitmask when need_structured_in_reasoning is False."""
         # Keep need_structured_in_reasoning as False (default)
-        assert mock_vllm_config.structured_outputs_config.need_structured_in_reasoning is False
+        config = mock_vllm_config.structured_outputs_config
+        assert config.need_structured_in_reasoning is False
 
         manager = StructuredOutputManager(mock_vllm_config)
         manager.reasoner = mock_reasoning_parser

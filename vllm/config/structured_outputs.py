@@ -38,6 +38,7 @@ class StructuredOutputsConfig:
     need_structured_in_reasoning: bool = False
     """ Whether to use structured input for reasoning.
     """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

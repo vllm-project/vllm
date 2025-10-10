@@ -466,7 +466,9 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config"
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
-    need_structured_in_reasoning: bool = StructuredOutputsConfig.need_structured_in_reasoning
+    need_structured_in_reasoning: bool = (
+        StructuredOutputsConfig.need_structured_in_reasoning
+    )
 
     # Deprecated guided decoding fields
     guided_decoding_backend: Optional[str] = None
@@ -1538,7 +1540,9 @@ class EngineArgs:
         if self.reasoning_parser:
             self.structured_outputs_config.reasoning_parser = self.reasoning_parser
         if self.need_structured_in_reasoning:
-            self.structured_outputs_config.need_structured_in_reasoning = self.need_structured_in_reasoning
+            self.structured_outputs_config.need_structured_in_reasoning = (
+                self.need_structured_in_reasoning
+            )
         # Forward the deprecated CLI args to the StructuredOutputsConfig
         so_config = self.structured_outputs_config
         if self.guided_decoding_backend is not None:
