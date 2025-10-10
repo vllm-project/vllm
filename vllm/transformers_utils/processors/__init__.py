@@ -11,5 +11,10 @@ reasons:
 from vllm.transformers_utils.processors.deepseek_vl2 import DeepseekVLV2Processor
 from vllm.transformers_utils.processors.ovis import OvisProcessor
 from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
+from .kimi_audio import KimiAudioProcessor, WhisperEncoder
 
-__all__ = ["DeepseekVLV2Processor", "OvisProcessor", "Ovis2_5Processor"]
+
+__all__ = [
+    "DeepseekVLV2Processor", "OvisProcessor", "Ovis2_5Processor",
+    "KimiAudioProcessor", "WhisperEncoder"
+]

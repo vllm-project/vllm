@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import huggingface_hub
+from tokenizers.tiktoken import TikTokenTokenizer
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing_extensions import assert_never
 
@@ -198,6 +199,10 @@ def get_tokenizer(
     tokenizer: AnyTokenizer
     if tokenizer_mode == "mistral":
         tokenizer = MistralTokenizer.from_pretrained(
+            str(tokenizer_name), revision=revision
+        )
+    elif tokenizer_mode == "tiktoken":
+        tokenizer = TikTokenTokenizer.from_pretrained(
             str(tokenizer_name), revision=revision
         )
     elif tokenizer_mode == "custom":

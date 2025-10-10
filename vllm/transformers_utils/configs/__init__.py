@@ -21,6 +21,7 @@ from vllm.transformers_utils.configs.flex_olmo import FlexOlmoConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
 from vllm.transformers_utils.configs.lfm2_moe import Lfm2MoeConfig
+from vllm.transformers_utils.configs.kimi_audio import WhisperVQConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
 from vllm.transformers_utils.configs.midashenglm import MiDashengLMConfig
 from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
@@ -40,6 +41,8 @@ from vllm.transformers_utils.configs.step3_vl import (
 )
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
+from .kimi_audio import KimiAudioConfig, WhisperVQConfig
+
 __all__ = [
     "ChatGLMConfig",
     "DeepseekVLV2Config",
@@ -55,6 +58,8 @@ __all__ = [
     "MLPSpeculatorConfig",
     "MoonViTConfig",
     "KimiVLConfig",
+    "KimiAudioConfig",
+    "WhisperVQConfig",
     "NemotronConfig",
     "NemotronHConfig",
     "Nemotron_Nano_VL_Config",
