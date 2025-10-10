@@ -60,6 +60,9 @@ class LoggingStatLogger(StatLoggerBase):
         self.spec_decoding_logging = SpecDecodingLogging()
         kv_tranfer_config = self.vllm_config.kv_transfer_config
         self.kv_connector_logging = KVConnectorLogging(kv_tranfer_config)
+        self.connector_prefix_caching_metrics = (
+            PrefixCachingMetrics() if kv_tranfer_config else None
+        )
         self.last_prompt_throughput: float = 0.0
         self.last_generation_throughput: float = 0.0
 
@@ -95,6 +98,14 @@ class LoggingStatLogger(StatLoggerBase):
         if scheduler_stats is not None:
             self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
 
+            if (
+                scheduler_stats.connector_prefix_cache_stats is not None
+                and self.connector_prefix_caching_metrics is not None
+            ):
+                self.connector_prefix_caching_metrics.observe(
+                    scheduler_stats.connector_prefix_cache_stats
+                )
+
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_logging.observe(scheduler_stats.spec_decoding_stats)
             if kv_connector_stats := scheduler_stats.kv_connector_stats:
@@ -125,13 +136,16 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_prompt_throughput = prompt_throughput
 
         # Format and print output.
-        log_fn(
+        log_msg = (
             "Engine %03d: "
             "Avg prompt throughput: %.1f tokens/s, "
             "Avg generation throughput: %.1f tokens/s, "
             "Running: %d reqs, Waiting: %d reqs, "
             "GPU KV cache usage: %.1f%%, "
-            "Prefix cache hit rate: %.1f%%",
+            "Prefix cache hit rate: %.1f%%"
+        )
+
+        log_args = [
             self.engine_index,
             prompt_throughput,
             generation_throughput,
@@ -139,7 +153,14 @@ class LoggingStatLogger(StatLoggerBase):
             scheduler_stats.num_waiting_reqs,
             scheduler_stats.kv_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
-        )
+        ]
+
+        if self.connector_prefix_caching_metrics is not None:
+            log_msg += ", KV connector prefix cache hit rate: %.1f%%"
+            log_args.append(self.connector_prefix_caching_metrics.hit_rate * 100)
+
+        log_fn(log_msg, *log_args)
+
         self.spec_decoding_logging.log(log_fn=log_fn)
         self.kv_connector_logging.log(log_fn=log_fn)
 
@@ -286,6 +307,32 @@ class PrometheusStatLogger(StatLoggerBase):
         )
         self.counter_prefix_cache_hits = make_per_engine(
             counter_prefix_cache_hits, engine_indexes, model_name
+        )
+
+        #
+        # KV connector cache
+        #
+        counter_connector_prefix_cache_queries = self._counter_cls(
+            name="vllm:connector_prefix_cache_queries",
+            documentation=(
+                "KV connector prefix cache queries, "
+                "in terms of number of queried tokens."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_connector_prefix_cache_queries = make_per_engine(
+            counter_connector_prefix_cache_queries, engine_indexes, model_name
+        )
+
+        counter_connector_prefix_cache_hits = self._counter_cls(
+            name="vllm:connector_prefix_cache_hits",
+            documentation=(
+                "KV connector prefix cache hits, in terms of number of cached tokens."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_connector_prefix_cache_hits = make_per_engine(
+            counter_connector_prefix_cache_hits, engine_indexes, model_name
         )
 
         #
@@ -688,6 +735,14 @@ class PrometheusStatLogger(StatLoggerBase):
             self.counter_prefix_cache_hits[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.hits
             )
+
+            if scheduler_stats.connector_prefix_cache_stats is not None:
+                self.counter_connector_prefix_cache_queries[engine_idx].inc(
+                    scheduler_stats.connector_prefix_cache_stats.queries
+                )
+                self.counter_connector_prefix_cache_hits[engine_idx].inc(
+                    scheduler_stats.connector_prefix_cache_stats.hits
+                )
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(
