@@ -1016,20 +1016,23 @@ class EagleProposer:
         self,
         num_tokens: int,
     ) -> None:
-        with set_forward_context(None, self.vllm_config, num_tokens=num_tokens):
-            if self.supports_mm_inputs:
-                input_ids = None
-                inputs_embeds = self.inputs_embeds[:num_tokens]
-            else:
-                input_ids = self.input_ids[:num_tokens]
-                inputs_embeds = None
+        # FIXME: when using tree-based specdec, adjust number of forward-passes
+        # according to the depth of the tree.
+        for _ in range(self.num_speculative_tokens):
+            with set_forward_context(None, self.vllm_config, num_tokens=num_tokens):
+                if self.supports_mm_inputs:
+                    input_ids = None
+                    inputs_embeds = self.inputs_embeds[:num_tokens]
+                else:
+                    input_ids = self.input_ids[:num_tokens]
+                    inputs_embeds = None
 
-            self.model(
-                input_ids=input_ids,
-                positions=self._get_positions(num_tokens),
-                hidden_states=self.hidden_states[:num_tokens],
-                inputs_embeds=inputs_embeds,
-            )
+                self.model(
+                    input_ids=input_ids,
+                    positions=self._get_positions(num_tokens),
+                    hidden_states=self.hidden_states[:num_tokens],
+                    inputs_embeds=inputs_embeds,
+                )
 
     def _get_attention_metadata_builder(self) -> list[AttentionMetadataBuilder]:
         """Find and return the attention metadata builders for EAGLE layers.
