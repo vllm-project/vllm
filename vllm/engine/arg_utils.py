@@ -416,7 +416,7 @@ class EngineArgs:
     tokenizer_revision: Optional[str] = ModelConfig.tokenizer_revision
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
-    need_structured_in_reasoning: bool = ModelConfig.need_structured_in_reasoning
+
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     limit_mm_per_prompt: dict[str, Union[int, dict[str, int]]] = get_field(
         MultiModalConfig, "limit_per_prompt"
@@ -466,6 +466,10 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config"
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
+    need_structured_in_reasoning: bool = (
+        StructuredOutputsConfig.need_structured_in_reasoning
+    )
+
     # Deprecated guided decoding fields
     guided_decoding_backend: Optional[str] = None
     guided_decoding_disable_fallback: Optional[bool] = None
@@ -673,6 +677,10 @@ class EngineArgs:
             # This choice is a special case because it's not static
             choices=list(ReasoningParserManager.reasoning_parsers),
             **structured_outputs_kwargs["reasoning_parser"],
+        )
+        structured_outputs_group.add_argument(
+            "--need-structured-in-reasoning",
+            **structured_outputs_kwargs["need_structured_in_reasoning"],
         )
         # Deprecated guided decoding arguments
         for arg, type in [
@@ -1144,7 +1152,6 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
-            need_structured_in_reasoning=self.need_structured_in_reasoning,
         )
 
     def validate_tensorizer_args(self):
@@ -1532,7 +1539,10 @@ class EngineArgs:
         # Pass reasoning_parser into StructuredOutputsConfig
         if self.reasoning_parser:
             self.structured_outputs_config.reasoning_parser = self.reasoning_parser
-
+        if self.need_structured_in_reasoning:
+            self.structured_outputs_config.need_structured_in_reasoning = (
+                self.need_structured_in_reasoning
+            )
         # Forward the deprecated CLI args to the StructuredOutputsConfig
         so_config = self.structured_outputs_config
         if self.guided_decoding_backend is not None:

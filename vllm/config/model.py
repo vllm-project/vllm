@@ -285,8 +285,6 @@ class ModelConfig:
     definitions"""
     io_processor_plugin: Optional[str] = None
     """IOProcessor plugin name to load at model startup"""
-    need_structured_in_reasoning: bool = False
-    """Whether to use structured input for reasoning. """
 
     # Pooler config
     pooler_config: Optional[PoolerConfig] = None
