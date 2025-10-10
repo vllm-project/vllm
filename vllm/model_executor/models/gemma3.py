@@ -372,6 +372,7 @@ class Gemma3Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
             prefix=f"{prefix}.embed_tokens",
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -442,6 +443,15 @@ class Gemma3Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            # Revert +1 during llama.cpp conversion
+            # see: https://github.com/ggml-org/llama.cpp/blob/be7c3034108473beda214fd1d7c98fd6a7a3bdf5/convert_hf_to_gguf.py#L3397-L3400
+            if (
+                self.quant_config
+                and self.quant_config.get_name() == "gguf"
+                and name.endswith("norm.weight")
+            ):
+                loaded_weight -= 1
+
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
             ):

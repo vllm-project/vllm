@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -48,7 +49,8 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.speculative_config.draft_model_config.hf_config
+        self.config = config
         quant_config = vllm_config.quant_config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -66,11 +68,15 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             )
         else:
             topk_indices_buffer = None
+
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
         self.mtp_block = DeepseekV2DecoderLayer(
-            vllm_config, prefix, topk_indices_buffer
+            vllm_config,
+            prefix,
+            config=self.config,
+            topk_indices_buffer=topk_indices_buffer,
         )
 
     def forward(
@@ -157,6 +163,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         return logits
 
 
+@support_torch_compile
 class DeepSeekMTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

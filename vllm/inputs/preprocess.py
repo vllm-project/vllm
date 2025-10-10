@@ -18,6 +18,8 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils.jsontree import json_iter_leaves
+from vllm.v1.metrics.stats import MultiModalCacheStats
 
 from .data import (
     DecoderOnlyInputs,
@@ -55,6 +57,8 @@ class InputPreprocessor:
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_processor_cache
 
+        self.mm_cache_stats = MultiModalCacheStats() if mm_processor_cache else None
+
     def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
             raise ValueError(
@@ -65,7 +69,7 @@ class InputPreprocessor:
 
     def get_bos_token_id(self) -> Optional[int]:
         if self.tokenizer is None:
-            logger.warning(
+            logger.warning_once(
                 "Using None for BOS token id because tokenizer is not initialized"
             )
             return None
@@ -74,7 +78,7 @@ class InputPreprocessor:
 
     def get_eos_token_id(self) -> Optional[int]:
         if self.tokenizer is None:
-            logger.warning(
+            logger.warning_once(
                 "Using None for EOS token id because tokenizer is not initialized"
             )
             return None
@@ -273,7 +277,10 @@ class InputPreprocessor:
         mm_hashes = mm_input["mm_hashes"]
 
         # Validate that all mm items have a string as their hash
-        if not contains_only_strings(mm_hashes):
+        contains_only_strings = all(
+            isinstance(leaf, str) for leaf in json_iter_leaves(mm_hashes)
+        )
+        if not contains_only_strings:
             raise ValueError(
                 f"mm_hashes must contain only strings, got: {mm_hashes}. "
                 "This is likely due to an incorrect custom implementation of "
@@ -344,8 +351,8 @@ class InputPreprocessor:
         if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_token_ids,
-                parsed_content.get("multi_modal_data", {}),
-                parsed_content.get("mm_processor_kwargs"),
+                parsed_content.get("multi_modal_data") or {},
+                parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
@@ -373,8 +380,8 @@ class InputPreprocessor:
         if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_text,
-                parsed_content.get("multi_modal_data", {}),
-                parsed_content.get("mm_processor_kwargs"),
+                parsed_content.get("multi_modal_data") or {},
+                parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
@@ -660,14 +667,13 @@ class InputPreprocessor:
 
         return self._build_decoder_only_llm_inputs(prompt_comps)
 
-    def preprocess(
+    def _preprocess(
         self,
         prompt: PromptType,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         *,
         mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> ProcessorInputs:
-        """Preprocess the input prompt."""
         if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder.
@@ -690,18 +696,40 @@ class InputPreprocessor:
             mm_uuids=mm_uuids,
         )
 
-    def clear_cache(self) -> None:
+    def preprocess(
+        self,
+        prompt: PromptType,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        *,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
+    ) -> ProcessorInputs:
+        """Preprocess the input prompt."""
+        res = self._preprocess(
+            prompt,
+            tokenization_kwargs,
+            mm_uuids=mm_uuids,
+        )
+
+        if self.mm_processor_cache and self.mm_cache_stats is not None:
+            delta = self.mm_processor_cache.make_stats(delta=True)
+            self.mm_cache_stats.requests += 1
+            self.mm_cache_stats.queries += delta.total
+            self.mm_cache_stats.hits += delta.hits
+
+        return res
+
+    def stat_mm_cache(self) -> Optional[MultiModalCacheStats]:
+        mm_cache_stats = self.mm_cache_stats
+        if mm_cache_stats is None:
+            return None
+
+        self.mm_cache_stats = MultiModalCacheStats()
+
+        return mm_cache_stats
+
+    def clear_mm_cache(self) -> None:
         if self.mm_processor_cache is not None:
             self.mm_processor_cache.clear_cache()
 
-
-# Helper function to validate that a nested dictionary contains
-# only strings or list of strings as the leaf values.
-def contains_only_strings(obj: object):
-    if isinstance(obj, str):
-        return True
-    if isinstance(obj, list):
-        return all(isinstance(x, str) for x in obj)
-    if isinstance(obj, dict):
-        return all(contains_only_strings(v) for v in obj.values())
-    return False
+        if self.mm_cache_stats is not None:
+            self.mm_cache_stats.reset = True

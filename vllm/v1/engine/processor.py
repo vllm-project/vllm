@@ -29,6 +29,7 @@ from vllm.utils import (
     memory_profiling,
 )
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.metrics.stats import MultiModalCacheStats
 from vllm.v1.structured_output.backend_guidance import validate_guidance_grammar
 from vllm.v1.structured_output.backend_lm_format_enforcer import (
     validate_structured_output_request_lm_format_enforcer,
@@ -46,9 +47,9 @@ class Processor:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: Optional[AnyTokenizer],
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-    ):
+    ) -> None:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -56,7 +57,6 @@ class Processor:
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
-        self.tokenizer = tokenizer
 
         self.generation_config_fields = self.model_config.try_get_generation_config()
 
@@ -65,12 +65,20 @@ class Processor:
 
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
-            self.tokenizer,
+            tokenizer,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
 
         self.profile_run()
+
+    @property
+    def tokenizer(self) -> Optional[AnyTokenizer]:
+        return self.input_preprocessor.tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, tokenizer: Optional[AnyTokenizer]) -> None:
+        self.input_preprocessor.tokenizer = tokenizer
 
     def _validate_logprobs(
         self,
@@ -524,10 +532,8 @@ class Processor:
             else:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
-        if self.model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = self.tokenizer
+        tokenizer = self.tokenizer
+        if tokenizer is not None:
             max_input_id = max(prompt_ids or [], default=0)
 
             # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
@@ -572,9 +578,8 @@ class Processor:
                 )
 
             raise ValueError(
-                f"The {prompt_type} prompt (length {prompt_len}) is "
-                f"longer than the maximum model length of {max_prompt_len}. "
-                f"{suggestion}"
+                f"The {prompt_type} prompt (length {prompt_len}) is longer than "
+                f"the maximum model length of {max_prompt_len}. {suggestion}"
             )
 
             # TODO: Find out how many placeholder tokens are there so we can
@@ -655,11 +660,12 @@ class Processor:
             )
             if memory_usage > diff.before_profile.free_memory:
                 raise ValueError(
-                    f"Not enough memory in {device} "
-                    f"for multi-modal processor. "
-                    f"Try reducing `api_server_count` or "
-                    f"revert to CPU processing."
+                    f"Not enough memory in {device} for multi-modal processor. "
+                    f"Try reducing `api_server_count` or revert to CPU processing."
                 )
 
-    def clear_cache(self) -> None:
-        self.input_preprocessor.clear_cache()
+    def stat_mm_cache(self) -> Optional[MultiModalCacheStats]:
+        return self.input_preprocessor.stat_mm_cache()
+
+    def clear_mm_cache(self) -> None:
+        self.input_preprocessor.clear_mm_cache()

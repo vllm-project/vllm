@@ -296,6 +296,7 @@ steps:
     - tests/v1
   commands:
     # split the test to avoid interference
+    - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
     - pytest -v -s v1/kv_offload
     - pytest -v -s v1/sample
@@ -317,7 +318,7 @@ steps:
   no_gpu: true
   commands:
     # split the test to avoid interference
-    - pytest -v -s v1/core
+    - pytest -v -s -m 'cpu_test' v1/core
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
@@ -399,8 +400,6 @@ steps:
     - pytest -v -s compile/test_fusion_attn.py
     - pytest -v -s compile/test_functionalization.py
     - pytest -v -s compile/test_silu_mul_quant_fusion.py
-    - pytest -v -s compile/test_sequence_parallelism.py
-    - pytest -v -s compile/test_async_tp.py
     - pytest -v -s compile/test_fusion_all_reduce.py
     - pytest -v -s compile/test_decorator.py
     - pytest -v -s compile/test_noop_elimination.py
@@ -432,8 +431,9 @@ steps:
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
+  - tests/kernels/test_top_k_per_row.py
   commands:
-    - pytest -v -s kernels/core
+    - pytest -v -s kernels/core kernels/test_top_k_per_row.py
 
 - label: Kernels Attention Test %N # 23min
   timeout_in_minutes: 35
@@ -828,7 +828,7 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
-    - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
+    - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     # Fusion
     - pytest -v -s tests/compile/test_fusion_all_reduce.py
     - pytest -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
@@ -867,7 +867,7 @@ steps:
     - pytest -s -v tests/quantization/test_blackwell_moe.py
 
 - label: Blackwell LM Eval Small Models
-  timeout_in_minutes: 75
+  timeout_in_minutes: 120
   gpu: b200
   optional: true # run on nightlies
   source_file_dependencies:
@@ -1092,6 +1092,8 @@ steps:
   working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
+    - pytest -v -s tests/compile/test_async_tp.py
+    - pytest -v -s tests/compile/test_sequence_parallelism.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
 

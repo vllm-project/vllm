@@ -472,7 +472,7 @@ class VllmConfig:
                 self.compilation_config.cudagraph_mode.has_full_cudagraphs()
                 and self.model_config is not None
                 and not self.model_config.disable_cascade_attn
-                and not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+                and not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()  # noqa: E501
             ):
                 logger.warning_once(
                     "No piecewise cudagraph for executing cascade attention."
@@ -605,7 +605,7 @@ class VllmConfig:
         # https://github.com/vllm-project/vllm/issues/25094
         if has_blocked_weights():
             custom_ops = self.compilation_config.custom_ops
-            if "none" not in custom_ops and "-quant_fp8" not in custom_ops:
+            if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:

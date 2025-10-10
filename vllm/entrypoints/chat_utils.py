@@ -403,20 +403,12 @@ def resolve_mistral_chat_template(
     chat_template: Optional[str],
     **kwargs: Any,
 ) -> Optional[str]:
-    if chat_template is not None:
-        logger.warning_once(
-            "'chat_template' cannot be overridden for mistral tokenizer."
+    if chat_template is not None or kwargs.get("chat_template_kwargs") is not None:
+        raise ValueError(
+            "'chat_template' or 'chat_template_kwargs' cannot be overridden "
+            "for mistral tokenizer."
         )
-    if "add_generation_prompt" in kwargs:
-        logger.warning_once(
-            "'add_generation_prompt' is not supported for mistral tokenizer, "
-            "so it will be ignored."
-        )
-    if "continue_final_message" in kwargs:
-        logger.warning_once(
-            "'continue_final_message' is not supported for mistral tokenizer, "
-            "so it will be ignored."
-        )
+
     return None
 
 
@@ -498,14 +490,14 @@ def resolve_hf_chat_template(
         tokenizer_name_or_path=model_config.tokenizer,
     )
     if path is not None:
-        logger.info(
+        logger.info_once(
             "Loading chat template fallback for %s as there isn't one "
             "defined on HF Hub.",
             tokenizer.name_or_path,
         )
         chat_template = load_chat_template(path)
     else:
-        logger.debug(
+        logger.debug_once(
             "There is no chat template fallback for %s", tokenizer.name_or_path
         )
 
