@@ -242,7 +242,6 @@ def fused_marlin_moe(
         is_zp_float=False,
     ).view(-1, topk, K)
 
-
     if output is None:
         output = hidden_states if inplace else torch.empty_like(hidden_states)
     if moe_sum is None:
