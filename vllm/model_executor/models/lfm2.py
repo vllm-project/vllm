@@ -71,14 +71,14 @@ class Lfm2MLP(nn.Module):
             output_sizes=[ff_dim] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj",
+            prefix=f"{prefix}.w1",
         )
         self.w2 = RowParallelLinear(
             input_size=ff_dim,
             output_size=dim,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.down_proj",
+            prefix=f"{prefix}.w2",
         )
         self.act_fn = SiluAndMul()
 
@@ -484,17 +484,12 @@ class Lfm2ForCausalLM(
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
-        scheduler_config = vllm_config.scheduler_config
         assert not cache_config.enable_prefix_caching, (
             "Lfm2 currently does not support prefix caching"
         )
 
         super().__init__()
         self.config = config
-        self.vllm_config = vllm_config
-        self.scheduler_config = scheduler_config
-        self.model_config = vllm_config.model_config
-
         self.model = Lfm2Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )

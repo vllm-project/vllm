@@ -14,7 +14,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache, disable_inplace
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_moe_intermediate_size,
@@ -235,7 +235,11 @@ def fused_marlin_moe(
     ).view(-1, topk, K)
 
     if output is None:
-        output = hidden_states if inplace else torch.empty_like(hidden_states)
+        if inplace and not disable_inplace():
+            output = hidden_states
+        else:
+            output = torch.empty_like(hidden_states)
+
     return torch.sum(intermediate_cache3.view(-1, topk, K), dim=1, out=output)
 
 
@@ -331,8 +335,6 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
@@ -340,7 +342,7 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # Modular Kernel provisions output buffer from workspace1. However in
         # the fused_marlin_moe() function, the final torch.sum(), is defined
         # essentially as,
@@ -360,7 +362,7 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2 = (M * topk * max(2 * N, K),)
         output = (M, K)
 
-        return (workspace1, workspace2, output, a.dtype)
+        return (workspace1, workspace2, output)
 
     def apply(
         self,
