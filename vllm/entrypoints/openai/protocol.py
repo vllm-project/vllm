@@ -1953,7 +1953,7 @@ class ChatMessage(OpenAIBaseModel):
     annotations: Optional[OpenAIAnnotation] = None
     audio: Optional[OpenAIChatCompletionAudio] = None
     function_call: Optional[FunctionCall] = None
-    tool_calls: list[ToolCall] = Field(default_factory=list)
+    tool_calls: Optional[list[ToolCall]] = None
 
     # vLLM-specific fields that are not in OpenAI spec
     reasoning_content: Optional[str] = None
@@ -2013,7 +2013,7 @@ class DeltaMessage(OpenAIBaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
     reasoning_content: Optional[str] = None
-    tool_calls: list[DeltaToolCall] = Field(default_factory=list)
+    tool_calls: Optional[list[DeltaToolCall]] = None
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
