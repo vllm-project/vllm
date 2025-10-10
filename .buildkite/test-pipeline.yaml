@@ -299,6 +299,7 @@ steps:
     - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
     - pytest -v -s v1/kv_offload
+    - pytest -v -s v1/attention
     - pytest -v -s v1/sample
     - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
