@@ -10,6 +10,7 @@ import vllm._custom_ops as ops
 from vllm.attention.backends.abstract import (
     AttentionLayer,
     AttentionType,
+    MultipleOf,
     is_quantized_kv_cache,
 )
 from vllm.config.cache import BlockSize
@@ -45,6 +46,10 @@ class CutlassMLABackend(MLACommonBackend):
     @staticmethod
     def get_builder_cls() -> type["CutlassMLAMetadataBuilder"]:
         return CutlassMLAMetadataBuilder
+
+    @classmethod
+    def get_supported_kernel_block_size(cls) -> list[Union[int, MultipleOf]]:
+        return [128]
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:

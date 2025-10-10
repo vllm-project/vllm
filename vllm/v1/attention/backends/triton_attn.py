@@ -3,7 +3,7 @@
 """High-Performance Triton-only Attention layer."""
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, Union
 
 import torch
 
@@ -12,6 +12,7 @@ from vllm.attention.backends.abstract import (
     AttentionImpl,
     AttentionMetadata,
     AttentionType,
+    MultipleOf,
 )
 from vllm.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
@@ -197,6 +198,10 @@ class TritonAttentionBackend(AttentionBackend):
                 "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
                 "FlexAttention backend which supports all head sizes."
             )
+
+    @classmethod
+    def get_supported_kernel_block_size(cls) -> list[Union[int, MultipleOf]]:
+        return [MultipleOf(16)]
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:

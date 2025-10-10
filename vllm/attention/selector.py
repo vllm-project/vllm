@@ -13,7 +13,6 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.registry import _Backend
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils import STR_BACKEND_ENV_VAR, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
@@ -134,6 +133,8 @@ def _cached_get_attn_backend(
                 ) from e
 
     # get device-specific attn_backend
+    from vllm.platforms import current_platform
+
     attention_cls = current_platform.get_attn_backend_cls(
         selected_backend,
         head_size,

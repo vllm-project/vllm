@@ -3,7 +3,7 @@
 """Attention layer with AiterFlashAttention."""
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -12,6 +12,7 @@ from vllm.attention.backends.abstract import (
     AttentionImpl,
     AttentionMetadata,
     AttentionType,
+    MultipleOf,
 )
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -386,6 +387,10 @@ class AiterFlashAttentionBackend(AttentionBackend):
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def get_supported_kernel_block_size(cls) -> list[Union[int, MultipleOf]]:
+        return [MultipleOf(16)]
 
 
 class AiterFlashAttentionImpl(AttentionImpl):
