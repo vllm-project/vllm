@@ -1672,6 +1672,14 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     """
     softmax: bool = True
 
+    embed_dtype: str = Field(
+        default="float32",
+        description=(
+            "What dtype to use for base64 encoding. Default to using "
+            "float32 for base64 encoding to match the OpenAI python client behavior."
+        ),
+    )
+
     def to_pooling_params(self):
         return PoolingParams(task="encode", softmax=self.softmax)
 

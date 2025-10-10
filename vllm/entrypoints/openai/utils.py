@@ -1,7 +1,8 @@
 import base64
-from typing import Literal, Union, assert_never
+from typing import Literal, Union
 
 import torch
+from typing_extensions import assert_never
 
 from vllm import PoolingRequestOutput
 from vllm.entrypoints.openai.protocol import EMBED_DTYPE_TO_TORCH_DTYPE

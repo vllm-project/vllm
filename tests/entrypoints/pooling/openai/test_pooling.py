@@ -279,8 +279,6 @@ async def test_base64_embed_dtype(server: RemoteOpenAIServer, model_name: str):
             },
         )
 
-        print(responses_base64.json())
-
         base64_data = []
         for data in responses_base64.json()["data"]:
             base64_data.append(
