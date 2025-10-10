@@ -856,7 +856,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if mm_input.get("use_audio_in_video") is True:
                 use_audio_in_video = True
 
-        assert supports_mrope(self.model), "M-RoPE support is not implemented."
+        assert supports_mrope(self.get_model()), "M-RoPE support is not implemented."
 
         req_state.mrope_positions, req_state.mrope_position_delta = (
             self.model.get_mrope_input_positions(
@@ -2892,7 +2892,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         prepare_communication_buffer_for_model(self.model)
 
         self.is_multimodal_pruning_enabled = (
-            supports_multimodal_pruning(self.model)
+            supports_multimodal_pruning(self.get_model())
             and self.model_config.multimodal_config.is_multimodal_pruning_enabled()
         )
 
