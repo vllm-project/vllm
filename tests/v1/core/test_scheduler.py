@@ -1022,9 +1022,9 @@ def test_kv_connector_unable_to_allocate():
     unable to allocate (run out of blocks in allocate_slots().
     """
 
-    # Setup Scheduler With Mock External Cache Hit.
+    # Setup Scheduler With Mock External Cache Hit. (2 blocks, 2 null)
     BLOCK_SIZE = 8
-    NUM_BLOCKS = 10
+    NUM_BLOCKS = 18
     scheduler = create_scheduler(
         enable_prefix_caching=True,
         use_kv_connector=True,
@@ -1104,10 +1104,9 @@ def test_kv_connector_handles_preemption():
     unable to allocate (run out of blocks in allocate_slots().
     """
 
-    # Setup Scheduler With Mock External Cache Hit.
-    BLOCK_SIZE = 2
-    # NOTE: there is 1 null block, so this is 6 blocks.
-    NUM_BLOCKS = 7
+    # Setup Scheduler With Mock External Cache Hit. (6 blocks, 1 null)
+    BLOCK_SIZE = 8
+    NUM_BLOCKS = 49
     scheduler = create_scheduler(
         enable_prefix_caching=True,
         use_kv_connector=True,
