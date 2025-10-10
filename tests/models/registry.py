@@ -772,7 +772,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         min_transformers_version="4.57",
         is_available_online=False,
     ),
-    "Qwen3OmniMoeThinkerForConditionalGeneration": _HfExamplesInfo(
+    "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         max_model_len=4096,
         min_transformers_version="4.57",
