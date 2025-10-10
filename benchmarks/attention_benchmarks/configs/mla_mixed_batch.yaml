@@ -15,34 +15,34 @@ model:
 
 batch_specs:
   # Small prefill + decode
-  - "1q1k_8s1k"           # 1 prefill + 8 decode
-  - "2q2k_16s1k"          # 2 prefill + 16 decode
-  - "4q1k_32s2k"          # 4 prefill + 32 decode
+  - "1q1k_8q1kv1k"           # 1 prefill + 8 decode
+  - "2q2k_16q1kv1k"          # 2 prefill + 16 decode
+  - "4q1k_32q1kv2k"          # 4 prefill + 32 decode
 
   # Medium prefill + decode
-  - "2q4k_32s2k"          # 2 medium prefill + 32 decode
-  - "4q4k_64s2k"          # 4 medium prefill + 64 decode
-  - "8q2k_64s4k"          # 8 prefill + 64 decode
+  - "2q4k_32q1kv2k"          # 2 medium prefill + 32 decode
+  - "4q4k_64q1kv2k"          # 4 medium prefill + 64 decode
+  - "8q2k_64q1kv4k"          # 8 prefill + 64 decode
 
   # Large prefill + decode (chunked prefill stress test)
-  - "2q8k_32s1k"          # 2 large prefill + 32 decode
-  - "1q16k_16s2k"         # 1 very large prefill + 16 decode
-  - "2q16k_32s4k"         # 2 very large prefill + 32 decode
+  - "2q8k_32q1kv1k"          # 2 large prefill + 32 decode
+  - "1q16k_16q1kv2k"         # 1 very large prefill + 16 decode
+  - "2q16k_32q1kv4k"         # 2 very large prefill + 32 decode
 
   # Context extension + decode
-  - "2q1ks2k_16s1k"       # 2 extend + 16 decode
-  - "4q2ks4k_32s2k"       # 4 extend + 32 decode
-  - "2q1ks8k_32s2k"       # 2 large extend + 32 decode
+  - "2q1kkv2k_16q1kv1k"       # 2 extend + 16 decode
+  - "4q2kkv4k_32q1kv2k"       # 4 extend + 32 decode
+  - "2q1kkv8k_32q1kv2k"       # 2 large extend + 32 decode
 
   # Explicitly chunked prefill
-  - "chunk4q8k"           # 8k prefill with chunking hint
-  - "chunk8q16k"          # 16k prefill with chunking hint
-  - "2chunk4q8k_32s2k"    # 2 chunked prefill + 32 decode
+  - "q8k"           # 8k prefill with chunking hint
+  - "q16k"          # 16k prefill with chunking hint
+  - "2q8k_32q1kv2k"    # 2 chunked prefill + 32 decode
 
   # High decode ratio (realistic serving)
-  - "1q2k_63s1k"          # 1 prefill + 63 decode
-  - "2q2k_62s2k"          # 2 prefill + 62 decode
-  - "4q4k_60s4k"          # 4 prefill + 60 decode
+  - "1q2k_63q1kv1k"          # 1 prefill + 63 decode
+  - "2q2k_62q1kv2k"          # 2 prefill + 62 decode
+  - "4q4k_60q1kv4k"          # 4 prefill + 60 decode
 
 backends:
   - cutlass_mla
