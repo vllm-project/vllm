@@ -512,6 +512,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
         )
 
+    def reset_mm_cache(self) -> None:
+        if self.mm_budget:
+            self.mm_budget.reset_cache()
+
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
             if self.uses_mrope:
@@ -712,6 +716,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Update the cached states.
 
             req_state.num_computed_tokens = num_computed_tokens
+            req_index = self.input_batch.req_id_to_index.get(req_id)
 
             if not is_last_rank:
                 # When using PP, the scheduler sends the sampled tokens back,
@@ -732,19 +737,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Some output tokens were discarded due to a sync-KV-load
                 # failure. Align the cached state.
                 del req_state.output_token_ids[num_output_tokens:]
-
-                req_index = self.input_batch.req_id_to_index.get(req_id)
                 if req_index is not None:
-                    old_end_idx = self.input_batch.num_tokens_no_spec[req_index]
                     end_idx = (
                         self.input_batch.num_prompt_tokens[req_index]
                         + num_output_tokens
                     )
                     self.input_batch.num_tokens[req_index] = end_idx
                     self.input_batch.num_tokens_no_spec[req_index] = end_idx
-                    self.input_batch.is_token_ids[req_index, end_idx:old_end_idx] = (
-                        False
-                    )
 
             # Update the block IDs.
             if not resumed_from_preemption:
@@ -753,12 +752,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     for block_ids, new_ids in zip(req_state.block_ids, new_block_ids):
                         block_ids.extend(new_ids)
             else:
+                assert req_index is None
                 assert new_block_ids is not None
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
 
-            req_index = self.input_batch.req_id_to_index.get(req_id)
             if req_index is None:
                 # The request is not in the persistent batch.
                 # The request was either preempted and resumed later, or was not
@@ -1183,13 +1182,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         uniform_decode = (
             max_num_scheduled_tokens == self.uniform_decode_query_len
         ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
+
+        # Disable DP padding when running eager to avoid excessive padding when
+        # running prefills. This lets us set enforce_eager on the prefiller in
+        # a P/D setup and still use CUDA graphs (enabled by this padding) on the
+        # decoder.
+        allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
-            num_scheduled_tokens,
-            num_tokens_unpadded,
-            num_tokens_padded,
-            self.parallel_config,
-            True,
-            uniform_decode,
+            num_tokens_unpadded=num_tokens_unpadded,
+            parallel_config=self.parallel_config,
+            allow_microbatching=True,
+            allow_dp_padding=allow_dp_padding,
+            num_tokens_padded=num_tokens_padded,
+            uniform_decode=uniform_decode,
+            num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
 
         self.seq_lens.np[:num_reqs] = (
@@ -2444,12 +2451,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     use_cascade_attn,
                 ) = self._prepare_inputs(scheduler_output)
 
+            dp_rank = self.parallel_config.data_parallel_rank
             if ubatch_slices:
                 assert num_tokens_across_dp is not None
-                num_input_tokens = int(num_tokens_across_dp[0].item())
+                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
                 self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
             elif num_tokens_across_dp is not None:
-                num_input_tokens = int(num_tokens_across_dp[0].item())
+                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
             else:
                 num_input_tokens = self._get_num_input_tokens(
                     scheduler_output.total_num_scheduled_tokens
@@ -3273,19 +3281,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
         total_num_scheduled_tokens = int(num_scheduled_tokens.sum())
 
+        # Disable DP padding when running eager
+        allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
-            num_scheduled_tokens,
-            total_num_scheduled_tokens,
-            total_num_scheduled_tokens,
-            self.vllm_config.parallel_config,
-            allow_microbatching,
-            uniform_decode,
+            num_tokens_unpadded=total_num_scheduled_tokens,
+            parallel_config=self.vllm_config.parallel_config,
+            allow_microbatching=allow_microbatching,
+            allow_dp_padding=allow_dp_padding,
+            num_tokens_padded=total_num_scheduled_tokens,
+            uniform_decode=uniform_decode,
+            num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
         num_tokens_after_padding = num_tokens
         if num_tokens_across_dp is not None:
-            num_tokens_after_padding = int(num_tokens_across_dp[0])
+            dp_rank = self.parallel_config.data_parallel_rank
+            num_tokens_after_padding = int(num_tokens_across_dp[dp_rank])
 
         attn_metadata: Optional[PerLayerAttnMetadata] = None
 
@@ -3462,7 +3475,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
-                self.drafter.dummy_run(num_tokens)
+                use_cudagraphs = cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+                self.drafter.dummy_run(num_tokens, use_cudagraphs=use_cudagraphs)
 
         # This is necessary to avoid blocking DP.
         # For dummy runs, we typically skip EPLB since we don't have any real
@@ -4263,9 +4277,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for kv_cache_group_id, kv_cache_group in enumerate(
             kv_cache_config.kv_cache_groups
         ):
-            if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                # All layers in the UniformTypeKVCacheSpecs have the same type,
+                # Pick an arbitrary one to dispatch.
+                kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
+            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
-            elif isinstance(kv_cache_group.kv_cache_spec, AttentionSpec):
+            elif isinstance(kv_cache_spec, AttentionSpec):
                 # This is an attention backend that supports virtual
                 # block splitting. Get the supported block sizes from
                 # all backends in the group.
@@ -4275,10 +4294,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     kv_manager_block_size, attn_groups
                 )
                 kernel_block_sizes.append(selected_kernel_size)
-            elif isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
+            elif isinstance(kv_cache_spec, MambaSpec):
                 # This is likely Mamba or other non-attention cache,
                 # no splitting.
-                kernel_block_sizes.append(kv_cache_group.kv_cache_spec.block_size)
+                kernel_block_sizes.append(kv_cache_spec.block_size)
             else:
                 raise NotImplementedError(
                     f"unknown kv cache spec {kv_cache_group.kv_cache_spec}"
