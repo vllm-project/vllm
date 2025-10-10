@@ -4,6 +4,7 @@
         "qps_list": [1, 4, 16, "inf"],
         "server_environment_variables": {
             "PT_HPU_LAZY_MODE": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
             "VLLM_DEFRAG": 1
         },
         "server_parameters": {
@@ -30,6 +31,7 @@
         "server_environment_variables": {
             "PT_HPU_LAZY_MODE": 1,
             "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
             "VLLM_DEFRAG": 1
         },
         "server_parameters": {
@@ -56,6 +58,7 @@
         "server_environment_variables": {
             "PT_HPU_LAZY_MODE": 1,
             "PT_HPU_ENABLE_LAZY_COLLECTIVES": 1,
+            "VLLM_CONTIGUOUS_PA": 1,
             "VLLM_DEFRAG": 1
         },
         "server_parameters": {
