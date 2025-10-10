@@ -238,7 +238,7 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
         echo "Skipping wheel size check."; \
     fi
 
-# Install DeepGEMM from source
+# Build DeepGEMM wheel from source
 ARG DEEPGEMM_GIT_REF
 COPY --chmod=755 tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
