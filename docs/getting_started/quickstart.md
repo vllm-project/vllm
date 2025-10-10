@@ -47,20 +47,21 @@ This guide will help you quickly get started with vLLM to perform:
     
     The `-v` flag in the `docker run` command below mounts a local directory into the container. Replace `<path/to/your/models>` with the path on your host machine to the directory containing your models. The models will then be accessible inside the container at `/app/models`.
     
-    ```bash
-    docker pull rocm/vllm-dev:nightly # to get the latest image
-    docker run -it --rm \
-    --network=host \
-    --group-add=video \
-    --ipc=host \
-    --cap-add=SYS_PTRACE \
-    --security-opt seccomp=unconfined \
-    --device /dev/kfd \
-    --device /dev/dri \
-    -v <path/to/your/models>:/app/models \
-    -e HF_HOME="/app/models" \
-    rocm/vllm-dev:nightly
-    ```
+    ???+ console "Commands"
+        ```bash
+        docker pull rocm/vllm-dev:nightly # to get the latest image
+        docker run -it --rm \
+        --network=host \
+        --group-add=video \
+        --ipc=host \
+        --cap-add=SYS_PTRACE \
+        --security-opt seccomp=unconfined \
+        --device /dev/kfd \
+        --device /dev/dri \
+        -v <path/to/your/models>:/app/models \
+        -e HF_HOME="/app/models" \
+        rocm/vllm-dev:nightly
+        ```
 
 !!! note
     For more detail and non-CUDA platforms, please refer [here](installation/README.md) for specific instructions on how to install vLLM.
