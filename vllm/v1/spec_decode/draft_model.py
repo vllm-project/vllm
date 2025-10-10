@@ -7,7 +7,6 @@ import torch
 
 from vllm.attention.layer import Attention
 from vllm.config import ModelConfig, VllmConfig, get_layers_from_vllm_config
-from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
@@ -104,21 +103,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
 
     def _raise_if_vocab_size_mismatch(self):
         self.vllm_config.speculative_config.verify_equal_vocab_size_if_draft_model()
-
-    def _model_kwargs(self, num_tokens: int) -> dict[str, Any]:
-        return {
-            "input_ids": self.input_ids[:num_tokens],
-            "positions": self.positions[:num_tokens],
-        }
-
-    def dummy_run(self, num_tokens: int, forward_ctx_kwargs: dict):
-        model_kwargs = self._model_kwargs(num_tokens)
-        with set_forward_context(
-            vllm_config=self.vllm_config,
-            num_tokens=num_tokens,
-            **forward_ctx_kwargs,
-        ):
-            self.model(**model_kwargs)
 
     def set_input_ids_first_pass(
         self,

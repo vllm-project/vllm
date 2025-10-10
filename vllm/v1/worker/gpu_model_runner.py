@@ -2944,14 +2944,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.model = CUDAGraphWrapper(
                 self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
             )
-            if hasattr(self, "drafter") and isinstance(
-                self.drafter, DraftModelProposer
-            ):
-                self.drafter.model = CUDAGraphWrapper(
-                    self.drafter.model,
-                    self.drafter.vllm_config,
-                    runtime_mode=CUDAGraphMode.FULL,
-                )
         elif self.parallel_config.enable_dbo:
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
                 self.model = UBatchWrapper(
@@ -3463,19 +3455,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 hidden_states = outputs
 
-            if self.speculative_config and self.speculative_config.use_eagle():
-                assert isinstance(self.drafter, EagleProposer)
+            if self.speculative_config and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+            ):
+                assert isinstance(self.drafter, (EagleProposer, DraftModelProposer))
                 use_cudagraphs = cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
                 self.drafter.dummy_run(num_tokens, use_cudagraphs=use_cudagraphs)
-
-            if self.speculative_config and self.speculative_config.uses_draft_model():
-                assert isinstance(self.drafter, DraftModelProposer)
-                forward_ctx_kwargs = {
-                    "attn_metadata": attn_metadata,
-                    "cudagraph_runtime_mode": cudagraph_runtime_mode,
-                    "batch_descriptor": batch_descriptor,
-                }
-                self.drafter.dummy_run(num_tokens, forward_ctx_kwargs)
 
         # This is necessary to avoid blocking DP.
         # For dummy runs, we typically skip EPLB since we don't have any real
