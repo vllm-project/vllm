@@ -397,6 +397,8 @@ class Ovis2_5Processor(ProcessorMixin):
                     images.append(image)
             elif isinstance(video, list):
                 images = video
+        else:
+            raise ValueError("Either images or video should be provided.")
         min_pixels = min(
             max_pixels if max_pixels is not None else MAX_PIXELS,
             min_pixels if min_pixels is not None else MIN_PIXELS,

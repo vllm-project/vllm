@@ -74,6 +74,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v3="DeepseekV3Config",
     deepseek_v32="DeepseekV3Config",
+    flex_olmo="FlexOlmoConfig",
     kimi_vl="KimiVLConfig",
     Llama_Nemotron_Nano_VL="Nemotron_Nano_VL_Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
@@ -91,6 +92,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     step3_vl="Step3VLConfig",
     step3_text="Step3TextConfig",
     qwen3_next="Qwen3NextConfig",
+    lfm2_moe="Lfm2MoeConfig",
 )
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
@@ -628,25 +630,25 @@ def get_config(
 
     if quantization_config is not None:
         config.quantization_config = quantization_config
-        # auto-enable DeepGEMM UE8M0 on Hopper if model config requests it
+        # auto-enable DeepGEMM UE8M0 if model config requests it
         scale_fmt = quantization_config.get("scale_fmt", None)
         if scale_fmt in ("ue8m0",):
-            if not envs.is_set("VLLM_USE_DEEP_GEMM_E8M0_HOPPER"):
-                os.environ["VLLM_USE_DEEP_GEMM_E8M0_HOPPER"] = "1"
+            if not envs.is_set("VLLM_USE_DEEP_GEMM_E8M0"):
+                os.environ["VLLM_USE_DEEP_GEMM_E8M0"] = "1"
                 logger.info_once(
                     (
                         "Detected quantization_config.scale_fmt=%s; "
-                        "enabling Hopper UE8M0."
+                        "enabling UE8M0 for DeepGEMM."
                     ),
                     scale_fmt,
                 )
-            elif not envs.VLLM_USE_DEEP_GEMM_E8M0_HOPPER:
+            elif not envs.VLLM_USE_DEEP_GEMM_E8M0:
                 logger.warning_once(
                     (
                         "Model config requests UE8M0 "
                         "(quantization_config.scale_fmt=%s), but "
-                        "VLLM_USE_DEEP_GEMM_E8M0_HOPPER=0 is set; "
-                        "Hopper UE8M0 disabled."
+                        "VLLM_USE_DEEP_GEMM_E8M0=0 is set; "
+                        "UE8M0 for DeepGEMM disabled."
                     ),
                     scale_fmt,
                 )

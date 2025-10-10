@@ -300,10 +300,12 @@ def LLM_with_max_seqs(
         # Allow some CPU offload if needed.
         swap_space=swap_space,
         # Keep things lean and CI-friendly.
-        dtype="float16",
+        dtype="auto",
         # Single-GPU by default; override externally if desired.
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
         trust_remote_code=os.getenv("VLLM_TRUST_REMOTE_CODE", "0") == "1",
-        enforce_eager=True,
         enable_prefix_caching=False,
+        enforce_eager=True,
+        # Enable for MOE models
+        # enable_expert_parallel=True,
     )
