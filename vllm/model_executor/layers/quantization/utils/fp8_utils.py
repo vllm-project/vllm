@@ -360,7 +360,7 @@ class W8A8BlockFp8LinearOp:
             weight,
             input_scale,
             weight_scale,
-            self.weight_group_shape,
+            list(self.weight_group_shape),
             input_2d.dtype,
         )
 
@@ -377,7 +377,7 @@ class W8A8BlockFp8LinearOp:
             weight,
             input_scale,
             weight_scale,
-            self.weight_group_shape,
+            list(self.weight_group_shape),
             input_2d.dtype,
         )
 
