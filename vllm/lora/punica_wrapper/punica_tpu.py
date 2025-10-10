@@ -134,14 +134,16 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             y[slice_idx, :, :] = y_s  # type: ignore[index]
         return y
 
-    def add_expand(self,
-                   y: torch.Tensor,
-                   x: Union[tuple[torch.Tensor, ...], torch.Tensor],
-                   lora_b_stacked: tuple[torch.Tensor, ...],
-                   output_slices: tuple[int, ...],
-                   offset_start: int = 0,
-                   add_inputs=True,
-                   **kwargs) -> torch.Tensor:
+    def add_expand(
+        self,
+        y: torch.Tensor,
+        x: Union[tuple[torch.Tensor, ...], torch.Tensor],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        output_slices: tuple[int, ...],
+        offset_start: int = 0,
+        add_inputs=True,
+        **kwargs,
+    ) -> torch.Tensor:
         """
         Performs GEMM and bias addition for multiple slices of lora_b.
 
@@ -198,16 +200,18 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         # Embedding layer only needs the expand op
         return self.expand(y, x, lora_b_stacked, add_inputs)
 
-    def add_lora_linear(self,
-                        y: torch.Tensor,
-                        x: torch.Tensor,
-                        lora_a_stacked: tuple[torch.Tensor, ...],
-                        lora_b_stacked: tuple[torch.Tensor, ...],
-                        scale: float,
-                        output_slices: tuple[int, ...],
-                        *,
-                        buffer: Optional[tuple[torch.Tensor, ...]] = None,
-                        **kwargs) -> torch.Tensor:
+    def add_lora_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        scale: float,
+        output_slices: tuple[int, ...],
+        *,
+        buffer: Optional[tuple[torch.Tensor, ...]] = None,
+        **kwargs,
+    ) -> torch.Tensor:
         """
         Applicable to linear-related lora.
 
@@ -242,7 +246,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             )
         buffer = self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
         return self.add_expand(
-            y, buffer, lora_b_stacked, None, output_slices, add_inputs=True, **kwargs
+            y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs
         )
 
     def add_lora_logits(

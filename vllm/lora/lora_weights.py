@@ -70,35 +70,42 @@ class LoRALayerWeights:
         embeddings_tensor: Optional[torch.Tensor] = None,
     ) -> "LoRALayerWeights":
         # lora_a and lora_b are set to None for config-based construction
-        return cls(module_name, peft_helper.r, peft_helper.lora_alpha, None,
-                   None, embeddings_tensor,
-                   peft_helper.vllm_lora_scaling_factor)
+        return cls(
+            module_name,
+            peft_helper.r,
+            peft_helper.lora_alpha,
+            None,
+            None,
+            embeddings_tensor,
+            peft_helper.vllm_lora_scaling_factor,
+        )
 
     @classmethod
     def create_dummy_lora_weights(
-            cls,
-            module_name: str,
-            input_dim: int,
-            output_dim: int,
-            rank: int,
-            dtype: torch.dtype,
-            device: torch.types.Device,
-            embeddings_tensor_dim: Optional[int] = None) -> "LoRALayerWeights":
+        cls,
+        module_name: str,
+        input_dim: int,
+        output_dim: int,
+        rank: int,
+        dtype: torch.dtype,
+        device: torch.types.Device,
+        embeddings_tensor_dim: Optional[int] = None,
+    ) -> "LoRALayerWeights":
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
-        lora_a = torch.zeros([rank, input_dim],
-                             dtype=dtype,
-                             device=device,
-                             pin_memory=pin_memory)
-        lora_b = torch.zeros([output_dim, rank],
-                             dtype=dtype,
-                             device=device,
-                             pin_memory=pin_memory)
+        lora_a = torch.zeros(
+            [rank, input_dim], dtype=dtype, device=device, pin_memory=pin_memory
+        )
+        lora_b = torch.zeros(
+            [output_dim, rank], dtype=dtype, device=device, pin_memory=pin_memory
+        )
         embeddings_tensor = None
         if embeddings_tensor_dim is not None:
-            embeddings_tensor = torch.zeros([embeddings_tensor_dim, input_dim],
-                                            dtype=dtype,
-                                            device=device,
-                                            pin_memory=pin_memory)
+            embeddings_tensor = torch.zeros(
+                [embeddings_tensor_dim, input_dim],
+                dtype=dtype,
+                device=device,
+                pin_memory=pin_memory,
+            )
         # embeddings_tensor is created above if embeddings_tensor_dim is not None
         return cls(module_name, rank, 1, lora_a, lora_b, embeddings_tensor)
 

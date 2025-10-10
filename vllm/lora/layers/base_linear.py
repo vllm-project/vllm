@@ -83,9 +83,11 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 lora_config.max_lora_rank,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
-            ) for _ in range(self.n_slices))
+            )
+            for _ in range(self.n_slices)
+        )
         # lora_bias_stacked allocation removed
-        self.output_slices = (self.lora_b_stacked[0].shape[2], )
+        self.output_slices = (self.lora_b_stacked[0].shape[2],)
 
     def reset_lora(self, index: int):
         for s_index in range(self.n_slices):
@@ -113,13 +115,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
 
-        self.lora_a_stacked[0][index,
-                               0, :lora_a.shape[0], :lora_a.shape[1]].copy_(
-                                   lora_a, non_blocking=True)
-        self.lora_b_stacked[0][index,
-                               0, :lora_b.shape[0], :lora_b.shape[1]].copy_(
-                                   lora_b, non_blocking=True)
-
+        self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
+            lora_a, non_blocking=True
+        )
+        self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
+            lora_b, non_blocking=True
+        )
 
     def apply(
         self, x: torch.Tensor, bias: Optional[torch.Tensor] = None
@@ -133,10 +134,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
-        lora_output: Optional[
-            torch.Tensor] = self.punica_wrapper.add_lora_linear(
-                output, x, self.lora_a_stacked, self.lora_b_stacked,
-                1.0, self.output_slices)
+        lora_output: Optional[torch.Tensor] = self.punica_wrapper.add_lora_linear(
+            output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
+        )
         if not current_platform.can_update_inplace():
             output = lora_output
 

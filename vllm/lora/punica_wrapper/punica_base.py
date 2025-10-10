@@ -86,16 +86,18 @@ class PunicaWrapperABC(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def add_lora_linear(self,
-                        y: torch.Tensor,
-                        x: torch.Tensor,
-                        lora_a_stacked: tuple[torch.Tensor, ...],
-                        lora_b_stacked: tuple[torch.Tensor, ...],
-                        scale: float,
-                        output_slices: tuple[int, ...],
-                        *,
-                        buffer: Optional[tuple[torch.Tensor, ...]] = None,
-                        **kwargs) -> Optional[torch.Tensor]:
+    def add_lora_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        scale: float,
+        output_slices: tuple[int, ...],
+        *,
+        buffer: Optional[tuple[torch.Tensor, ...]] = None,
+        **kwargs,
+    ) -> Optional[torch.Tensor]:
         """
         Applicable to linear-related lora.
         """
@@ -348,14 +350,16 @@ class PunicaWrapperBase(PunicaWrapperABC):
         raise NotImplementedError
 
     @abstractmethod
-    def add_expand(self,
-                   y: torch.Tensor,
-                   x: Union[tuple[torch.Tensor, ...], torch.Tensor],
-                   lora_b_stacked: tuple[torch.Tensor, ...],
-                   output_slices: tuple[int, ...],
-                   offset_start: int = 0,
-                   add_inputs=True,
-                   **kwargs) -> Optional[torch.Tensor]:
+    def add_expand(
+        self,
+        y: torch.Tensor,
+        x: Union[tuple[torch.Tensor, ...], torch.Tensor],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        output_slices: tuple[int, ...],
+        offset_start: int = 0,
+        add_inputs=True,
+        **kwargs,
+    ) -> Optional[torch.Tensor]:
         """
         Performs GEMM and bias addition for multiple slices of lora_b.
 
@@ -403,16 +407,18 @@ class PunicaWrapperBase(PunicaWrapperABC):
         raise NotImplementedError
 
     @abstractmethod
-    def add_lora_linear(self,
-                        y: torch.Tensor,
-                        x: torch.Tensor,
-                        lora_a_stacked: tuple[torch.Tensor, ...],
-                        lora_b_stacked: tuple[torch.Tensor, ...],
-                        scale: float,
-                        output_slices: tuple[int, ...],
-                        *,
-                        buffer: Optional[tuple[torch.Tensor, ...]] = None,
-                        **kwargs) -> Optional[torch.Tensor]:
+    def add_lora_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        scale: float,
+        output_slices: tuple[int, ...],
+        *,
+        buffer: Optional[tuple[torch.Tensor, ...]] = None,
+        **kwargs,
+    ) -> Optional[torch.Tensor]:
         """
         Applicable to linear-related lora.
 

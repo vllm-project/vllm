@@ -120,7 +120,6 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         lora_b = lora_b[start_idx:end_idx, :]
         return lora_b
 
-
     def apply(
         self, x: torch.Tensor, bias: Optional[torch.Tensor] = None
     ) -> torch.Tensor:

@@ -913,7 +913,8 @@ class EngineArgs:
         lora_group.add_argument(
             "--enable-lora",
             action=argparse.BooleanOptionalAction,
-            help="If True, enable handling of LoRA adapters.")
+            help="If True, enable handling of LoRA adapters.",
+        )
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank", **lora_kwargs["max_lora_rank"])
         lora_group.add_argument(
@@ -1510,15 +1511,21 @@ class EngineArgs:
                 "non multimodal model"
             )
 
-        lora_config = LoRAConfig(
-            max_lora_rank=self.max_lora_rank,
-            max_loras=self.max_loras,
-            default_mm_loras=self.default_mm_loras,
-            fully_sharded_loras=self.fully_sharded_loras,
-            lora_extra_vocab_size=self.lora_extra_vocab_size,
-            lora_dtype=self.lora_dtype,
-            max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
-            and self.max_cpu_loras > 0 else None) if self.enable_lora else None
+        lora_config = (
+            LoRAConfig(
+                max_lora_rank=self.max_lora_rank,
+                max_loras=self.max_loras,
+                default_mm_loras=self.default_mm_loras,
+                fully_sharded_loras=self.fully_sharded_loras,
+                lora_extra_vocab_size=self.lora_extra_vocab_size,
+                lora_dtype=self.lora_dtype,
+                max_cpu_loras=self.max_cpu_loras
+                if self.max_cpu_loras and self.max_cpu_loras > 0
+                else None,
+            )
+            if self.enable_lora
+            else None
+        )
 
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":

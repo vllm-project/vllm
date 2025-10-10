@@ -26,8 +26,12 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
     For `ColumnParallelLinearWithLoRA` or classes that inherit from
     `ColumnParallelLinearWithLoRA`, they share the same `apply` logic.
     """
-    assert (layer.n_slices == len(layer.lora_a_stacked) == len(
-        layer.lora_b_stacked) == len(layer.output_slices))
+    assert (
+        layer.n_slices
+        == len(layer.lora_a_stacked)
+        == len(layer.lora_b_stacked)
+        == len(layer.output_slices)
+    )
 
     output = layer.base_layer.quant_method.apply(layer.base_layer, x, bias)
 
@@ -220,7 +224,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 lora_config.max_lora_rank,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
-            ) for output_size in self.output_slices)
+            )
+            for output_size in self.output_slices
+        )
         # lora_bias_stacked allocation removed
 
     def slice_lora_a(
@@ -265,7 +271,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 self.lora_b_stacked[i][
                     index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
                 ].copy_(lora_b_i, non_blocking=True)
-
 
     @classmethod
     @_not_fully_sharded_can_replace
@@ -332,8 +337,6 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         ]
         lora_b = torch.cat([lora_b_q, lora_b_k, lora_b_v], dim=0)
         return lora_b
-
-
 
     @classmethod
     @_not_fully_sharded_can_replace

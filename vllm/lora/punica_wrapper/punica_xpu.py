@@ -103,14 +103,16 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         for slice_idx in range(len(lora_a_stacked)):
             self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx], scale)
 
-    def add_expand(self,
-                   y: torch.Tensor,
-                   x: torch.Tensor,
-                   lora_b_stacked: tuple[torch.Tensor, ...],
-                   output_slices: tuple[int, ...],
-                   offset_start: int = 0,
-                   add_inputs=True,
-                   **kwargs) -> None:
+    def add_expand(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        output_slices: tuple[int, ...],
+        offset_start: int = 0,
+        add_inputs=True,
+        **kwargs,
+    ) -> None:
         """
         Performs GEMM and bias addition for multiple slices of lora_b.
 
@@ -169,16 +171,18 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         token_lora_indices = self._get_token_lora_indices(x)
         bgmv_expand(x, lora_b_stacked, y, token_lora_indices, add_inputs)
 
-    def add_lora_linear(self,
-                        y: torch.Tensor,
-                        x: torch.Tensor,
-                        lora_a_stacked: tuple[torch.Tensor, ...],
-                        lora_b_stacked: tuple[torch.Tensor, ...],
-                        scale: float,
-                        output_slices: tuple[int, ...],
-                        *,
-                        buffer: Optional[torch.Tensor] = None,
-                        **kwargs) -> None:
+    def add_lora_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        scale: float,
+        output_slices: tuple[int, ...],
+        *,
+        buffer: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> None:
         """
         Applicable to linear-related lora.
 
@@ -223,7 +227,6 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             y,
             buffer,  # type: ignore
             lora_b_stacked,
-            None,
             output_slices,
             add_inputs=True,
             **kwargs,

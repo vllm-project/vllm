@@ -111,8 +111,8 @@ def replace_submodule(
 
 
 def parse_fine_tuned_lora_name(
-        name: str,
-        weights_mapper: Optional["WeightsMapper"] = None) -> tuple[str, bool]:
+    name: str, weights_mapper: Optional["WeightsMapper"] = None
+) -> tuple[str, bool]:
     """Parse the name of lora weights.
 
     args:

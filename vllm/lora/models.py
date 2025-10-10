@@ -140,7 +140,8 @@ class LoRAModel:
         loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
             module_name, is_lora_a = parse_fine_tuned_lora_name(
-                tensor_name, weights_mapper)
+                tensor_name, weights_mapper
+            )
             if module_name not in loras:
                 lora_embeddings_tensor = None
                 if embeddings:
@@ -159,8 +160,7 @@ class LoRAModel:
                 )
 
             if is_lora_a:
-                loras[module_name].lora_a = tensor.to(device=device,
-                                                      dtype=dtype)
+                loras[module_name].lora_a = tensor.to(device=device, dtype=dtype)
                 if pin_memory:
                     loras[module_name].lora_a = loras[module_name].lora_a.pin_memory()
             else:
@@ -227,8 +227,7 @@ class LoRAModel:
 
         def check_unexpected_modules(modules: dict):
             for lora_module in modules.keys():  # noqa
-                module_name, _ = parse_fine_tuned_lora_name(
-                    lora_module, weights_mapper)
+                module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
                 part_name = module_name.split(".")[-1]
                 if part_name not in expected_lora_modules:
                     unexpected_modules.append(module_name)
@@ -431,8 +430,12 @@ class LoRAModelManager:
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if module_lora:
                 module_lora.optimize()
-                module.set_lora(index, module_lora.lora_a, module_lora.lora_b,
-                                module_lora.embeddings_tensor)
+                module.set_lora(
+                    index,
+                    module_lora.lora_a,
+                    module_lora.lora_b,
+                    module_lora.embeddings_tensor,
+                )
             else:
                 module.reset_lora(index)
         return True
@@ -557,9 +560,11 @@ class LoRAModelManager:
         """Create zero-initialized LoRAModel for warmup."""
         model = LoRAModel(lora_id, rank, {})
         for module_name, module in self.model.named_modules():
-            if (not self._match_target_modules(module_name)
-                    or not isinstance(module, BaseLayerWithLoRA)
-                    or self._filter_unsupported_mm_module(module_name)):
+            if (
+                not self._match_target_modules(module_name)
+                or not isinstance(module, BaseLayerWithLoRA)
+                or self._filter_unsupported_mm_module(module_name)
+            ):
                 continue
             parts = module_name.split(".")
             if module_name not in self.packed_modules:
@@ -588,12 +593,17 @@ class LoRAModelManager:
                         rank,
                         module.lora_a_stacked[0].dtype,
                         "cpu",
-                        embeddings_tensor_dim=embeddings_tensor_dim)
+                        embeddings_tensor_dim=embeddings_tensor_dim,
+                    )
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
-                        module_name, module.lora_a_stacked[0].shape[-1],
-                        module.lora_b_stacked[0].shape[-2], rank,
-                        module.lora_a_stacked[0].dtype, "cpu")
+                        module_name,
+                        module.lora_a_stacked[0].shape[-1],
+                        module.lora_b_stacked[0].shape[-2],
+                        rank,
+                        module.lora_a_stacked[0].dtype,
+                        "cpu",
+                    )
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
@@ -602,8 +612,11 @@ class LoRAModelManager:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,
                         module.lora_a_stacked[i].shape[-1],
-                        module.lora_b_stacked[i].shape[-2], rank,
-                        module.lora_a_stacked[i].dtype, "cpu")
+                        module.lora_b_stacked[i].shape[-2],
+                        rank,
+                        module.lora_a_stacked[i].dtype,
+                        "cpu",
+                    )
                     subloras.append(lora)
                 lora = PackedLoRALayerWeights.pack(subloras)
             model.loras[module_name] = lora
