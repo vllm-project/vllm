@@ -4242,9 +4242,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for kv_cache_group_id, kv_cache_group in enumerate(
             kv_cache_config.kv_cache_groups
         ):
-            if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                # All layers in the UniformTypeKVCacheSpecs have the same type,
+                # Pick an arbitrary one to dispatch.
+                kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
+            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
-            elif isinstance(kv_cache_group.kv_cache_spec, AttentionSpec):
+            elif isinstance(kv_cache_spec, AttentionSpec):
                 # This is an attention backend that supports virtual
                 # block splitting. Get the supported block sizes from
                 # all backends in the group.
@@ -4254,10 +4259,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     kv_manager_block_size, attn_groups
                 )
                 kernel_block_sizes.append(selected_kernel_size)
-            elif isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
+            elif isinstance(kv_cache_spec, MambaSpec):
                 # This is likely Mamba or other non-attention cache,
                 # no splitting.
-                kernel_block_sizes.append(kv_cache_group.kv_cache_spec.block_size)
+                kernel_block_sizes.append(kv_cache_spec.block_size)
             else:
                 raise NotImplementedError(
                     f"unknown kv cache spec {kv_cache_group.kv_cache_spec}"
