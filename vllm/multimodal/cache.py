@@ -18,7 +18,7 @@ from vllm.distributed.device_communicators.shm_object_storage import (
 from vllm.envs import VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, MiB_bytes
-from vllm.utils.cache import LRUCache
+from vllm.utils.cache import CacheInfo, LRUCache
 from vllm.utils.jsontree import json_count_leaves, json_map_leaves, json_reduce_leaves
 
 from .inputs import (
@@ -302,6 +302,16 @@ class BaseMultiModalProcessorCache(
         """
         return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
 
+    @abstractmethod
+    def make_stats(self, *, delta: bool = False) -> CacheInfo:
+        """
+        Get (and reset) the multi-modal cache stats.
+
+        Returns:
+            The current multi-modal caching stats.
+        """
+        raise NotImplementedError
+
 
 class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
     """
@@ -346,6 +356,10 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
     @override
     def clear_cache(self) -> None:
         self._cache.clear()
+
+    @override
+    def make_stats(self, *, delta: bool = False) -> CacheInfo:
+        return self._cache.stat(delta=delta)
 
 
 class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
@@ -397,6 +411,10 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
     def clear_cache(self) -> None:
         self._cache.clear()
 
+    @override
+    def make_stats(self, *, delta: bool = False) -> CacheInfo:
+        return self._cache.stat(delta=delta)
+
 
 class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
     """
@@ -430,6 +448,20 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         # cache (prompt_updates, modality) for P0 only
         self._p0_cache: dict[str, tuple[Sequence[ResolvedPromptUpdate], str]] = {}
 
+        self._hits = 0
+        self._total = 0
+        self._last_info = CacheInfo(hits=0, total=0)
+
+    def _stat(self, *, delta: bool = False) -> CacheInfo:
+        info = CacheInfo(hits=self._hits, total=self._total)
+
+        if delta:
+            info_delta = info - self._last_info
+            self._last_info = info
+            info = info_delta
+
+        return info
+
     @override
     def is_cached_item(self, mm_hash: str) -> bool:
         return self._shm_cache.is_cached(mm_hash)
@@ -441,11 +473,16 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         mm_hash: str,
     ) -> MultiModalProcessorCacheOutItem:
         if self._shm_cache.is_cached(mm_hash):
+            self._hits += 1
+            self._total += 1
+
             address, monotonic_id = self._shm_cache.get_cached(mm_hash)
             prompt_updates, modality = self._p0_cache[mm_hash]
             return self.address_as_item(address, monotonic_id, modality), prompt_updates
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
+
+        self._total += 1
 
         try:
             address, monotonic_id = self._shm_cache.put(mm_hash, mm_item[0])
@@ -468,6 +505,14 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
     def clear_cache(self) -> None:
         self._shm_cache.clear()
         self._p0_cache.clear()
+
+        self._hits = 0
+        self._total = 0
+        self._last_info = CacheInfo(hits=0, total=0)
+
+    @override
+    def make_stats(self, *, delta: bool = False) -> CacheInfo:
+        return self._stat(delta=delta)
 
     def remove_dangling_items(self) -> None:
         """Remove items that are no longer in the shared memory cache."""

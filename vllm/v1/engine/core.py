@@ -319,7 +319,7 @@ class EngineCore:
         )
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
-        )  # type: ignore
+        )
 
         return (engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0)
 
@@ -400,15 +400,18 @@ class EngineCore:
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
-        # re-sync the internal caches (P0 processor, P0 mirror, P1 mirror)
+        # re-sync the internal caches (P0 sender, P1 receiver)
         if self.scheduler.has_unfinished_requests():
             logger.warning(
                 "Resetting the multi-modal cache when requests are "
                 "in progress may lead to desynced internal caches."
             )
 
+        # The cache either exists in EngineCore or WorkerWrapperBase
         if self.mm_receiver_cache is not None:
             self.mm_receiver_cache.clear_cache()
+
+        self.model_executor.reset_mm_cache()
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
