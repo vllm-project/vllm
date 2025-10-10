@@ -21,6 +21,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.metrics.stats import MultiModalCacheStats
 from vllm.v1.structured_output.backend_guidance import validate_guidance_grammar
 from vllm.v1.structured_output.backend_lm_format_enforcer import (
     validate_structured_output_request_lm_format_enforcer,
@@ -37,6 +38,7 @@ class Processor:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        tokenizer: Optional[AnyTokenizer],
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         self.vllm_config = vllm_config
@@ -52,6 +54,7 @@ class Processor:
 
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
+            tokenizer,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
@@ -571,5 +574,8 @@ class Processor:
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
 
-    def clear_cache(self) -> None:
-        self.input_preprocessor.clear_cache()
+    def stat_mm_cache(self) -> Optional[MultiModalCacheStats]:
+        return self.input_preprocessor.stat_mm_cache()
+
+    def clear_mm_cache(self) -> None:
+        self.input_preprocessor.clear_mm_cache()

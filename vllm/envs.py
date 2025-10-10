@@ -89,6 +89,8 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
+    VLLM_USE_AOT_COMPILE: bool = False
+    VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_TORCH_PROFILER_WITH_STACK: bool = True
     VLLM_TORCH_PROFILER_WITH_FLOPS: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
@@ -133,6 +135,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
+    VLLM_RAY_DP_PACK_STRATEGY: str = "strict"
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MXFP4_USE_MARLIN: Optional[bool] = None
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
@@ -142,7 +145,6 @@ if TYPE_CHECKING:
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
-    VLLM_USE_DEEP_GEMM_E8M0_HOPPER: bool = False
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
@@ -233,6 +235,13 @@ def maybe_convert_bool(value: Optional[str]) -> Optional[bool]:
     if value is None:
         return None
     return bool(int(value))
+
+
+def use_aot_compile() -> bool:
+    from vllm.utils import is_torch_equal_or_newer
+
+    default_value = "1" if is_torch_equal_or_newer("2.10.0.dev") else "0"
+    return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
 
 
 def env_with_choices(
@@ -494,6 +503,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Dump fx graphs to the given directory.
     # It will override CompilationConfig.debug_dump_path if set.
     "VLLM_DEBUG_DUMP_PATH": lambda: os.environ.get("VLLM_DEBUG_DUMP_PATH", None),
+    # Feature flag to enable/disable AOT compilation. This will ensure
+    # compilation is done in warmup phase and the compilation will be
+    # reused in subsequent calls.
+    "VLLM_USE_AOT_COMPILE": use_aot_compile,
+    # Force vllm to always load AOT compiled models from disk. Failure
+    # to load will result in a hard error when this is enabled.
+    # Will be ignored when VLLM_USE_AOT_COMPILE is disabled.
+    "VLLM_FORCE_AOT_LOAD": lambda: os.environ.get("VLLM_FORCE_AOT_LOAD", "0") == "1",
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
@@ -1001,6 +1018,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0"
     )
     == "1",
+    # Strategy to pack the data parallel ranks for Ray.
+    # Available options:
+    # - "fill":
+    #   for DP master node, allocate exactly data-parallel-size-local DP ranks,
+    #   for non-master nodes, allocate as many DP ranks as can fit;
+    # - "strict":
+    #   allocate exactly data-parallel-size-local DP ranks to each picked node;
+    # This environment variable is ignored if data-parallel-backend is not Ray.
+    "VLLM_RAY_DP_PACK_STRATEGY": lambda: os.getenv(
+        "VLLM_RAY_DP_PACK_STRATEGY", "strict"
+    ),
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3": lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
     # Use model_redirect to redirect the model name to a local folder.
@@ -1054,11 +1082,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use E8M0 scaling when DeepGEMM is used on Blackwell GPUs.
     "VLLM_USE_DEEP_GEMM_E8M0": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_E8M0", "1"))
-    ),
-    # TODO(wentao): unify the two E8M0 flags after verifying the correctness.
-    # Whether to use E8M0 scaling when DeepGEMM is used on Hopper GPUs.
-    "VLLM_USE_DEEP_GEMM_E8M0_HOPPER": lambda: bool(
-        int(os.getenv("VLLM_USE_DEEP_GEMM_E8M0_HOPPER", "0"))
     ),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
@@ -1433,7 +1456,6 @@ def compute_hash() -> str:
         "VLLM_DISABLED_KERNELS",
         "VLLM_USE_DEEP_GEMM",
         "VLLM_USE_DEEP_GEMM_E8M0",
-        "VLLM_USE_DEEP_GEMM_E8M0_HOPPER",
         "VLLM_USE_TRTLLM_FP4_GEMM",
         "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
         "VLLM_USE_FLASHINFER_MOE_FP16",

@@ -4,7 +4,7 @@
 
 Run `pytest tests/quantization/test_quark.py`.
 
-See also `tests/kernels/moe/test_mxfp4_moe.py`.
+See also `tests/kernels/moe/test_ocp_mx_moe.py`.
 """
 
 import importlib.metadata

@@ -574,11 +574,12 @@ class Ernie4_5_VisionTransformer(nn.Module):
             grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
         ).cumsum(dim=0, dtype=torch.int32)
 
+        zeros = cu_seqlens.new_zeros(1)
         if num_pad > 0:
-            cu_seqlens = F.pad(cu_seqlens, (1, 1), value=0)
+            cu_seqlens = torch.cat([zeros, cu_seqlens, zeros])
             cu_seqlens[-1] = cu_seqlens[-2] + num_pad
         else:
-            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+            cu_seqlens = torch.cat([zeros, cu_seqlens])
 
         # add batch size
         if hidden_states.ndim == 2:

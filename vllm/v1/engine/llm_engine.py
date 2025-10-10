@@ -19,11 +19,12 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tracing import init_tracer
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device
 from vllm.v1.engine import EngineCoreRequest
@@ -95,8 +96,16 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
-        # Processor (convert Inputs --> EngineCoreRequests)
-        self.processor = Processor(vllm_config, mm_registry=mm_registry)
+        if self.model_config.skip_tokenizer_init:
+            tokenizer = None
+        else:
+            tokenizer = init_tokenizer_from_configs(self.model_config)
+
+        self.processor = Processor(self.vllm_config, tokenizer)
+        self.io_processor = get_io_processor(
+            self.vllm_config,
+            self.model_config.io_processor_plugin,
+        )
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(
@@ -204,14 +213,6 @@ class LLMEngine:
     def validate_outputs(cls, outputs, output_type):
         return outputs
 
-    @property
-    def tokenizer(self) -> Optional[AnyTokenizer]:
-        return self.processor.tokenizer
-
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: Optional[AnyTokenizer]) -> None:
-        self.processor.tokenizer = tokenizer
-
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
 
@@ -305,19 +306,15 @@ class LLMEngine:
         # 4) Record stats
         if self.logger_manager is not None:
             assert outputs.scheduler_stats is not None
+
             self.logger_manager.record(
                 scheduler_stats=outputs.scheduler_stats,
                 iteration_stats=iteration_stats,
+                mm_cache_stats=self.processor.stat_mm_cache(),
             )
             self.do_log_stats_with_interval()
 
         return processed_outputs.request_outputs
-
-    def get_vllm_config(self):
-        return self.vllm_config
-
-    def get_model_config(self):
-        return self.model_config
 
     def start_profile(self):
         self.engine_core.profile(True)
@@ -326,7 +323,7 @@ class LLMEngine:
         self.engine_core.profile(False)
 
     def reset_mm_cache(self):
-        self.processor.clear_cache()
+        self.processor.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(self, device: Optional[Device] = None):
@@ -344,6 +341,14 @@ class LLMEngine:
     def get_metrics(self) -> list[Metric]:
         assert self.log_stats, "Stat logging disabled"
         return get_metrics_snapshot()
+
+    @property
+    def tokenizer(self) -> Optional[AnyTokenizer]:
+        return self.processor.tokenizer
+
+    @tokenizer.setter
+    def tokenizer(self, tokenizer: Optional[AnyTokenizer]) -> None:
+        self.processor.tokenizer = tokenizer
 
     def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:

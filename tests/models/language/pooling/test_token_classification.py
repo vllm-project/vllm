@@ -67,4 +67,4 @@ def test_modernbert_models(
     for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
         hf_output = torch.tensor(hf_output).cpu().float()
         vllm_output = torch.tensor(vllm_output).cpu().float()
-        assert torch.allclose(hf_output, vllm_output, 1e-2)
+        assert torch.allclose(hf_output, vllm_output, atol=1e-2)

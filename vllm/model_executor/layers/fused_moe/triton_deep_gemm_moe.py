@@ -83,8 +83,6 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
@@ -92,7 +90,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
@@ -101,8 +99,6 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         ):
             assert self.deep_gemm_expert is not None
             return self.deep_gemm_expert.workspace_shapes(
-                a,
-                aq,
                 M,
                 N,
                 K,
@@ -113,8 +109,6 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             )
         else:
             return self.triton_expert.workspace_shapes(
-                a,
-                aq,
                 M,
                 N,
                 K,
@@ -143,7 +137,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         apply_router_weight_on_input: bool,
     ):
         use_deep_gemm = self.allow_deep_gemm and (
-            _valid_deep_gemm(hidden_states, w1, w2) or is_deep_gemm_e8m0_used()
+            is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2)
         )
 
         experts = self.deep_gemm_expert if use_deep_gemm else self.triton_expert

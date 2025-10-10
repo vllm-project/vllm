@@ -142,12 +142,18 @@ class EngineCore:
             logger.info("Disabling chunked prefill for model without KVCache")
             vllm_config.scheduler_config.chunked_prefill_enabled = False
 
+        scheduler_block_size = (
+            vllm_config.cache_config.block_size
+            * vllm_config.parallel_config.decode_context_parallel_size
+        )
+
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             structured_output_manager=self.structured_output_manager,
             include_finished_set=vllm_config.parallel_config.data_parallel_size > 1,
             log_stats=self.log_stats,
+            block_size=scheduler_block_size,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
@@ -177,14 +183,13 @@ class EngineCore:
             self.vllm_config.cache_config.enable_prefix_caching
             or self.scheduler.get_kv_connector() is not None
         ):
-            block_size = vllm_config.cache_config.block_size
             caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo
             )
             init_none_hash(caching_hash_fn)
 
             self.request_block_hasher = get_request_block_hasher(
-                block_size, caching_hash_fn
+                scheduler_block_size, caching_hash_fn
             )
 
         self.step_fn = (
@@ -319,7 +324,7 @@ class EngineCore:
         )
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
-        )  # type: ignore
+        )
 
         return (engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0)
 
@@ -400,15 +405,18 @@ class EngineCore:
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
-        # re-sync the internal caches (P0 processor, P0 mirror, P1 mirror)
+        # re-sync the internal caches (P0 sender, P1 receiver)
         if self.scheduler.has_unfinished_requests():
             logger.warning(
                 "Resetting the multi-modal cache when requests are "
                 "in progress may lead to desynced internal caches."
             )
 
+        # The cache either exists in EngineCore or WorkerWrapperBase
         if self.mm_receiver_cache is not None:
             self.mm_receiver_cache.clear_cache()
+
+        self.model_executor.reset_mm_cache()
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
@@ -681,17 +689,21 @@ class EngineCoreProc(EngineCore):
             # external LB case for our colocated front-end to use (coordinator
             # only runs with rank 0).
             dp_stats_address = self.frontend_stats_publish_address
-            handshake_socket.send(
-                msgspec.msgpack.encode(
-                    {
-                        "status": "READY",
-                        "local": local_client,
-                        "headless": headless,
-                        "num_gpu_blocks": num_gpu_blocks,
-                        "dp_stats_address": dp_stats_address,
-                    }
+
+            # Include config hash for DP configuration validation
+            ready_msg = {
+                "status": "READY",
+                "local": local_client,
+                "headless": headless,
+                "num_gpu_blocks": num_gpu_blocks,
+                "dp_stats_address": dp_stats_address,
+            }
+            if vllm_config.parallel_config.data_parallel_size > 1:
+                ready_msg["parallel_config_hash"] = (
+                    vllm_config.parallel_config.compute_hash()
                 )
-            )
+
+            handshake_socket.send(msgspec.msgpack.encode(ready_msg))
 
     @staticmethod
     def startup_handshake(

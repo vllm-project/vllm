@@ -420,7 +420,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name:
             assert chunk.usage is None
         else:
             assert chunk.usage is None
-            final_chunk = await stream.__anext__()
+            final_chunk = await anext(stream)
             assert final_chunk.usage is not None
             assert final_chunk.usage.prompt_tokens > 0
             assert final_chunk.usage.completion_tokens > 0
@@ -450,7 +450,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name:
             chunk.usage.prompt_tokens + chunk.usage.completion_tokens
         )
         if chunk.choices[0].finish_reason is not None:
-            final_chunk = await stream.__anext__()
+            final_chunk = await anext(stream)
             assert final_chunk.usage is not None
             assert final_chunk.usage.prompt_tokens > 0
             assert final_chunk.usage.completion_tokens > 0

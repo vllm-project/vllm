@@ -65,7 +65,7 @@ def _mk_processor(
         device_config=DeviceConfig(device="cpu"),
     )
 
-    return Processor(vllm_config)
+    return Processor(vllm_config, tokenizer=None)
 
 
 def test_multi_modal_uuids_length_mismatch_raises(monkeypatch):

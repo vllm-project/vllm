@@ -10,7 +10,6 @@ from typing import Optional, Union, cast
 import jinja2
 from fastapi import Request
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
@@ -44,7 +43,6 @@ class OpenAIServingCompletion(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -55,7 +53,6 @@ class OpenAIServingCompletion(OpenAIServing):
     ):
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
@@ -201,7 +198,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 # but pre-commit in CI fails without it.
                 engine_prompt = cast(Union[EmbedsPrompt, TokensPrompt], engine_prompt)
                 if isinstance(sampling_params, BeamSearchParams):
-                    generator = self.engine_client.beam_search(
+                    generator = self.beam_search(
                         prompt=engine_prompt,
                         request_id=request_id,
                         params=sampling_params,
