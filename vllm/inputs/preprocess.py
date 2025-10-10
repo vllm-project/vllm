@@ -19,6 +19,7 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils.jsontree import json_iter_leaves
+from vllm.v1.metrics.stats import MultiModalCacheStats
 
 from .data import (
     DecoderOnlyInputs,
@@ -55,6 +56,8 @@ class InputPreprocessor:
         self.tokenizer = tokenizer
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_processor_cache
+
+        self.mm_cache_stats = MultiModalCacheStats() if mm_processor_cache else None
 
     def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
@@ -664,14 +667,13 @@ class InputPreprocessor:
 
         return self._build_decoder_only_llm_inputs(prompt_comps)
 
-    def preprocess(
+    def _preprocess(
         self,
         prompt: PromptType,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         *,
         mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> ProcessorInputs:
-        """Preprocess the input prompt."""
         if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder.
@@ -694,6 +696,40 @@ class InputPreprocessor:
             mm_uuids=mm_uuids,
         )
 
-    def clear_cache(self) -> None:
+    def preprocess(
+        self,
+        prompt: PromptType,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        *,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
+    ) -> ProcessorInputs:
+        """Preprocess the input prompt."""
+        res = self._preprocess(
+            prompt,
+            tokenization_kwargs,
+            mm_uuids=mm_uuids,
+        )
+
+        if self.mm_processor_cache and self.mm_cache_stats is not None:
+            delta = self.mm_processor_cache.make_stats(delta=True)
+            self.mm_cache_stats.requests += 1
+            self.mm_cache_stats.queries += delta.total
+            self.mm_cache_stats.hits += delta.hits
+
+        return res
+
+    def stat_mm_cache(self) -> Optional[MultiModalCacheStats]:
+        mm_cache_stats = self.mm_cache_stats
+        if mm_cache_stats is None:
+            return None
+
+        self.mm_cache_stats = MultiModalCacheStats()
+
+        return mm_cache_stats
+
+    def clear_mm_cache(self) -> None:
         if self.mm_processor_cache is not None:
             self.mm_processor_cache.clear_cache()
+
+        if self.mm_cache_stats is not None:
+            self.mm_cache_stats.reset = True
