@@ -16,22 +16,6 @@ from vllm.reasoning.gptoss_reasoning_parser import (
     tag_with_builtin_funcs,
 )
 
-no_func_reaonsing_tag = {
-    "type": "structural_tag",
-    "format": {
-        "type": "triggered_tags",
-        "tags": [
-            {
-                "begin": "<|channel|>analysis<|message|>",
-                "content": {"type": "any_text"},
-                "end": "<|end|>",
-            }
-        ],
-        "triggers": ["<|channel|>analysis"],
-        "stop_after_first": False,
-    },
-}
-
 
 class TestGptOssReasoningParser:
     """Test cases for GptOssReasoningParser structural tag functionality."""

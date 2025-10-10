@@ -127,7 +127,9 @@ class TestGptOssStructuralTagsIntegration:
         ]
 
         for case in test_cases:
-            tool_server.has_tool = Mock(side_effect=lambda tool: case.get(tool, False))
+            tool_server.has_tool = Mock(
+                side_effect=lambda tool, case=case: case.get(tool, False)
+            )
 
             result = gptoss_parser.prepare_structured_tag(None, tool_server)
             parsed_result = json.loads(result)
@@ -167,7 +169,9 @@ class TestGptOssStructuralTagsIntegration:
 
         for tools in tool_combinations:
             tool_server = Mock(spec=ToolServer)
-            tool_server.has_tool = Mock(side_effect=lambda tool: tool in tools)
+            tool_server.has_tool = Mock(
+                side_effect=lambda tool, tools=tools: tool in tools
+            )
 
             result = gptoss_parser.prepare_structured_tag(None, tool_server)
 
