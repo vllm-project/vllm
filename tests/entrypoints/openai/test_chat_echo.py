@@ -7,10 +7,21 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 
+from vllm.config import ModelConfig
+
 from ...utils import RemoteOpenAIServer
 
 # # any model with a chat template should work here
 MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
+
+
+def get_vocab_size(model_name):
+    config = ModelConfig(
+        model=model_name,
+        seed=0,
+        dtype="float16",
+    )
+    return config.get_vocab_size()
 
 
 @pytest.fixture(scope="module")
@@ -107,6 +118,7 @@ async def test_top_logprobs(client: openai.AsyncOpenAI):
     completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
+        max_tokens=1,
         extra_body={
             "top_logprobs": -1,
             "logprobs": "true",
@@ -115,3 +127,6 @@ async def test_top_logprobs(client: openai.AsyncOpenAI):
     assert completion.choices[0].logprobs is not None
     assert completion.choices[0].logprobs.content is not None
     assert len(completion.choices[0].logprobs.content) > 0
+    assert len(
+        completion.choices[0].logprobs.content[0].top_logprobs
+    ) == get_vocab_size(MODEL_NAME)
