@@ -162,11 +162,13 @@ class EngineCore:
 
         # If a KV connector is initialized for scheduler, we want to collect
         # handshake metadata from all workers so the connector in the scheduler
-        # will have the full context 
+        # will have the full context
         if self.scheduler.get_kv_connector() is not None:
             # Collect and store KV connector xfer metadata from workers
             # (after KV cache registration)
-            xfer_handshake_metadata = self.model_executor.get_kv_connector_handshake_metadata()
+            xfer_handshake_metadata = (
+                self.model_executor.get_kv_connector_handshake_metadata()
+            )
 
             if xfer_handshake_metadata:
                 # xfer_handshake_metadata is list of dicts from workers

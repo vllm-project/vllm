@@ -89,6 +89,7 @@ _NIXL_SUPPORTED_DEVICE = {
 _NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
 
 
+@dataclass
 class NixlAgentMetadata(KVConnectorHandshakeMetadata):
     engine_id: str
     agent_metadata: bytes
@@ -213,7 +214,7 @@ class NixlConnector(KVConnectorBase_V1):
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
-    
+
     def set_xfer_handshake_metadata(self, metadata: dict[int, dict[int, dict]]) -> None:
         """
         Set the KV connector handshake metadata for this connector.
@@ -339,14 +340,18 @@ class NixlConnectorScheduler:
         Args:
             metadata (dict): the handshake metadata to set.
         """
-        encoded_data = {}
+        encoded_data: dict[int, dict[int, bytes]] = {}
         for dp_rank, tp_metadata in metadata.items():
             encoded_data[dp_rank] = {}
             for tp_rank, rank_metadata in tp_metadata.items():
                 encoder = msgspec.msgpack.Encoder()
                 encoded_data[dp_rank][tp_rank] = encoder.encode(rank_metadata)
-                logger.debug("Dp rank %d, Tp rank %d: Size of encoded NixlAgentMetadata: %s bytes",
-                     dp_rank, tp_rank, str(len(encoded_data[dp_rank][tp_rank])))
+                logger.debug(
+                    "Dp rank %d, Tp rank %d: encoded NixlAgentMetadata size: %s bytes",
+                    dp_rank,
+                    tp_rank,
+                    str(len(encoded_data[dp_rank][tp_rank])),
+                )
         self._encoded_xfer_handshake_metadata = encoded_data
 
         # Only start the listener when we have metadata to serve.
@@ -381,12 +386,16 @@ class NixlConnectorScheduler:
                 identity, _, msg = sock.recv_multipart()
                 # Decode the message which contains (GET_META_MSG, rank)
                 msg, target_dp_rank, target_tp_rank = msgspec.msgpack.decode(msg)
-                logger.debug("Received message for dp rank %s tp rank %s", target_dp_rank, target_tp_rank)
+                logger.debug(
+                    "Received message for dp rank %s tp rank %s",
+                    target_dp_rank,
+                    target_tp_rank,
+                )
                 if msg != GET_META_MSG:
-                    logger.warning(
-                        "Connection listener got unexpected message %s", msg)
+                    logger.warning("Connection listener got unexpected message %s", msg)
                 sock.send_multipart(
-                    (identity, b"", encoded_data[target_dp_rank][target_tp_rank]))
+                    (identity, b"", encoded_data[target_dp_rank][target_tp_rank])
+                )
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -754,12 +763,15 @@ class NixlConnectorWorker:
         logger.debug(
             "Querying metadata on path: %s at remote tp rank %s", path, p_remote_tp_rank
         )
-         # [WIP] gluo: using dp_rank 0 data (standard for disaggregated prefill-decode) is sufficient?
+        # [WIP] gluo: using dp_rank 0 data (standard for disaggregated prefill-decode)
+        # is sufficient?
         p_remote_dp_rank = 0
 
         # Send query for the request.
         with zmq_ctx(zmq.REQ, path) as sock:
-            msg = msgspec.msgpack.encode((GET_META_MSG, p_remote_dp_rank, p_remote_tp_rank))
+            msg = msgspec.msgpack.encode(
+                (GET_META_MSG, p_remote_dp_rank, p_remote_tp_rank)
+            )
             sock.send(msg)
             metadata_bytes = sock.recv()
             decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
@@ -1448,7 +1460,8 @@ class NixlConnectorWorker:
         # workers will issue xfers to parts of the P worker remote kv caches.
 
         # Get descs ids.
-        local_block_descs_ids: np.ndarray
+        local_block_descs_ids: np.ndar621
+
         remote_block_descs_ids: np.ndarray
         if not self.block_window_per_layer:
             # Default case: assume global attention

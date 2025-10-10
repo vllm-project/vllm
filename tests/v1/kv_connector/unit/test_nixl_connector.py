@@ -284,7 +284,8 @@ def test_prompt_less_than_block_size():
     assert len(kv_connector_metadata.reqs_to_recv) == 1
     assert len(scheduler_output.scheduled_new_reqs) == 0
 
-def test_kv_transfer_metadata():
+
+def test_kv_transfer_metadata(dist_init):
     """Unit test for basic NixlConnector interface functionality."""
 
     # Test setup, we creates a scheduler that contains a NixlConnector
@@ -323,24 +324,30 @@ def test_kv_transfer_metadata():
     assert kv_connector_metadata is not None
     assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
 
-    # Decode connector will be able to create handshake with the prefill connector.    
+    # Decode connector will be able to create handshake with the prefill connector.
     decode_connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
     # Here we are testing the retrieval of NIXLAgentMetadata,
     # by knowing the implementation detail, we override the add_remote_agent
     # to validate the metadata received is the same as the one in prefill_connector.
-    
+
     received_metadata = None
-    def mock_add_remote_agent(self, agent_metadata: NixlAgentMetadata, remote_tp_rank: int, remote_tp_size: int):
+
+    def mock_add_remote_agent(
+        self,
+        agent_metadata: NixlAgentMetadata,
+        remote_tp_rank: int,
+        remote_tp_size: int,
+    ):
         nonlocal received_metadata
         received_metadata = (agent_metadata, remote_tp_rank, remote_tp_size)
         return "remote_agent"
+
     decode_connector.connector_worker.add_remote_agent = mock_add_remote_agent
 
     meta = kv_connector_metadata.reqs_to_recv[request_id]
-    decode_connector.connector_worker._nixl_handshake(meta.remote_host,
-                meta.remote_port,
-                meta.tp_size,
-                meta.remote_engine_id)
+    decode_connector.connector_worker._nixl_handshake(
+        meta.remote_host, meta.remote_port, meta.tp_size, meta.remote_engine_id
+    )
     assert received_metadata is not None
     assert received_metadata[1] == 0  # remote_tp_rank
     assert received_metadata[2] == 1  # remote_tp_size

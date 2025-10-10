@@ -82,6 +82,7 @@ class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
     Metadata used for out of band connector handshakeandshake between
     P/D workers. This needs to serializeable.
     """
+
     pass
 
 
@@ -450,4 +451,4 @@ class KVConnectorBase_V1(ABC):
         Args:
             metadata (dict): the handshake metadata to set.
         """
-        pass
+        return None

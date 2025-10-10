@@ -19,9 +19,11 @@ from vllm.distributed import (
     init_distributed_environment,
     set_custom_all_reduce,
 )
-from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
-                                          get_kv_transfer_group,
-                                          has_kv_transfer_group)
+from vllm.distributed.kv_transfer import (
+    ensure_kv_transfer_initialized,
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -320,7 +322,7 @@ class Worker(WorkerBase):
         gc.collect()
 
         return int(self.available_kv_cache_memory_bytes)
-    
+
     def get_kv_connector_handshake_metadata(self) -> Optional[dict]:
         """Get KV connector metadata from this worker if available."""
 
@@ -333,7 +335,8 @@ class Worker(WorkerBase):
             logger.warning(
                 "KV connector metadata is not available. "
                 "This may happen if the KV connector is not initialized "
-                "or the worker is not part of a disaggregated KV cache setup.")
+                "or the worker is not part of a disaggregated KV cache setup."
+            )
             return None
 
         tp_rank = get_tp_group().rank_in_group
