@@ -334,8 +334,6 @@ async def transfer_layer(
         expert_weights_buffer=expert_weights_buffer,
         cuda_stream=cuda_stream,
         ep_group=ep_group)
-    # NOTE(bowen): We need this synchronize to run, but I don't know why.
-    # If you figure out the reason, please let me know -- thank you!
     return is_unchanged, is_received_locally, experts_recv_loc
 
 
