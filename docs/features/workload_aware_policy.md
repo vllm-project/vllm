@@ -8,6 +8,15 @@ This PR introduces a new optional parameter for each request, `metainf
 
 Note that the WA policy can be applied beyond the traces from Aliyun Bailian. The WA policy can be useful in any deployment where one vLLM serving engine serves multiple frontend workloads (Chat, Multi-modal, Reasoning, etc.). As soon as the client provides the workload tag in the request, the WA policy can leverage this to perform better cache eviction than LRU.
 
+## Usage
+
+Users or developers can enable this eviction policy via the `--wa-offline-param-path` hyperparameter.
+If None is specified, it will fall back to the default FreeKVCacheBlockQueue implementation (LRU).
+
+`type_info` should be specified in the request.
+
+Your can refer our example `benchmark/benchmark_wa.py`, it will use the Aliyun Bailian trace to profile KVCache reuse patterns to improve the cache eviction performance.
+
 ## Implementation Details
 
 The KVCache reuse patterns vary across different request categories and can be predicted using historical request information. Therefore, the WA policy estimates a KV cache reuse probability for each workload, and the WA free queue selects the block with the lowest predicted reuse probability in the upcoming time window as the eviction candidate.
@@ -91,7 +100,9 @@ We can see that the WA policy can get the cache hit rate improvemen
 
 The Workload-Aware policy (WA) feature is designed for users who observe significant differences between workloads served within a single instance.
 
-Users or developers can enable this eviction policy via the `--enable-wa-policy` hyperparameter and specify the WA hyperparameter by `--wa-offline-param-path`. Our example `benchmark_wa.py`offers a demo to generate the hyperparameter file.
+Users or developers can enable this eviction policy via the `--wa-offline-param-path` hyperparameter.
+If None is specified, it will fall back to the default FreeKVCacheBlockQueue implementation (LRU).
+Our example `benchmark_wa.py`offers a demo to generate the hyperparameter file.
 
 When incoming requests lack sufficient workload tagging, this feature should remain disabled.
 In such cases,the system will automatically revert to the default FreeKVCacheBlockQueue implementation.
