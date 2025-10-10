@@ -21,3 +21,10 @@ os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
 os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 # see https://github.com/vllm-project/vllm/issues/10619
 torch._inductor.config.compile_threads = 1
+
+# Set FlashInfer workspace directory to be inside vLLM's cache directory
+# This ensures FlashInfer kernels are stored alongside other vLLM cache files
+if 'FLASHINFER_WORKSPACE_BASE' not in os.environ:
+    import vllm.envs as envs
+
+    os.environ['FLASHINFER_WORKSPACE_BASE'] = envs.VLLM_CACHE_ROOT
