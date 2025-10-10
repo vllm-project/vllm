@@ -14,11 +14,12 @@ The class provides the following primitives:
             temporary buffer alloc by the CacheManager.
         update_connector_output() - update KVConnector state after
             output is received from worker-side connectors.
-        request_finished() - called when a request is finished, with
-            the computed kv cache blocks for the request.
-            Returns whether KV cache should be freed now or will be
-            freed asynchronously and optionally returns KV transfer
-            params.
+        request_finished() - called once when a request is finished,
+            with the computed kv cache blocks for the request.
+            Returns whether KV cache should be freed now or if the
+            connector now assumes responsibility for freeing the
+            the blocks asynchronously. Also optionally returns KV
+            transfer params.
         take_events() - returns new KV events that were collected
             by the connector since the last call.
 
@@ -362,7 +363,11 @@ class KVConnectorBase_V1(ABC):
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
-        Called when a request has finished, before its blocks are freed.
+        Called exactly once when a request has finished, before its blocks are
+        freed.
+
+        The connector may assumes responsibility for freeing the the blocks
+        asynchronously by returning True.
 
         Returns:
             True if the request is being saved/sent asynchronously and blocks
