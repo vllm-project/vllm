@@ -2043,12 +2043,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
         invoke_fused_moe_kernel(
-            # The code `hidden_states` is not performing any specific action in
-            # the provided snippet. It seems to be a variable name or
-            # placeholder without any associated code or context.
-            # The code `hidden_states` is not performing any specific action in
-            # the provided snippet. It seems to be a variable or placeholder
-            # that has been declared but not used or assigned any value.
             hidden_states,
             w1,
             intermediate_cache1,
@@ -2110,7 +2104,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             B_bias=self.w2_bias,
         )
 
-        # ops.moe_sum(intermediate_cache3, output)
+        # separate function is required for MoE + LoRA
         self.moe_sum(intermediate_cache3, output)
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
