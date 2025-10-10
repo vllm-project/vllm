@@ -1178,13 +1178,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         uniform_decode = (
             max_num_scheduled_tokens == self.uniform_decode_query_len
         ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
+
+        # Disable DP padding when running eager to avoid excessive padding when
+        # running prefills. This lets us set enforce_eager on the prefiller in
+        # a P/D setup and still use CUDA graphs (enabled by this padding) on the
+        # decoder.
+        allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
-            num_scheduled_tokens,
-            num_tokens_unpadded,
-            num_tokens_padded,
-            self.parallel_config,
-            True,
-            uniform_decode,
+            num_tokens_unpadded=num_tokens_unpadded,
+            parallel_config=self.parallel_config,
+            allow_microbatching=True,
+            allow_dp_padding=allow_dp_padding,
+            num_tokens_padded=num_tokens_padded,
+            uniform_decode=uniform_decode,
+            num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
 
         self.seq_lens.np[:num_reqs] = (
@@ -2436,12 +2444,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     use_cascade_attn,
                 ) = self._prepare_inputs(scheduler_output)
 
+            dp_rank = self.parallel_config.data_parallel_rank
             if ubatch_slices:
                 assert num_tokens_across_dp is not None
-                num_input_tokens = int(num_tokens_across_dp[0].item())
+                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
                 self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
             elif num_tokens_across_dp is not None:
-                num_input_tokens = int(num_tokens_across_dp[0].item())
+                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
             else:
                 num_input_tokens = self._get_num_input_tokens(
                     scheduler_output.total_num_scheduled_tokens
@@ -3256,19 +3265,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
         total_num_scheduled_tokens = int(num_scheduled_tokens.sum())
 
+        # Disable DP padding when running eager
+        allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
-            num_scheduled_tokens,
-            total_num_scheduled_tokens,
-            total_num_scheduled_tokens,
-            self.vllm_config.parallel_config,
-            allow_microbatching,
-            uniform_decode,
+            num_tokens_unpadded=total_num_scheduled_tokens,
+            parallel_config=self.vllm_config.parallel_config,
+            allow_microbatching=allow_microbatching,
+            allow_dp_padding=allow_dp_padding,
+            num_tokens_padded=total_num_scheduled_tokens,
+            uniform_decode=uniform_decode,
+            num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
         num_tokens_after_padding = num_tokens
         if num_tokens_across_dp is not None:
-            num_tokens_after_padding = int(num_tokens_across_dp[0])
+            dp_rank = self.parallel_config.data_parallel_rank
+            num_tokens_after_padding = int(num_tokens_across_dp[dp_rank])
 
         attn_metadata: Optional[PerLayerAttnMetadata] = None
 
