@@ -78,9 +78,6 @@ async def transfer_run_periodically(
                     if state.layer_to_transfer >= current_num_layers:
                         break
 
-                    for i, weight in enumerate(model.expert_weights[0]):
-                        state.expert_buffer[i] = torch.empty_like(weight)
-
                     (state.is_unchanged, state.is_received_locally,
                      state.experts_recv_loc) = await transfer_layer(
                          old_global_expert_indices=state.

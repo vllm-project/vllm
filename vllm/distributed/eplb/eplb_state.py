@@ -449,13 +449,6 @@ class EplbState:
             - `max_tokens`: The maximum load across ranks.
             - `balancedness`: The ratio of average load to maximum load.
         """
-        if self.is_async:
-            is_profile = False
-        """
-        Non-Blocking EPLB don't support profile now,
-        because it need build a new thread.
-        TODO: support profile in non-blocking EPLB
-        """
         ep_group = get_ep_group().device_group
         if is_profile:
             self.rearrange(model, is_profile=True)
@@ -538,6 +531,9 @@ class EplbState:
                 self.pending_global_ready_check = False
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
+            if self.is_async and self.rebalanced:
+                # Still performing asynchronous rearrangement
+                return
             self.expert_rearrangement_step = 0
             self.rearrange(model)
 
@@ -650,7 +646,8 @@ class EplbState:
             num_gpus,
         )
 
-        if not self.is_async:
+        # do these in asynchronous profile mode and synchronous normal mode
+        if not self.is_async or is_profile:
             # Update expert weights
             rearrange_expert_weights_inplace(
                 self.physical_to_logical_map,
@@ -673,7 +670,7 @@ class EplbState:
         self.rebalanced = True
 
         # Signal async thread to start transferring layers
-        if self.is_async:
+        if self.is_async and (not is_profile):
             self.layer_to_transfer = 0  # Reset for new rearrangement
             self.pending_global_ready_check = True
             self.rearrange_event.set()
