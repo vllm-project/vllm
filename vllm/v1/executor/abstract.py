@@ -51,7 +51,9 @@ class Executor(ExecutorBase):
             executor_class = MultiprocExecutor
         elif distributed_executor_backend == "mp_distributed":
             from vllm.v1.executor.multiproc_distributed_executor import (  # noqa
-                MultiprocDistributedExecutor)
+                MultiprocDistributedExecutor,
+            )
+
             executor_class = MultiprocDistributedExecutor
         elif distributed_executor_backend == "uni":
             executor_class = UniProcExecutor

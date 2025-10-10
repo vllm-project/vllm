@@ -891,9 +891,12 @@ def wait_for_engine_startup(
             conn_pending[0 if local else 1] -= 1
             start_pending[0 if local else 1] += 1
             engine.state = CoreEngineState.CONNECTED
-        
-        elif status == "READY" and engine.state == CoreEngineState.CONNECTED \
-            and parallel_config.distributed_node_rank > 0:
+
+        elif (
+            status == "READY"
+            and engine.state == CoreEngineState.CONNECTED
+            and parallel_config.distributed_node_rank > 0
+        ):
             engine.state = CoreEngineState.READY
             start_pending[0 if local else 1] -= 1
         elif status == "READY" and engine.state == CoreEngineState.CONNECTED:
