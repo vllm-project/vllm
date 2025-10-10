@@ -750,7 +750,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
 
-                if self.use_async_scheduling and is_last_rank and num_output_tokens > 0:
+                if self.use_async_scheduling and num_output_tokens > 0:
                     # We must recover the output token ids for resumed requests in the
                     # async scheduling case, so that correct input_ids are obtained.
                     resumed_token_ids = req_data.resumed_req_token_ids[i]
