@@ -680,6 +680,7 @@ class RandomDatasetForReranking(RandomDataset):
         query_len = int(query_lens[0])
 
         if not is_reranker:
+            assert num_requests > 1 and batchsize > 1
             num_requests = num_requests - 1
             batchsize = batchsize - 1
             doc_len_param = input_len
