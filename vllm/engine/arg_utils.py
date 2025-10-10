@@ -335,7 +335,7 @@ class EngineArgs:
 
     model: str = ModelConfig.model
     served_model_name: Optional[Union[str, list[str]]] = ModelConfig.served_model_name
-    tokenizer: Optional[str] = ModelConfig.tokenizer
+    tokenizer: Optional[str] = get_field(ModelConfig, "tokenizer")
     hf_config_path: Optional[str] = ModelConfig.hf_config_path
     runner: RunnerOption = ModelConfig.runner
     convert: ConvertOption = ModelConfig.convert
@@ -353,7 +353,7 @@ class EngineArgs:
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = ModelConfig.seed
-    max_model_len: int = ModelConfig.max_model_len
+    max_model_len: int = get_field(ModelConfig, "max_model_len")
     cuda_graph_sizes: list[int] = get_field(SchedulerConfig, "cuda_graph_sizes")
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
@@ -394,7 +394,7 @@ class EngineArgs:
     max_parallel_loading_workers: Optional[int] = (
         ParallelConfig.max_parallel_loading_workers
     )
-    block_size: BlockSize = CacheConfig.block_size
+    block_size: BlockSize = get_field(CacheConfig, "block_size")
     enable_prefix_caching: Optional[bool] = CacheConfig.enable_prefix_caching
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
@@ -405,11 +405,11 @@ class EngineArgs:
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: Optional[int] = CacheConfig.kv_cache_memory_bytes
-    max_num_batched_tokens: int = SchedulerConfig.max_num_batched_tokens
+    max_num_batched_tokens: int = get_field(SchedulerConfig, "max_num_batched_tokens")
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
-    max_num_seqs: int = SchedulerConfig.max_num_seqs
+    max_num_seqs: int = get_field(SchedulerConfig, "max_num_seqs")
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
