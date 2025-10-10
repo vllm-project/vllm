@@ -1187,7 +1187,7 @@ class Scheduler(SchedulerInterface):
         # First pass: collect requests to remove from queues
         for req_id in request_ids:
             request = self.requests.get(req_id)
-            if request is None:
+            if request is None or request.is_finished():
                 # Invalid request ID.
                 continue
 
@@ -1365,14 +1365,8 @@ class Scheduler(SchedulerInterface):
             self.finished_recving_kv_req_ids.add(req_id)
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            if req_id not in self.requests:
-                logger.warning(
-                    "Got finished sending KV transfer for request %s,"
-                    "but the request is already freed.",
-                    req_id,
-                )
-            else:
-                self._free_blocks(self.requests[req_id])
+            assert req_id in self.requests
+            self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
         self, requests: Iterable[Request], invalid_block_ids: set[int]
