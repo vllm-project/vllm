@@ -5,9 +5,8 @@
 Comprehensive 3-way SiLU Benchmark Suite
 
 This benchmark compares three SiLU implementations:
-1. SiLU V1 (Baseline) - Original implementation from vLLM
-2. SiLU V2 (CUDA) - Optimized CUDA kernel implementation
-3. Triton Kernel - Triton-based implementation
+1. SiLU V2 (CUDA) - Optimized CUDA kernel implementation
+2. Triton Kernel - Triton-based implementation
 
 The suite generates detailed performance comparisons including:
 - Memory bandwidth utilization
@@ -23,7 +22,6 @@ import torch
 
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     persistent_masked_m_silu_mul_quant,
-    silu_v1,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -310,7 +308,7 @@ def benchmark(
 
 
 def create_comparison_plot(
-    ratios, silu_v1_times, silu_v2_times, triton_times, config_labels, strategy_name, id
+    ratios, silu_v2_times, triton_times, config_labels, strategy_name, id
 ):
     fig, ax = plt.subplots(1, 1, figsize=(18, 6))
 
@@ -319,14 +317,6 @@ def create_comparison_plot(
     width = 0.25
 
     # Execution Time plot (lower is better)
-    ax.bar(
-        x - width,
-        silu_v1_times,
-        width,
-        label="SiLU V1 (Baseline)",
-        alpha=0.8,
-        color="orange",
-    )
     ax.bar(x, silu_v2_times, width, label="SiLU V2 (CUDA)", alpha=0.8, color="blue")
     ax.bar(
         x + width, triton_times, width, label="Triton Kernel", alpha=0.8, color="green"
@@ -334,20 +324,8 @@ def create_comparison_plot(
 
     # Add speedup labels over each bar trio
     for i in range(len(x)):
-        triton_v1_speedup = ratios[i][0]  # triton/v1
         triton_v2_speedup = ratios[i][1]  # triton/v2
-        max_height = max(silu_v1_times[i], silu_v2_times[i], triton_times[i])
-
-        # Triton/V1 speedup
-        ax.text(
-            x[i] - width / 2,
-            max_height + max_height * 0.02,
-            f"{triton_v1_speedup:.2f}x",
-            ha="center",
-            va="bottom",
-            fontweight="bold",
-            fontsize=8,
-        )
+        max_height = max(silu_v2_times[i], triton_times[i])
 
         # Triton/V2 speedup
         ax.text(
@@ -384,7 +362,6 @@ def create_combined_plot(all_results):
     for idx, (
         strategy_name,
         all_ratios,
-        all_silu_v1_results,
         all_silu_v2_results,
         all_triton_results,
         config_labels,
@@ -393,14 +370,9 @@ def create_combined_plot(all_results):
         ax = axes[idx]
 
         # Flatten the nested results to get bandwidth percentages for plotting
-        silu_v1_bandwidths = []
         silu_v2_bandwidths = []
         triton_bandwidths = []
         flat_ratios = []
-
-        for config_results in all_silu_v1_results:
-            for result in config_results:
-                silu_v1_bandwidths.append(result[3])  # bandwidth percentage
 
         for config_results in all_silu_v2_results:
             for result in config_results:
@@ -420,14 +392,6 @@ def create_combined_plot(all_results):
 
         # Bandwidth utilization plot (higher is better)
         ax.bar(
-            x - width,
-            silu_v1_bandwidths,
-            width,
-            label="SiLU V1 (Baseline)",
-            alpha=0.8,
-            color="orange",
-        )
-        ax.bar(
             x,
             silu_v2_bandwidths,
             width,
@@ -446,22 +410,8 @@ def create_combined_plot(all_results):
 
         # Add speedup labels over each bar trio
         for i in range(len(x)):
-            triton_v1_speedup = flat_ratios[i][0]  # triton/v1
             triton_v2_speedup = flat_ratios[i][1]  # triton/v2
-            max_height = max(
-                silu_v1_bandwidths[i], silu_v2_bandwidths[i], triton_bandwidths[i]
-            )
-
-            # Triton/V1 speedup
-            ax.text(
-                x[i] - width / 2,
-                max_height + max_height * 0.02,
-                f"{triton_v1_speedup:.2f}x",
-                ha="center",
-                va="bottom",
-                fontweight="bold",
-                fontsize=8,
-            )
+            max_height = max(silu_v2_bandwidths[i], triton_bandwidths[i])
 
             # Triton/V2 speedup
             ax.text(
@@ -529,7 +479,6 @@ for id, strategy in enumerate(strategies):
     # Collect benchmark data for all three algorithms
     config_labels = []
     config_x_axis = []
-    all_silu_v1_results = []
     all_silu_v2_results = []
     all_triton_results = []
     all_ratios = []
@@ -541,7 +490,6 @@ for id, strategy in enumerate(strategies):
                 total_tokens_config.append(i * E)
         config_x_axis.append(total_tokens_config)
 
-        silu_v1_results = []
         silu_v2_results = []
         triton_results = []
         ratios = []
@@ -549,19 +497,6 @@ for id, strategy in enumerate(strategies):
         for total_tokens in total_tokens_config:
             config_label = f"E={E},T={T},H={H},TT={total_tokens}"
             config_labels.append(config_label)
-
-            # SiLU V1 (Baseline) results
-            time_ms_silu_v1, gflops, gbps, perc = benchmark(
-                silu_v1,
-                E,
-                T,
-                H,
-                total_tokens,
-                runs=runs,
-                num_warmups=num_warmups,
-                gen_strategy=strategy,
-            )
-            silu_v1_results.append((time_ms_silu_v1, gflops, gbps, perc))
 
             # SiLU V2 (CUDA kernel) results
             time_ms_silu_v2, gflops, gbps, perc = benchmark(
@@ -590,17 +525,15 @@ for id, strategy in enumerate(strategies):
             triton_results.append((time_ms_triton, gflops, gbps, perc))
 
             # Calculate speedup ratios (triton baseline / implementation)
-            triton_v1_ratio = time_ms_triton / time_ms_silu_v1
             triton_v2_ratio = time_ms_triton / time_ms_silu_v2
-            ratios.append((triton_v1_ratio, triton_v2_ratio))
+            ratios.append(triton_v2_ratio)
 
             print(
-                f"Completed: {config_label} - V1:"
-                f" {time_ms_silu_v1:.3f}ms, V2: {time_ms_silu_v2:.3f}ms,"
+                f"Completed: {config_label}:"
+                f" V2: {time_ms_silu_v2:.3f}ms,"
                 f" Triton: {time_ms_triton:.3f}ms"
             )
 
-        all_silu_v1_results.append(silu_v1_results)
         all_silu_v2_results.append(silu_v2_results)
         all_triton_results.append(triton_results)
         all_ratios.append(ratios)
@@ -610,7 +543,6 @@ for id, strategy in enumerate(strategies):
         (
             strategy_descriptions[strategy],
             all_ratios,
-            all_silu_v1_results,
             all_silu_v2_results,
             all_triton_results,
             config_labels,
@@ -620,24 +552,18 @@ for id, strategy in enumerate(strategies):
 
     # Print summary table for this strategy
     print(f"\nSummary Table - {strategy_descriptions[strategy]}:")
-    print(
-        f"{'Config':<20} {'V1 Time(ms)':<12}"
-        f" {'V2 Time(ms)':<12} {'Triton Time(ms)':<14} "
-        f"{'Triton/V1':<10} {'Triton/V2':<10}"
-    )
+    print(f" {'V2 Time(ms)':<12} {'Triton Time(ms)':<14} {'Triton/V2':<10}")
     print("-" * 90)
 
     for i, (E, T, H) in enumerate(configs):
         # Get the first result for each config (simplifying for summary)
-        v1_time = silu_v1_results[i][0]
         v2_time = silu_v2_results[i][0]
         triton_time = triton_results[i][0]
-        triton_v1_speedup = triton_time / v1_time
         triton_v2_speedup = triton_time / v2_time
         config_label = f"E={E:3d},T={T:4d},H={H:4d}"
         print(
-            f"{config_label:<20} {v1_time:8.5f} {v2_time:8.5f} {triton_time:10.5f} "
-            f"{triton_v1_speedup:8.2f}x {triton_v2_speedup:8.2f}x"
+            f"{config_label:<20} {v2_time:8.5f} {triton_time:10.5f} "
+            f"{triton_v2_speedup:8.2f}x"
         )
 
 
@@ -651,9 +577,7 @@ def create_total_tokens_plot(all_results):
 
     # Add main title to the entire figure
     fig.suptitle(
-        "Performance Analysis: "
-        "Speedup vs Bandwidth Utilization "
-        "(SiLU V1, V2, and Triton)",
+        "Performance Analysis: Speedup vs Bandwidth Utilization (SiLU V2, and Triton)",
         fontsize=18,
         fontweight="bold",
         y=0.98,
@@ -671,7 +595,6 @@ def create_total_tokens_plot(all_results):
         (
             strategy_name,
             all_ratios,
-            all_silu_v1_results,
             all_silu_v2_results,
             all_triton_results,
             config_labels,
@@ -689,13 +612,9 @@ def create_total_tokens_plot(all_results):
             total_tokens_values = config_x_axis[config_idx]
 
             # Extract speedup ratios
-            triton_v1_ratios = [ratio[0] for ratio in ratios]
             triton_v2_ratios = [ratio[1] for ratio in ratios]
 
             # Extract bandwidth percentages for all implementations
-            v1_bandwidth_percentages = [
-                result[3] for result in all_silu_v1_results[config_idx]
-            ]
             v2_bandwidth_percentages = [
                 result[3] for result in all_silu_v2_results[config_idx]
             ]
@@ -704,14 +623,6 @@ def create_total_tokens_plot(all_results):
             ]
 
             # Plot speedup ratios vs total tokens (left plot)
-            ax_speedup.plot(
-                total_tokens_values,
-                triton_v1_ratios,
-                "bo-",
-                linewidth=3,
-                markersize=8,
-                label="Triton/V1 Speedup",
-            )
             ax_speedup.plot(
                 total_tokens_values,
                 triton_v2_ratios,
@@ -731,15 +642,6 @@ def create_total_tokens_plot(all_results):
             ax_speedup.grid(True, alpha=0.3)
 
             # Plot bandwidth utilization (right plot)
-            ax_bandwidth.plot(
-                total_tokens_values,
-                v1_bandwidth_percentages,
-                "o-",
-                linewidth=3,
-                markersize=8,
-                label="SiLU V1",
-                color="orange",
-            )
             ax_bandwidth.plot(
                 total_tokens_values,
                 v2_bandwidth_percentages,
@@ -784,19 +686,6 @@ def create_total_tokens_plot(all_results):
                 for label in ax.get_xticklabels() + ax.get_yticklabels():
                     label.set_fontweight("bold")
 
-            # Add value labels on Triton/V1 speedup points
-            for x, y in zip(total_tokens_values, triton_v1_ratios):
-                ax_speedup.annotate(
-                    f"{y:.2f}x",
-                    (x, y),
-                    textcoords="offset points",
-                    xytext=(0, 12),
-                    ha="center",
-                    fontsize=9,
-                    fontweight="bold",
-                    bbox=dict(boxstyle="round,pad=0.2", facecolor="blue", alpha=0.3),
-                )
-
             # Add value labels on Triton/V2 speedup points
             for x, y in zip(total_tokens_values, triton_v2_ratios):
                 ax_speedup.annotate(
@@ -827,5 +716,5 @@ print(f"\n{'=' * 80}")
 print("3-Way Benchmark Suite Complete!")
 print(f"Generated combined comparison plot: {combined_plot_filename}")
 print(f"Generated total tokens analysis plot: {total_tokens_plot_filename}")
-print("Compared: SiLU V1 (Baseline), SiLU V2 (CUDA), and Triton implementations")
+print("Compared: SiLU V2 (CUDA), and Triton implementations")
 print(f"{'=' * 80}")

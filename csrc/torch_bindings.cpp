@@ -39,12 +39,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("persistent_masked_m_silu_mul_quant", torch::kCUDA,
            &persistent_masked_m_silu_mul_quant);
 
-  ops.def(
-      "silu_v1_cuda(Tensor input, Tensor counts, Tensor! "
-      "y_q, Tensor! y_s, int group_size, "
-      "bool use_ue8m0, int num_parallel_tokens) -> ()");
-  ops.impl("silu_v1_cuda", torch::kCUDA, &silu_v1_cuda);
-
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
 

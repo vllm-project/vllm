@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from math import log2
 from typing import Optional
 
 import torch
@@ -18,94 +17,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import fp8_m_grouped_gemm_nt_masked, is_deep_gemm_e8m0_used
 
 logger = init_logger(__name__)
-
-
-def silu_v1(
-    y: torch.Tensor,  # (E, T, 2*H)
-    tokens_per_expert: torch.Tensor,  # (E,) number of valid tokens per expert
-    num_parallel_tokens=16,
-    group_size: int = 128,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
-    y has shape (E, T, 2*H). The first half of the last dimension is
-    silu-activated, multiplied by the second half, then quantized into FP8.
-
-    Launches (E * P * H) / (GROUP_SIZE * NUM_WARPS) thread blocks, where
-    P1 is the parallelization factor over all tokens in a single expert.
-    For example, if (E, T, H) = (9, 1024, 7168), P = 64 works well, empirically.
-
-    The first warp in the first block in the first expert will process the
-    128 elements, followed by the first 128 elements in the second token, etc.
-    In total, this warp will process (T / P1) x 128 elements.
-
-    A thread block consisting of NUM_WARPS = 4 warps will process 4 groups in parallel.
-    These warps pipeline loads via cp.async where the next item from memory is fetched
-    from the next token.
-
-
-    Shared memory layout:
-    The SiLU V1 shared memory block, consisting of 4 warps and 2 stages, has the
-    following layout:
-
-             stage0                  stage1                stage0        stage1
-    ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬───┬───┬───┬───┬───┬───┬───┬───┐
-    │gate0│gate1│gate2│gate3│gate0│gate1│gate2│gate3│up0│up1│up2│up3│up0│up1│up2│up3│
-    └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴───┴───┴───┴───┴───┴───┴───┴───┘
-
-    where every gate_i and up_i, (0 <= i < 4) consists of 128 BF16 values.
-
-    This is achieved by the first half of the threads conducting coalesced global
-    loads into the gate buffer in parallel with the 2nd half of all threads in a block
-    conducting global loads into the up buffer.
-
-    Returns `(y_q, y_s)` where
-    * `y_q`: FP8 tensor, shape (E, T, H), same layout as y[..., :H]
-    * `y_s`: FP32 tensor, shape (E, T, H // group_size), strides (T*G, 1, T)
-    """
-    assert y.ndim == 3, "y must be (E, T, 2*H)"
-    E, T, H2 = y.shape
-    assert H2 % 2 == 0, "last dim of y must be even (2*H)"
-    H = H2 // 2
-    G = (H + group_size - 1) // group_size
-    assert H % 8 == 0, "H must be divisible by 8"
-    assert group_size == 128, "H must be divisible by 8"
-    assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
-
-    tokens_per_expert = tokens_per_expert.to(device=y.device, dtype=torch.int32)
-
-    fp8_dtype = torch.float8_e4m3fn
-    y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
-
-    stride_ys_e = T * G
-    stride_ys_t = 1
-    stride_ys_g = T
-    y_s = torch.empty_strided(
-        (E, T, G),
-        (stride_ys_e, stride_ys_t, stride_ys_g),
-        dtype=torch.float32,
-        device=y.device,
-    )
-
-    use_ue8m0 = is_deep_gemm_e8m0_used()
-
-    if E <= 16:
-        max_empirical_parallelism = 64
-    elif E <= 32:
-        max_empirical_parallelism = 16
-    else:
-        max_empirical_parallelism = 4
-
-    # We never want to launch more than Tx number of threads
-    # This computes the clip.
-    num_parallel_tokens = max(
-        1, min(max_empirical_parallelism, 2 ** int(log2(min(num_parallel_tokens, T))))
-    )
-
-    torch.ops._C.silu_v1_cuda(
-        y, tokens_per_expert, y_q, y_s, group_size, use_ue8m0, num_parallel_tokens
-    )
-
-    return y_q, y_s
 
 
 @triton.jit
