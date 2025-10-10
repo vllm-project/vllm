@@ -262,9 +262,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                      self.kv_cache_spec.block_size)
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
-        # NOTE(qcs): Context Parallel do not support graph mode now
         self.enable_cuda_graph = (self.compilation_config.cudagraph_mode.\
-            decode_mode() == CUDAGraphMode.FULL and self.cp_world_size == 1)
+            decode_mode() == CUDAGraphMode.FULL)
         if self.enable_cuda_graph:
             # For full cudagraph capture, one `decode_wrapper` for each batch
             # size is needed for FlashInfer.

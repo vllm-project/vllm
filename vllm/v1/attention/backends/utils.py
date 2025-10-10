@@ -139,6 +139,8 @@ def _make_metadata_with_slice(
     block_table_tensor = attn_metadata.block_table_tensor[request_slice]
     slot_mapping = attn_metadata.slot_mapping[token_slice]
 
+    # TODO(qcs): check if we can split query_positions and 
+    # cp_kv_recover_idx as following approach
     query_positions = attn_metadata.query_positions[token_slice] \
         if attn_metadata.query_positions is not None else None
     cp_kv_recover_idx = attn_metadata.cp_kv_recover_idx[token_slice] \
@@ -710,6 +712,7 @@ def split_decodes_and_prefills(
     num_prefills = num_reqs - num_decodes
     num_decode_tokens = query_start_loc[first_prefill].item()
     num_prefill_tokens = num_tokens - num_decode_tokens
+    print(f"q lens: {query_lens}, num_tokens: {num_tokens}, D_tokens: {num_decode_tokens}, P_tokens: {num_prefill_tokens} ")
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
