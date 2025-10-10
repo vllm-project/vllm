@@ -170,23 +170,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     typename Ktraits::state_t *intermediate_states = params.cache_enabled && params.intermediate_states_ptr != nullptr ?
                           reinterpret_cast<typename Ktraits::state_t *>(params.intermediate_states_ptr) : nullptr;
 
-    // The intermediate_states tensor has shape [batch_size, max_blocks, dim, dstate]
-    // In varlen mode, max_blocks must match what Python allocated: total_seqlen / block_size
-    int max_blocks = 0;
-    if (params.cache_enabled) {
-        if constexpr (kVarlen) {
-            // For varlen mode with chunked prefill, the intermediate_states tensor is allocated
-            // based on the TOTAL sequence length across all sequences in the original batch.
-            // Even though we process in chunks, each batch_id gets the same max_blocks allocation.
-            int *query_start_loc = reinterpret_cast<int *>(params.query_start_loc_ptr);
-            const int num_seqs = params.batch;
-            int total_seqlen = query_start_loc[num_seqs] - query_start_loc[0];
-            max_blocks = (total_seqlen + params.block_size - 1) / params.block_size;
-        } else {
-            // For non-varlen mode, all sequences have the same length
-            max_blocks = (seqlen + params.block_size - 1) / params.block_size;
-        }
-    }
 
     for (int chunk = 0; chunk < n_chunks; ++chunk) {
         int chunk_start_pos = chunk * kChunkSize;
@@ -212,7 +195,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             // intermediate_states has shape [batch_size, max_blocks, dim, dstate]
             // So the offset for batch_id, block_idx is: batch_id * max_blocks * dim * dstate + block_idx * dim * dstate
             const int block_state_offset = params.cache_enabled ?
-                                          (batch_id * max_blocks + block_idx_in_seq) * params.dim * params.dstate : 0;
+                                          (batch_id * params.max_blocks + block_idx_in_seq) * params.dim * params.dstate : 0;
 
             input_t u_vals[kNRows][kNItems], delta_vals_load[kNRows][kNItems];
 
@@ -541,7 +524,8 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         bool varlen,
                         int64_t pad_slot_id,
                         const std::optional<at::Tensor>& intermediate_states,
-                        int64_t block_size) {
+                        int64_t block_size,
+                        int64_t max_blocks) {
 
     // Reset the parameters
     memset(&params, 0, sizeof(params));
@@ -580,7 +564,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.intermediate_states_ptr = intermediate_states.has_value() ? intermediate_states.value().data_ptr() : nullptr;
     params.cache_enabled = intermediate_states.has_value();
     params.block_size = static_cast<int>(block_size);
-
+    params.max_blocks = static_cast<int>(max_blocks);
 
     // All stride are in elements, not bytes.
     params.A_d_stride = A.stride(0);
@@ -660,7 +644,8 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   // in case of padding, the kernel will return early
                   int64_t pad_slot_id,
                   const std::optional<torch::Tensor> &intermediate_states,
-                  int64_t block_size) {
+                  int64_t block_size,
+                  int64_t max_blocks) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -794,7 +779,8 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                        varlen,
                        pad_slot_id,
                        intermediate_states,
-                       block_size
+                       block_size,
+                       max_blocks
                        );
 
     

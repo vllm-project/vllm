@@ -1724,6 +1724,7 @@ def selective_scan_fwd(
     pad_slot_id: int,
     intermediate_states: Optional[torch.Tensor] = None,
     block_size: int = 256,  # TODO(Josephasafg): Make this optional
+    max_blocks: int = 0,  # TODO(Josephasafg): Make this optional
 ):
     torch.ops._C.selective_scan_fwd(
         u,
@@ -1742,6 +1743,7 @@ def selective_scan_fwd(
         pad_slot_id,
         intermediate_states,
         block_size,
+        max_blocks,
     )
 
 

@@ -471,6 +471,7 @@ def selective_scan_fn(
         pad_slot_id,
         intermediate_states,
         block_size,
+        max_blocks,
     )
 
     if return_intermediate_states:

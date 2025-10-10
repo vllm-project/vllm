@@ -26,6 +26,7 @@ struct SSMParamsBase {
     bool delta_softplus;
     bool cache_enabled;
     int block_size;
+    int max_blocks;
 
     index_t A_d_stride;
     index_t A_dstate_stride;
