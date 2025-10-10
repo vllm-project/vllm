@@ -2193,7 +2193,8 @@ class FusedMoE(CustomOp):
                 torch.ops.vllm.moe_forward(
                     hidden_states, router_logits, self.layer_name
                 )
-                hidden_states.resize_(og_size)
+            # hidden_states.resize_(og_size)
+            hidden_states.copy_(hidden_states.narrow(-1, 0, og_hidden_states))
             return hidden_states
         else:
             if current_platform.is_tpu():
@@ -2204,7 +2205,8 @@ class FusedMoE(CustomOp):
                 shared_output = torch.ops.vllm.moe_forward_shared(
                     hidden_states, router_logits, self.layer_name
                 )
-            hidden_states.resize_(og_size)
+            # hidden_states.resize_(og_size)
+            hidden_states.copy_(hidden_states.narrow(-1, 0, og_hidden_states))
             assert shared_output is not None
             return (hidden_states, shared_output[..., :og_hidden_states])
 
