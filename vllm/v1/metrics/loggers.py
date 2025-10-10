@@ -60,7 +60,6 @@ class LoggingStatLogger(StatLoggerBase):
         self._reset(time.monotonic())
 
         self.last_scheduler_stats = SchedulerStats()
-        self.last_mm_cache_stats: Optional[MultiModalCacheStats] = None
 
         # Caching metrics. This cannot be reset.
         # TODO: Make the interval configurable.
@@ -115,8 +114,6 @@ class LoggingStatLogger(StatLoggerBase):
         if mm_cache_stats:
             self.mm_caching_metrics.observe(mm_cache_stats)
 
-            self.last_mm_cache_stats = mm_cache_stats
-
     def log(self):
         now = time.monotonic()
         prompt_throughput = self._get_throughput(self.num_prompt_tokens, now)
@@ -157,7 +154,7 @@ class LoggingStatLogger(StatLoggerBase):
             scheduler_stats.kv_cache_usage * 100,
             self.prefix_caching_metrics.hit_rate * 100,
         ]
-        if self.last_mm_cache_stats:
+        if not self.mm_caching_metrics.empty:
             log_parts.append("MM cache hit rate: %.1f%%")
             log_args.append(self.mm_caching_metrics.hit_rate * 100)
 
