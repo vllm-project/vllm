@@ -783,4 +783,6 @@ class VllmBackend:
                 list_args[index] = static_tensor
             return self.split_gm(*list_args)
 
-        return copy_and_call
+        return VllmSerializableFunction(
+            graph, example_inputs, self.prefix, copy_and_call
+        )
