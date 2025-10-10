@@ -332,7 +332,10 @@ class InductorAdaptor(CompilerInterface):
                 nonlocal file_path
                 compiled_fn = inductor_compiled_graph.current_callable
                 file_path = compiled_fn.__code__.co_filename  # noqa
-                if not file_path.startswith(self.base_cache_dir):
+                if (
+                    not file_path.startswith(self.base_cache_dir)
+                    and compiled_fn.__closure__ is not None
+                ):
                     # hooked in the align_inputs_from_check_idxs function
                     # in torch/_inductor/utils.py
                     for cell in compiled_fn.__closure__:
@@ -359,7 +362,10 @@ class InductorAdaptor(CompilerInterface):
                     nonlocal file_path
                     compiled_fn = inductor_compiled_graph.current_callable
                     file_path = compiled_fn.__code__.co_filename  # noqa
-                    if not file_path.startswith(self.base_cache_dir):
+                    if (
+                        not file_path.startswith(self.base_cache_dir)
+                        and compiled_fn.__closure__ is not None
+                    ):
                         # hooked in the align_inputs_from_check_idxs function
                         # in torch/_inductor/utils.py
                         for cell in compiled_fn.__closure__:
