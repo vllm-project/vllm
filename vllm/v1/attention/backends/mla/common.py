@@ -1783,11 +1783,16 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         q_nope_trimmed = q_nope[:num_actual_toks, ...]
         q_pe_trimmed = q_pe[:num_actual_toks, ...]
 
-        decode_q_nope = q_nope_trimmed[:num_decode_tokens]
-        decode_q_pe = q_pe_trimmed[:num_decode_tokens]
-
-        prefill_q_nope = q_nope_trimmed[num_decode_tokens:]
-        prefill_q_pe = q_pe_trimmed[num_decode_tokens:]
+        decode_q_nope, prefill_q_nope = torch.split(
+            q_nope_trimmed,
+            [num_decode_tokens, q_nope_trimmed.size(0) - num_decode_tokens],
+            dim=0,
+        )
+        decode_q_pe, prefill_q_pe = torch.split(
+            q_pe_trimmed,
+            [num_decode_tokens, q_pe_trimmed.size(0) - num_decode_tokens],
+            dim=0,
+        )
         if prefill_q_nope.shape[:-1] != prefill_q_pe.shape[:-1]:
             raise RuntimeError(
                 "MLA prefill query components have mismatched shapes: "
@@ -1881,11 +1886,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             if self.dcp_world_size > 1:
                 assert not fp8_attention, "DCP not support fp8 kvcache now."
                 # concatenate decode_ql_nope and decode_q_pe -> (B, N, L + P)
-                decode_q_concat = torch.cat(decode_q, dim=-1)
+                decode_q = torch.cat(decode_q, dim=-1)
                 # decode_q do allgather in head dim.
-                decode_q_concat = get_dcp_group().all_gather(decode_q_concat, dim=1)
+                decode_q = get_dcp_group().all_gather(decode_q, dim=1)
                 # split back after gather to maintain tuple interface
-                decode_q = decode_q_concat.split(
+                decode_q = decode_q.split(
                     [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
                 )
 

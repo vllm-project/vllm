@@ -970,6 +970,10 @@ def unified_mla_attention_fake(
     layer = forward_context.no_compile_layers.get(layer_name)
     q_nope, _ = q
     if layer is None:
+        logger.warning(
+            "MLAAttention layer '%s' not found in forward context; returning empty tensor.",
+            layer_name,
+        )
         return torch.empty_like(torch.cat(q, dim=-1)).contiguous()
     output_shape = (*q_nope.shape[:-1], layer.num_heads * layer.v_head_dim)
     return torch.empty(output_shape, dtype=q_nope.dtype, device=q_nope.device)
