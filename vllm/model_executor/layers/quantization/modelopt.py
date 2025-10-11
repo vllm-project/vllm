@@ -1303,13 +1303,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         w13_input_scale = PerTensorScaleParameter(
             data=torch.empty(global_num_experts, 2, dtype=torch.float32),
-            weight_loader=weight_loader
+            weight_loader=weight_loader,
         )
         layer.register_parameter("w13_input_scale", w13_input_scale)
 
         w2_input_scale = PerTensorScaleParameter(
             data=torch.empty(global_num_experts, dtype=torch.float32),
-            weight_loader=weight_loader
+            weight_loader=weight_loader,
         )
 
         layer.register_parameter("w2_input_scale", w2_input_scale)
