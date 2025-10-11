@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
-from typing import Optional, Union
+from typing import Optional, Union, cast
 
 import torch
 import torch.distributed as dist
@@ -226,10 +226,8 @@ class CustomAllreduce:
                 all_data[i], src=rank, group=self.group, device="cpu"
             )
         # Unpack list of tuples to tuple of lists.
-        handles = [d[0] for d in all_data]
-        offsets = [d[1] for d in all_data]
-        assert all(h is not None for h in handles)
-        assert all(o is not None for o in offsets)
+        handles = cast(list[list[int]], [d[0] for d in all_data])
+        offsets = cast(list[list[int]], [d[1] for d in all_data])
         ops.register_graph_buffers(self._ptr, handles, offsets)
 
     def should_custom_ar(self, inp: torch.Tensor):
