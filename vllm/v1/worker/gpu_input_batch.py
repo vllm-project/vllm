@@ -200,6 +200,7 @@ class InputBatch:
             (max_num_reqs,), dtype=torch.int64, device="cpu", pin_memory=pin_memory
         )
         self.num_accepted_tokens_cpu = self.num_accepted_tokens_cpu_tensor.numpy()
+        self.num_accepted_tokens_event = torch.cuda.Event()
 
         # lora related
         self.request_lora_mapping = np.zeros((self.max_num_reqs,), dtype=np.int32)
@@ -421,6 +422,7 @@ class InputBatch:
             raise NotImplementedError("Unrecognized request type")
 
         # Speculative decoding: by default 1 token is generated.
+        self.num_accepted_tokens_event.synchronize()
         self.num_accepted_tokens_cpu[req_index] = 1
 
         # Add request lora ID
@@ -581,6 +583,7 @@ class InputBatch:
             self.repetition_penalties_cpu[i2],
             self.repetition_penalties_cpu[i1],
         )
+        self.num_accepted_tokens_event.synchronize()
         self.num_accepted_tokens_cpu[i1], self.num_accepted_tokens_cpu[i2] = (
             self.num_accepted_tokens_cpu[i2],
             self.num_accepted_tokens_cpu[i1],
@@ -699,6 +702,7 @@ class InputBatch:
             self.repetition_penalties_cpu[empty_index] = self.repetition_penalties_cpu[
                 last_req_index
             ]
+            self.num_accepted_tokens_event.synchronize()
             self.num_accepted_tokens_cpu[empty_index] = self.num_accepted_tokens_cpu[
                 last_req_index
             ]
