@@ -375,14 +375,21 @@ class StreamingXMLToolCallParser:
                 return buffer[: tag_end2 + 1], start_pos + tag_end2 + 1
             else:
                 # If currently not parsing tool calls (entering a tool_call),
-                # check if starts with <tool_call>
+                # check if starts with <tool_call> or <function=
                 if self.current_call_id is None:
                     # Check if might be start of <tool_call>
                     if buffer == "<tool_call>"[: len(buffer)]:
                         # Might be start of <tool_call>, wait for more data
                         return None, start_pos
+                    elif (
+                        buffer.startswith("<function=")
+                        or buffer == "<function="[: len(buffer)]
+                    ):
+                        # Might be start of <function=, wait for more data
+                        # to get the complete function tag
+                        return None, start_pos
                     else:
-                        # Not start of <tool_call>, treat as text
+                        # Not start of <tool_call> or <function=, treat as text
                         return buffer, start_pos + len(buffer)
                 else:
                     # When parsing tool calls,
