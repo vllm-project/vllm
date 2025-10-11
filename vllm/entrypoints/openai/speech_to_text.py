@@ -58,6 +58,7 @@ class OpenAISpeechToText(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         task_type: Literal["transcribe", "translate"] = "transcribe",
         log_error_stack: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -73,6 +74,8 @@ class OpenAISpeechToText(OpenAIServing):
         self.asr_config = self.model_cls.get_speech_to_text_config(
             self.model_config, task_type
         )
+
+        self.enable_force_include_usage = enable_force_include_usage
 
         self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
 
