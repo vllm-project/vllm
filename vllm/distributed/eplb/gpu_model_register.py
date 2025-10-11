@@ -2,13 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import types
-import typing
-from typing import Callable
 
 import torch
-
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
-from vllm.model_executor.models.utils import is_pp_missing_parameter
 
 
 def set_eplb_state(
@@ -38,16 +33,17 @@ def update_physical_experts_metadata(
     self.num_local_physical_experts = num_local_physical_experts
     self.num_redundant_experts = num_physical_experts - self.num_logical_experts
     for layer in self.model.layers:
-            moe = (getattr(layer, "mlp", None)
-                   or getattr(layer, "feed_forward", None)
-                   or getattr(layer, "block_sparse_moe", None)
-            )
-            if not isinstance(moe, self.example_moe):
-                continue
-            moe.n_local_physical_experts = num_local_physical_experts
-            moe.n_physical_experts = num_physical_experts
-            moe.n_redundant_experts = self.num_redundant_experts
-            moe.experts.update_expert_map()
+        moe = (
+            getattr(layer, "mlp", None)
+            or getattr(layer, "feed_forward", None)
+            or getattr(layer, "block_sparse_moe", None)
+        )
+        if not isinstance(moe, self.example_moe):
+            continue
+        moe.n_local_physical_experts = num_local_physical_experts
+        moe.n_physical_experts = num_physical_experts
+        moe.n_redundant_experts = self.num_redundant_experts
+        moe.experts.update_expert_map()
 
 
 def model_register(model):
