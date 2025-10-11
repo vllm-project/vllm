@@ -44,42 +44,39 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self._inject_lora_into_fused_moe()
 
     def _inject_lora_into_fused_moe(self):
-        base_layer = self.base_layer
-        base_layer._lora = {}
-        top_k = base_layer.top_k
+        moe_state_dict = {}
+        top_k = self.base_layer.top_k
 
-        if base_layer.quant_config is None:
+        if self.base_layer.quant_config is None:
             quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
-        elif not isinstance(base_layer.quant_config, Mxfp4Config):
-            quant_config = base_layer.quant_config
+        elif not isinstance(self.base_layer.quant_config, Mxfp4Config):
+            quant_config = self.base_layer.quant_config
         else:
             quant_config = mxfp4_w4a16_moe_quant_config(
-                w1_bias=base_layer.w13_bias,
-                w2_bias=base_layer.w2_bias,
-                w1_scale=base_layer.w13_weight_scale,
-                w2_scale=base_layer.w2_weight_scale,
+                w1_bias=self.base_layer.w13_bias,
+                w2_bias=self.base_layer.w2_bias,
+                w1_scale=self.base_layer.w13_weight_scale,
+                w2_scale=self.base_layer.w2_weight_scale,
             )
 
         m_fused_moe_fn = (
             modular_triton_fused_moe(
-                quant_config, shared_experts=base_layer.shared_experts
+                quant_config, shared_experts=self.base_layer.shared_experts
             )
             if not quant_config.use_mxfp4_w4a16
             else modular_marlin_fused_moe(
-                quant_config, shared_experts=base_layer.shared_experts
+                quant_config, shared_experts=self.base_layer.shared_experts
             )
         )
 
         def fwd_decorator(layer, func):
             def wrapper(*args, **kwargs):
-                self.base_layer._lora["hidden_states"] = kwargs["hidden_states"]
-                self.base_layer._lora["topk_ids"] = kwargs["topk_ids"]
-                self.base_layer._lora["topk_weights"] = kwargs["topk_weights"]
-                self.base_layer._lora["global_num_experts"] = kwargs[
-                    "global_num_experts"
-                ]
-                self.base_layer._lora["expert_map"] = kwargs["expert_map"]
-                self.base_layer._lora["apply_router_weight_on_input"] = kwargs[
+                moe_state_dict["hidden_states"] = kwargs["hidden_states"]
+                moe_state_dict["topk_ids"] = kwargs["topk_ids"]
+                moe_state_dict["topk_weights"] = kwargs["topk_weights"]
+                moe_state_dict["global_num_experts"] = kwargs["global_num_experts"]
+                moe_state_dict["expert_map"] = kwargs["expert_map"]
+                moe_state_dict["apply_router_weight_on_input"] = kwargs[
                     "apply_router_weight_on_input"
                 ]
                 result = func(*args, **kwargs)
@@ -91,14 +88,14 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             def wrapper(*args, **kwargs):
                 _, output, input = args
 
-                hidden_states = layer._lora["hidden_states"]
-                topk_weights = layer._lora["topk_weights"]
-                curr_topk_ids = layer._lora["topk_ids"]
-                global_num_experts = layer._lora["global_num_experts"]
-                expert_map = layer._lora["expert_map"]
+                hidden_states = moe_state_dict["hidden_states"]
+                topk_weights = moe_state_dict["topk_weights"]
+                curr_topk_ids = moe_state_dict["topk_ids"]
+                global_num_experts = moe_state_dict["global_num_experts"]
+                expert_map = moe_state_dict["expert_map"]
 
                 (token_lora_mapping, _, _, _, _, _) = (
-                    layer.punica_wrapper.token_mapping_meta.meta_args(
+                    self.punica_wrapper.token_mapping_meta.meta_args(
                         hidden_states.size(0)
                     )
                 )
@@ -135,24 +132,21 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     expert_map,
                 )
 
-                layer._lora["sorted_token_ids_lora"] = sorted_token_ids_lora
-                layer._lora["expert_ids_lora"] = expert_ids_lora
-                layer._lora["num_tokens_post_padded_lora"] = num_tokens_post_padded_lora
+                moe_state_dict["sorted_token_ids_lora"] = sorted_token_ids_lora
+                moe_state_dict["expert_ids_lora"] = expert_ids_lora
+                moe_state_dict["num_tokens_post_padded_lora"] = (
+                    num_tokens_post_padded_lora
+                )
 
-                w1_lora_a_stacked = layer.w1_lora_a_stacked
-                w1_lora_b_stacked = layer.w1_lora_b_stacked
-                w3_lora_a_stacked = layer.w3_lora_a_stacked
-                w3_lora_b_stacked = layer.w3_lora_b_stacked
-
-                max_lora_rank = w1_lora_a_stacked.shape[-2]
-                w13_lora_a_stacked = [w1_lora_a_stacked, w3_lora_a_stacked]
-                w13_lora_b_stacked = [w1_lora_b_stacked, w3_lora_b_stacked]
+                w13_lora_a_stacked = [self.w1_lora_a_stacked, self.w3_lora_a_stacked]
+                w13_lora_b_stacked = [self.w1_lora_b_stacked, self.w3_lora_b_stacked]
+                max_lora_rank = self.w1_lora_a_stacked.shape[-2]
                 expert_ids_lora = expert_ids_lora.view(curr_topk_ids.shape[-1], -1)
                 sorted_token_ids_lora = sorted_token_ids_lora.view(
                     curr_topk_ids.shape[-1], -1
                 )
 
-                layer.punica_wrapper.add_lora_fused_moe(
+                self.punica_wrapper.add_lora_fused_moe(
                     input.view(-1, top_k, input.shape[-1]),
                     hidden_states,
                     w13_lora_a_stacked,
@@ -168,16 +162,16 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
                 result = func(*args, **kwargs)
 
-                layer._lora["intermediate_cache2"] = output
+                moe_state_dict["intermediate_cache2"] = output
                 return result
 
             return wrapper
 
         def moe_sum_decorator(layer, func):
             def wrapper(*args, **kwargs):
-                hidden_states = layer._lora["hidden_states"]
-                topk_weights = layer._lora["topk_weights"]
-                curr_topk_ids = layer._lora["topk_ids"]
+                hidden_states = moe_state_dict["hidden_states"]
+                topk_weights = moe_state_dict["topk_weights"]
+                curr_topk_ids = moe_state_dict["topk_ids"]
 
                 config_dtype = _get_config_dtype_str(
                     dtype=hidden_states.dtype,
@@ -199,28 +193,25 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 )
 
                 config = get_config_func(M)
-                w1_lora_a_stacked = layer.w1_lora_a_stacked
-                w2_lora_a_stacked = layer.w2_lora_a_stacked
-                w2_lora_b_stacked = layer.w2_lora_b_stacked
 
-                max_lora_rank = w1_lora_a_stacked.shape[-2]
-
-                sorted_token_ids_lora = layer._lora["sorted_token_ids_lora"]
-                expert_ids_lora = layer._lora["expert_ids_lora"]
-                num_tokens_post_padded_lora = layer._lora["num_tokens_post_padded_lora"]
+                sorted_token_ids_lora = moe_state_dict["sorted_token_ids_lora"]
+                expert_ids_lora = moe_state_dict["expert_ids_lora"]
+                num_tokens_post_padded_lora = moe_state_dict[
+                    "num_tokens_post_padded_lora"
+                ]
 
                 expert_ids_lora = expert_ids_lora.view(curr_topk_ids.shape[-1], -1)
                 sorted_token_ids_lora = sorted_token_ids_lora.view(
                     curr_topk_ids.shape[-1], -1
                 )
-                intermediate_cache2 = layer._lora["intermediate_cache2"]
+                intermediate_cache2 = moe_state_dict["intermediate_cache2"]
                 intermediate_cache3 = args[0]
-
-                layer.punica_wrapper.add_lora_fused_moe(
+                max_lora_rank = self.w1_lora_a_stacked.shape[-2]
+                self.punica_wrapper.add_lora_fused_moe(
                     intermediate_cache3,
                     intermediate_cache2,
-                    [w2_lora_a_stacked],
-                    [w2_lora_b_stacked],
+                    [self.w2_lora_a_stacked],
+                    [self.w2_lora_b_stacked],
                     topk_weights,
                     sorted_token_ids_lora,
                     expert_ids_lora,
@@ -238,14 +229,18 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         fused_experts = m_fused_moe_fn.fused_experts
 
-        m_fused_moe_fn.forward = fwd_decorator(base_layer, m_fused_moe_fn.forward)
-        fused_experts.activation = act_decorator(base_layer, fused_experts.activation)
-        fused_experts.moe_sum = moe_sum_decorator(base_layer, fused_experts.moe_sum)
-
-        base_layer.quant_method.old_fused_experts = (
-            base_layer.quant_method.fused_experts
+        m_fused_moe_fn.forward = fwd_decorator(self.base_layer, m_fused_moe_fn.forward)
+        fused_experts.activation = act_decorator(
+            self.base_layer, fused_experts.activation
         )
-        base_layer.quant_method.fused_experts = m_fused_moe_fn
+        fused_experts.moe_sum = moe_sum_decorator(
+            self.base_layer, fused_experts.moe_sum
+        )
+
+        self.base_layer.quant_method.old_fused_experts = (
+            self.base_layer.quant_method.fused_experts
+        )
+        self.base_layer.quant_method.fused_experts = m_fused_moe_fn
 
     def create_lora_weights(
         self,
@@ -400,7 +395,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         punica_wrapper,
     ):
         self.punica_wrapper: PunicaWrapperBase = punica_wrapper
-        self.base_layer.punica_wrapper = self.punica_wrapper
 
     @classmethod
     def can_replace_layer(
