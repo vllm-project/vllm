@@ -1088,6 +1088,16 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
+##### H100 test #####
+- label: Distrubted Tests PoC (H100) # optional
+  gpu: h100
+  optional: true
+  working_dir: "/vllm-workspace/"
+  num_gpus: 2
+  commands:
+    - pytest -v -s tests/distributed/test_context_parallel.py
+    - VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
+
 ##### H200 test #####
 - label: Distrubted Tests (H200) # optional
   gpu: h200
