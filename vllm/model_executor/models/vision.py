@@ -529,6 +529,7 @@ def get_llm_pos_ids_for_vision(
         .to(llm_grid_h.device)
         .view(-1, 1)
         .expand(-1, llm_grid_h * llm_grid_w)
+        .long()
         .flatten()
     )
     _llm_pos_ids = torch.stack([t_index_tensor, h_index, w_index])
