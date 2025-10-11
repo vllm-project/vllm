@@ -8,10 +8,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
 
 class Cache:
     def __init__(self):

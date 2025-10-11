@@ -511,16 +511,14 @@ class MoriAll2AllManager(All2AllManagerBase):
                 backend,
             )
 
-            current_group = (
-                self.cpu_group if self.cpu_group is not None else dist.group.WORLD
-            )
+            assert self.cpu_group is not None, "No CPU group is given to mori"
             group_name = "mori_shmem_group"
 
             try:
                 import torch._C._distributed_c10d as c10d
 
-                # Register the current process group
-                c10d._register_process_group(group_name, current_group)
+                # Register the process group
+                c10d._register_process_group(group_name, self.cpu_group)
                 logger.debug(
                     "[rank %s] Registered proc group %s", self.rank, group_name
                 )
