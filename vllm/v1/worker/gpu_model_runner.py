@@ -312,8 +312,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
-        self._encoder_cudagraph_buffers: dict[tuple[Any, ...],
-                                              torch.Tensor] = {}
+        self._encoder_cudagraph_buffers: dict[tuple[Any, ...], torch.Tensor] = {}
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
@@ -1031,11 +1030,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return None
 
         # Build encoder_seq_lens array mapping request indices to
-        # encoder lengths for inputs scheduled in this batch
-        encoder_seq_lens = np.zeros((int(num_reqs), ), dtype=np.int32)
-        for req_id in scheduler_output.scheduled_encoder_inputs:
-            req_index = self.input_batch.req_id_to_index[req_id]
-            encoder_seq_lens[req_index] = self.max_encoder_len
+        # encoder lengths for all requests with encoder inputs.
+        # Note: This must include ALL requests with encoder features,
+        # not just those being scheduled in this step, because cross-attention
+        # needs encoder lengths during decode phase for CUDA graph compatibility.
+        encoder_seq_lens = np.zeros((int(num_reqs),), dtype=np.int32)
+
+        # Iterate through all active requests in the batch
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            req_state = self.requests.get(req_id)
+            # Check if this request has encoder inputs (multimodal features)
+            if req_state and req_state.mm_features:
+                req_index = self.input_batch.req_id_to_index[req_id]
+                encoder_seq_lens[req_index] = self.max_encoder_len
 
         return encoder_seq_lens
 
@@ -1902,7 +1909,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if self._should_use_encoder_cudagraph_buffers():
             encoder_features = self._prepare_encoder_inputs_for_cudagraph(
-                encoder_features)
+                encoder_features
+            )
 
         return encoder_features
 
@@ -1918,7 +1926,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return encoder_inputs
 
         encoder_inputs["input_features"] = self._copy_to_cudagraph_buffer(
-            ("input_features", ), input_features)
+            ("input_features",), input_features
+        )
         return encoder_inputs
 
     def _copy_to_cudagraph_buffer(
@@ -1933,22 +1942,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 buffer = torch.empty_like(value)
                 self._encoder_cudagraph_buffers[key] = buffer
             else:
-                assert (buffer.shape == value.shape
-                        and buffer.dtype == value.dtype
-                        and buffer.device == value.device), (
-                            "CUDAGraph buffer mismatch for encoder inputs.")
+                assert (
+                    buffer.shape == value.shape
+                    and buffer.dtype == value.dtype
+                    and buffer.device == value.device
+                ), "CUDAGraph buffer mismatch for encoder inputs."
             buffer.copy_(value)
             return buffer
 
         if isinstance(value, list):
             return [
-                self._copy_to_cudagraph_buffer(key_prefix + (idx, ), item)
+                self._copy_to_cudagraph_buffer(key_prefix + (idx,), item)
                 for idx, item in enumerate(value)
             ]
         if isinstance(value, tuple):
             return tuple(
-                self._copy_to_cudagraph_buffer(key_prefix + (idx, ), item)
-                for idx, item in enumerate(value))
+                self._copy_to_cudagraph_buffer(key_prefix + (idx,), item)
+                for idx, item in enumerate(value)
+            )
 
         return value
 
