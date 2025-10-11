@@ -30,13 +30,13 @@ def test_classify_models(
             hf_overrides={"head_dtype": head_dtype_str},
         ) as vllm_model:
             model_config = vllm_model.llm.llm_engine.model_config
-            dtype = model_config.head_dtype
+            model_dtype = model_config.dtype
             head_dtype = model_config.head_dtype
 
             if head_dtype_str == "float32":
                 assert head_dtype == torch.float32
             elif head_dtype_str == "model":
-                assert head_dtype == dtype
+                assert head_dtype == model_dtype
 
             vllm_outputs = vllm_model.classify(example_prompts)
 
