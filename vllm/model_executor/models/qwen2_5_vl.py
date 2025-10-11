@@ -46,9 +46,16 @@ from vllm.attention.layer import (
     check_upstream_fa_availability,
     maybe_get_vit_flash_attn_backend,
 )
+from vllm.attention.ops.vit_attn_wrappers import (
+    vit_flash_attn_wrapper,
+    vit_xformers_attn_wrapper,
+)
+from vllm.compilation.backends import set_model_tag
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -386,8 +393,8 @@ class Qwen2_5_VisionAttention(nn.Module):
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
-        max_seqlen: Optional[int] = None,  # Only used for Flash Attention
-        seqlens: Optional[list[int]] = None,  # Only used for xFormers
+        max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        seqlens: torch.Tensor,  # Only used for xFormers
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -404,23 +411,16 @@ class Qwen2_5_VisionAttention(nn.Module):
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         if self.is_flash_attn_backend:
-            q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-
-            output = self.flash_attn_varlen_func(
+            context_layer = vit_flash_attn_wrapper(
                 q,
                 k,
                 v,
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
-                dropout_p=0.0,
-                causal=False,
+                cu_seqlens,
+                max_seqlen,
+                batch_size,
+                self.attn_backend == _Backend.ROCM_AITER_FA,
+                self.use_upstream_fa,
             )
-
-            context_layer = rearrange(
-                output, "(b s) h d -> s b (h d)", b=batch_size
-            ).contiguous()
         elif self.attn_backend == _Backend.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
             outputs = []
@@ -441,24 +441,21 @@ class Qwen2_5_VisionAttention(nn.Module):
                 context_layer, "b s h d -> s b (h d)"
             ).contiguous()
         elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-            from xformers.ops.fmha.attn_bias import BlockDiagonalMask
-
-            attn_bias = BlockDiagonalMask.from_seqlens(
-                q_seqlen=seqlens, kv_seqlen=None, device=q.device
-            )
-
-            context_layer = xops.memory_efficient_attention_forward(
-                q, k, v, attn_bias=attn_bias, p=0, scale=None
-            )
-            context_layer = rearrange(
-                context_layer, "b s h d -> s b (h d)"
-            ).contiguous()
+            context_layer = vit_xformers_attn_wrapper(q, k, v, seqlens)
 
         output, _ = self.proj(context_layer)
         return output
 
 
+@set_model_tag("Qwen2_5_VisionBlock")
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 0,
+        "cu_seqlens": 0,
+        "rotary_pos_emb": 0,
+        "seqlens": 0,
+    }
+)
 class Qwen2_5_VisionBlock(nn.Module):
     def __init__(
         self,
@@ -503,8 +500,8 @@ class Qwen2_5_VisionBlock(nn.Module):
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
-        max_seqlen: Optional[int] = None,  # Only used for Flash Attention
-        seqlens: Optional[list[int]] = None,  # Only used for xFormers
+        max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        seqlens: torch.Tensor,  # Only used for xFormers
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
@@ -518,6 +515,12 @@ class Qwen2_5_VisionBlock(nn.Module):
         return x
 
 
+@set_model_tag("Qwen2_5_VisionPatchEmbed")
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 0,
+    }
+)
 class Qwen2_5_VisionPatchEmbed(nn.Module):
     def __init__(
         self,
@@ -547,6 +550,12 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
         return x
 
 
+@set_model_tag("Qwen2_5_VisionPatchMerger")
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 0,
+    }
+)
 class Qwen2_5_VisionPatchMerger(nn.Module):
     def __init__(
         self,
@@ -815,15 +824,18 @@ class Qwen2_5_VisionTransformer(nn.Module):
     def compute_attn_mask_seqlen(
         self,
         cu_seqlens: torch.Tensor,
-    ) -> tuple[Optional[int], Optional[list[int]]]:
-        max_seqlen, seqlens = None, None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        max_seqlen, seqlens = (
+            torch.zeros(1, device=cu_seqlens.device),
+            torch.zeros(1, device=cu_seqlens.device),
+        )
         if (
             self.attn_backend == _Backend.FLASH_ATTN
             or self.attn_backend == _Backend.ROCM_AITER_FA
         ):
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
         return max_seqlen, seqlens
 
     @staticmethod
@@ -1217,6 +1229,7 @@ class Qwen2_5_VLForConditionalGeneration(
 
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.config = config
+        self.vllm_config = vllm_config
         self.multimodal_config = multimodal_config
         self.video_pruning_rate = multimodal_config.video_pruning_rate
         self.is_multimodal_pruning_enabled = (
@@ -1227,7 +1240,7 @@ class Qwen2_5_VLForConditionalGeneration(
             "image"
         ) or multimodal_config.get_limit_per_prompt("video"):
             self.visual = Qwen2_5_VisionTransformer(
-                config.vision_config,
+                vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
@@ -1361,13 +1374,13 @@ class Qwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-
-            if self.use_data_parallel:
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
-                )
-            else:
-                image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
+            with set_forward_context(None, self.vllm_config):
+                if self.use_data_parallel:
+                    return run_dp_sharded_mrope_vision_model(
+                        self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
+                    )
+                else:
+                    image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
@@ -1421,12 +1434,18 @@ class Qwen2_5_VLForConditionalGeneration(
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
-            if self.use_data_parallel:
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values_videos, grid_thw_list, rope_type="rope_3d"
-                )
-            else:
-                video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw_list)
+            with set_forward_context(None, self.vllm_config):
+                if self.use_data_parallel:
+                    return run_dp_sharded_mrope_vision_model(
+                        self.visual,
+                        pixel_values_videos,
+                        grid_thw_list,
+                        rope_type="rope_3d",
+                    )
+                else:
+                    video_embeds = self.visual(
+                        pixel_values_videos, grid_thw=grid_thw_list
+                    )
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
