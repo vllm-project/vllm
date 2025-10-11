@@ -76,9 +76,12 @@ def rocm_aiter_gemm_w8a8_blockscale_impl(
     block_size: list[int],
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    import aiter as rocm_aiter
-
-    return rocm_aiter.gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
+    # MI300's fp8nuz should be enough to detect if we call ck vs triton
+    if current_platform.is_fp8_fnuz():
+        from aiter import gemm_a8w8_blockscale
+    else:
+        from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
+    return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
 
 
 def rocm_aiter_gemm_w8a8_blockscale_fake(
@@ -101,15 +104,32 @@ if current_platform.is_rocm():
         op_func=rocm_aiter_gemm_w8a8_blockscale_impl,
         fake_impl=rocm_aiter_gemm_w8a8_blockscale_fake,
     )
-    if (
-        envs.VLLM_ROCM_USE_AITER
-        and envs.VLLM_ROCM_USE_AITER_LINEAR
-        and current_platform.is_fp8_fnuz()
-    ):
+    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR:
         import aiter as rocm_aiter
         from aiter import get_hip_quant
 
         aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
+
+        def aiter_per1x128_quant_impl(
+            x: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            return aiter_per1x128_quant(x, quant_dtype=rocm_aiter.dtypes.fp8)
+
+        def aiter_per1x128_quant_fake(
+            x: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            shape, device = x.shape, x.device
+            y = torch.empty(shape, dtype=rocm_aiter.dtypes.fp8, device=device)
+            scale = torch.empty(
+                (*shape[:-1], shape[-1] // 128), dtype=torch.float32, device=device
+            )
+            return y, scale
+
+        direct_register_custom_op(
+            op_name="rocm_aiter_per1x128_quant",
+            op_func=aiter_per1x128_quant_impl,
+            fake_impl=aiter_per1x128_quant_fake,
+        )
 
 
 # TODO we should be able to change the type of block_size to GroupShape
@@ -352,8 +372,8 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
         assert self.act_quant_group_shape == GroupShape(1, 128)
-        q_input, input_scale = aiter_per1x128_quant(
-            input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8
+        q_input, input_scale = torch.ops.vllm.rocm_aiter_per1x128_quant(
+            input_2d.contiguous()
         )
         return torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale(
             q_input,
@@ -945,7 +965,6 @@ def check_aiter_fp8_linear_support() -> bool:
         current_platform.is_rocm()
         and envs.VLLM_ROCM_USE_AITER
         and envs.VLLM_ROCM_USE_AITER_LINEAR
-        and current_platform.is_fp8_fnuz()
     )
 
 
