@@ -293,7 +293,7 @@ class VllmEplbAdaptor(BaseAdaptor):
         """
         for expert_tensor, buffer_tensor in zip(
             self.expert_param_per_layer[layer_id][local_expert_to_replace],
-            self.buffer_tensor_list[buffer_tensor_id]
+            self.buffer_tensor_list[buffer_tensor_id],
         ):
             expert_tensor.copy_(buffer_tensor)
 
