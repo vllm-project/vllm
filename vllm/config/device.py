@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from dataclasses import field
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 
 import torch
-from pydantic import ConfigDict, SkipValidation
+from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
+from typing_extensions import Self
 
 from vllm.config.utils import config
 
@@ -19,15 +19,12 @@ Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
-    device: SkipValidation[Optional[Union[Device, torch.device]]] = "auto"
+    device: Device | str = "auto"
     """Device type for vLLM execution.
-    This parameter is deprecated and will be
-    removed in a future release.
-    It will now be set automatically based
-    on the current platform."""
-    device_type: str = field(init=False)
-    """Device type from the current platform. This is set in
-    `__post_init__`."""
+    This parameter is deprecated and will be removed in a future release.
+    It will now be set automatically based on the current platform."""
+    device_type: str = Field(init=False)
+    """Device type from the current platform. Set during validation."""
 
     def compute_hash(self) -> str:
         """
@@ -48,7 +45,15 @@ class DeviceConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __post_init__(self):
+    @field_validator("device", mode="before")
+    @classmethod
+    def validate_device(cls, device: str | torch.device) -> str:
+        if isinstance(device, torch.device):
+            return device.type
+        return device
+
+    @model_validator(mode="after")
+    def _validate_device_type(self) -> Self:
         if self.device == "auto":
             # Automated device type detection
             from vllm.platforms import current_platform
@@ -73,3 +78,5 @@ class DeviceConfig:
         else:
             # Set device with device type
             self.device = torch.device(self.device_type)
+
+        return self
