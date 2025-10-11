@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import InitVar
 from typing import Any, Literal, Union
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -169,21 +169,17 @@ class SchedulerConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @field_validator("max_num_seqs", mode="before")
-    @classmethod
-    def _validate_max_num_seqs(cls, max_num_seqs: int | None) -> int:
-        if max_num_seqs is None:
+    @model_validator(mode="before")
+    def _set_defaults(self) -> Self:
+        if self.max_num_seqs is None:
             logger.warning("max_num_seqs is not set, using arbitrary value 128.")
-            return 128
-        return max_num_seqs
+            self.max_num_seqs = 128
 
-    @field_validator("max_model_len", mode="before")
-    @classmethod
-    def _validate_max_model_len(cls, max_model_len: int | None) -> int:
-        if max_model_len is None:
+        if self.max_model_len is None:
             logger.warning("max_model_len is not set, using arbitrary value 8192.")
-            return 8192
-        return max_model_len
+            self.max_model_len = 8192
+
+        return self
 
     def __post_init__(self, is_encoder_decoder: bool) -> None:
         """Post init to handle init vars."""
