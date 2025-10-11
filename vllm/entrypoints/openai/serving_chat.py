@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Callable, Final, Optional, Union
+from typing import Final, Optional, Union
 
 import jinja2
 import partial_json_parser
@@ -56,14 +56,13 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import (
