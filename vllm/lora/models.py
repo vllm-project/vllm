@@ -216,6 +216,10 @@ class LoRAModel:
             for lora_module in modules.keys():  # noqa
                 module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
                 part_name = module_name.split(".")[-1]
+                # Handle FSDP file format where experts.base_layer is the
+                # gate_up_proj and experts is the down_proj
+                if "base_layer" in lora_module:
+                    continue
                 if part_name not in expected_lora_modules:
                     unexpected_modules.append(module_name)
             if unexpected_modules:
