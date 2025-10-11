@@ -17,8 +17,6 @@ from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.utils import is_torch_equal_or_newer
 
-from .inductor_pass import pass_context
-
 
 class CompilerInterface:
     """
@@ -201,6 +199,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         if compiler_config is not None:
             current_config.update(compiler_config)
         set_inductor_config(current_config, runtime_shape)
+        set_functorch_config()
 
         if isinstance(runtime_shape, int):
             dynamic_shapes = "from_example_inputs"
@@ -209,13 +208,12 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
         from torch._inductor import standalone_compile
 
-        with pass_context(runtime_shape):
-            compiled_graph = standalone_compile(
-                graph,
-                example_inputs,
-                dynamic_shapes=dynamic_shapes,
-                options={"config_patches": current_config},
-            )
+        compiled_graph = standalone_compile(
+            graph,
+            example_inputs,
+            dynamic_shapes=dynamic_shapes,
+            options={"config_patches": current_config},
+        )
 
         # Save the compiled artifact to disk in the specified path
         assert key is not None
@@ -310,6 +308,7 @@ class InductorAdaptor(CompilerInterface):
         current_config["fx_graph_remote_cache"] = False
 
         set_inductor_config(current_config, runtime_shape)
+        set_functorch_config()
 
         # inductor can inplace modify the graph, so we need to copy it
         # see https://github.com/pytorch/pytorch/issues/138980
@@ -462,13 +461,12 @@ class InductorAdaptor(CompilerInterface):
                     torch._functorch.config.patch(enable_remote_autograd_cache=False)
                 )
 
-            with pass_context(runtime_shape):
-                compiled_graph = compile_fx(
-                    graph,
-                    example_inputs,
-                    inner_compile=hijacked_compile_fx_inner,
-                    config_patches=current_config,
-                )
+            compiled_graph = compile_fx(
+                graph,
+                example_inputs,
+                inner_compile=hijacked_compile_fx_inner,
+                config_patches=current_config,
+            )
 
         # We treat VLLM_DISABLE_COMPILE_CACHE as the overall switch for torch
         # compilation cache. So turn off the checks if we disable the
@@ -598,6 +596,10 @@ def set_inductor_config(config, runtime_shape):
         config["coordinate_descent_tuning"] = (
             envs.VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING
         )
+
+
+def set_functorch_config():
+    torch._functorch.config.bundled_autograd_cache = False
 
 
 class EagerAdaptor(CompilerInterface):
