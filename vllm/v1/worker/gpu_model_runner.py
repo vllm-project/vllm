@@ -4043,8 +4043,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
             logger.warning(msg)
 
-        # double check that we can support full cudagraph if they are requested
-        # even after automatic downgrades
+        # Check that we can support the requested cudagraph mode
         if (
             cudagraph_mode.has_full_cudagraphs()
             and min_cg_support == AttentionCGSupport.NEVER
@@ -4052,9 +4051,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             raise ValueError(
                 f"CUDAGraphMode.{cudagraph_mode.name} is not "
                 f"supported with {min_cg_builder_name} backend ("
-                f"support:{min_cg_support}) "
-                "; please try cudagraph_mode=PIECEWISE, "
-                "and make sure compilation level is piecewise"
+                f"support: {min_cg_support}). "
+                f"Please use a compatible attention backend or set "
+                f"cudagraph_mode=NONE."
             )
 
         # Trigger cudagraph dispatching keys initialization here (after
