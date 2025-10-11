@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Optional
 
 from vllm.v1.core.block_pool import BlockPool
@@ -48,11 +49,13 @@ class KVCacheCoordinator(ABC):
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
 
+        self.empty_blocks: tuple[KVCacheBlock, ...] = ()
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
         num_tokens: int,
-        new_computed_blocks: tuple[list[KVCacheBlock], ...],
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_encoder_tokens: int,
     ) -> int:
         """
@@ -76,7 +79,7 @@ class KVCacheCoordinator(ABC):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id, num_encoder_tokens, []
+                    request_id, num_encoder_tokens, self.empty_blocks
                 )
             else:
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
@@ -85,7 +88,7 @@ class KVCacheCoordinator(ABC):
         return num_blocks_to_allocate
 
     def save_new_computed_blocks(
-        self, request_id: str, new_computed_blocks: tuple[list[KVCacheBlock], ...]
+        self, request_id: str, new_computed_blocks: tuple[Sequence[KVCacheBlock], ...]
     ) -> None:
         """
         Add the new computed blocks to the request.
