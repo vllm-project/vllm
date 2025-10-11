@@ -57,3 +57,15 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         return type(source_layer) is ReplicatedLinear
+
+    def slice_lora_a(
+        self, lora_a: Union[torch.Tensor, list[Union[torch.Tensor, None]]]
+    ) -> Union[torch.Tensor, list[Union[torch.Tensor, None]]]:
+        """Slice lora a if splitting for tensor parallelism."""
+        return lora_a
+
+    def slice_lora_b(
+        self, lora_b: Union[torch.Tensor, list[Union[torch.Tensor, None]]]
+    ) -> Union[torch.Tensor, list[Union[torch.Tensor, None]]]:
+        """Slice lora b if splitting with tensor parallelism."""
+        return lora_b

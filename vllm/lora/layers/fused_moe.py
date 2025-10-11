@@ -79,6 +79,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 moe_state_dict["apply_router_weight_on_input"] = kwargs[
                     "apply_router_weight_on_input"
                 ]
+                moe_state_dict["max_loras"] = layer.w1_lora_a_stacked.shape[0]
                 result = func(*args, **kwargs)
                 return result
 
@@ -93,6 +94,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 curr_topk_ids = moe_state_dict["topk_ids"]
                 global_num_experts = moe_state_dict["global_num_experts"]
                 expert_map = moe_state_dict["expert_map"]
+                max_loras = moe_state_dict["max_loras"]
 
                 (token_lora_mapping, _, _, _, _, _) = (
                     self.punica_wrapper.token_mapping_meta.meta_args(
@@ -128,7 +130,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     token_lora_mapping,
                     config["BLOCK_SIZE_M"],
                     global_num_experts,
-                    curr_topk_ids.shape[-1],
+                    max_loras,
                     expert_map,
                 )
 
@@ -141,10 +143,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 w13_lora_a_stacked = [self.w1_lora_a_stacked, self.w3_lora_a_stacked]
                 w13_lora_b_stacked = [self.w1_lora_b_stacked, self.w3_lora_b_stacked]
                 max_lora_rank = self.w1_lora_a_stacked.shape[-2]
-                expert_ids_lora = expert_ids_lora.view(curr_topk_ids.shape[-1], -1)
-                sorted_token_ids_lora = sorted_token_ids_lora.view(
-                    curr_topk_ids.shape[-1], -1
-                )
+                expert_ids_lora = expert_ids_lora.view(max_loras, -1)
+                sorted_token_ids_lora = sorted_token_ids_lora.view(max_loras, -1)
 
                 self.punica_wrapper.add_lora_fused_moe(
                     input.view(-1, top_k, input.shape[-1]),
@@ -172,6 +172,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 hidden_states = moe_state_dict["hidden_states"]
                 topk_weights = moe_state_dict["topk_weights"]
                 curr_topk_ids = moe_state_dict["topk_ids"]
+                max_loras = moe_state_dict["max_loras"]
 
                 config_dtype = _get_config_dtype_str(
                     dtype=hidden_states.dtype,
@@ -200,10 +201,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     "num_tokens_post_padded_lora"
                 ]
 
-                expert_ids_lora = expert_ids_lora.view(curr_topk_ids.shape[-1], -1)
-                sorted_token_ids_lora = sorted_token_ids_lora.view(
-                    curr_topk_ids.shape[-1], -1
-                )
+                expert_ids_lora = expert_ids_lora.view(max_loras, -1)
+                sorted_token_ids_lora = sorted_token_ids_lora.view(max_loras, -1)
                 intermediate_cache2 = moe_state_dict["intermediate_cache2"]
                 intermediate_cache3 = args[0]
                 max_lora_rank = self.w1_lora_a_stacked.shape[-2]
