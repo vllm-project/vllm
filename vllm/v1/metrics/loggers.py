@@ -1037,7 +1037,6 @@ class StatLoggerManager:
                     custom_prometheus_logger = True
             else:
                 # per engine logger
-                # assert callable(stat_logger_factory)
                 global_stat_logger = PerEngineStatLoggerAdapter(
                     vllm_config=vllm_config,
                     engine_indexes=self.engine_indexes,
