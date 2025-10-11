@@ -13,7 +13,10 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
-from vllm.transformers_utils.config import get_hf_file_bytes, get_hf_file_to_dict, try_get_dense_modules
+from vllm.transformers_utils.config import (
+    get_hf_file_bytes,
+    try_get_dense_modules,
+)
 
 from .interfaces_base import VllmModelForPooling, is_pooling_model
 
@@ -35,8 +38,9 @@ _GENERATE_SUFFIXES = [
 def _load_st_projector(model_config: "ModelConfig") -> Optional[nn.Module]:
     """Load Sentence-Transformers Dense projection layers."""
 
-    dense_modules = try_get_dense_modules(model_config.model,
-                                          revision=model_config.revision)
+    dense_modules = try_get_dense_modules(
+        model_config.model, revision=model_config.revision
+    )
 
     if dense_modules is None:
         return
@@ -45,10 +49,12 @@ def _load_st_projector(model_config: "ModelConfig") -> Optional[nn.Module]:
         layers = []
         for layer_config in dense_modules:
             folder = layer_config["folder"]
-            linear = nn.Linear(layer_config["in_features"],
-                               layer_config["out_features"],
-                               bias=layer_config.get("bias", True),
-                               dtype=model_config.head_dtype)
+            linear = nn.Linear(
+                layer_config["in_features"],
+                layer_config["out_features"],
+                bias=layer_config.get("bias", True),
+                dtype=model_config.head_dtype,
+            )
             if not _load_dense_weights(linear, folder, model_config):
                 continue
             layers.append(linear)

@@ -38,10 +38,11 @@ from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
     is_interleaved,
+    try_get_dense_modules,
     try_get_generation_config,
     try_get_safetensors_metadata,
     try_get_tokenizer_config,
-    uses_mrope, try_get_dense_modules,
+    uses_mrope,
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
@@ -1698,8 +1699,7 @@ class ModelConfig:
 
     @property
     def embedding_size(self):
-        dense_modules = try_get_dense_modules(self.model,
-                                              revision=self.revision)
+        dense_modules = try_get_dense_modules(self.model, revision=self.revision)
         if dense_modules is not None:
             return dense_modules[-1]["out_features"]
         return self.hidden_size

@@ -1062,8 +1062,7 @@ def try_get_dense_modules(
             modules = modules.get("modules", [])
 
         dense_modules = [
-            m for m in modules
-            if m.get("type") == "sentence_transformers.models.Dense"
+            m for m in modules if m.get("type") == "sentence_transformers.models.Dense"
         ]
         if not dense_modules:
             return None
