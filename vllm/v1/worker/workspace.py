@@ -306,37 +306,15 @@ class WorkspaceManager:
 
         # Check if we need to grow the workspace
         current_size = self._workspace_size_bytes(self._current_workspaces[0])
+        if self._locked and current_size < required_bytes:
+            raise AssertionError(
+                f"Workspace is locked but allocation for '{name}' requires "
+                f"{required_bytes / _MB:.2f} MB, current size is "
+                f"{current_size / _MB:.2f} MB. "
+                "Workspace growth is not allowed after locking."
+            )
 
-        if envs.VLLM_DEBUG_WORKSPACE:
-            if self._current_workspaces[0] is None:
-                assert not self._locked
-                logger.info(
-                    "[WORKSPACE DEBUG] Allocating workspace '%s': %.2f MB "
-                    "(%d ubatches, total memory %.2f MB)",
-                    name,
-                    required_bytes / _MB,
-                    self._num_ubatches,
-                    required_bytes * self._num_ubatches / _MB,
-                )
-            else:
-                assert current_size < required_bytes
-                if self._locked:
-                    raise AssertionError(
-                        f"Workspace is locked but allocation for '{name}' requires "
-                        f"{required_bytes / _MB:.2f} MB, current size is "
-                        f"{current_size / _MB:.2f} MB. "
-                        "Workspace growth is not allowed after locking."
-                    )
-
-                logger.info(
-                    "[WORKSPACE DEBUG] Resizing workspace '%s': %.2f MB -> %.2f "
-                    "MB (%d ubatches, total memory %.2f MB)",
-                    name,
-                    current_size / _MB,
-                    required_bytes / _MB,
-                    self._num_ubatches,
-                    required_bytes * self._num_ubatches / _MB,
-                )
+        was_unallocated = self._current_workspaces[0] is None
 
         for ubatch_id in range(self._num_ubatches):
             current_workspace = self._current_workspaces[ubatch_id]
@@ -348,6 +326,28 @@ class WorkspaceManager:
             elif self._workspace_size_bytes(current_workspace) < required_bytes:
                 # Use resize_() for efficient in-place resizing
                 current_workspace.resize_(required_bytes)
+
+        if envs.VLLM_DEBUG_WORKSPACE:
+            total_mb = required_bytes * self._num_ubatches / _MB
+            if was_unallocated:
+                logger.info(
+                    "[WORKSPACE DEBUG] Allocated workspace '%s': %.2f MB "
+                    "(%d ubatches, total memory %.2f MB)",
+                    name,
+                    required_bytes / _MB,
+                    self._num_ubatches,
+                    total_mb,
+                )
+            else:
+                logger.info(
+                    "[WORKSPACE DEBUG] Resized workspace '%s': %.2f MB -> %.2f "
+                    "MB (%d ubatches, total memory %.2f MB)",
+                    name,
+                    current_size / _MB,
+                    required_bytes / _MB,
+                    self._num_ubatches,
+                    total_mb,
+                )
 
 
 def init_workspace_manager(device: torch.device, vllm_config: VllmConfig) -> None:

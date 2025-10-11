@@ -695,41 +695,39 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             if num_prefill_tokens > 0:
                 prefill_start = num_decode_tokens
                 topk_prefill = topk_indices_global[prefill_start:]
-                if (
-                    unique_prefill_indices is not None
-                    and unique_prefill_indices.numel() > 0
-                ):
-                    # Get workspace for prefill_bf16_workspace
-                    prefill_bf16_workspace = current_workspace_manager().get(
-                        self.prefill_bf16_workspace_spec
-                    )
+            if (
+                unique_prefill_indices is not None
+                and unique_prefill_indices.numel() > 0
+            ):
+                # Get workspace for prefill_bf16_workspace
+                prefill_bf16_workspace = current_workspace_manager().get(
+                    self.prefill_bf16_workspace_spec
+                )
 
-                    indices_for_upconvert = unique_prefill_indices.to(
-                        dtype=torch.int32, copy=False
-                    )
-                    print("upconverting cache")
-                    ops.upconvert_ds_mla_tokens(
-                        kv_cache,
-                        prefill_bf16_workspace,
-                        indices_for_upconvert.contiguous(),
-                        self.prefill_unique_count,
-                    )
-                    # Zero the bitmap wholesale; cheaper than selectively
-                    # clearing the visited slots and keeps next call ready.
-                    assert self.prefill_seen_buffer is not None
-                    self.prefill_seen_buffer.zero_()
-                    print("bf16 prefill")
-                    attn_out[prefill_start:] = self._forward_bf16_kv(
-                        q[prefill_start:],
-                        prefill_bf16_workspace,
-                        topk_prefill,
-                        attn_metadata,
-                    )
-                else:
-                    # Zero the bitmap wholesale; cheaper than selectively
-                    # clearing the visited slots and keeps next call ready.
-                    assert self.prefill_seen_buffer is not None
-                    self.prefill_seen_buffer.zero_()
+                indices_for_upconvert = unique_prefill_indices.to(
+                    dtype=torch.int32, copy=False
+                )
+                ops.upconvert_ds_mla_tokens(
+                    kv_cache,
+                    prefill_bf16_workspace,
+                    indices_for_upconvert.contiguous(),
+                    self.prefill_unique_count,
+                )
+                # Zero the bitmap wholesale; cheaper than selectively
+                # clearing the visited slots and keeps next call ready.
+                assert self.prefill_seen_buffer is not None
+                self.prefill_seen_buffer.zero_()
+                attn_out[prefill_start:] = self._forward_bf16_kv(
+                    q[prefill_start:],
+                    prefill_bf16_workspace,
+                    topk_prefill,
+                    attn_metadata,
+                )
+            else:
+                # Zero the bitmap wholesale; cheaper than selectively
+                # clearing the visited slots and keeps next call ready.
+                assert self.prefill_seen_buffer is not None
+                self.prefill_seen_buffer.zero_()
 
         self._v_up_proj(attn_out, out=output[:num_actual_toks])
         return output
