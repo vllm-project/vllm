@@ -3,7 +3,7 @@
 
 import hashlib
 from functools import cached_property
-from typing import Any, Literal, Optional, cast
+from typing import Any, Literal, Optional
 
 from pydantic import field_validator, model_validator
 from pydantic.dataclasses import dataclass
@@ -102,6 +102,7 @@ class ObservabilityConfig:
             raise ValueError("otlp_traces_endpoint must start with http:// or https://")
 
         from vllm.tracing import is_otel_available, otel_import_error_traceback
+
         if not is_otel_available():
             raise ValueError(
                 "OpenTelemetry is not available. Unable to configure "
@@ -118,9 +119,7 @@ class ObservabilityConfig:
             return None
 
         assert isinstance(value, list)
-        return [
-            v.strip() for item in value for v in str(item).split(",") if v.strip()
-        ]
+        return [v.strip() for item in value for v in str(item).split(",") if v.strip()]
 
     @model_validator(mode="after")
     def _validate_tracing_config(self):
