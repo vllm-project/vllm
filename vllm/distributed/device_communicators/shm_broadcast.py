@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
 from threading import Event
-from typing import Any, Optional, Union
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -80,7 +80,7 @@ class ShmRingBuffer:
         n_reader: int,
         max_chunk_bytes: int,
         max_chunks: int,
-        name: Optional[str] = None,
+        name: str | None = None,
     ):
         """
         A shared memory ring buffer implementation for broadcast communication.
@@ -213,9 +213,9 @@ class ShmRingBuffer:
 class Handle:
     local_reader_ranks: list[int] = field(default_factory=list)
 
-    buffer_handle: Optional[tuple[int, int, int, str]] = None
-    local_subscribe_addr: Optional[str] = None
-    remote_subscribe_addr: Optional[str] = None
+    buffer_handle: tuple[int, int, int, str] | None = None
+    local_subscribe_addr: str | None = None
+    remote_subscribe_addr: str | None = None
     remote_addr_ipv6: bool = False
 
 
@@ -224,10 +224,10 @@ class MessageQueue:
         self,
         n_reader,  # number of all readers
         n_local_reader,  # number of local readers through shared memory
-        local_reader_ranks: Optional[list[int]] = None,
+        local_reader_ranks: list[int] | None = None,
         max_chunk_bytes: int = 1024 * 1024 * 10,
         max_chunks: int = 10,
-        connect_ip: Optional[str] = None,
+        connect_ip: str | None = None,
     ):
         if local_reader_ranks is None:
             local_reader_ranks = list(range(n_local_reader))
@@ -384,7 +384,7 @@ class MessageQueue:
             assert recv == b"READY"
 
     @contextmanager
-    def acquire_write(self, timeout: Optional[float] = None):
+    def acquire_write(self, timeout: float | None = None):
         assert self._is_writer, "Only writers can acquire write"
         start_time = time.monotonic()
         n_warning = 1
@@ -444,8 +444,8 @@ class MessageQueue:
     @contextmanager
     def acquire_read(
         self,
-        timeout: Optional[float] = None,
-        cancel: Optional[Event] = None,
+        timeout: float | None = None,
+        cancel: Event | None = None,
         indefinite: bool = False,
     ):
         assert self._is_local_reader, "Only readers can acquire read"
@@ -502,7 +502,7 @@ class MessageQueue:
                 self._read_spin_timer.record_activity()
                 break
 
-    def enqueue(self, obj, timeout: Optional[float] = None):
+    def enqueue(self, obj, timeout: float | None = None):
         """Write to message queue with optional timeout (in seconds)"""
         assert self._is_writer, "Only writers can enqueue"
         serialized_obj = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
@@ -520,8 +520,8 @@ class MessageQueue:
 
     def dequeue(
         self,
-        timeout: Optional[float] = None,
-        cancel: Optional[Event] = None,
+        timeout: float | None = None,
+        cancel: Event | None = None,
         indefinite: bool = False,
     ):
         """Read from message queue with optional timeout (in seconds)"""
@@ -542,7 +542,7 @@ class MessageQueue:
         return obj
 
     @staticmethod
-    def recv(socket: zmq.Socket, timeout: Optional[float]) -> Any:
+    def recv(socket: zmq.Socket, timeout: float | None) -> Any:
         timeout_ms = None if timeout is None else int(timeout * 1000)
         if not socket.poll(timeout=timeout_ms):
             raise TimeoutError
@@ -558,7 +558,7 @@ class MessageQueue:
 
     @staticmethod
     def create_from_process_group(
-        pg: Union[ProcessGroup, StatelessProcessGroup],
+        pg: ProcessGroup | StatelessProcessGroup,
         max_chunk_bytes,
         max_chunks,
         writer_rank=0,

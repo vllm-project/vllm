@@ -3,7 +3,7 @@
 
 from collections.abc import Iterator
 from enum import Enum
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 import regex as re
 import torch
@@ -23,7 +23,7 @@ class BatchLogprobsComposition(Enum):
     SAMPLE_PROMPT = 3
 
 
-BatchLogprobsSpecType = list[tuple[Optional[int], Optional[int]]]
+BatchLogprobsSpecType = list[tuple[int | None, int | None]]
 
 
 def get_test_batch(
@@ -222,8 +222,8 @@ def create_allowed_token_ids(
     vocab_size: int,
     num_allowed_token_ids: int,
     device: torch.device,
-) -> Optional[torch.Tensor]:
-    mask: Optional[torch.Tensor] = None
+) -> torch.Tensor | None:
+    mask: torch.Tensor | None = None
     for i in range(batch_size):
         if i % 2 == 1:
             continue

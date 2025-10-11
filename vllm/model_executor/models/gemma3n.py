@@ -16,7 +16,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections.abc import Iterable
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -196,7 +195,7 @@ class Gemma3nLaurelBlock(nn.Module):
         laurel_rank: int,
         rms_norm_eps: float,
         *,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str,
     ) -> None:
         super().__init__()
@@ -236,7 +235,7 @@ class Gemma3nMLP(nn.Module):
         intermediate_size: int,
         hidden_activation: str,
         activation_sparsity: float = 0.0,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -285,8 +284,8 @@ class Gemma3nAttention(nn.Module):
         num_kv_heads: int,
         head_dim: int,
         max_position_embeddings: int,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -412,8 +411,8 @@ class Gemma3nDecoderLayer(nn.Module):
     def __init__(
         self,
         config: Gemma3nTextConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -650,7 +649,7 @@ class Gemma3nSelfDecoder(nn.Module):
     def get_per_layer_inputs(
         self,
         hidden_states_0: torch.Tensor,
-        per_layer_inputs: Optional[torch.Tensor],
+        per_layer_inputs: torch.Tensor | None,
     ) -> torch.Tensor:
         per_layer_projection = self.per_layer_model_projection(hidden_states_0)
         per_layer_projection = per_layer_projection.reshape(
@@ -687,8 +686,8 @@ class Gemma3nSelfDecoder(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        per_layer_inputs: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
+        per_layer_inputs: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if inputs_embeds is not None:
@@ -870,8 +869,8 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        per_layer_inputs: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
+        per_layer_inputs: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         logits_indices_padded, num_logits_indices = None, None
@@ -947,8 +946,8 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        per_layer_inputs: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
+        per_layer_inputs: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         hidden_states, per_layer_inputs = self.self_decoder(
@@ -990,13 +989,13 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        per_layer_inputs: Optional[torch.Tensor] = None,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        per_layer_inputs: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if self.fast_prefill_enabled:
             hidden_states = self.fast_prefill_forward(
                 input_ids,
@@ -1116,11 +1115,11 @@ class Gemma3nForCausalLM(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         *,
-        per_layer_inputs: Optional[torch.Tensor] = None,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        per_layer_inputs: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids,
             positions,
@@ -1134,7 +1133,7 @@ class Gemma3nForCausalLM(nn.Module):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.model.embed_tokens, hidden_states)
         return logits
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Literal, Optional
+from typing import Literal
 
 from torch import nn
 
@@ -122,7 +122,7 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
 
 def get_model(
-    *, vllm_config: VllmConfig, model_config: Optional[ModelConfig] = None
+    *, vllm_config: VllmConfig, model_config: ModelConfig | None = None
 ) -> nn.Module:
     loader = get_model_loader(vllm_config.load_config)
     if model_config is None:

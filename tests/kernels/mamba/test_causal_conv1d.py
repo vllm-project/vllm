@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import pytest
 import torch
@@ -19,11 +18,11 @@ from vllm.platforms import current_platform
 def causal_conv1d_ref(
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    initial_states: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
+    initial_states: torch.Tensor | None = None,
     return_final_states: bool = False,
-    final_states_out: Optional[torch.Tensor] = None,
-    activation: Optional[str] = "silu",
+    final_states_out: torch.Tensor | None = None,
+    activation: str | None = "silu",
 ):
     """
     x: (batch, dim, seqlen)
@@ -117,12 +116,12 @@ def causal_conv1d_update_ref(
 def causal_conv1d_opcheck_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    cu_seq_len: Optional[torch.Tensor] = None,
-    cache_indices: Optional[torch.Tensor] = None,
-    has_initial_state: Optional[torch.Tensor] = None,
-    conv_states: Optional[torch.Tensor] = None,
-    activation: Optional[str] = "silu",
+    bias: torch.Tensor | None = None,
+    cu_seq_len: torch.Tensor | None = None,
+    cache_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    conv_states: torch.Tensor | None = None,
+    activation: str | None = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
 ):
     """

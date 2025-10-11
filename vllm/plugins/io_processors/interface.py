@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Sequence
-from typing import Any, Generic, Optional, TypeVar, Union
+from typing import Any, Generic, TypeVar
 
 from vllm.config import VllmConfig
 from vllm.entrypoints.openai.protocol import IOProcessorResponse
@@ -22,24 +22,24 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
     def pre_process(
         self,
         prompt: IOProcessorInput,
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
         **kwargs,
-    ) -> Union[PromptType, Sequence[PromptType]]:
+    ) -> PromptType | Sequence[PromptType]:
         raise NotImplementedError
 
     async def pre_process_async(
         self,
         prompt: IOProcessorInput,
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
         **kwargs,
-    ) -> Union[PromptType, Sequence[PromptType]]:
+    ) -> PromptType | Sequence[PromptType]:
         return self.pre_process(prompt, request_id, **kwargs)
 
     @abstractmethod
     def post_process(
         self,
         model_output: Sequence[PoolingRequestOutput],
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
         **kwargs,
     ) -> IOProcessorOutput:
         raise NotImplementedError
@@ -47,7 +47,7 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
     async def post_process_async(
         self,
         model_output: AsyncGenerator[tuple[int, PoolingRequestOutput]],
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
         **kwargs,
     ) -> IOProcessorOutput:
         # We cannot guarantee outputs are returned in the same order they were

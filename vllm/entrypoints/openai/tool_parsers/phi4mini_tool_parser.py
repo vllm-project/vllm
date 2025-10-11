@@ -3,7 +3,7 @@
 
 import json
 from collections.abc import Sequence
-from typing import Any, Optional
+from typing import Any
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
@@ -118,5 +118,5 @@ class Phi4MiniJsonToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Optional[DeltaMessage]:
+    ) -> DeltaMessage | None:
         return None

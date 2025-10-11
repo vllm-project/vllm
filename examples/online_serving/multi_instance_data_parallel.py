@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-from typing import Optional
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -43,7 +42,7 @@ async def main():
     )
 
     prompt = "Who won the 2004 World Series?"
-    final_output: Optional[RequestOutput] = None
+    final_output: RequestOutput | None = None
     async for output in engine_client.generate(
         prompt=prompt,
         sampling_params=sampling_params,

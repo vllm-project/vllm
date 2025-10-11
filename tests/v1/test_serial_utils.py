@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import UserDict
 from dataclasses import dataclass
-from typing import Optional
 
 import msgspec
 import numpy as np
@@ -100,7 +99,7 @@ def test_encode_decode(monkeypatch: pytest.MonkeyPatch):
 
 
 class MyRequest(msgspec.Struct):
-    mm: Optional[list[MultiModalKwargsItems]]
+    mm: list[MultiModalKwargsItems] | None
 
 
 def test_multimodal_kwargs():

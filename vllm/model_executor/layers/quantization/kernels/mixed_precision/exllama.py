@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -25,7 +24,7 @@ class ExllamaLinearKernel(MPLinearKernel):
         return 60
 
     @classmethod
-    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         if c.has_g_idx and c.partition_weight_shape[0] != c.full_weight_shape[0]:
             return (
                 False,
@@ -137,7 +136,7 @@ class ExllamaLinearKernel(MPLinearKernel):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         c = self.config
 

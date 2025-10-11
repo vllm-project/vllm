@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Optional, Union
 
 import torch
 
@@ -15,17 +14,17 @@ logger = init_logger(__name__)
 
 
 class RequestLogger:
-    def __init__(self, *, max_log_len: Optional[int]) -> None:
+    def __init__(self, *, max_log_len: int | None) -> None:
         self.max_log_len = max_log_len
 
     def log_inputs(
         self,
         request_id: str,
-        prompt: Optional[str],
-        prompt_token_ids: Optional[list[int]],
-        prompt_embeds: Optional[torch.Tensor],
-        params: Optional[Union[SamplingParams, PoolingParams, BeamSearchParams]],
-        lora_request: Optional[LoRARequest],
+        prompt: str | None,
+        prompt_token_ids: list[int] | None,
+        prompt_embeds: torch.Tensor | None,
+        params: SamplingParams | PoolingParams | BeamSearchParams | None,
+        lora_request: LoRARequest | None,
     ) -> None:
         max_log_len = self.max_log_len
         if max_log_len is not None:
@@ -52,8 +51,8 @@ class RequestLogger:
         self,
         request_id: str,
         outputs: str,
-        output_token_ids: Optional[Sequence[int]],
-        finish_reason: Optional[str] = None,
+        output_token_ids: Sequence[int] | None,
+        finish_reason: str | None = None,
         is_streaming: bool = False,
         delta: bool = False,
     ) -> None:

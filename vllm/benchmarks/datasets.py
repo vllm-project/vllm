@@ -21,13 +21,13 @@ import logging
 import math
 import random
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import cache
 from io import BytesIO
-from typing import Any, Callable, Optional, Union, cast
+from typing import Any, cast
 
 import numpy as np
 from PIL import Image
@@ -75,12 +75,12 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: Union[str, list[str]]
+    prompt: str | list[str]
     prompt_len: int
     expected_output_len: int
-    multi_modal_data: Optional[Union[MultiModalDataDict, dict, list[dict]]] = None
-    lora_request: Optional[LoRARequest] = None
-    request_id: Optional[str] = None
+    multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
+    lora_request: LoRARequest | None = None
+    request_id: str | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -94,7 +94,7 @@ class BenchmarkDataset(ABC):
 
     def __init__(
         self,
-        dataset_path: Optional[str] = None,
+        dataset_path: str | None = None,
         random_seed: int = DEFAULT_SEED,
         disable_shuffle: bool = False,
         **kwargs,
@@ -119,7 +119,7 @@ class BenchmarkDataset(ABC):
     def apply_multimodal_chat_transformation(
         self,
         prompt: str,
-        mm_content: Optional[Union[MultiModalDataDict, dict, list[dict]]] = None,
+        mm_content: MultiModalDataDict | dict | list[dict] | None = None,
     ) -> list[dict]:
         """
         Transform a prompt and optional multimodal content into a chat format.
@@ -154,9 +154,9 @@ class BenchmarkDataset(ABC):
 
     def get_random_lora_request(
         self,
-        max_loras: Optional[int] = None,
-        lora_path: Optional[str] = None,
-    ) -> Optional[LoRARequest]:
+        max_loras: int | None = None,
+        lora_path: str | None = None,
+    ) -> LoRARequest | None:
         """
         Optionally select a random LoRA request.
 
@@ -384,7 +384,7 @@ def gen_prompt_decode_to_target_len(
     target_token_len: int,
     max_retry: int = 10,
     add_special_tokens: bool = False,
-    rng: Optional[np.random.Generator] = None,
+    rng: np.random.Generator | None = None,
 ) -> tuple[str, list[int]]:
     """
     Ensure decoded-then-encoded prompt length matches the target token length.
@@ -1054,9 +1054,9 @@ class ShareGPTDataset(BenchmarkDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        lora_path: Optional[str] = None,
-        max_loras: Optional[int] = None,
-        output_len: Optional[int] = None,
+        lora_path: str | None = None,
+        max_loras: int | None = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -1766,9 +1766,9 @@ class CustomDataset(BenchmarkDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        lora_path: Optional[str] = None,
-        max_loras: Optional[int] = None,
-        output_len: Optional[int] = None,
+        lora_path: str | None = None,
+        max_loras: int | None = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
         request_id_prefix: str = "",
@@ -1997,8 +1997,8 @@ class BurstGPTDataset(BenchmarkDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        max_loras: Optional[int] = None,
-        lora_path: Optional[str] = None,
+        max_loras: int | None = None,
+        lora_path: str | None = None,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
@@ -2034,15 +2034,15 @@ class BurstGPTDataset(BenchmarkDataset):
 class HuggingFaceDataset(BenchmarkDataset):
     """Base class for datasets hosted on HuggingFace."""
 
-    SUPPORTED_DATASET_PATHS: Union[set[str], dict[str, Callable]] = set()
+    SUPPORTED_DATASET_PATHS: set[str] | dict[str, Callable] = set()
 
     def __init__(
         self,
         dataset_path: str,
         dataset_split: str,
         no_stream: bool = False,
-        dataset_subset: Optional[str] = None,
-        hf_name: Optional[str] = None,
+        dataset_subset: str | None = None,
+        hf_name: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__(dataset_path=dataset_path, **kwargs)
@@ -2083,7 +2083,7 @@ class ConversationDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2152,7 +2152,7 @@ class VisionArenaDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2206,7 +2206,7 @@ class MMVUDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2267,7 +2267,7 @@ class InstructCoderDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
         request_id_prefix: str = "",
@@ -2331,7 +2331,7 @@ class MTBenchDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
         request_id_prefix: str = "",
@@ -2397,7 +2397,7 @@ class BlazeditDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         skip_chat_template: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2478,7 +2478,7 @@ class AIMODataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
@@ -2660,7 +2660,7 @@ class ASRDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
@@ -2738,7 +2738,7 @@ class MLPerfDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
@@ -2902,7 +2902,7 @@ class MMStarDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,

@@ -26,7 +26,7 @@ class TextPrompt(TypedDict):
     if the model supports it.
     """
 
-    mm_processor_kwargs: NotRequired[Optional[dict[str, Any]]]
+    mm_processor_kwargs: NotRequired[dict[str, Any] | None]
     """
     Optional multi-modal processor kwargs to be forwarded to the
     multimodal input mapper & processor. Note that if multiple modalities
@@ -67,7 +67,7 @@ class TokensPrompt(TypedDict):
     if the model supports it.
     """
 
-    mm_processor_kwargs: NotRequired[Optional[dict[str, Any]]]
+    mm_processor_kwargs: NotRequired[dict[str, Any] | None]
     """
     Optional multi-modal processor kwargs to be forwarded to the
     multimodal input mapper & processor. Note that if multiple modalities
@@ -185,7 +185,7 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
 
     encoder_prompt: _T1_co
 
-    decoder_prompt: Optional[_T2_co]
+    decoder_prompt: _T2_co | None
 
     mm_processor_kwargs: NotRequired[dict[str, Any]]
 
@@ -220,7 +220,7 @@ class TokenInputs(TypedDict):
 
 def token_inputs(
     prompt_token_ids: list[int],
-    cache_salt: Optional[str] = None,
+    cache_salt: str | None = None,
 ) -> TokenInputs:
     """Construct [`TokenInputs`][vllm.inputs.data.TokenInputs] from optional
     values."""
@@ -249,7 +249,7 @@ class EmbedsInputs(TypedDict):
 
 def embeds_inputs(
     prompt_embeds: torch.Tensor,
-    cache_salt: Optional[str] = None,
+    cache_salt: str | None = None,
 ) -> EmbedsInputs:
     """Construct [`EmbedsInputs`][vllm.inputs.data.EmbedsInputs] from optional
     values."""
@@ -301,8 +301,8 @@ _T2 = TypeVar("_T2", bound=SingletonPrompt, default=SingletonPrompt)
 
 def build_explicit_enc_dec_prompt(
     encoder_prompt: _T1,
-    decoder_prompt: Optional[_T2],
-    mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    decoder_prompt: _T2 | None,
+    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> ExplicitEncoderDecoderPrompt[_T1, _T2]:
     if mm_processor_kwargs is None:
         mm_processor_kwargs = {}
@@ -315,10 +315,8 @@ def build_explicit_enc_dec_prompt(
 
 def zip_enc_dec_prompts(
     enc_prompts: Iterable[_T1],
-    dec_prompts: Iterable[Optional[_T2]],
-    mm_processor_kwargs: Optional[
-        Union[Iterable[dict[str, Any]], dict[str, Any]]
-    ] = None,
+    dec_prompts: Iterable[_T2 | None],
+    mm_processor_kwargs: Iterable[dict[str, Any]] | dict[str, Any] | None = None,
 ) -> list[ExplicitEncoderDecoderPrompt[_T1, _T2]]:
     """
     Zip encoder and decoder prompts together into a list of
@@ -350,7 +348,7 @@ def zip_enc_dec_prompts(
 
 def to_enc_dec_tuple_list(
     enc_dec_prompts: Iterable[ExplicitEncoderDecoderPrompt[_T1, _T2]],
-) -> list[tuple[_T1, Optional[_T2]]]:
+) -> list[tuple[_T1, _T2 | None]]:
     return [
         (enc_dec_prompt["encoder_prompt"], enc_dec_prompt["decoder_prompt"])
         for enc_dec_prompt in enc_dec_prompts

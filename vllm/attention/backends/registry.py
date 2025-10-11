@@ -3,7 +3,6 @@
 """Attention backend registry"""
 
 import enum
-from typing import Optional
 
 from vllm.utils import resolve_obj_by_qualname
 
@@ -53,7 +52,7 @@ BACKEND_MAP = {
 }
 
 
-def register_attn_backend(backend: _Backend, class_path: Optional[str] = None):
+def register_attn_backend(backend: _Backend, class_path: str | None = None):
     """
     Decorator: register a custom attention backend into BACKEND_MAPPING.
     - If class_path is provided, use it.
@@ -98,7 +97,7 @@ def backend_to_class(backend: _Backend) -> type:
     return resolve_obj_by_qualname(backend_class_name)
 
 
-def backend_name_to_enum(backend_name: str) -> Optional[_Backend]:
+def backend_name_to_enum(backend_name: str) -> _Backend | None:
     """
     Convert a string backend name to a _Backend enum value.
 

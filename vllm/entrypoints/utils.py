@@ -6,7 +6,7 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
-from typing import Any, Optional, Union
+from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -164,9 +164,9 @@ def cli_env_setup():
 
 def _validate_truncation_size(
     max_model_len: int,
-    truncate_prompt_tokens: Optional[int],
-    tokenization_kwargs: Optional[dict[str, Any]] = None,
-) -> Optional[int]:
+    truncate_prompt_tokens: int | None,
+    tokenization_kwargs: dict[str, Any] | None = None,
+) -> int | None:
     if truncate_prompt_tokens is not None:
         if truncate_prompt_tokens <= -1:
             truncate_prompt_tokens = max_model_len
@@ -191,7 +191,7 @@ def _validate_truncation_size(
 
 def get_max_tokens(
     max_model_len: int,
-    request: Union[ChatCompletionRequest, CompletionRequest],
+    request: ChatCompletionRequest | CompletionRequest,
     input_length: int,
     default_sampling_params: dict,
 ) -> int:
@@ -211,7 +211,7 @@ def get_max_tokens(
     )
 
 
-def log_non_default_args(args: Union[Namespace, EngineArgs]):
+def log_non_default_args(args: Namespace | EngineArgs):
     non_default_args = {}
 
     # Handle Namespace

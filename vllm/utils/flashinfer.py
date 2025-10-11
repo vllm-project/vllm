@@ -13,7 +13,8 @@ import importlib
 import importlib.util
 import os
 import shutil
-from typing import Any, Callable, NoReturn
+from collections.abc import Callable
+from typing import Any, NoReturn
 
 import requests
 import torch

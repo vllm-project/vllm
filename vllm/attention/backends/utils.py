@@ -3,7 +3,6 @@
 """Attention backend utils"""
 
 from dataclasses import dataclass
-from typing import Optional
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
@@ -15,7 +14,7 @@ PAD_SLOT_ID = -1
 
 @dataclass
 class MLADims:
-    q_lora_rank: Optional[int]
+    q_lora_rank: int | None
     kv_lora_rank: int
     qk_nope_head_dim: int
     qk_rope_head_dim: int

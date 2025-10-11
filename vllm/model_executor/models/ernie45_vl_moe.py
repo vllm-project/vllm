@@ -25,7 +25,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 from torch import nn
@@ -74,7 +74,7 @@ logger = init_logger(__name__)
 
 
 class Ernie4_5_VLMoeMLP(Ernie4_5_MoeMLP):
-    def __init__(self, shared_experts: Optional[torch.nn.Module] = None, **kwargs):
+    def __init__(self, shared_experts: torch.nn.Module | None = None, **kwargs):
         super().__init__(**kwargs)
         self.shared_experts = shared_experts
 
@@ -91,15 +91,15 @@ class Ernie4_5_VLMoeAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        head_dim: Optional[int] = None,
+        head_dim: int | None = None,
         rope_theta: float = 500000,
-        rope_scaling: Optional[dict[str, Any]] = None,
+        rope_scaling: dict[str, Any] | None = None,
         freq_allocation: int = 20,
         max_position_embeddings: int = 131072,
         rms_norm_eps: float = 1e-05,
         qkv_bias: bool = False,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -192,7 +192,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -390,8 +390,8 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -463,8 +463,8 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        visual_token_mask: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
+        visual_token_mask: torch.Tensor | None,
         **kwargs: object,
     ) -> torch.Tensor:
         # Self Attention
@@ -551,11 +551,11 @@ class Ernie4_5_VLMoeModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        visual_token_mask: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        visual_token_mask: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -632,10 +632,10 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
@@ -644,7 +644,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

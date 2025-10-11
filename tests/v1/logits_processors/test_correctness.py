@@ -3,7 +3,7 @@
 
 import random
 from collections.abc import Callable
-from typing import NamedTuple, Optional, Union
+from typing import NamedTuple, Union
 
 import numpy as np
 import pytest
@@ -435,7 +435,7 @@ class LogitsprocTestHelpers(NamedTuple):
     """Supports setting up and validating logitsprocs unit tests."""
 
     eval_fxn: Callable
-    gen_request_fxn: Optional[Callable] = None
+    gen_request_fxn: Callable | None = None
 
 
 logitsprocs_test_mapping = {
@@ -471,7 +471,7 @@ def _generate_fake_step_update(
     workload_params: list[LogitsProcsRequestParams],
     wdx: int,
     batch_update_builder: BatchUpdateBuilder,
-) -> tuple[Optional[BatchUpdate], int, int]:
+) -> tuple[BatchUpdate | None, int, int]:
     batch_size = len(persistent_batch)
     workload_size = len(workload_params)
     workload_reqs_remaining = workload_size - wdx

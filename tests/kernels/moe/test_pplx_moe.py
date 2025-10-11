@@ -9,7 +9,7 @@ import copy
 import itertools
 import textwrap
 import traceback
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 
 import pytest
 import torch
@@ -89,7 +89,7 @@ def torch_prepare(
     a: torch.Tensor,
     topk_ids: torch.Tensor,
     num_experts: int,
-    max_num_tokens: Optional[int] = None,
+    max_num_tokens: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert topk_ids.dim() == 2
     assert topk_ids.shape[0] == a.shape[0]
@@ -214,10 +214,10 @@ def create_pplx_prepare_finalize(
     dp_size: int,
     world_size: int,
     in_dtype: torch.dtype,
-    quant_dtype: Optional[torch.dtype],
-    block_shape: Optional[list[int]],
+    quant_dtype: torch.dtype | None,
+    block_shape: list[int] | None,
     per_act_token_quant: bool,
-    group_name: Optional[str],
+    group_name: str | None,
 ):
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize,
@@ -274,18 +274,14 @@ def chunk_by_rank(t: torch.Tensor, r: int, w: int) -> torch.Tensor:
     return t[(r * chunk) : (r + 1) * chunk]
 
 
-def maybe_chunk_by_rank(
-    t: Optional[torch.Tensor], r: int, w: int
-) -> Optional[torch.Tensor]:
+def maybe_chunk_by_rank(t: torch.Tensor | None, r: int, w: int) -> torch.Tensor | None:
     if t is not None:
         return chunk_by_rank(t, r, w)
     else:
         return t
 
 
-def chunk_scales_by_rank(
-    t: Optional[torch.Tensor], r: int, w: int
-) -> Optional[torch.Tensor]:
+def chunk_scales_by_rank(t: torch.Tensor | None, r: int, w: int) -> torch.Tensor | None:
     if t is not None and t.numel() > 1:
         chunk = rank_chunk(t.shape[0], r, w)
         return t[(r * chunk) : (r + 1) * chunk]
@@ -293,9 +289,7 @@ def chunk_scales_by_rank(
         return t
 
 
-def chunk_scales(
-    t: Optional[torch.Tensor], start: int, end: int
-) -> Optional[torch.Tensor]:
+def chunk_scales(t: torch.Tensor | None, start: int, end: int) -> torch.Tensor | None:
     if t is not None and t.numel() > 1:
         return t[start:end]
     else:
@@ -313,10 +307,10 @@ def pplx_prepare_finalize(
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
     num_experts: int,
-    quant_dtype: Optional[torch.dtype],
-    block_shape: Optional[list[int]],
+    quant_dtype: torch.dtype | None,
+    block_shape: list[int] | None,
     per_act_token_quant: bool,
-    group_name: Optional[str],
+    group_name: str | None,
 ) -> torch.Tensor:
     assert torch.cuda.current_device() == pgi.local_rank
 
@@ -409,8 +403,8 @@ def _pplx_prepare_finalize(
     score: torch.Tensor,
     topk: torch.Tensor,
     num_experts: int,
-    quant_dtype: Optional[torch.dtype],
-    block_shape: Optional[list[int]],
+    quant_dtype: torch.dtype | None,
+    block_shape: list[int] | None,
     per_act_token_quant: bool,
     use_internode: bool,
 ):
@@ -479,7 +473,7 @@ def test_pplx_prepare_finalize_slow(
     dtype: torch.dtype,
     world_dp_size: tuple[int, int],
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]],
+    block_shape: list[int] | None,
     use_internode: bool,
 ):
     if dtype == torch.float8_e4m3fn:
@@ -521,7 +515,7 @@ def test_pplx_prepare_finalize_slow(
 
 
 def pplx_moe(
-    group_name: Optional[str],
+    group_name: str | None,
     rank: int,
     world_size: int,
     dp_size: int,
@@ -530,17 +524,17 @@ def pplx_moe(
     w2: torch.Tensor,
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
-    quant_dtype: Optional[torch.dtype] = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    quant_dtype: torch.dtype | None = None,
     per_act_token_quant=False,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
     use_compile: bool = False,
     use_cudagraphs: bool = True,
-    shared_experts: Optional[torch.nn.Module] = None,
-) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    shared_experts: torch.nn.Module | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     num_tokens, hidden_dim = a.shape
     num_experts = w1.shape[0]
     topk = topk_ids.shape[1]
@@ -657,13 +651,13 @@ def _pplx_moe(
     score: torch.Tensor,
     topk: int,
     num_experts: int,
-    w1_s: Optional[torch.Tensor] = None,
-    w2_s: Optional[torch.Tensor] = None,
-    quant_dtype: Optional[torch.dtype] = None,
+    w1_s: torch.Tensor | None = None,
+    w2_s: torch.Tensor | None = None,
+    quant_dtype: torch.dtype | None = None,
     per_act_token_quant: bool = False,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
     use_internode: bool = False,
-    shared_experts: Optional[torch.nn.Module] = None,
+    shared_experts: torch.nn.Module | None = None,
 ):
     try:
         if use_internode:
@@ -812,7 +806,7 @@ def test_pplx_moe_slow(
     dtype: torch.dtype,
     world_dp_size: tuple[int, int],
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]],
+    block_shape: list[int] | None,
     use_internode: bool,
 ):
     current_platform.seed_everything(7)

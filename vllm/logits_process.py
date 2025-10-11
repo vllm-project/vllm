@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
-from typing import Callable, Union
+from collections.abc import Callable, Sequence
+from typing import Union
 
 import torch
 
