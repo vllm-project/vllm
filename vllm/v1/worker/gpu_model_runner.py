@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
 import gc
 import itertools
 import time
@@ -210,6 +211,21 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
         return output
+
+
+class ForceAttention(enum.Enum):
+    """
+    This enum determines whether we want to force compilation of attention
+    metadata when we do a dummy run of the model.
+    ALL means that we always force compilation of attention metadata.
+    SEPARATE_KV_UPDATE_ONLY means that we force compilation of attention
+    metadata only for backends that split KV Cache update and attention op.
+    NONE means that we don't force compilation of attention metadata.
+    """
+
+    ALL = enum.auto()
+    SEPARATE_KV_UPDATE_ONLY = enum.auto()
+    NONE = enum.auto()
 
 
 class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
@@ -3191,7 +3207,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         num_tokens: int,
         cudagraph_runtime_mode: Optional[CUDAGraphMode] = None,
-        force_attention: bool = False,
+        force_attention: ForceAttention = ForceAttention.NONE,
         uniform_decode: bool = False,
         allow_microbatching: bool = True,
         skip_eplb: bool = False,
@@ -3296,9 +3312,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         attn_metadata: Optional[PerLayerAttnMetadata] = None
 
-        # If force_attention is True, we always capture attention. Otherwise,
-        # it only happens for cudagraph_runtime_mode=FULL.
-        if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        # We always capture attention if cudagraph_runtime_mode is FULL.
+        # Otherwise, if force_attention is not ALL, we capture attention
+        # for all backends. If it's SEPARATE_KV_UPDATE_ONLY, we capture
+        # attention only for backends that split KV Cache update and
+        # attention op.
+        # TODO get rid of build_for_cudagraph_capture
+        # https://github.com/vllm-project/vllm/issues/22945
+        if (
+            force_attention != ForceAttention.NONE
+            or cudagraph_runtime_mode == CUDAGraphMode.FULL
+        ):
             attn_metadata = {}
             if ubatch_slices is not None:
                 attn_metadata = [dict() for _ in range(len(ubatch_slices))]
@@ -3345,6 +3369,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     else None,
                 )
                 for attn_group in self.attn_groups[kv_cache_group_id]:
+                    # Only capture attention for backends that split KV Cache
+                    # update and attention op, unless cudagraph_runtime_mode is
+                    # FULL.
+                    if (
+                        force_attention == ForceAttention.SEPARATE_KV_UPDATE_ONLY
+                        and cudagraph_runtime_mode != CUDAGraphMode.FULL
+                        and attn_group.backend.forward_includes_kv_cache
+                    ):
+                        continue
                     if ubatch_slices is not None:
                         common_attn_metadata_list = split_attn_metadata(
                             ubatch_slices, common_attn_metadata
@@ -3845,17 +3878,41 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
             )
 
+            # Force attention for all cudagraph modes when the backend forward
+            # op doesn't include KV cache update. This is required
+            # for KV cache update to be captured correctly in cases where
+            # the KV cache update and attention are two separate custom ops.
+            # Keep in mind that when we use `FULL` cudagraph mode, we capture
+            # all attention regardless of the `force_attention_*` variables.
+            has_separate_kv_update = not all(
+                all(g.backend.forward_includes_kv_cache for g in gs)
+                for gs in self.attn_groups
+            )
+            force_attention_dummy = (
+                ForceAttention.SEPARATE_KV_UPDATE_ONLY
+                if has_separate_kv_update
+                else ForceAttention.NONE
+            )
+            force_attention_warmup = (
+                ForceAttention.ALL
+                if (cudagraph_runtime_mode == CUDAGraphMode.FULL)
+                else (
+                    ForceAttention.SEPARATE_KV_UPDATE_ONLY
+                    if (
+                        has_separate_kv_update
+                        and cudagraph_runtime_mode != CUDAGraphMode.NONE
+                    )
+                    else ForceAttention.NONE
+                )
+            )
+
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
                 # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
-                # But be careful, warm up with `NONE`is orthogonal to
-                # if we want to warm up attention or not. This is
-                # different from the case where `FULL` implies capture
-                # attention while `PIECEWISE` implies no attention.
-                force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
+                # This is independent from how we want to warm up the attention.
                 self._dummy_run(
                     num_tokens,
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                    force_attention=force_attention,
+                    force_attention=force_attention_warmup,
                     uniform_decode=uniform_decode,
                     allow_microbatching=allow_microbatching,
                     skip_eplb=True,
@@ -3864,6 +3921,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self._dummy_run(
                 num_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                force_attention=force_attention_dummy,
                 uniform_decode=uniform_decode,
                 allow_microbatching=allow_microbatching,
                 skip_eplb=True,
@@ -4184,9 +4242,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Generate kernel_block_sizes that matches each block_size
         kernel_block_sizes = self._prepare_kernel_block_sizes(kv_cache_config)
 
-        if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [
-            self.cache_config.block_size
-        ]:
+        if (
+            len(block_sizes) > 0
+            and block_sizes != [self.cache_config.block_size]
+            or len(kernel_block_sizes) > 0
+            and kernel_block_sizes != [self.cache_config.block_size]
+        ):
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
