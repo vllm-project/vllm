@@ -21,10 +21,10 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallInProgressEvent,
     ResponseCodeInterpreterCallInterpretingEvent,
     ResponseCodeInterpreterToolCallParam,
-    ResponseFunctionCallArgumentsDeltaEvent,
-    ResponseFunctionCallArgumentsDoneEvent,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
+    ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
     ResponseOutputItem,
@@ -1424,18 +1424,17 @@ class OpenAIServingResponses(OpenAIServing):
                     if previous_item.recipient is not None:
                         # Deal with tool call
                         if previous_item.recipient.startswith("functions."):
-                            function_name = \
-                                previous_item.recipient[len("functions."): ]
+                            function_name = previous_item.recipient[len("functions.") :]
                             yield _increment_sequence_number_and_return(
                                 ResponseFunctionCallArgumentsDoneEvent(
-                                    type=
-                                    "response.function_call_arguments.done",
+                                    type="response.function_call_arguments.done",
                                     arguments=previous_item.content[0].text,
                                     name=function_name,
                                     item_id=current_item_id,
                                     output_index=current_output_index,
                                     sequence_number=-1,
-                                ))
+                                )
+                            )
                             function_call_item = ResponseFunctionToolCall(
                                 type="function_call",
                                 arguments=previous_item.content[0].text,
@@ -1452,7 +1451,8 @@ class OpenAIServingResponses(OpenAIServing):
                                     sequence_number=-1,
                                     output_index=current_output_index,
                                     item=function_call_item,
-                                ))
+                                )
+                            )
                     elif previous_item.channel == "analysis":
                         content = ResponseReasoningTextContent(
                             text=previous_item.content[0].text,
@@ -1806,19 +1806,22 @@ class OpenAIServingResponses(OpenAIServing):
                                 outputs=[],
                                 status="completed",
                             ),
-                        ))
+                        )
+                    )
             # developer tools will be triggered on the commentary channel
             # and recipient starts with "functions.TOOL_NAME"
-            if ctx.parser.current_channel == "commentary" \
-               and ctx.parser.current_recipient and \
-               ctx.parser.current_recipient.startswith("functions."):
-                fc_name = ctx.parser.current_recipient[len("functions."):]
+            if (
+                ctx.parser.current_channel == "commentary"
+                and ctx.parser.current_recipient
+                and ctx.parser.current_recipient.startswith("functions.")
+            ):
+                fc_name = ctx.parser.current_recipient[len("functions.") :]
                 tool_call_item = ResponseFunctionToolCall(
                     name=fc_name,
                     type="function_call",
                     id=current_item_id,
                     call_id=f"call_{random_uuid()}",
-                    arguments='',
+                    arguments="",
                     status="in_progress",
                 )
                 if sent_function_call_item_added is False:
@@ -1830,7 +1833,8 @@ class OpenAIServingResponses(OpenAIServing):
                             sequence_number=-1,
                             output_index=current_output_index,
                             item=tool_call_item,
-                        ))
+                        )
+                    )
                 else:
                     yield _increment_sequence_number_and_return(
                         ResponseFunctionCallArgumentsDeltaEvent(
@@ -1838,7 +1842,9 @@ class OpenAIServingResponses(OpenAIServing):
                             delta=ctx.parser.last_content_delta,
                             output_index=current_output_index,
                             sequence_number=-1,
-                            type="response.function_call_arguments.delta"))
+                            type="response.function_call_arguments.delta",
+                        )
+                    )
 
     async def responses_stream_generator(
         self,
