@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import time
 from contextlib import contextmanager
 from dataclasses import field, replace
 from functools import lru_cache
@@ -269,6 +270,9 @@ class VllmConfig:
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
+
+        # To give each torch profile run a unique instance name.
+        self.instance_id = f"{time.time_ns()}"
 
         self.try_verify_and_update_config()
 
