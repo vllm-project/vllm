@@ -573,6 +573,229 @@ def _decode_token_type_ids(input_ids: torch.Tensor) -> torch.Tensor:
     return token_type_ids
 
 
+class BertMLMHead(nn.Module):
+    def __init__(
+        self, hidden_size: int, vocab_size: int, layer_norm_eps: float = 1e-12
+    ):
+        super().__init__()
+        self.dense = nn.Linear(hidden_size, hidden_size)
+        self.activation = nn.GELU()
+        self.layer_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+        self.decoder = nn.Linear(hidden_size, vocab_size, bias=True)
+
+    def tie_weights_with_embeddings(self, embeddings_weight: torch.Tensor):
+        self.decoder.weight = embeddings_weight
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        x = self.dense(hidden_states)
+        x = self.activation(x)
+        x = self.layer_norm(x)
+        logits = self.decoder(x)
+        return logits
+
+
+class SPLADESparsePooler(Pooler):
+    """
+    SPLADE sparse pooling:
+    logits = mlm_head(hidden_states)
+            -> log1p(relu(logits))
+            -> (max|sum over L)
+            -> [V]
+
+    Padding is masked with an attention mask,
+    [CLS]/[SEP] is removed (selected),
+    and then pooled.
+    """
+
+    def __init__(
+        self,
+        mlm_head: nn.Module,
+        cls_token_id: Optional[int] = 101,
+        sep_token_id: Optional[int] = 102,
+        pooling: str = "max",
+        remove_cls_sep: bool = True,
+    ):
+        super().__init__()
+        assert pooling in ("max", "sum")
+        self.mlm_head = mlm_head
+        self.cls_token_id = cls_token_id
+        self.sep_token_id = sep_token_id
+        self.pooling = pooling
+        self.remove_cls_sep = remove_cls_sep
+
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return {"embed"}
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate(requires_token_ids=True)
+
+    def forward(
+        self,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+        pooling_metadata: PoolingMetadata,
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+        lens_tensor: torch.Tensor = pooling_metadata.prompt_lens
+        lens: list[int] = lens_tensor.tolist()
+        B: int = len(lens)
+        max_len: int = int(lens_tensor.max().item())
+
+        if isinstance(hidden_states, list):
+            hs_list = hidden_states
+        else:
+            hs_list = torch.split(hidden_states, lens, dim=0)
+
+        device = hs_list[0].device
+        H = hs_list[0].size(-1)
+
+        padded = hidden_states.new_zeros((B, max_len, H))
+        valid_mask = torch.zeros((B, max_len), dtype=torch.bool, device=device)
+        for i, (hs, L) in enumerate(zip(hs_list, lens)):
+            L = int(L)
+            padded[i, :L] = hs
+            valid_mask[i, :L] = True
+
+        token_ids = pooling_metadata.prompt_token_ids
+        if self.remove_cls_sep and token_ids is not None:
+            for i, L in enumerate(lens):
+                if (
+                    self.cls_token_id is not None
+                    and int(token_ids[i, 0].item()) == self.cls_token_id
+                ):
+                    valid_mask[i, 0] = False
+                if (
+                    self.sep_token_id is not None
+                    and int(token_ids[i, L - 1].item()) == self.sep_token_id
+                ):
+                    valid_mask[i, L - 1] = False
+
+        flat = padded.reshape(B * max_len, H)
+        logits = self.mlm_head(flat)
+        V = int(logits.size(-1))
+        logits = logits.view(B, max_len, V)
+
+        # SPLADE activation
+        scores = torch.log1p(torch.relu(logits))  # [B, T, V]
+
+        if self.pooling == "sum":
+            pooled = (scores * valid_mask.to(scores.dtype).unsqueeze(-1)).sum(dim=1)
+        else:
+            neg_inf = torch.tensor(
+                float("-inf"), device=scores.device, dtype=scores.dtype
+            )
+            masked = scores.masked_fill(~valid_mask.unsqueeze(-1), neg_inf)
+            pooled = masked.amax(dim=1)
+            pooled = torch.where(
+                torch.isneginf(pooled), torch.zeros_like(pooled), pooled
+            )
+
+        return pooled.contiguous()
+
+
+@default_pooling_type("CLS")
+class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
+    """
+    BertEmbeddingModel + SPLADE sparse embedding.
+    - Make logits by self.mlm_head
+    - pooler: SPLADESparsePooler(mlm_head...)
+    """
+
+    def __init__(
+        self, *, vllm_config: VllmConfig, prefix: str = "", splade_pooling: str = "max"
+    ):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        cfg = vllm_config.model_config.hf_config
+
+        # MLM head
+        self.mlm_head = BertMLMHead(
+            hidden_size=cfg.hidden_size,
+            vocab_size=cfg.vocab_size,
+            layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-12),
+        )
+
+        self._splade_pooling = splade_pooling
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+        self.pooler = self._build_pooler(pooler_config)
+
+    def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
+        cfg = self.model.config
+
+        if not hasattr(self, "mlm_head"):
+            self.mlm_head = BertMLMHead(
+                hidden_size=cfg.hidden_size,
+                vocab_size=cfg.vocab_size,
+                layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-12),
+            )
+
+        pooling_mode = getattr(self, "_splade_pooling", "max")
+
+        cls_id = getattr(cfg, "cls_token_id", None)
+        sep_id = getattr(cfg, "sep_token_id", None)
+
+        return DispatchPooler(
+            {
+                "encode": Pooler.for_encode(pooler_config),
+                "embed": SPLADESparsePooler(
+                    mlm_head=self.mlm_head,
+                    cls_token_id=cls_id,
+                    sep_token_id=sep_id,
+                    pooling=pooling_mode,  # "max" or "sum"
+                    remove_cls_sep=True,
+                ),
+            }
+        )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        if not hasattr(self, "mlm_head"):
+            cfg = self.model.config
+            self.mlm_head = BertMLMHead(
+                hidden_size=cfg.hidden_size,
+                vocab_size=cfg.vocab_size,
+                layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-12),
+            )
+
+        def _strip(name: str) -> str:
+            for p in ("model.", "bert."):
+                if name.startswith(p):
+                    name = name[len(p) :]
+            return name
+
+        weights_list = list(weights)
+        model_side: list[tuple[str, torch.Tensor]] = []
+        mlm_side: list[tuple[str, torch.Tensor]] = []
+
+        for k, w in weights_list:
+            name = _strip(k)
+            if name.startswith("cls.predictions."):
+                mlm_side.append((name, w))
+            else:
+                model_side.append((name, w))
+
+        loaded: set[str] = set()
+        loaded_model = self.model.load_weights(model_side)
+        loaded.update({"model." + n for n in loaded_model})
+
+        if mlm_side:
+            name_map = {
+                "cls.predictions.transform.dense.weight": "mlm_head.dense.weight",
+                "cls.predictions.transform.dense.bias": "mlm_head.dense.bias",
+                ("cls.predictions.transform.LayerNorm.weight"): (
+                    "mlm_head.layer_norm.weight"
+                ),
+                ("cls.predictions.transform.LayerNorm.bias"): (
+                    "mlm_head.layer_norm.bias"
+                ),
+                "cls.predictions.decoder.weight": "mlm_head.decoder.weight",
+                "cls.predictions.decoder.bias": "mlm_head.decoder.bias",
+            }
+            remapped = [(name_map[n], w) for n, w in mlm_side if n in name_map]
+            if remapped:
+                loaded_mlm = AutoWeightsLoader(self).load_weights(remapped)
+                loaded.update(loaded_mlm)
+
+        return loaded
+
+
 @default_pooling_type("CLS")
 class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
