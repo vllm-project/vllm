@@ -55,7 +55,6 @@ class PyNcclPipe(KVPipeBase):
         self.kv_rank = self.config.kv_rank
         assert self.kv_rank is not None
         self.kv_parallel_size = self.config.kv_parallel_size
-        assert self.kv_parallel_size is not None
         if device is None:
             self.device = self._select_device(self.config.kv_buffer_device)
         else:
@@ -110,7 +109,7 @@ class PyNcclPipe(KVPipeBase):
 
         return send, recv
 
-    def _select_device(self, device: Optional[str]):
+    def _select_device(self, device: str):
         logger.info("Selecting device: %s", device)
         if device == "cuda":
             return torch.device(f"cuda:{self.local_rank}")

@@ -247,7 +247,7 @@ class MooncakePipe(KVPipeBase):
         self.transport_thread: Optional[ThreadPoolExecutor] = None
         self.none_tensor = torch.tensor([NONE_INT], device=self.device)
 
-    def _select_device(self, device: Optional[str]) -> torch.device:
+    def _select_device(self, device: str) -> torch.device:
         """Select available device (CUDA or CPU)."""
         logger.info("Selecting device: %s", device)
         if device == "cuda":
