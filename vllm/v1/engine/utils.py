@@ -345,6 +345,7 @@ class CoreEngineActorManager:
         world_size = vllm_config.parallel_config.world_size
         placement_groups: list[PlacementGroup] = []
         local_dp_ranks: list[int] = []
+
         dp_master_ip_key = f"node:{dp_master_ip}"
         nodes = sorted(
             available_resources.values(), key=lambda x: dp_master_ip_key not in x
@@ -355,6 +356,41 @@ class CoreEngineActorManager:
             dp_master_ip,
         )
         device_str = current_platform.ray_device_key
+        n_node_devices: list[int] = [
+            int(node_resources[device_str])
+            for node_resources in nodes
+            if device_str in node_resources
+        ]
+        if not n_node_devices:
+            raise ValueError(f"No {device_str} found in Ray cluster.")
+        max_device_per_node = max(n_node_devices)
+
+        if max_device_per_node < world_size:
+            # if we need multiple nodes per dp group, we require for now that
+            # available nodes are homogenous
+            assert set(n_node_devices) == {max_device_per_node}, (
+                f"Nodes are not homogenous, {nodes}"
+            )
+            assert world_size % max_device_per_node == 0, (
+                f"For multi-node data parallel groups, world_size ({world_size}) must "
+                f"be a multiple of number of devices per node ({max_device_per_node})."
+            )
+            assert len(nodes) * max_device_per_node >= world_size * dp_size, (
+                f"Not enough total available nodes ({len(nodes)}) and devices per node"
+                f" ({max_device_per_node}) "
+                f"to satisfy required world size {world_size} and data parallel size "
+                f"{dp_size}"
+            )
+            assert dp_size_local == 1, (
+                f"data-parallel-size-local {dp_size_local} must be 1 if we "
+                "need multiple nodes per dp group"
+            )
+
+            nodes_per_pg = world_size // max_device_per_node
+            placement_stategy = "PACK"
+        else:
+            nodes_per_pg = 1
+            placement_stategy = "STRICT_PACK"
 
         if envs.VLLM_RAY_DP_PACK_STRATEGY == "fill" and (
             envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
@@ -372,7 +408,10 @@ class CoreEngineActorManager:
         )
         strict_local_size = envs.VLLM_RAY_DP_PACK_STRATEGY == "strict"
 
-        for node_resources in nodes:
+        # if a placement group spans N (N>1) nodes
+        # we only need to consider every Nth node
+        prev_bundles = []
+        for node_idx, node_resources in enumerate(nodes):
             node_ip_keys = [
                 key
                 for key in node_resources
@@ -385,14 +424,20 @@ class CoreEngineActorManager:
             node_ip_key = node_ip_keys[0]
             node_ip = node_ip_key.split(":")[1]
 
-            # For now, each DP rank can only be assigned to one node
-            # TODO(rui): support allocating a single DP rank
-            # to multiple nodes
+            available_engine_count = (
+                int(node_resources[device_str]) * nodes_per_pg
+            ) // world_size
+            is_master_ip = dp_master_ip_key in node_resources
+
             dp_size_available = (
-                int(node_resources[device_str]) // world_size
-                if device_str in node_resources
-                else 0
-            )
+                int(node_resources[device_str]) * nodes_per_pg
+            ) // world_size
+
+            if is_master_ip:
+                assert available_engine_count >= dp_size_local, (
+                    "Not enough resources to allocate DP ranks "
+                    f"on DP master node {dp_master_ip}"
+                )
 
             if node_ip == dp_master_ip:
                 if dp_size_available < dp_size_local:
@@ -419,12 +464,32 @@ class CoreEngineActorManager:
                 dp_size_to_allocate = dp_size_available
 
             for i in range(dp_size_to_allocate):
-                bundles = [{device_str: 1.0, "node:" + node_ip: 0.001}] * world_size + [
-                    {"CPU": 1.0}
-                ]
+                n_devices_per_bundle = (
+                    world_size if nodes_per_pg == 0 else max_device_per_node
+                )
+                bundles = [
+                    {device_str: 1.0, "node:" + node_ip: 0.001}
+                ] * n_devices_per_bundle
+
+                # we only create a placement group if we've iterated
+                # over all nodes that we need
+                is_all_nodes_collected = ((node_idx + 1) % nodes_per_pg == 0) or (
+                    node_idx == len(nodes) - 1
+                )
+                if not is_all_nodes_collected:
+                    assert nodes_per_pg > 1, (
+                        "Only multi-node placement groups can have prev_bundles"
+                    )
+                    prev_bundles += bundles
+                    continue
+
+                bundles += prev_bundles
+                bundles += [{"CPU": 1.0}]
+                prev_bundles = []
+
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{len(placement_groups)}",
-                    strategy="STRICT_PACK",
+                    strategy=placement_stategy,
                     bundles=bundles,
                 )
                 placement_groups.append(pg)
