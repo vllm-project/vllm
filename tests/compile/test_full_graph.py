@@ -185,6 +185,9 @@ def test_inductor_graph_partition_attn_fusion(caplog_vllm):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
     model = "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8"
+    if current_platform.get_device_capability()[0] < 10:
+        pytest.skip(f"{model} can only be loaded by B200 or above")
+
     compilation_config = CompilationConfig(
         level=CompilationLevel.PIECEWISE,
         use_inductor_graph_partition=True,
