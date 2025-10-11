@@ -90,12 +90,10 @@ class SharedStorageConnector(KVConnectorBase_V1):
         super().__init__(vllm_config=vllm_config, role=role)
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}
-        transfer_config = vllm_config.kv_transfer_config
-        assert transfer_config is not None
-        self._storage_path = transfer_config.get_from_extra_config(
+        self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
         )
-        logger.info(vllm_config.kv_transfer_config)
+        logger.info(self._kv_transfer_config)
         logger.info("Shared storage path is %s", self._storage_path)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
@@ -311,13 +309,15 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         total_need_load = 0
         for new_req in scheduler_output.scheduled_new_reqs:
+            token_ids = new_req.prompt_token_ids or []
+            mm_hashes = [f.identifier for f in new_req.mm_features]
             if new_req.req_id in self._requests_need_load:
                 meta.add_request(
-                    token_ids=list(new_req.prompt_token_ids or []),
+                    token_ids=token_ids,
                     block_ids=new_req.block_ids[0],
                     block_size=self._block_size,
                     is_store=False,
-                    mm_hashes=[f.identifier for f in new_req.mm_features],
+                    mm_hashes=mm_hashes,
                 )
                 total_need_load += 1
             else:
@@ -325,11 +325,9 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 # but a single request can have both store and load.
                 # NOTE(rob): for this debug implementation, we only cache
                 # the original prompt tokens.
-                token_ids_list = list(new_req.prompt_token_ids or [])
-                mm_hashes = [f.identifier for f in new_req.mm_features]
-                if not self._found_match_for_prompt(token_ids_list, mm_hashes):
+                if not self._found_match_for_prompt(token_ids, mm_hashes):
                     meta.add_request(
-                        token_ids=token_ids_list,
+                        token_ids=token_ids,
                         block_ids=new_req.block_ids[0],
                         block_size=self._block_size,
                         is_store=True,

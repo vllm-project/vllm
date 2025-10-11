@@ -517,7 +517,9 @@ class NixlConnectorWorker:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
-        assert vllm_config.kv_transfer_config is not None
+        if vllm_config.kv_transfer_config is None:
+            raise ValueError("kv_transfer_config must be set for NixlConnector")
+
         self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
             "backends", ["UCX"]
         )
@@ -558,10 +560,7 @@ class NixlConnectorWorker:
 
         # KV Caches and nixl tracking data.
         self.device_type = current_platform.device_type
-        assert vllm_config.kv_transfer_config is not None
-        self.kv_buffer_device: str = (
-            vllm_config.kv_transfer_config.kv_buffer_device or "cuda"
-        )
+        self.kv_buffer_device: str = vllm_config.kv_transfer_config.kv_buffer_device
         if self.device_type not in _NIXL_SUPPORTED_DEVICE:
             raise RuntimeError(f"{self.device_type} is not supported.")
         elif self.kv_buffer_device not in _NIXL_SUPPORTED_DEVICE[self.device_type]:

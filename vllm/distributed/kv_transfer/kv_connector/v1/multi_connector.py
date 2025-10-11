@@ -86,14 +86,11 @@ class MultiConnector(KVConnectorBase_V1):
         super().__init__(vllm_config=vllm_config, role=role)
         self._connectors: list[KVConnectorBase_V1] = []
         self._ktc_kv_transfer_config = []
-        assert vllm_config.kv_transfer_config is not None
-        ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "connectors"
-        )
+        ktcs = self._kv_transfer_config.kv_connector_extra_config.get("connectors")
         assert ktcs is not None
         for ktc in ktcs:
             temp_config = copy.copy(vllm_config)
-            engine_id = ktc.get("engine_id", vllm_config.kv_transfer_config.engine_id)
+            engine_id = ktc.get("engine_id", self._kv_transfer_config.engine_id)
             temp_config.kv_transfer_config = KVTransferConfig(
                 **ktc, engine_id=engine_id
             )
