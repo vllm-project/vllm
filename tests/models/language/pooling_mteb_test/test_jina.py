@@ -29,6 +29,7 @@ EMBEDDING_MODELS = [
         # CUDAGraph due to odd length for Gemm. We set it to 8192 to avoid
         # avoid this issue.
         max_model_len=8192,
+        dtype="float32",
     )
 ]
 
