@@ -248,6 +248,10 @@ def video_to_pixel_values(
     return torch.stack(frames_tensors)
 
 
+def input_conditioner(x, norm_mean, norm_std):
+    return (x - norm_mean) / norm_std
+
+
 class BaseNanoNemotronVLProcessor(ABC):
     """
     This model doesn't define its own HF processor,
@@ -341,7 +345,9 @@ class BaseNanoNemotronVLProcessor(ABC):
         else:
             pixel_values_lst = self._images_to_pixel_values_lst(images, max_num_tiles)
             image_inputs = {
-                "pixel_values_flat": torch.cat(pixel_values_lst),
+                "pixel_values_flat": input_conditioner(
+                    torch.cat(pixel_values_lst), self.norm_mean, self.norm_std
+                ),
                 "image_num_patches": torch.tensor(
                     [len(item) for item in pixel_values_lst]
                 ),
@@ -465,7 +471,9 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             )
 
             video_inputs = {
-                "pixel_values_flat_video": torch.cat(pixel_values_lst_video),
+                "pixel_values_flat_video": input_conditioner(
+                    torch.cat(pixel_values_lst_video), self.norm_mean, self.norm_std
+                ),
                 "video_num_patches": torch.tensor(
                     [len(item) for item in pixel_values_lst_video]
                 ),
