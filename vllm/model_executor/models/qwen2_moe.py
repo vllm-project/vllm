@@ -534,11 +534,7 @@ class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             "q_proj",
             "k_proj",
             "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        ]
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -547,6 +543,18 @@ class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        # Only perform the following mapping when Qwen2MoeMLP exists
+        if (
+            getattr(config, "mlp_only_layers", [])
+            or config.shared_expert_intermediate_size > 0
+        ):
+            self.packed_modules_mapping["gate_up_proj"] = (
+                [
+                    "gate_proj",
+                    "up_proj",
+                ],
+            )
+
         self.model = Qwen2MoeModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
