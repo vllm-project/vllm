@@ -412,17 +412,6 @@ class SeedOssToolParser(ToolParser):
                 # Continue processing next tool
                 return None
 
-        # Check if end thinking
-        if not self.is_thinking_end and (
-            self.think_end_token_id in delta_token_ids
-            or self.think_end_token in delta_text
-        ):
-            self.is_thinking_end = True
-
-        # If thinking hasn't ended yet, don't process any tool calls
-        if not self.is_thinking_end:
-            return DeltaMessage(content=delta_text)
-
         # Handle normal content before tool calls
         if not self.is_tool_call_started:
             # Check if tool call is starting
