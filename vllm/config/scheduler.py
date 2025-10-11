@@ -170,16 +170,17 @@ class SchedulerConfig:
         return hash_str
 
     @model_validator(mode="before")
-    def _set_defaults(self) -> Self:
-        if self.max_num_seqs is None:
+    @classmethod
+    def _set_defaults(cls, data: Any) -> Any:
+        if data.get("max_num_seqs") is None:
             logger.warning("max_num_seqs is not set, using arbitrary value 128.")
-            self.max_num_seqs = 128
+            data["max_num_seqs"] = 128
 
-        if self.max_model_len is None:
+        if data.get("max_model_len") is None:
             logger.warning("max_model_len is not set, using arbitrary value 8192.")
-            self.max_model_len = 8192
+            data["max_model_len"] = 8192
 
-        return self
+        return data
 
     def __post_init__(self, is_encoder_decoder: bool) -> None:
         """Post init to handle init vars."""
