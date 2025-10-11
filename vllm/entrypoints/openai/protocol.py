@@ -460,25 +460,6 @@ class ResponsesRequest(OpenAIBaseModel):
                 )
         return data
 
-    @model_validator(mode="before")
-    def function_call_parsing(cls, data):
-        """Function call parsing to ensure ResponseFunctionToolCall objects 
-        are created."""
-        input_data = data.get("input")
-        if isinstance(input_data, list):
-
-            def convert(item):
-                if isinstance(item,
-                              dict) and item.get('type') == 'function_call':
-                    try:
-                        return ResponseFunctionToolCall(**item)
-                    except Exception:
-                        return item
-                return item
-
-            data["input"] = [convert(item) for item in input_data]
-        return data
-
 
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation

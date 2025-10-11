@@ -940,6 +940,8 @@ class OpenAIServingResponses(OpenAIServing):
                 # to add the tool call request to prev_outputs so that the
                 # parse_response_input can find the tool call request when
                 # parsing the tool call output.
+                if response_msg.get("type") == "function_call":
+                    response_msg = ResponseFunctionToolCall.model_validate(response_msg)
                 if isinstance(response_msg, ResponseFunctionToolCall):
                     prev_outputs.append(response_msg)
         return messages
