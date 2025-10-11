@@ -104,6 +104,7 @@ from .utils import (
     maybe_prefix,
     split_list_into_ranges,
 )
+from .vision import get_llm_pos_ids_for_vision
 
 try:
     import flash_attn
@@ -1082,7 +1083,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 grid_hs = image_grid_thw[:, 1]
                 grid_ws = image_grid_thw[:, 2]
                 t_index = (torch.arange(grid_t) * 1 * tokens_per_second).long()
-                llm_pos_ids = cls._get_llm_pos_ids_for_vision(
+                llm_pos_ids = get_llm_pos_ids_for_vision(
                     start_idx, image_idx, spatial_merge_size, t_index, grid_hs, grid_ws
                 )
                 llm_pos_ids_list.append(llm_pos_ids)
@@ -1100,7 +1101,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                     * second_per_grid_ts[video_idx]
                     * tokens_per_second
                 ).long()
-                llm_pos_ids = cls._get_llm_pos_ids_for_vision(
+                llm_pos_ids = get_llm_pos_ids_for_vision(
                     start_idx, video_idx, spatial_merge_size, t_index, grid_hs, grid_ws
                 )
                 llm_pos_ids_list.append(llm_pos_ids)
@@ -1139,7 +1140,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                         len(t_chunk) * grid_h * grid_w // (spatial_merge_size**2)
                     )
                     new_src_item.extend([video_token_id] * vision_ntoken_per_chunk)
-                    vision_llm_pos_ids_list = cls._get_llm_pos_ids_for_vision(
+                    vision_llm_pos_ids_list = get_llm_pos_ids_for_vision(
                         start_idx,
                         video_idx,
                         spatial_merge_size,
@@ -1194,43 +1195,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         llm_positions = llm_positions[:, context_len:seq_len]
 
         return llm_positions, mrope_position_delta
-
-    @staticmethod
-    def _get_llm_pos_ids_for_vision(
-        start_idx: int,
-        vision_idx: int,
-        spatial_merge_size: int,
-        t_index: list[int],
-        grid_hs: torch.Tensor,
-        grid_ws: torch.Tensor,
-    ) -> torch.Tensor:
-        llm_pos_ids_list = []
-        llm_grid_h = grid_hs[vision_idx] // spatial_merge_size
-        llm_grid_w = grid_ws[vision_idx] // spatial_merge_size
-        h_index = (
-            torch.arange(llm_grid_h)
-            .view(1, -1, 1)
-            .expand(len(t_index), -1, llm_grid_w)
-            .flatten()
-        )
-        w_index = (
-            torch.arange(llm_grid_w)
-            .view(1, 1, -1)
-            .expand(len(t_index), llm_grid_h, -1)
-            .flatten()
-        )
-        t_index_tensor = (
-            torch.Tensor(t_index)
-            .to(llm_grid_h.device)
-            .view(-1, 1)
-            .expand(-1, llm_grid_h * llm_grid_w)
-            .long()
-            .flatten()
-        )
-        _llm_pos_ids = torch.stack([t_index_tensor, h_index, w_index])
-        llm_pos_ids_list.append(_llm_pos_ids + start_idx)
-        llm_pos_ids = torch.cat(llm_pos_ids_list, dim=1)
-        return llm_pos_ids
 
     def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
