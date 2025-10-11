@@ -192,25 +192,23 @@ def fused_marlin_moe(
         is_zp_float=False,
     )
 
-    if activation_func is not None:
-        activation_func(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
-        )
-    else:
-        if activation == "silu":
-            torch.ops._C.silu_and_mul(
-                intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
-            )
-        elif activation == "swigluoai":
-            # alpha = 1.702, limit = 7.0
-            torch.ops._C.swigluoai_and_mul(
-                intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
-            )
-        else:
-            raise ValueError(
-                f"Unsupported activation: {activation}. "
-                "Only silu and swigluoai activations are supported."
-            )
+    if activation_func is None:
+        def activation_func(activation:str, output:torch.Tensor, input:torch.Tensor) -> None:
+            if activation == "silu":
+                torch.ops._C.silu_and_mul(
+                    output, input
+                )
+            elif activation == "swigluoai":
+                # alpha = 1.702, limit = 7.0
+                torch.ops._C.swigluoai_and_mul(
+                    output, input
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported activation: {activation}. "
+                    "Only silu and swigluoai activations are supported."
+                )
+    activation_func(activation, intermediate_cache2, intermediate_cache1.view(-1, 2 * N))
 
     if expert_map is not None:
         intermediate_cache3.zero_()
@@ -424,7 +422,6 @@ class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)
-
 
 def modular_marlin_fused_moe(
     quant_config: FusedMoEQuantConfig, shared_experts: Optional[torch.nn.Module] = None

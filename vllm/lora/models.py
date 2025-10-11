@@ -417,7 +417,7 @@ class LoRAModelManager:
             if module_lora:
                 module_lora.optimize()
                 # Note (gnovack) - If MOE lora weights are not split into
-                # um_experts chunks, we split them here
+                # num_experts chunks, we split them here
                 if isinstance(module, FusedMoEWithLoRA) and torch.is_tensor(
                     module_lora.lora_a
                 ):
