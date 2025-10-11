@@ -4,10 +4,12 @@
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage)
-from vllm.reasoning import (DeepSeekR1ReasoningParser,
-                            DeepSeekV3ReasoningParser, IdentityReasoningParser)
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.reasoning import (
+    DeepSeekR1ReasoningParser,
+    DeepSeekV3ReasoningParser,
+    IdentityReasoningParser
+)
 
 REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-V3.1"
 
@@ -26,8 +28,7 @@ def tokenizer():
 )
 def test_parser_selection(tokenizer, thinking, expected_parser_type):
     parser = DeepSeekV3ReasoningParser(
-        tokenizer,
-        chat_template_kwargs={"thinking": thinking}
+        tokenizer, chat_template_kwargs={"thinking": thinking}
     )
 
     assert isinstance(parser._parser, expected_parser_type)
@@ -46,9 +47,7 @@ def test_identity_reasoning_parser_basic(tokenizer):
     assert parser.extract_content_ids(input_ids) == input_ids
 
     # Test extract_reasoning_content returns (None, model_output)
-    request = ChatCompletionRequest(model="test-model",
-                                    messages=[],
-                                    temperature=1.0)
+    request = ChatCompletionRequest(model="test-model", messages=[], temperature=1.0)
     reasoning, content = parser.extract_reasoning_content(input_text, request)
     assert reasoning is None
     assert content == input_text

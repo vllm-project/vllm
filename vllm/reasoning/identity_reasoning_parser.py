@@ -6,8 +6,7 @@ from typing import Optional, Union
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage)
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 
@@ -27,7 +26,8 @@ class IdentityReasoningParser(ReasoningParser):
         if not self.model_tokenizer:
             raise ValueError(
                 "The model tokenizer must be passed to the ReasoningParser "
-                "constructor during construction.")
+                "constructor during construction."
+            )
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         # Always return True, since we never treat reasoning specially
@@ -52,7 +52,7 @@ class IdentityReasoningParser(ReasoningParser):
         return None
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+        self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
         # No reasoning separation: return None for reasoning_content,
         # and full model_output as content
