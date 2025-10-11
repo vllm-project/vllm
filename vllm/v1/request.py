@@ -114,6 +114,12 @@ class Request:
         # State
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
+        # P/D: Decode will get num_cached_tokens from kv_tranfer_params,
+        # passed by Prefill.
+        if self.kv_transfer_params is not None:
+            self.num_cached_tokens = self.kv_transfer_params.get(
+                "num_cached_tokens", -1
+            )
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted

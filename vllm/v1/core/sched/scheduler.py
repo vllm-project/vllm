@@ -1023,6 +1023,10 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids or pooler_output is not None or kv_transfer_params:
+                # P/D: Prefill will pass the kv_xfer_params to Decode.
+                if kv_transfer_params is not None:
+                    kv_transfer_params["num_cached_tokens"] = request.num_cached_tokens
+
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
