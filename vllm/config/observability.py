@@ -100,6 +100,15 @@ class ObservabilityConfig:
             return value
         if not (value.startswith("http://") or value.startswith("https://")):
             raise ValueError("otlp_traces_endpoint must start with http:// or https://")
+
+        from vllm.tracing import is_otel_available, otel_import_error_traceback
+        if not is_otel_available():
+            raise ValueError(
+                "OpenTelemetry is not available. Unable to configure "
+                "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
+                f"installed. Original error:\n{otel_import_error_traceback}"
+            )
+
         return value
 
     @field_validator("collect_detailed_traces", mode="before")
@@ -109,8 +118,9 @@ class ObservabilityConfig:
             return None
 
         assert isinstance(value, list)
-        value = cast(list[DetailedTraceModules], value[0].split(","))
-        return value
+        return [
+            v.strip() for item in value for v in str(item).split(",") if v.strip()
+        ]
 
     @model_validator(mode="after")
     def _validate_tracing_config(self):
