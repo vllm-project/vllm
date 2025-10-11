@@ -6,9 +6,43 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
 import torch
+from typing_extensions import TypeAlias
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+
+# Alias type for token ID(s).
+# 1) int: a single token (most requests emit one output token per batch)
+# 2) list[int]: multiple tokens (for spec decoding, requests might emit
+#    more than one token per batch)
+#
+# It's introduced in order to mitigate GC costs for large batch size
+# scenarios. Without the alias, output tokens per batch are stored as list[int],
+# for large batch size, each ModelRunnerOutput will trigger a generation 0
+# GC collection and ultimately boost up triggering frequency across all
+# generations.
+TokenIDs: TypeAlias = Union[int, list[int]]
+
+
+def convert_to_token_id_list(tokens: TokenIDs) -> list[int]:
+    """
+    Converts TokenIDs to a list of token IDs (i.e. list[int]).
+    """
+    return [tokens] if isinstance(tokens, int) else tokens
+
+
+def convert_to_token_ids(tokens: list[int]) -> TokenIDs:
+    """
+    Converts a list of token IDs (i.e. list[int]) to TokenIDs.
+    """
+    return tokens[0] if len(tokens) == 1 else tokens
+
+
+def get_token_count(tokens: TokenIDs) -> int:
+    """
+    Returns the number of tokens in TokenIDs.
+    """
+    return 1 if isinstance(tokens, int) else len(tokens)
 
 
 class LogprobsLists(NamedTuple):
@@ -109,7 +143,7 @@ class ModelRunnerOutput:
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
-    sampled_token_ids: list[list[int]]
+    sampled_token_ids: list[TokenIDs]
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]

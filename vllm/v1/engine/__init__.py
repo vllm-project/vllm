@@ -14,7 +14,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, TokenIDs
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -106,7 +106,7 @@ class EngineCoreOutput(
     gc=False,
 ):  # type: ignore[call-arg]
     request_id: str
-    new_token_ids: list[int]
+    new_token_ids: TokenIDs
 
     new_logprobs: Optional[LogprobsLists] = None
     new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
