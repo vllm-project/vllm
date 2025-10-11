@@ -637,7 +637,6 @@ class EngineCoreProc(EngineCore):
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
         """Dispatch request from client."""
-        logger.info("[wxl debug] EngineCore handling client request %s.", request.request_id)
         if request_type == EngineCoreRequestType.ADD:
             self.add_request(request)
         elif request_type == EngineCoreRequestType.ABORT:
