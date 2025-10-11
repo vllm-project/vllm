@@ -82,8 +82,8 @@ logger.info("-" * 50)
 for step in range(50):
     logger.info("Training Step %d/50", step + 1)
 
-    # Determine sleep level: level 1 every 10 steps, level 2 every 5 steps
-    sleep_level = 1 if (step + 1) % 10 == 0 else (2 if (step + 1) % 5 == 0 else 0)
+    # Determine sleep level: level 1 every 10 steps
+    sleep_level = 1 if (step + 1) % 10 == 0 else 0
 
     if sleep_level:
         logger.info("Sleep level %d -> Wake up", sleep_level)
