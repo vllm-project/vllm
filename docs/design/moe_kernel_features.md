@@ -41,6 +41,7 @@ th {
 | flashinfer<sup>4</sup>                | standard           | nvfp4,fp8       | G,A,T                  | N     | N                     | [`FlashInferCutlassMoEPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize.FlashInferCutlassMoEPrepareAndFinalize]   |
 | MoEPrepareAndFinalizeNoEP<sup>5</sup> | standard           | fp8,int8        | G,A,T                  | N     | Y                     | [`MoEPrepareAndFinalizeNoEP`][vllm.model_executor.layers.fused_moe.prepare_finalize.MoEPrepareAndFinalizeNoEP]                                                |
 | BatchedPrepareAndFinalize<sup>5</sup> | batched            | fp8,int8        | G,A,T                  | N     | Y                     | [`BatchedPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.fused_batched_moe.BatchedPrepareAndFinalize]                                               |
+| MoriPrepareAndFinalize<sup>7</sup>    | standard           | fp8<sup>8</sup> | G(128),A,T<sup>8</sup> |N     | Y                     | [`MoriPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.mori_prepare_finalize.MoriPrepareAndFinalize]                                              |
 
 !!! info "Table key"
     1. All types: mxfp4, nvfp4, int4, int8, fp8
@@ -49,6 +50,8 @@ th {
     4. Controlled by different env vars (`VLLM_FLASHINFER_MOE_BACKEND` "throughput" or "latency")
     5. This is a no-op dispatcher that can be used to pair with any modular experts to produce a modular kernel that runs w/o dispatch or combine.  These cannot be selected via environment variable.  These are generally use for testing or adapting an expert subclass to the `fused_experts` API.
     6. This depends on the experts implementation.
+    7. Currently, MoRI supports low-latency mode only.
+    8. This depends on the experts implementation, currently mori supports aiter.
 
     ---
 
@@ -118,3 +121,4 @@ The following table shows "families" of modular kernels that are intended to wor
 | deepep_high_throughput           | `DeepEPHTPrepareAndFinalize`                               |  `DeepGemmExperts`,</br>`TritonExperts`,</br>`TritonOrDeepGemmExperts`,</br>`CutlassExpertsFp8`, </br>`MarlinExperts`      |
 | deepep_low_latency,</br>pplx     | `DeepEPLLPrepareAndFinalize`,</br>`PplxPrepareAndFinalize` |  `BatchedDeepGemmExperts`,</br>`BatchedTritonExperts`,</br>`BatchedTritonOrDeepGemmExperts`,</br>`CutlassBatchedExpertsFp8`|
 | flashinfer                       | `FlashInferCutlassMoEPrepareAndFinalize`                   | `FlashInferExperts`                                                                                                        |
+| mori                             | `MoriPrepareAndFinalize`                                   | `AiterExperts`                                                                                                        |
