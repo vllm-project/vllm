@@ -839,10 +839,12 @@ class Indexer(nn.Module):
 
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
-        q_fp8, q_scale = per_token_group_quant_fp8(q,
-                                                   self.quant_block_size,
-                                                   column_major_scales=False,
-                                                   use_ue8m0=self.scale_fmt == 'ue8m0')
+        q_fp8, q_scale = per_token_group_quant_fp8(
+            q,
+            self.quant_block_size,
+            column_major_scales=False,
+            use_ue8m0=self.scale_fmt is not None,
+        )
         q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
         q_scale = q_scale.view(-1, self.n_head, 1)
 
