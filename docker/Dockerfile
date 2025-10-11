@@ -388,13 +388,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="9.0a 10.0a" /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"}
 
 COPY tools/install_gdrcopy.sh install_gdrcopy.sh
+ARG GDRCOPY_VERSION
 RUN set -eux; \
     case "${TARGETPLATFORM}" in \
       linux/arm64) UUARCH="aarch64" ;; \
       linux/amd64) UUARCH="x64" ;; \
       *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" >&2; exit 1 ;; \
     esac; \
-    ./install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"; \
+    GDRCOPY_VERSION=${GDRCOPY_VERSION} ./install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"; \
     rm ./install_gdrcopy.sh
 
 # Install EP kernels(pplx-kernels and DeepEP)
