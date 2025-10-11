@@ -350,11 +350,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             --pre pytorch_triton==3.3.0+gitab727c40 ; \
     fi
 
-# Install vllm wheel first, so that torch etc will be installed.
-RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
-    --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+# install build and runtime dependencies
+COPY requirements/common.txt requirements/common.txt
+COPY requirements/cuda.txt requirements/cuda.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -r requirements/cuda.txt \
+    -r requirements/common.txt \
+    --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # Install FlashInfer pre-compiled kernel cache and binaries
 # https://docs.flashinfer.ai/installation.html
@@ -416,8 +418,6 @@ ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
 # note that this uses vllm installed by `pip`
 FROM vllm-base AS test
 
-ADD . /vllm-workspace/
-
 ARG PYTHON_VERSION
 
 ARG PIP_INDEX_URL UV_INDEX_URL
@@ -430,12 +430,18 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
+# Copy over remaining requirements files
+COPY requirements/ requirements/
+
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
         uv pip install --system -r requirements/dev.txt; \
     fi
+
+# Move host vLLM workspace into image
+ADD . /vllm-workspace/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -449,11 +455,18 @@ ENV HF_HUB_ENABLE_HF_TRANSFER 1
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
+# Install vllm wheel
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system dist/*.whl --verbose \
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
 # Source code is used in the `python_only_compile.sh` test
 # We hide it inside `src/` so that this source code
 # will not be imported by other tests
 RUN mkdir src
 RUN mv vllm src/vllm
+
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
