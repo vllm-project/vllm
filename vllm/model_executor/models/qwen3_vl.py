@@ -1701,13 +1701,7 @@ class Qwen3VLForConditionalGeneration(
             is_multimodal=is_multimodal,
         )
 
-        if deepstack_input_embeds is not None:
-            deepstack_input_embeds = (
-                torch.zeros_like(inputs_embeds)
-                .unsqueeze(0)
-                .repeat(self.deepstack_num_level, 1, 1)
-                .contiguous()
-            )
+        if self.use_deepstack:
             self._set_deepstack_input_embeds(deepstack_input_embeds)
 
         return inputs_embeds
