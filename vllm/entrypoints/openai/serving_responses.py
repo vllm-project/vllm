@@ -96,7 +96,6 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
@@ -136,18 +135,9 @@ class OpenAIServingResponses(OpenAIServing):
         self.chat_template_content_format: Final = chat_template_content_format
         self.enable_log_outputs = enable_log_outputs
 
-        self.reasoning_parser: Optional[Callable[[AnyTokenizer], ReasoningParser]] = (
-            None
+        self.reasoning_parser = self._get_reasoning_parser(
+            reasoning_parser_name=reasoning_parser
         )
-        if reasoning_parser:
-            try:
-                self.reasoning_parser = ReasoningParserManager.get_reasoning_parser(
-                    reasoning_parser
-                )
-                assert self.reasoning_parser is not None
-            except Exception as e:
-                raise TypeError(f"{reasoning_parser=} has not been registered") from e
-
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
