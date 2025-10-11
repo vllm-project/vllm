@@ -461,6 +461,17 @@ class ResponsesRequest(OpenAIBaseModel):
         return data
 
 
+def _validate_cache_hit_threshold(cls, data):
+    cache_hit_threshold = data.get("cache_hit_threshold")
+    if cache_hit_threshold is not None and (
+        cache_hit_threshold < 0.0 or cache_hit_threshold > 1.0
+    ):
+        raise ValueError(
+            "Parameter `cache_hit_threshold` must be between 0.0 and 1.0 if provided."
+        )
+    return data
+
+
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -709,6 +720,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description="KVTransfer parameters used for disaggregated serving.",
     )
 
+    cache_hit_threshold: Optional[float] = Field(
+        default=None,
+        description="Minimum required KV-cache hit ratio to process the request.",
+    )
+
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
         description=(
@@ -825,6 +841,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -1079,6 +1096,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
             )
         return data
 
+    _validate_cache_hit_threshold = model_validator(mode="before")(
+        _validate_cache_hit_threshold
+    )
+
     @model_validator(mode="before")
     @classmethod
     def check_cache_salt_support(cls, data):
@@ -1269,6 +1290,11 @@ class CompletionRequest(OpenAIBaseModel):
         description="KVTransfer parameters used for disaggregated serving.",
     )
 
+    cache_hit_threshold: Optional[float] = Field(
+        default=None,
+        description="Minimum required KV-cache hit ratio to process the request.",
+    )
+
     vllm_xargs: Optional[dict[str, Union[str, int, float]]] = Field(
         default=None,
         description=(
@@ -1371,6 +1397,7 @@ class CompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -1483,6 +1510,10 @@ class CompletionRequest(OpenAIBaseModel):
                     "Parameter 'cache_salt' must be a non-empty string if provided."
                 )
         return data
+
+    _validate_cache_hit_threshold = model_validator(mode="before")(
+        _validate_cache_hit_threshold
+    )
 
 
 class EmbeddingCompletionRequest(OpenAIBaseModel):
