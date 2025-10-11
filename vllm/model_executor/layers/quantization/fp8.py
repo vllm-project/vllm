@@ -203,6 +203,15 @@ class Fp8Config(QuantizationConfig):
                 )
         self.weight_block_size = weight_block_size
 
+    def __repr__(self) -> str:
+        return (
+            f"Fp8Config("
+            f"is_checkpoint_fp8_serialized={self.is_checkpoint_fp8_serialized}, "
+            f"activation_scheme={self.activation_scheme}, "
+            f"ignored_layers={self.ignored_layers}, "
+            f"weight_block_size={self.weight_block_size})"
+        )
+
     @classmethod
     def get_name(cls) -> QuantizationMethods:
         return "fp8"
