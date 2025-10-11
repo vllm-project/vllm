@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.reasoning import (
     DeepSeekR1ReasoningParser,
     ReasoningParser,
-    ReasoningParserManager
+    ReasoningParserManager,
 )
 
 from .identity_reasoning_parser import IdentityReasoningParser

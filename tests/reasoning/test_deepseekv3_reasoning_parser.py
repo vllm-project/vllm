@@ -8,7 +8,7 @@ from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.reasoning import (
     DeepSeekR1ReasoningParser,
     DeepSeekV3ReasoningParser,
-    IdentityReasoningParser
+    IdentityReasoningParser,
 )
 
 REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-V3.1"

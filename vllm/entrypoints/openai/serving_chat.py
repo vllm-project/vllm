@@ -529,7 +529,7 @@ class OpenAIServingChat(OpenAIServing):
             if self.reasoning_parser:
                 reasoning_parser = self.reasoning_parser(
                     tokenizer,
-                    chat_template_kwargs=request.chat_template_kwargs  # type: ignore
+                    chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
                 )
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
@@ -1232,7 +1232,7 @@ class OpenAIServingChat(OpenAIServing):
                 try:
                     reasoning_parser = self.reasoning_parser(
                         tokenizer,
-                        chat_template_kwargs=request.chat_template_kwargs  # type: ignore
+                        chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
                     )
                 except RuntimeError as e:
                     logger.exception("Error in reasoning parser creation.")
