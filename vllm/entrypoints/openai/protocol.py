@@ -1729,6 +1729,10 @@ class RerankRequest(OpenAIBaseModel):
         )
 
 
+class AbortRequest(BaseModel):
+    request_id: str
+
+
 class RerankDocument(BaseModel):
     text: Optional[str] = None
     multi_modal: Optional[ScoreContentPartParam] = None
