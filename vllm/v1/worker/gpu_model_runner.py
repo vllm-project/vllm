@@ -2271,7 +2271,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_counts={
                     dummy_data_modality: 1
                 },
-            ).multi_modal_data
+            )
+            dummy_mm_kwargs = dummy_mm_data.multi_modal_data
+            dummy_mm_token_ids = dummy_mm_data.multi_modal_token_ids
 
             batched_dummy_mm_inputs = MultiModalKwargs.batch(
                 [dummy_mm_kwargs] * max_num_mm_items,
