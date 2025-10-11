@@ -467,8 +467,6 @@ class Qwen3_VisionTransformer(nn.Module):
             dh_grid, dw_grid = torch.meshgrid(dh, dw, indexing="ij")
             h_floor_grid, w_floor_grid = torch.meshgrid(h_floor, w_floor, indexing="ij")
             h_ceil_grid, w_ceil_grid = torch.meshgrid(h_ceil, w_ceil, indexing="ij")
-            h_floor_grid_idx = h_floor_grid * num_grid_per_side
-            h_ceil_grid_idx = h_ceil_grid * num_grid_per_side
 
             # original computation of weights
             # w00 = (1 - dh_grid) * (1 - dw_grid)
@@ -482,12 +480,11 @@ class Qwen3_VisionTransformer(nn.Module):
             w01 = dw_grid - w11
             w00 = 1 - dh_grid - w01
 
-            idx00 = h_floor_grid_idx + w_floor_grid
-            idx01 = h_floor_grid_idx + w_ceil_grid
-            idx10 = h_ceil_grid_idx + w_floor_grid
-            idx11 = h_ceil_grid_idx + w_ceil_grid
+            h_grid = torch.stack([h_floor_grid, h_floor_grid, h_ceil_grid, h_ceil_grid])
+            w_grid = torch.stack([w_floor_grid, w_ceil_grid, w_floor_grid, w_ceil_grid])
+            h_grid_idx = h_grid * num_grid_per_side
 
-            indices = torch.stack([idx00, idx01, idx10, idx11], dim=0).reshape(4, -1)
+            indices = (h_grid_idx + w_grid).reshape(4, -1)
             weights = torch.stack([w00, w01, w10, w11], dim=0).reshape(4, -1, 1)
             weights = weights.to(dtype=self.dtype)
 
