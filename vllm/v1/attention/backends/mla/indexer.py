@@ -338,7 +338,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             requires_padding = (decode_lens_cpu.max() > decode_lens_cpu.min()).item()
 
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
-            if not current_platform.is_rocm():
+            if current_platform.is_cuda():
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
                     seq_lens, self.kv_cache_spec.block_size, self.num_sms
                 )
