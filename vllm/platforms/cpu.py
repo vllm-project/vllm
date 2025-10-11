@@ -4,9 +4,9 @@
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
-import re
 from dataclasses import dataclass
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Optional
@@ -45,8 +45,6 @@ class LogicalCPUInfo:
 
     @classmethod
     def _int(cls, value: str) -> int:
-        if value == "-":
-            return -1  # Temporarily retain and convert later
         try:
             int_value = int(value)
         except Exception:
@@ -55,21 +53,16 @@ class LogicalCPUInfo:
 
     @staticmethod
     def json_decoder(obj_dict: dict):
-        id_val = obj_dict.get("cpu")
+        id = obj_dict.get("cpu")
         physical_core = obj_dict.get("core")
         numa_node = obj_dict.get("node")
 
-        if not (id_val is None or physical_core is None or numa_node is None):
-            cpu_id = LogicalCPUInfo._int(str(id_val))
-            phys_core = LogicalCPUInfo._int(str(physical_core))
-            # Special handling of NUMA: -1 is treated as 0 (single node)
-            node_val = LogicalCPUInfo._int(str(numa_node))
-            if node_val == -1:
-                node_val = 0
+        if not (id is None or physical_core is None or numa_node is None):
             return LogicalCPUInfo(
-                id=cpu_id,
-                physical_core=phys_core,
-                numa_node=node_val)
+                id=LogicalCPUInfo._int(id),
+                physical_core=LogicalCPUInfo._int(physical_core),
+                numa_node=LogicalCPUInfo._int(numa_node),
+            )
         else:
             return obj_dict
 
@@ -341,44 +334,44 @@ class CpuPlatform(Platform):
         assert platform.system() == "Linux"
 
         # Init LogicalCPUInfo from lscpu
-        lscpu_output = subprocess.check_output("lscpu -J -e=CPU,CORE,NODE",
-                                               shell=True,
-                                               text=True)
-
-        # Preprocessing: Replace invalid "node": - with "node": -1 (decoder will process it further)
-        lscpu_output = re.sub(r'"node":\s*-\s*(,|\n)', r'"node": -1\1', lscpu_output)
-
+        lscpu_output = subprocess.check_output(
+            "lscpu -J -e=CPU,CORE,NODE", shell=True, text=True
+        )
+        lscpu_output = re.sub(
+            r'"node":\s*-\s*(,|\n)', 
+            r'"node": 0\1', 
+            lscpu_output
+        )  
         logical_cpu_list: list[LogicalCPUInfo] = json.loads(
-            lscpu_output, object_hook=LogicalCPUInfo.json_decoder)['cpus']
+            lscpu_output, object_hook=LogicalCPUInfo.json_decoder
+        )["cpus"]
 
-        # Filter CPUs with invalid attributes (relax NUMA checking)
+        # Filter CPUs with invalid attributes
         logical_cpu_list = [
-            x for x in logical_cpu_list
-            if -1 not in (x.id, x.physical_core)  # ignore x.numa_node
+            x
+            for x in logical_cpu_list
+            if -1 not in (x.id, x.physical_core, x.numa_node)
         ]
 
         # Filter allowed CPUs
-        allowed_cpu_id_list = os.sched_getaffinity(0)
-        logical_cpu_list = [
-            x for x in logical_cpu_list if x.id in allowed_cpu_id_list
-        ]
+        if hasattr(os, "sched_getaffinity"):
+            allowed_cpu_id_list = os.sched_getaffinity(0)
+        else:
+            raise NotImplementedError("Unsupported OS")
+        logical_cpu_list = [x for x in logical_cpu_list if x.id in allowed_cpu_id_list]
 
         # Get allowed NUMA nodes
         allowed_numa_nodes = set()
         for x in logical_cpu_list:
-            allowed_numa_nodes.add(x.numa_node)  # now it will include 0
+            allowed_numa_nodes.add(x.numa_node)  # type: ignore
         allowed_numa_nodes_list = sorted(allowed_numa_nodes)
 
         env_key = CpuPlatform.device_control_env_var
-        if (env_key in os.environ and os.environ[env_key] != ""):
-            visible_nodes = [int(s) for s in os.environ[env_key].split(',')]
+        if env_key in os.environ and os.environ[env_key] != "":
+            visible_nodes = [int(s) for s in os.environ[env_key].split(",")]
             allowed_numa_nodes_list = [
-                x for x in visible_nodes if x in allowed_numa_nodes
+                x for x in visible_nodes if x in allowed_cpu_id_list
             ]
-
-        # Additional safety check: if still empty, fallback to [0]
-        if not allowed_numa_nodes_list:
-            allowed_numa_nodes_list = [0]
 
         return allowed_numa_nodes_list, logical_cpu_list
 
