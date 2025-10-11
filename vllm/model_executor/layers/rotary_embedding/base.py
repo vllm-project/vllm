@@ -6,13 +6,10 @@ from typing import Optional
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 
 from .common import apply_rotary_emb_torch
-from .rocm_aiter_rope_ops import (
-    is_rocm_triton_rotary_embedding_enabled,
-    rocm_aiter_rotary_emb,
-)
 
 
 @CustomOp.register("rotary_embedding")
@@ -50,8 +47,8 @@ class RotaryEmbedding(CustomOp):
             cache = cache.to(dtype)
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
-        self.is_rocm_triton_rotary_embedding_enabled = (
-            is_rocm_triton_rotary_embedding_enabled()
+        self.is_rocm_triton_rotary_embed_enabled = (
+            rocm_aiter_ops.is_triton_rotary_embed_enabled()
         )
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
@@ -156,9 +153,9 @@ class RotaryEmbedding(CustomOp):
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if self.is_rocm_triton_rotary_embedding_enabled:
+        if self.is_rocm_triton_rotary_embed_enabled:
             self._match_cos_sin_cache_dtype(query)
-            rocm_aiter_rotary_emb(
+            rocm_aiter_ops.triton_rotary_embed(
                 positions,
                 query,
                 key,
