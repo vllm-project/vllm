@@ -195,7 +195,6 @@ class EngineCore:
                 not self.scheduler.get_kv_connector()):
             logger.warning("Got kv_transfer_params, but no KVConnector found. "
                            "Disabling KVTransfer for this request.")
-
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: list[str]):
@@ -638,7 +637,6 @@ class EngineCoreProc(EngineCore):
     def _handle_client_request(self, request_type: EngineCoreRequestType,
                                request: Any) -> None:
         """Dispatch request from client."""
-
         if request_type == EngineCoreRequestType.ADD:
             self.add_request(request)
         elif request_type == EngineCoreRequestType.ABORT:

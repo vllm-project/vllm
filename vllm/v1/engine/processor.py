@@ -25,6 +25,8 @@ from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
 from vllm.v1.structured_output.backend_xgrammar import (
     validate_xgrammar_grammar)
+from vllm.logger import init_logger
+logger = init_logger(__name__)
 
 
 class Processor:
@@ -225,7 +227,7 @@ class Processor:
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
     ) -> tuple[Optional[str], EngineCoreRequest]:
-
+        logger.info("[wxl debug] Request %s start process_inputs.", request_id)
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
         self._validate_lora(lora_request)
