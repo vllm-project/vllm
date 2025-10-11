@@ -177,7 +177,7 @@ struct reduceQKBlockKernel {
                                 const int token_num) {
     const int group_num = (token_num + TOKEN_PER_GROUP - 1) / TOKEN_PER_GROUP;
 
-    qk_acc_vec_type group_accums[MAX_GROUP_NUM];
+    qk_acc_vec_type group_accums[MAX_GROUP_NUM] = {};
     if (token_num == BLOCK_SIZE) {
       for (int q_offset = 0; q_offset < HEAD_SIZE;
            q_offset += x, k_block += x * BLOCK_SIZE) {
@@ -329,7 +329,7 @@ struct paged_attention_v1_impl {
             HEAD_SIZE / head_elem_num_per_partition;
         for (int head_part_idx = 0; head_part_idx < head_partition_num;
              ++head_part_idx) {
-          vec_op::FP32Vec16 accums[head_elem_num_per_partition];
+          vec_op::FP32Vec16 accums[head_elem_num_per_partition] = {};
           scalar_t* __restrict__ out_ptr =
               out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE +
               head_part_idx * head_elem_num_per_partition;
@@ -582,7 +582,7 @@ struct paged_attention_v2_impl {
               HEAD_SIZE / head_elem_num_per_partition;
           for (int head_part_idx = 0; head_part_idx < head_partition_num;
                ++head_part_idx) {
-            vec_op::FP32Vec16 accums[head_elem_num_per_partition];
+            vec_op::FP32Vec16 accums[head_elem_num_per_partition] = {};
             scalar_t* __restrict__ out_ptr =
                 output_buffer + head_part_idx * head_elem_num_per_partition;
             for (int block_idx = 0; block_idx < block_num; ++block_idx) {
@@ -673,7 +673,7 @@ struct paged_attention_v2_impl {
               out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE +
               group_idx * head_elem_num_per_group;
 
-          vec_op::FP32Vec16 acc;
+          vec_op::FP32Vec16 acc = {};
           for (int i = 0; i < partition_num; ++i) {
             vec_op::FP32Vec16 rescale_factor(seq_head_rescale_factors[i]);
             v_load_vec_type value(seq_head_tmp_out + i * HEAD_SIZE);
