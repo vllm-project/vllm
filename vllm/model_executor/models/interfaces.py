@@ -325,7 +325,7 @@ class SupportsLoRA(Protocol):
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
     embedding_padding_modules: ClassVar[list[str]] = []
-    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
+    packed_modules_mapping: dict[str, list[str]] = {}
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
