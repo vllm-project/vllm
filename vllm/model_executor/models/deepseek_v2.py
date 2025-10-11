@@ -82,6 +82,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.worker.workspace import WorkspaceSpec, current_workspace_manager
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (
@@ -598,15 +599,22 @@ def sparse_attn_indexer(
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = attn_metadata.prefill
+
+        # Get workspaces for k_fp8 and k_scale
         for chunk in prefill_metadata.chunks:
-            k_fp8 = torch.empty(
-                [chunk.total_seq_lens, head_dim],
-                device=k.device,
+            # Use workspace instead of torch.empty
+            k_fp8_spec = WorkspaceSpec(
+                shape=(chunk.total_seq_lens, head_dim),
                 dtype=torch.float8_e4m3fn,
+                name="k_fp8_chunk",
             )
-            k_scale = torch.empty(
-                [chunk.total_seq_lens, 1], device=k.device, dtype=torch.float32
+            k_scale_spec = WorkspaceSpec(
+                shape=(chunk.total_seq_lens, 1),
+                dtype=torch.float32,
+                name="k_scale_chunk",
             )
+            k_fp8 = current_workspace_manager().get(k_fp8_spec)
+            k_scale = current_workspace_manager().get(k_scale_spec)
             cp_gather_indexer_k_quant_cache(
                 kv_cache,
                 k_fp8,
@@ -620,7 +628,7 @@ def sparse_attn_indexer(
                 (k_fp8, k_scale),
                 weights[chunk.token_start : chunk.token_end],
                 chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
+                chunk.cu_seq_lens,
             )
             num_rows = logits.shape[0]
             assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
@@ -633,7 +641,7 @@ def sparse_attn_indexer(
             torch.ops._C.top_k_per_row(
                 logits,
                 chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
+                chunk.cu_seq_lens,
                 topk_indices,
                 topk_values,
                 num_rows,
@@ -814,6 +822,29 @@ class Indexer(nn.Module):
         from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
         self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
+
+        # Register workspaces for k_fp8 and k_scale buffers
+        # These will be allocated lazily on first use since we don't have device yet
+        from vllm.v1.worker.workspace import WorkspaceSpec
+
+        # k_fp8: [max_total_seq_len, head_dim], dtype=float8_e4m3fn
+        self.k_fp8_spec = WorkspaceSpec(
+            shape=(self.max_total_seq_len, self.head_dim),
+            dtype=torch.float8_e4m3fn,
+            name=f"{prefix}.k_fp8",
+        )
+        # k_scale: [max_total_seq_len, 1], dtype=float32
+        self.k_scale_spec = WorkspaceSpec(
+            shape=(self.max_total_seq_len, 1),
+            dtype=torch.float32,
+            name=f"{prefix}.k_scale",
+        )
+
+        # Reserve workspaces (allocation will happen on first get call)
+        from vllm.v1.worker.workspace import current_workspace_manager
+
+        current_workspace_manager().reserve(self.k_fp8_spec)
+        current_workspace_manager().reserve(self.k_scale_spec)
 
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb

@@ -297,6 +297,9 @@ class Worker(WorkerBase):
             self.requested_memory - profile_result.non_kv_cache_memory
         )
 
+        # Note: per-KV-cache-token workspace memory (e.g., prefill_bf16_workspace)
+        # is accounted for in get_num_blocks() during KV cache allocation
+
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
         logger.debug(
             "Initial free memory: %.2f GiB; Requested memory: %.2f (util), %.2f GiB",
