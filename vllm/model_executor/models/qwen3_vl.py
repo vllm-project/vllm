@@ -488,7 +488,9 @@ class Qwen3_VisionTransformer(nn.Module):
 
             indices = torch.stack([idx00, idx01, idx10, idx11], dim=0).reshape(4, -1)
             weights = torch.stack([w00, w01, w10, w11], dim=0).reshape(4, -1, 1)
-            weights = weights.to(dtype=self.dtype, device=self.device)
+            weights = weights.to(
+                dtype=self.dtype, device=self.device, non_blocking=True
+            )
 
             embeds = self.pos_embed(indices)
             weighted_embeds = embeds * weights
@@ -524,14 +526,15 @@ class Qwen3_VisionTransformer(nn.Module):
         x: torch.Tensor,
         grid_thw: list[list[int]],
     ) -> torch.Tensor:
-        hidden_states = x.to(device=self.device, dtype=self.dtype)
+        hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
         hidden_states = self.patch_embed(hidden_states)
 
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
         hidden_states = hidden_states + pos_embeds
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
+        rotary_pos_emb = rotary_pos_emb.to(hidden_states.device, non_blocking=True)
 
-        grid_thw_tensor = torch.tensor(grid_thw, device=self.device, dtype=torch.int32)
+        grid_thw_tensor = torch.tensor(grid_thw, dtype=torch.int32)
 
         cu_seqlens = torch.repeat_interleave(
             grid_thw_tensor[:, 1] * grid_thw_tensor[:, 2], grid_thw_tensor[:, 0]
@@ -539,11 +542,11 @@ class Qwen3_VisionTransformer(nn.Module):
             dim=0,
             dtype=grid_thw_tensor.dtype if torch.jit.is_tracing() else torch.int32,
         )
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
 
         hidden_states = hidden_states.unsqueeze(1)
-        rotary_pos_emb = rotary_pos_emb.to(hidden_states.device)
         max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
+        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
 
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
@@ -1304,7 +1307,7 @@ class Qwen3VLForConditionalGeneration(
                     f"Got ndim: {mm_input.ndim} "
                     f"(shape={mm_input.shape})"
                 )
-            return torch.concat(list(mm_input))
+            return mm_input.reshape(-1, mm_input.shape[-1])
         else:
             return torch.concat(mm_input)
 

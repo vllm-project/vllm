@@ -17,8 +17,9 @@ from vllm.multimodal.inputs import (
     MultiModalUUIDDict,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils.jsontree import json_iter_leaves
+from vllm.v1.metrics.stats import MultiModalCacheStats
 
 from .data import (
     DecoderOnlyInputs,
@@ -45,19 +46,18 @@ class InputPreprocessor:
     def __init__(
         self,
         model_config: ModelConfig,
+        tokenizer: Optional[AnyTokenizer],
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         mm_processor_cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> None:
         super().__init__()
 
         self.model_config = model_config
+        self.tokenizer = tokenizer
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_processor_cache
 
-        if model_config.skip_tokenizer_init:
-            self.tokenizer = None
-        else:
-            self.tokenizer = init_tokenizer_from_configs(model_config)
+        self.mm_cache_stats = MultiModalCacheStats() if mm_processor_cache else None
 
     def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
@@ -351,8 +351,8 @@ class InputPreprocessor:
         if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_token_ids,
-                parsed_content.get("multi_modal_data", {}),
-                parsed_content.get("mm_processor_kwargs"),
+                parsed_content.get("multi_modal_data") or {},
+                parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
@@ -380,8 +380,8 @@ class InputPreprocessor:
         if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_text,
-                parsed_content.get("multi_modal_data", {}),
-                parsed_content.get("mm_processor_kwargs"),
+                parsed_content.get("multi_modal_data") or {},
+                parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
@@ -667,14 +667,13 @@ class InputPreprocessor:
 
         return self._build_decoder_only_llm_inputs(prompt_comps)
 
-    def preprocess(
+    def _preprocess(
         self,
         prompt: PromptType,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         *,
         mm_uuids: Optional[MultiModalUUIDDict] = None,
     ) -> ProcessorInputs:
-        """Preprocess the input prompt."""
         if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder.
@@ -697,6 +696,40 @@ class InputPreprocessor:
             mm_uuids=mm_uuids,
         )
 
-    def clear_cache(self) -> None:
+    def preprocess(
+        self,
+        prompt: PromptType,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        *,
+        mm_uuids: Optional[MultiModalUUIDDict] = None,
+    ) -> ProcessorInputs:
+        """Preprocess the input prompt."""
+        res = self._preprocess(
+            prompt,
+            tokenization_kwargs,
+            mm_uuids=mm_uuids,
+        )
+
+        if self.mm_processor_cache and self.mm_cache_stats is not None:
+            delta = self.mm_processor_cache.make_stats(delta=True)
+            self.mm_cache_stats.requests += 1
+            self.mm_cache_stats.queries += delta.total
+            self.mm_cache_stats.hits += delta.hits
+
+        return res
+
+    def stat_mm_cache(self) -> Optional[MultiModalCacheStats]:
+        mm_cache_stats = self.mm_cache_stats
+        if mm_cache_stats is None:
+            return None
+
+        self.mm_cache_stats = MultiModalCacheStats()
+
+        return mm_cache_stats
+
+    def clear_mm_cache(self) -> None:
         if self.mm_processor_cache is not None:
             self.mm_processor_cache.clear_cache()
+
+        if self.mm_cache_stats is not None:
+            self.mm_cache_stats.reset = True
