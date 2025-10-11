@@ -817,6 +817,13 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", str(timeout))
 
+    def run_test_and_cleanup():
+        llm = LLM(**llm_kwargs)
+        try:
+            _run_abort_timeout_test(llm, timeout)
+        finally:
+            llm.llm_engine.engine_core.shutdown()
+
     # Build runtime_env only if we're using Ray
     if distributed_executor_backend == "ray":
         with _make_fake_nixl_pkg() as working_dir:
@@ -829,15 +836,16 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
                 },
             }
             ray.init(runtime_env=runtime_env)
-
-            _run_abort_timeout_test(llm_kwargs, timeout)
+            try:
+                run_test_and_cleanup()
+            finally:
+                ray.shutdown()
     else:
-        _run_abort_timeout_test(llm_kwargs, timeout)
+        run_test_and_cleanup()
 
 
-def _run_abort_timeout_test(llm_kwargs: dict, timeout: int):
+def _run_abort_timeout_test(llm: LLM, timeout: int):
     """Helper function to run the abort timeout test logic."""
-    llm = LLM(**llm_kwargs)
     remote_prefill_opts = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
@@ -921,7 +929,7 @@ def test_register_kv_caches(dist_init):
         ),
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.threading.Thread"
-        ),
+        ) as mock_thread,
     ):  # noqa: E501
         # Create connector
         connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
@@ -932,6 +940,9 @@ def test_register_kv_caches(dist_init):
         # Get the mock instance
         mock_wrapper_instance = mock_nixl_wrapper.return_value
         connector.connector_worker.nixl_wrapper = mock_wrapper_instance
+
+        # Reassure the shutdown() check that the thread is terminated
+        mock_thread.return_value.is_alive.return_value = False
 
         # Execute register_kv_caches
         connector.register_kv_caches(kv_caches)
@@ -1050,6 +1061,7 @@ def test_shutdown_cleans_up_resources(dist_init):
     with (
         patch.object(worker, "_handshake_initiation_executor") as mock_exec,
         patch.object(worker, "_nixl_handshake_listener_t") as mock_listener,
+        patch.object(worker, "_nixl_handshake_listener_stop_event") as mock_event,
         patch.object(nixl_wrapper, "release_xfer_handle") as mock_rel_xfer,
         patch.object(nixl_wrapper, "release_dlist_handle") as mock_rel_dlist,
         patch.object(nixl_wrapper, "remove_remote_agent") as mock_rem_agent,
@@ -1061,6 +1073,8 @@ def test_shutdown_cleans_up_resources(dist_init):
         worker._remote_agents = {"engine1": {0: "agent1"}}
         worker._registered_descs = ["desc1", "desc2"]
 
+        mock_listener.is_alive.return_value = False
+
         worker.shutdown()
 
         # Test idempotency
@@ -1068,7 +1082,8 @@ def test_shutdown_cleans_up_resources(dist_init):
         worker.shutdown()
 
         mock_exec.shutdown.assert_called_with(wait=False)
-        mock_listener.join.assert_called_once_with(timeout=0)
+        mock_event.set.assert_called_once()
+        mock_listener.join.assert_called_once_with(timeout=1.0)
 
         mock_rel_xfer.assert_called_once_with(123)
         assert mock_rel_dlist.call_count == 2
