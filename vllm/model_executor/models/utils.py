@@ -410,6 +410,14 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
     return " + ".join(_embedding_count_expression(inner) for inner in embeddings)
 
 
+def split_list_into_ranges(lst: torch.Tensor, interval: int) -> list[list[int]]:
+    ranges: list[list[int]] = [[] for _ in range((max(lst) // interval) + 1)]
+    for num in lst:
+        index = num // interval
+        ranges[index].append(num)
+    return ranges
+
+
 def _merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,
     multimodal_embeddings: NestedTensors,
