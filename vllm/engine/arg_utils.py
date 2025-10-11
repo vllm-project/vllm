@@ -620,8 +620,11 @@ class EngineArgs:
             help=model_kwargs["hf_token"]["help"],
         )
         model_group.add_argument("--hf-overrides", **model_kwargs["hf_overrides"])
+        model_group.add_argument("--pooler-config", **model_kwargs["pooler_config"])
         model_group.add_argument(
-            "--override-pooler-config", **model_kwargs["override_pooler_config"]
+            "--override-pooler-config",
+            **model_kwargs["override_pooler_config"],
+            deprecated=True,
         )
         model_group.add_argument(
             "--logits-processor-pattern", **model_kwargs["logits_processor_pattern"]
