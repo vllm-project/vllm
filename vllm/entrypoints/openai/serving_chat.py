@@ -112,42 +112,15 @@ class OpenAIServingChat(OpenAIServing):
         self.trust_request_chat_template = trust_request_chat_template
         self.enable_log_outputs = enable_log_outputs
 
+        # set up reasoning parser
+        self.reasoning_parser = self._get_reasoning_parser(
+            reasoning_parser_name=reasoning_parser
+        )
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
-        if self.enable_auto_tools:
-            logger.info(
-                '"auto" tool choice has been enabled please note that while'
-                " the parallel_tool_calls client option is preset for "
-                "compatibility reasons, it will be ignored."
-            )
-
-        self.reasoning_parser: Optional[Callable[[AnyTokenizer], ReasoningParser]] = (
-            None
+        self.tool_parser = self._get_tool_parser(
+            tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools
         )
-        if reasoning_parser:
-            try:
-                self.reasoning_parser = ReasoningParserManager.get_reasoning_parser(
-                    reasoning_parser
-                )
-                assert self.reasoning_parser is not None
-            except Exception as e:
-                raise TypeError(f"{reasoning_parser=} has not been registered") from e
-        self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
-        if self.enable_auto_tools:
-            try:
-                if tool_parser == "pythonic" and self.model_config.model.startswith(
-                    "meta-llama/Llama-3.2"
-                ):
-                    logger.warning(
-                        "Llama3.2 models may struggle to emit valid pythonic tool calls"
-                    )
-                self.tool_parser = ToolParserManager.get_tool_parser(tool_parser)
-            except Exception as e:
-                raise TypeError(
-                    "Error: --enable-auto-tool-choice requires "
-                    f"tool_parser:'{tool_parser}' which has not "
-                    "been registered"
-                ) from e
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
