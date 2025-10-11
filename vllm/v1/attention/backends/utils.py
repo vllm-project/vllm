@@ -84,6 +84,8 @@ class CommonAttentionMetadata:
     # Needed by custom mask calc for context parallelism
     query_positions: Optional[np.ndarray] = None
     cp_kv_recover_idx: Optional[torch.Tensor] = None
+    cp_kv_recover_idx_for_slotmapping: Optional[torch.Tensor] = None
+    num_cp_pads: Optional[torch.Tensor] = None
 
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,
@@ -712,7 +714,6 @@ def split_decodes_and_prefills(
     num_prefills = num_reqs - num_decodes
     num_decode_tokens = query_start_loc[first_prefill].item()
     num_prefill_tokens = num_tokens - num_decode_tokens
-    print(f"q lens: {query_lens}, num_tokens: {num_tokens}, D_tokens: {num_decode_tokens}, P_tokens: {num_prefill_tokens} ")
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 

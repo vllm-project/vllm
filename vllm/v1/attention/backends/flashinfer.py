@@ -603,16 +603,19 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     if self.cp_world_size > 1:
                         # NOTE(qcs): no chunked prefill and prefix caching
                         kv_indptr_cpu = qo_indptr_cpu * self.cp_world_size
+                        kv_lens = kv_indptr_cpu[1:] - kv_indptr_cpu[:-1] - \
+                            common_attn_metadata.num_cp_pads[prefill_start:]
+                        kv_indptr_cpu[1:] = torch.cumsum(kv_lens, 0)
                         # init custom mask for head-tail query order
                         mask_arr = []
-                        q_pos = common_attn_metadata.query_positions
+                        q_pos = common_attn_metadata.query_positions[prefill_start:]
                         for i in range(num_prefills):
                             # |----<C>-----|-<Q0>-|-<Q1>-|
                             # |---<C+Q*cp_world_size>----|
                             # cp_world_size = 2
                             # Q = 2
                             # C = 8
-                            # cur_q_pos = [0,3]
+                            # cur_q_pos = [0,3] // [1, 2] in another rank
                             # context_mask_i.shape = (2, 8)
                             # upper = [0,1,2,3]
                             # local_mask_i = [[True, False, False, False], 
@@ -625,7 +628,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                 mask_arr.append(torch.zeros(0, dtype=torch.bool))
                                 continue
                             context_mask_i = torch.ones((Q, C), dtype=torch.bool)
-                            upper = torch.arange(Q*self.cp_world_size)
+                            upper = torch.arange(kv_lens[i])
                             local_mask_i = (upper.unsqueeze(0) <= cur_q_pos.unsqueeze(1))
                             mask_i = torch.cat([context_mask_i, local_mask_i], dim=1)
                             mask_arr.append(mask_i.flatten())
@@ -873,6 +876,26 @@ class FlashInferImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+
+        key_across_cp = get_cp_group().all_gather(
+            key.contiguous(), dim=0)
+        value_across_cp = get_cp_group().all_gather(
+            value.contiguous(), dim=0)
+        if (self.cp_world_size > 1
+            and attn_metadata.cp_kv_recover_idx is not None):
+            # reorder kv after cp allgather and remove duplicate decoding tokens
+            key_across_cp = torch.index_select(
+                key_across_cp, 0,
+                attn_metadata.cp_kv_recover_idx
+            )
+            value_across_cp = torch.index_select(
+                value_across_cp, 0,
+                attn_metadata.cp_kv_recover_idx
+            )
+        key = key_across_cp
+        value = value_across_cp
 
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache.
@@ -882,17 +905,16 @@ class FlashInferImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            if self.cp_world_size == 1:
-                torch.ops._C_cache_ops.reshape_and_cache_flash(
-                    key,
-                    value,
-                    kv_cache[:, 0],
-                    kv_cache[:, 1],
-                    attn_metadata.slot_mapping,
-                    self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
-                )
+            torch.ops._C_cache_ops.reshape_and_cache_flash(
+                key,
+                value,
+                kv_cache[:, 0],
+                kv_cache[:, 1],
+                attn_metadata.slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
 
             # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
             # to process the cache when the kv_cache_dtype is fp8
@@ -912,9 +934,6 @@ class FlashInferImpl(AttentionImpl):
             output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache))
             return output
 
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
         kv_cache_permute = kv_cache.permute(*stride_order)
         # Regular attention (common case).
@@ -932,34 +951,12 @@ class FlashInferImpl(AttentionImpl):
                     self.logits_soft_cap or 0.0)
                 assert prefill_wrapper._sm_scale == self.scale
                 if self.cp_world_size > 1:
-                    key_across_cp = get_cp_group().all_gather(
-                        key[num_decode_tokens:].contiguous(), dim=0)
-                    value_across_cp = get_cp_group().all_gather(
-                        value[num_decode_tokens:].contiguous(), dim=0)
-                    key_across_cp = torch.index_select(
-                        key_across_cp, 0,
-                        attn_metadata.cp_kv_recover_idx
-                    )
-                    value_across_cp = torch.index_select(
-                        value_across_cp, 0,
-                        attn_metadata.cp_kv_recover_idx
-                    )
-                    torch.ops._C_cache_ops.reshape_and_cache_flash(
-                        key_across_cp,
-                        value_across_cp,
-                        kv_cache[:, 0],
-                        kv_cache[:, 1],
-                        attn_metadata.slot_mapping[num_decode_tokens:],
-                        self.kv_cache_dtype,
-                        layer._k_scale,
-                        layer._v_scale,
-                    )
                     # TODO(qcs): 考虑 chunked prefill/ prefix cache 情况下
                     # kvcache的获取与拼接
                     prefill_wrapper.run(
                         prefill_query,
-                        key_across_cp,
-                        value_across_cp,
+                        key[num_decode_tokens:],
+                        value[num_decode_tokens:],
                         out=output[num_decode_tokens:],
                     )
                 else:
@@ -1046,17 +1043,6 @@ class FlashInferImpl(AttentionImpl):
                                                            or 0.0)
                 assert decode_wrapper._sm_scale == self.scale
                 if self.cp_world_size > 1:
-                    torch.ops._C_cache_ops.reshape_and_cache_flash(
-                        key[:num_decode_tokens],
-                        value[:num_decode_tokens],
-                        kv_cache[:, 0],
-                        kv_cache[:, 1],
-                        attn_metadata.slot_mapping[:num_decode_tokens],
-                        self.kv_cache_dtype,
-                        layer._k_scale,
-                        layer._v_scale,
-                    )
-                    kv_cache_permute = kv_cache.permute(*stride_order)
                     out, lse = decode_wrapper.run(
                         decode_query,
                         kv_cache_permute,

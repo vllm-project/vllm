@@ -836,10 +836,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _update_tokens_for_cp(self, tokens, scheduler_output: "SchedulerOutput"):
         if not self.cp_world_size > 1:
+            self.num_cp_pads = None
+            self.cp_kv_recover_idx = None
             return tokens
         num_reqs = self.input_batch.num_reqs
-        self.num_cp_pads = np.empty(num_reqs, dtype=np.int32)
-        self.cp_kv_recover_idx: List[List[int]] = [[]
+        self.num_cp_pads = torch.empty(num_reqs, dtype=torch.int32)
+        self.cp_kv_recover_idx: Union(List[List[int]], torch.Tensor, None) = [[]
                                               for _ in range(self.cp_world_size)
                                               ]
         self.position_cp = np.zeros(self.max_num_tokens, dtype=np.int32)
@@ -861,26 +863,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 start_index += num_tokens
                 tokens[i] = num_tokens
             else:
-                self.num_cp_pads[i] = 0
+                self.num_cp_pads[i] = self.cp_world_size-1 # we allgather cp_world_size duplicated tokens in decode phase
                 self.position_cp[start_index:start_index +
                                              num_tokens] = [idx for idx in range(num_tokens)]
                 start_index += num_tokens
-                for rank in range(len(self.cp_kv_recover_idx)):
-                    self.cp_kv_recover_idx[rank].append(rank)
+                num_added_recover_tokens = len(self.cp_kv_recover_idx[0]) * self.cp_world_size
+                for rank in range(self.cp_world_size):
+                    self.cp_kv_recover_idx[rank].append(rank+num_added_recover_tokens)
+
+
+        cp_kv_recover_idx = torch.from_numpy(np.concatenate(self.cp_kv_recover_idx)
+                                             ).to(device=self.device)
+        cp_kv_recover_idx = cp_kv_recover_idx.to(
+            torch.float32).argsort(
+                stable=True).to(torch.int32)
+        mask = torch.ones_like(cp_kv_recover_idx).to(torch.bool)
+        cur_req_end_loc = 0
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            cp_pad = self.num_cp_pads[i]
+            cur_req_end_loc += num_tokens + cp_pad
+            mask[cur_req_end_loc-cp_pad:cur_req_end_loc] = 0
+        self.cp_kv_recover_idx = cp_kv_recover_idx[mask]
+
         return tokens
 
-    def _update_logits_indices_for_cp(self, cu_num_tokens, scheduler_output: "SchedulerOutput"):
-        # todo: find a better way to get is_prefill
-        is_prefill = list(
-            scheduler_output.num_scheduled_tokens.values())[0] > 1
-        num_reqs = self.input_batch.num_reqs
-        if self.cp_world_size > 1 and is_prefill:
-            # logits_indices = cu_num_tokens - num_cp_pads[:num_reqs] - 1 # if without all-gather and only sample on cp0
-            logits_indices = cu_num_tokens * self.cp_world_size \
-                - torch.tensor(self.num_cp_pads[:num_reqs]).to(cu_num_tokens) - 1
-        else:
-            logits_indices = cu_num_tokens - 1
-        return logits_indices
 
     def _get_cumsum_and_arange(
         self,
@@ -1039,7 +1046,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.cp_world_size > 1:
             req_indices_for_slotmapping = np.repeat(self.arange_np[:num_reqs],
                                              original_num_scheduled_tokens)
-            _, original_arange = self._get_cumsum_and_arange(
+            cu_num_tokens_for_logits_indices, original_arange = self._get_cumsum_and_arange(
                 original_num_scheduled_tokens)
             positions_np_for_slotmapping = self.positions.np[
                 :total_num_scheduled_tokens_for_slotmapping].copy()
@@ -1053,6 +1060,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                    arange,
                    out=positions_np)
+            cu_num_tokens_for_logits_indices = cu_num_tokens
             req_indices_for_slotmapping = req_indices
             positions_np_for_slotmapping = positions_np
 
@@ -1191,10 +1199,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
-            logits_indices = self._update_logits_indices_for_cp(
-                query_start_loc[1:], 
-                scheduler_output
-            )
+            logits_indices = torch.from_numpy(cu_num_tokens_for_logits_indices) - 1
             num_draft_tokens = None
             spec_decode_metadata = None
         else:
@@ -1239,18 +1244,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.cp_world_size > 1:
             # Prepare the metadata for Context Parallel
             total_num_scheduled_tokens_for_slotmapping = sum(original_num_scheduled_tokens[:num_reqs])
-
-            total_prefill_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
-            cp_kv_recover_idx = torch.zeros(total_prefill_num_scheduled_tokens * self.cp_world_size,
-                                            dtype=torch.int32,
-                                            device=self.device)
-            cp_kv_recover_idx.copy_(torch.tensor(
-                np.array(self.cp_kv_recover_idx).flatten().tolist()),
-                non_blocking=True)
-            self.cp_kv_recover_idx = cp_kv_recover_idx.to(
-                torch.float32).argsort().to(torch.int32)
-        else:
-            self.cp_kv_recover_idx = None
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -1305,6 +1298,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 encoder_seq_lens=encoder_seq_lens,
                 query_positions=positions_np,
                 cp_kv_recover_idx=self.cp_kv_recover_idx,
+                num_cp_pads=self.num_cp_pads,
             )
 
             if self.speculative_config and \
@@ -1970,11 +1964,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
-        cp_size = self.vllm_config.parallel_config.context_parallel_size
-        if cp_size > 1:
-            # TODO(qcs): When ContextParallel is adapted to GraphMode,
-            # revise this length alignment strategy again. 
-            return cdiv(num_scheduled_tokens, self.cp_world_size * 2) * 2
         if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
                 and not envs.VLLM_DISABLE_PAD_FOR_CUDAGRAPH
                 and hasattr(self, "cudagraph_batch_sizes")
@@ -1999,6 +1988,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         ubatch_slices: Optional[UBatchSlices] = None,
         num_tokens_after_padding: Optional[torch.Tensor] = None,
+        num_scheduled_tokens_after_cp: Optional[int] = None,
     ) -> tuple[int, int, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], torch.Tensor,
                Optional[IntermediateTensors], dict[str, Any]]:
@@ -2009,7 +1999,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_input_tokens = int(num_tokens_after_padding[0].item() * 2)
             self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
         elif ubatch_slices is None:
-            num_input_tokens = self._get_num_input_tokens(num_scheduled_tokens)
+            if self.cp_world_size == 1:
+                num_input_tokens = self._get_num_input_tokens(num_scheduled_tokens)
+            else:
+                assert num_scheduled_tokens_after_cp is not None
+                num_input_tokens = self._get_num_input_tokens(num_scheduled_tokens_after_cp)
             num_pad, num_tokens_after_padding = self.get_dp_padding(
                 num_input_tokens)
             num_input_tokens += num_pad
@@ -2316,7 +2310,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 intermediate_tensors,
                 model_kwargs,
             ) = self._preprocess(scheduler_output, intermediate_tensors,
-                                 ubatch_slices, num_tokens_after_padding)
+                                 ubatch_slices, num_tokens_after_padding,
+                                 sum(num_scheduled_tokens_np))
 
             if ubatch_slices is not None:
                 num_input_tokens = num_input_tokens // 2
