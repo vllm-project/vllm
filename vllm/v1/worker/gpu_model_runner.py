@@ -1928,19 +1928,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         supported_tasks = list(model.pooler.get_supported_tasks())
 
-        if (
-            self.scheduler_config.chunked_prefill_enabled
-            and "encode" in supported_tasks
-        ):
-            supported_tasks.remove("encode")
-
-            logger.debug_once(
-                "Chunked prefill is not supported with "
-                "encode task which using ALL pooling. "
-                "Please turn off chunked prefill by "
-                "`--no-enable-chunked-prefill` before using it."
-            )
-
         if "score" in supported_tasks:
             num_labels = getattr(self.model_config.hf_config, "num_labels", 0)
             if num_labels != 1:
@@ -2049,11 +2036,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self._sync_device()
 
         pooler_output: list[Optional[torch.Tensor]] = []
-        for raw_output, seq_len, prompt_len in zip(
-            raw_pooler_output, seq_lens_cpu, pooling_metadata.prompt_lens
-        ):
-            output = raw_output if seq_len == prompt_len else None
-            pooler_output.append(output)
+        for raw_output in raw_pooler_output:
+            pooler_output.append(raw_output)
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -2535,6 +2519,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     output = self._pool(
                         hidden_states, num_scheduled_tokens, num_scheduled_tokens_np
                     )
+
+                    print("ModelRunnerOutput", [x.shape for x in output.pooler_output])
                     output.kv_connector_output = kv_connector_output
                     return output
 
