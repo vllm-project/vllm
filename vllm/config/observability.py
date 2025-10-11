@@ -5,6 +5,7 @@ import hashlib
 from functools import cached_property
 from typing import Any, Literal, Optional, cast
 
+from pydantic import field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm import version
@@ -79,25 +80,46 @@ class ObservabilityConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __post_init__(self):
-        if (
-            self.collect_detailed_traces is not None
-            and len(self.collect_detailed_traces) == 1
-            and "," in self.collect_detailed_traces[0]
-        ):
-            self._parse_collect_detailed_traces()
-
-        from vllm.tracing import is_otel_available, otel_import_error_traceback
-
-        if not is_otel_available() and self.otlp_traces_endpoint is not None:
+    @field_validator("show_hidden_metrics_for_version", mode="before")
+    @classmethod
+    def _normalize_version(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        value = value.lstrip("v")
+        parts = value.split(".")
+        if len(parts) not in (2, 3) or not all(p.isdigit() for p in parts):
             raise ValueError(
-                "OpenTelemetry is not available. Unable to configure "
-                "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
-                f"installed. Original error:\n{otel_import_error_traceback}"
+                "show_hidden_metrics_for_version must look like '0.7' or '0.7.0'"
             )
+        return value
 
-    def _parse_collect_detailed_traces(self):
-        assert isinstance(self.collect_detailed_traces, list)
-        self.collect_detailed_traces = cast(
-            list[DetailedTraceModules], self.collect_detailed_traces[0].split(",")
+    @field_validator("otlp_traces_endpoint", mode="after")
+    @classmethod
+    def _validate_endpoint(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        if not (value.startswith("http://") or value.startswith("https://")):
+            raise ValueError(
+                "otlp_traces_endpoint must start with http:// or https://"
+            )
+        return value
+
+    @field_validator("collect_detailed_traces", mode="before")
+    @classmethod
+    def _parse_collect_traces(cls, value: Any) -> Optional[list[DetailedTraceModules]]:
+        if value is None:
+            return None
+
+        assert isinstance(value, list)
+        value = cast(
+            list[DetailedTraceModules], value[0].split(",")
         )
+        return value
+
+    @model_validator(mode="after")
+    def _require_endpoint_if_traces(self):
+        if self.collect_detailed_traces and not self.otlp_traces_endpoint:
+            raise ValueError(
+                "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
+            )
+        return self
