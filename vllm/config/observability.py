@@ -117,7 +117,7 @@ class ObservabilityConfig:
         return value
 
     @model_validator(mode="after")
-    def _require_endpoint_if_traces(self):
+    def _validate_tracing_config(self):
         if self.collect_detailed_traces and not self.otlp_traces_endpoint:
             raise ValueError(
                 "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
