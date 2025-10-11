@@ -47,7 +47,8 @@ class KVConnectorFactory:
             )
 
         kv_transfer_config = config.kv_transfer_config
-        assert kv_transfer_config is not None
+        if kv_transfer_config is None:
+            raise ValueError("kv_transfer_config must be set to create a connector")
         connector_cls = cls.get_connector_class(kv_transfer_config)
         logger.info(
             "Creating v1 connector with name: %s and engine_id: %s",
@@ -79,12 +80,13 @@ class KVConnectorFactory:
             if connector_module_path is None:
                 raise ValueError(f"Unsupported connector type: {connector_name}")
             connector_module = importlib.import_module(connector_module_path)
-            connector_cls_any = getattr(connector_module, connector_name, None)
-            if connector_cls_any is None:
+            try:
+                connector_cls = getattr(connector_module, connector_name)
+            except AttributeError as e:
                 raise AttributeError(
                     f"Class {connector_name} not found in {connector_module_path}"
-                )
-            connector_cls = cast(type[KVConnectorBaseType], connector_cls_any)
+                ) from e
+            connector_cls = cast(type[KVConnectorBaseType], connector_cls)
         return connector_cls
 
 
