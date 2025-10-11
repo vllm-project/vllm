@@ -287,7 +287,7 @@ class OpenAIServing:
             " the parallel_tool_calls client option is preset for "
             "compatibility reasons, it will be ignored."
         )
-        """Get the tool parser based on the name."""
+
         try:
             if tool_parser_name == "pythonic" and self.model_config.model.startswith(
                 "meta-llama/Llama-3.2"
