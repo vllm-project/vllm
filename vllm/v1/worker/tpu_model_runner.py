@@ -371,6 +371,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             self.sample_from_logits_func = self.sample_from_logits
 
+    def reset_mm_cache(self) -> None:
+        if self.mm_budget:
+            self.mm_budget.reset_cache()
+
     def _update_num_xla_graphs(self, case_str):
         check_comp = self.check_recompilation and not self.enforce_eager
         if not check_comp:
