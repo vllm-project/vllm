@@ -416,7 +416,6 @@ class EngineArgs:
     tokenizer_revision: Optional[str] = ModelConfig.tokenizer_revision
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
-
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     limit_mm_per_prompt: dict[str, Union[int, dict[str, int]]] = get_field(
         MultiModalConfig, "limit_per_prompt"
