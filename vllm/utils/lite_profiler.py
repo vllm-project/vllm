@@ -27,50 +27,48 @@ def _should_log_results() -> bool:
     return process.name in ("EngineCore_DP0", "VllmWorker-0")
 
 
-# Cache for log file handles
-_log_file_cache: dict[str, TextIO] = {}
+# Cache for log file handle
+_log_file: TextIO | None = None
 log_results = _should_log_results()
 
 
 def _write_log_entry(name: str, elapsed_us: int) -> None:
-    """Write a profiler entry using cached file handles for optimal performance.
+    """Write a profiler entry using cached file handle for optimal performance.
 
-    This function implements an efficient caching approach where file handles
-    are opened once per log path and reused for all subsequent writes. This
-    eliminates the significant overhead of opening/closing files for every
-    profiler entry, which is crucial for maintaining the lightweight nature
-    of the profiler.
+    This function implements an efficient caching approach where the file handle
+    is opened once and reused for all subsequent writes. This eliminates the
+    significant overhead of opening/closing files for every profiler entry,
+    which is crucial for maintaining the lightweight nature of the profiler.
 
-    The cached file handles are automatically closed on program exit via atexit.
+    The cached file handle is automatically closed on program exit via atexit.
     """
-    global _log_file_cache
+    global _log_file
     _LOG_PATH = envs.VLLM_LITE_PROFILER_LOG_PATH
 
     if not log_results or _LOG_PATH is None:
         return
 
-    # Handle case where file handle was opened in parent but we're in child
-    # The file descriptor may be invalid after fork
-    if _log_file_cache.get(_LOG_PATH) is not None:
+    # Handle case where file handle was opened in parent but we're in the
+    # child process. The file descriptor may become invalid after fork
+    if _log_file is not None:
         try:
-            # Test if the file handle is still valid
-            _log_file_cache[_LOG_PATH].tell()
+            # Verify if the file handle is still valid
+            _log_file.tell()
         except (OSError, ValueError):
             # File handle is stale, clear and reopen
-            _log_file_cache.clear()
+            _log_file = None
 
+    # Write the log entry
     log_line = f"{name}|{elapsed_us}\n"
-    log_file = _log_file_cache.get(_LOG_PATH)
-    if log_file is None:
+    if _log_file is None:
         directory = os.path.dirname(_LOG_PATH)
         if directory:
             os.makedirs(directory, exist_ok=True)
         # ruff: noqa: SIM115 - intentionally keeping file handle cached globally
-        log_file = open(_LOG_PATH, "a", buffering=50000)
-        _log_file_cache[_LOG_PATH] = log_file
-        atexit.register(log_file.close)
+        _log_file = open(_LOG_PATH, "a", buffering=50000)
+        atexit.register(_log_file.close)
 
-    log_file.write(log_line)
+    _log_file.write(log_line)
 
 
 class LiteScope:
