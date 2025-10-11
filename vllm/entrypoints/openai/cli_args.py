@@ -189,6 +189,8 @@ class FrontendArgs:
     Helps mitigate header abuse. Default: 256."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
+    sentry_dsn: Optional[str] = None
+    """Enables Sentry error reporting to the specified data source name."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
