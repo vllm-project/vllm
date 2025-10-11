@@ -14,13 +14,13 @@ ROCM_FP8FNUZ_MAX = 224.0
 FP8_DTYPE = current_platform.fp8_dtype()
 
 
-def as_float32_tensor(x: float | torch.tensor) -> torch.tensor:
+def as_float32_tensor(x: float | torch.Tensor) -> torch.Tensor:
     return torch.as_tensor(x, dtype=torch.float32, device="cuda")
 
 
 def ref_dynamic_per_token_quant(
-    x: torch.tensor, quant_dtype: torch.dtype, scale_ub: torch.tensor | None = None
-) -> tuple[torch.tensor, torch.tensor]:
+    x: torch.Tensor, quant_dtype: torch.dtype, scale_ub: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
     assert quant_dtype in [torch.int8, FP8_DTYPE]
     if scale_ub is not None:
         assert quant_dtype == FP8_DTYPE
@@ -75,8 +75,8 @@ def ref_dynamic_per_token_quant(
 # ref_dynamic_per_token_quant, when we have a dynamic_per_tensor int8 quant
 # kernel
 def ref_dynamic_per_tensor_fp8_quant(
-    x: torch.tensor,
-) -> tuple[torch.tensor, torch.tensor]:
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
     fp8_traits = torch.finfo(FP8_DTYPE)
     fp8_traits_max = (
         ROCM_FP8FNUZ_MAX
