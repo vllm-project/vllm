@@ -3,6 +3,7 @@
 
 import hashlib
 import os
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import torch
@@ -34,6 +35,10 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 
 
+class EPLBPolicyType(Enum):
+    DEFAULT_EPLB = 0
+
+
 @config
 @dataclass
 class EPLBConfig:
@@ -57,6 +62,9 @@ class EPLBConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
+
+    eplb_policy_type: EPLBPolicyType = EPLBPolicyType.DEFAULT_EPLB
+    """The policy type for expert parallel load balancing (EPLB)."""
 
 
 @config
