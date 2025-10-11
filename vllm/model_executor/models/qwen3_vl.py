@@ -1701,7 +1701,7 @@ class Qwen3VLForConditionalGeneration(
             is_multimodal=is_multimodal,
         )
 
-        if self.use_deepstack:
+        if deepstack_input_embeds is not None:
             self._set_deepstack_input_embeds(deepstack_input_embeds)
 
         return inputs_embeds
