@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.distributed as dist
@@ -14,12 +14,10 @@ from vllm.utils.flashinfer import has_flashinfer_all2all
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
-if has_flashinfer_all2all():
-    from flashinfer.comm import Mapping  # type: ignore[import-not-found]
-    from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
-    from flashinfer.comm.trtllm_alltoall import (
-        MnnvlMoe,  # type: ignore[import-not-found]
-    )
+if has_flashinfer_all2all() and not TYPE_CHECKING:
+    from flashinfer.comm import Mapping
+    from flashinfer.comm.mnnvl import MnnvlConfig
+    from flashinfer.comm.trtllm_alltoall import MnnvlMoe
 
 logger = init_logger(__name__)
 
