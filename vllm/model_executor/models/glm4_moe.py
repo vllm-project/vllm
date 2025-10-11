@@ -635,7 +635,7 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self.num_expert_groups = config.n_group
 
         self.moe_layers: list[SharedFusedMoE] = []
-        example_moe = None
+        self.example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue

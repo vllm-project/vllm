@@ -93,7 +93,7 @@ class VllmEplbAdaptor(BaseAdaptor):
 
         # copy of expert map on CPU to avoid device synchronize frequently
         self.expert_map_per_layer_cpu = dict()
-        
+
         for layer_idx in range(self.num_moe_layers):
             self.expert_map_per_layer[self.num_dense_layers + layer_idx] = (
                 self.model.get_expert_map(self.num_dense_layers + layer_idx)
@@ -114,9 +114,9 @@ class VllmEplbAdaptor(BaseAdaptor):
 
         self.log2phy_map_per_layer = dict()
         for layer_idx in range(self.num_moe_layers):
-            self.log2phy_map_per_layer[self.num_dense_layers + layer_idx] = \
+            self.log2phy_map_per_layer[self.num_dense_layers + layer_idx] = (
                 self.model.get_log2phy_map(self.num_dense_layers + layer_idx)
-
+            )
         self.all_topk_ids = []
 
     def init_buffer_tensor(self, num_buffer_tensor):
@@ -188,8 +188,9 @@ class VllmEplbAdaptor(BaseAdaptor):
         all_expert_maps = all_maps.cpu()
 
         for layer_idx in range(num_moe_layers):
-            self.expert_map_per_layer_cpu[self.num_dense_layers + layer_idx] = \
+            self.expert_map_per_layer_cpu[self.num_dense_layers + layer_idx] = (
                 all_expert_maps[layer_idx][self.rank_id]
+            )
 
         return all_expert_maps
 
