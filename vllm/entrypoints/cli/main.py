@@ -1,23 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-'''The CLI entrypoints of vLLM
+"""The CLI entrypoints of vLLM
 
 Note that all future modules must be lazily loaded within main
-to avoid certain eager import breakage.'''
+to avoid certain eager import breakage."""
+
 from __future__ import annotations
 
 import importlib.metadata
-import signal
 import sys
 
+from vllm.logger import init_logger
 
-def register_signal_handlers():
-
-    def signal_handler(sig, frame):
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTSTP, signal_handler)
+logger = init_logger(__name__)
 
 
 def main():
@@ -39,23 +34,38 @@ def main():
 
     cli_env_setup()
 
+    # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default
+    if len(sys.argv) > 1 and sys.argv[1] == "bench":
+        logger.debug(
+            "Bench command detected, must ensure current platform is not "
+            "UnspecifiedPlatform to avoid device type inference error"
+        )
+        from vllm import platforms
+
+        if platforms.current_platform.is_unspecified():
+            from vllm.platforms.cpu import CpuPlatform
+
+            platforms.current_platform = CpuPlatform()
+            logger.info(
+                "Unspecified platform detected, switching to CPU Platform instead."
+            )
+
     parser = FlexibleArgumentParser(
         description="vLLM CLI",
-        epilog=VLLM_SUBCMD_PARSER_EPILOG,
+        epilog=VLLM_SUBCMD_PARSER_EPILOG.format(subcmd="[subcommand]"),
     )
     parser.add_argument(
-        '-v',
-        '--version',
-        action='version',
-        version=importlib.metadata.version('vllm'),
+        "-v",
+        "--version",
+        action="version",
+        version=importlib.metadata.version("vllm"),
     )
     subparsers = parser.add_subparsers(required=False, dest="subparser")
     cmds = {}
     for cmd_module in CMD_MODULES:
         new_cmds = cmd_module.cmd_init()
         for cmd in new_cmds:
-            cmd.subparser_init(subparsers).set_defaults(
-                dispatch_function=cmd.cmd)
+            cmd.subparser_init(subparsers).set_defaults(dispatch_function=cmd.cmd)
             cmds[cmd.name] = cmd
     args = parser.parse_args()
     if args.subparser in cmds:

@@ -1,24 +1,20 @@
 # Summary
 
-[](){ #configuration }
-
 ## Configuration
 
 API documentation for vLLM's configuration classes.
 
 - [vllm.config.ModelConfig][]
 - [vllm.config.CacheConfig][]
-- [vllm.config.TokenizerPoolConfig][]
 - [vllm.config.LoadConfig][]
 - [vllm.config.ParallelConfig][]
 - [vllm.config.SchedulerConfig][]
 - [vllm.config.DeviceConfig][]
 - [vllm.config.SpeculativeConfig][]
 - [vllm.config.LoRAConfig][]
-- [vllm.config.PromptAdapterConfig][]
 - [vllm.config.MultiModalConfig][]
 - [vllm.config.PoolerConfig][]
-- [vllm.config.DecodingConfig][]
+- [vllm.config.StructuredOutputsConfig][]
 - [vllm.config.ObservabilityConfig][]
 - [vllm.config.KVTransferConfig][]
 - [vllm.config.CompilationConfig][]
@@ -50,7 +46,6 @@ Engine classes for offline and online inference.
 Inference parameters for vLLM APIs.
 
 [](){ #sampling-params }
-[](){ #pooling-params }
 
 - [vllm.SamplingParams][]
 - [vllm.PoolingParams][]
@@ -81,6 +76,7 @@ Internal data structures.
 - [vllm.multimodal.inputs.MultiModalFieldElem][]
 - [vllm.multimodal.inputs.MultiModalFieldConfig][]
 - [vllm.multimodal.inputs.MultiModalKwargsItem][]
+- [vllm.multimodal.inputs.MultiModalKwargsItems][]
 - [vllm.multimodal.inputs.MultiModalKwargs][]
 - [vllm.multimodal.inputs.MultiModalInputs][]
 

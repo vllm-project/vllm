@@ -6,12 +6,11 @@ from typing import Optional
 
 import torch
 
-from vllm.v1.sample.logits_processor import LogitsProcessorManager
+from vllm.v1.sample.logits_processor import LogitsProcessors
 
 
 @dataclass
 class SamplingMetadata:
-
     temperature: Optional[torch.Tensor]
     all_greedy: bool
     all_random: bool
@@ -40,4 +39,7 @@ class SamplingMetadata:
     bad_words_token_ids: dict[int, list[list[int]]]
 
     # Loaded logits processors
-    logitsprocs: LogitsProcessorManager
+    logitsprocs: LogitsProcessors
+
+    # Speculative token ids
+    spec_token_ids: Optional[list[list[int]]] = None

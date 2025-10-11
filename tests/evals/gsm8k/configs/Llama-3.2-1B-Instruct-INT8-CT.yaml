@@ -1,0 +1,5 @@
+model_name: "RedHatAI/Llama-3.2-1B-Instruct-quantized.w8a8"
+accuracy_threshold: 0.31
+num_questions: 1319
+num_fewshot: 5
+max_model_len: 4096

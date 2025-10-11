@@ -23,6 +23,13 @@ a:not(:has(svg)):not(.md-icon):not(.autorefs-external) {
     }
 }
 
+a[href*="localhost"]::after,
+a[href*="127.0.0.1"]::after,
+a[href*="org.readthedocs.build"]::after,
+a[href*="docs.vllm.ai"]::after {
+    display: none !important;
+}
+
 /* Light mode: darker section titles */
 body[data-md-color-scheme="default"] .md-nav__item--section > label.md-nav__link .md-ellipsis {
   color: rgba(0, 0, 0, 0.7) !important;

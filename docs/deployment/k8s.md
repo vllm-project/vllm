@@ -5,14 +5,16 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 - [Deployment with CPUs](#deployment-with-cpus)
 - [Deployment with GPUs](#deployment-with-gpus)
 - [Troubleshooting](#troubleshooting)
-  - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
+    - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
 - [Conclusion](#conclusion)
 
 Alternatively, you can deploy vLLM to Kubernetes using any of the following:
 
 - [Helm](frameworks/helm.md)
 - [InftyAI/llmaz](integrations/llmaz.md)
+- [KAITO](integrations/kaito.md)
 - [KServe](integrations/kserve.md)
+- [KubeRay](integrations/kuberay.md)
 - [kubernetes-sigs/lws](frameworks/lws.md)
 - [meta-llama/llama-stack](integrations/llamastack.md)
 - [substratusai/kubeai](integrations/kubeai.md)
@@ -379,7 +381,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
 ### Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"
 
-If the startup or readiness probe failureThreshold is too low for the time needed to startup the server, Kubernetes scheduler will kill the container. A couple of indications that this has happened:
+If the startup or readiness probe failureThreshold is too low for the time needed to start up the server, Kubernetes scheduler will kill the container. A couple of indications that this has happened:
 
 1. container log contains "KeyboardInterrupt: terminated"
 2. `kubectl get events` shows message `Container $NAME failed startup probe, will be restarted`

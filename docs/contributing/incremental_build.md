@@ -40,6 +40,16 @@ python tools/generate_cmake_presets.py
 
 The script will prompt you if it cannot automatically determine certain paths (e.g., `nvcc` or a specific Python executable for your vLLM development environment). Follow the on-screen prompts. If an existing `CMakeUserPresets.json` is found, the script will ask for confirmation before overwriting it.
 
+**Force overwrite existing file:**
+
+To automatically overwrite an existing `CMakeUserPresets.json` without prompting, use the `--force-overwrite` flag:
+
+```console
+python tools/generate_cmake_presets.py --force-overwrite
+```
+
+This is particularly useful in automated scripts or CI/CD environments where interactive prompts are not desired.
+
 After running the script, a `CMakeUserPresets.json` file will be created in the root of your vLLM repository.
 
 ### Example `CMakeUserPresets.json`
@@ -99,16 +109,16 @@ Once your `CMakeUserPresets.json` is configured:
 1. **Initialize the CMake build environment:**
    This step configures the build system according to your chosen preset (e.g., `release`) and creates the build directory at `binaryDir`
 
-   ```console
-   cmake --preset release
-   ```
+    ```console
+    cmake --preset release
+    ```
 
 2. **Build and install the vLLM components:**
    This command compiles the code and installs the resulting binaries into your vLLM source directory, making them available to your editable Python installation.
 
-   ```console
-   cmake --build --preset release --target install
-   ```
+    ```console
+    cmake --build --preset release --target install
+    ```
 
 3. **Make changes and repeat!**
     Now you start using your editable install of vLLM, testing and making changes as needed. If you need to build again to update based on changes, simply run the CMake command again to build only the affected files.

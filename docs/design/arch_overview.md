@@ -69,6 +69,11 @@ Sometimes you may see the API server entrypoint used directly instead of via the
 python -m vllm.entrypoints.openai.api_server --model <model>
 ```
 
+!!! warning
+
+    `python -m vllm.entrypoints.openai.api_server` is deprecated
+    and may become unsupported in a future release.
+
 That code can be found in <gh-file:vllm/entrypoints/openai/api_server.py>.
 
 More details on the API server can be found in the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) document.
@@ -200,7 +205,8 @@ vision-language model.
                 lora_config = vllm_config.lora_config
                 super().__init__(config, cache_config, quant_config, lora_config, prefix)
 
-        if __version__ >= "0.6.4":
+        from packaging import version
+        if version.parse(__version__) >= version.parse("0.6.4"):
             MyModel = MyNewModel
         else:
             MyModel = MyOldModel

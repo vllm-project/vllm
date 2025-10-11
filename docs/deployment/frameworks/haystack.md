@@ -1,14 +1,12 @@
 # Haystack
 
-# Haystack
-
 [Haystack](https://github.com/deepset-ai/haystack) is an end-to-end LLM framework that allows you to build applications powered by LLMs, Transformer models, vector search and more. Whether you want to perform retrieval-augmented generation (RAG), document search, question answering or answer generation, Haystack can orchestrate state-of-the-art embedding models and LLMs into pipelines to build end-to-end NLP applications and solve your use case.
 
 It allows you to deploy a large language model (LLM) server with vLLM as the backend, which exposes OpenAI-compatible endpoints.
 
 ## Prerequisites
 
-- Setup vLLM and Haystack environment
+Set up the vLLM and Haystack environment:
 
 ```bash
 pip install vllm haystack-ai
@@ -16,13 +14,13 @@ pip install vllm haystack-ai
 
 ## Deploy
 
-- Start the vLLM server with the supported chat completion model, e.g.
+1. Start the vLLM server with the supported chat completion model, e.g.
 
-```bash
-vllm serve mistralai/Mistral-7B-Instruct-v0.1
-```
+    ```bash
+    vllm serve mistralai/Mistral-7B-Instruct-v0.1
+    ```
 
-- Use the `OpenAIGenerator` and `OpenAIChatGenerator` components in Haystack to query the vLLM server.
+1. Use the `OpenAIGenerator` and `OpenAIChatGenerator` components in Haystack to query the vLLM server.
 
 ??? code
 

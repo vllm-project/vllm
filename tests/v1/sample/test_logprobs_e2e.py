@@ -15,22 +15,23 @@ EXPECTED_VALUE = 0.62
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 MODEL_ARGS = f"pretrained={MODEL},enforce_eager=True,enable_prefix_caching=False,gpu_memory_utilization=0.8"  # noqa: E501
 SERVER_ARGS = [
-    "--enforce_eager", "--no_enable_prefix_caching", "--disable-log-requests",
-    "--gpu-memory-utilization=0.8"
+    "--enforce_eager",
+    "--no_enable_prefix_caching",
+    "--gpu-memory-utilization=0.8",
 ]
 NUM_CONCURRENT = 100
 
 
 def test_prompt_logprobs_e2e():
-    results = lm_eval.simple_evaluate(model="vllm",
-                                      model_args=MODEL_ARGS,
-                                      tasks=TASK,
-                                      batch_size="auto")
+    results = lm_eval.simple_evaluate(
+        model="vllm", model_args=MODEL_ARGS, tasks=TASK, batch_size="auto"
+    )
 
     measured_value = results["results"][TASK][FILTER]
-    assert (measured_value - RTOL < EXPECTED_VALUE
-            and measured_value + RTOL > EXPECTED_VALUE
-            ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+    assert (
+        measured_value - RTOL < EXPECTED_VALUE
+        and measured_value + RTOL > EXPECTED_VALUE
+    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
 def test_prompt_logprobs_e2e_server():
@@ -40,7 +41,8 @@ def test_prompt_logprobs_e2e_server():
         model_args = (
             f"model={MODEL},"
             f"base_url={url},"
-            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False")
+            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False"
+        )
 
         results = lm_eval.simple_evaluate(
             model="local-completions",
@@ -49,6 +51,7 @@ def test_prompt_logprobs_e2e_server():
         )
 
         measured_value = results["results"][TASK][FILTER]
-        assert (measured_value - RTOL < EXPECTED_VALUE
-                and measured_value + RTOL > EXPECTED_VALUE
-                ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+        assert (
+            measured_value - RTOL < EXPECTED_VALUE
+            and measured_value + RTOL > EXPECTED_VALUE
+        ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"

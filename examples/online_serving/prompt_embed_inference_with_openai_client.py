@@ -10,7 +10,7 @@ This script demonstrates how to:
 
 Run the vLLM server first:
 vllm serve meta-llama/Llama-3.2-1B-Instruct \
-  --task generate \
+  --runner generate \
   --max-model-len 4096 \
   --enable-prompt-embeds
 

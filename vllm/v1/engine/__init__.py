@@ -3,15 +3,14 @@
 
 import enum
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping
 from typing import Any, Optional, Union
 
 import msgspec
 import torch
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalKwargs
-from vllm.multimodal.inputs import PlaceholderRange
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
@@ -33,6 +32,7 @@ class FinishReason(enum.IntEnum):
     abort - aborted for another reason
 
     """
+
     STOP = 0
     LENGTH = 1
     ABORT = 2
@@ -42,16 +42,14 @@ class FinishReason(enum.IntEnum):
 
 
 class EngineCoreRequest(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
-
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
     request_id: str
-    prompt_token_ids: list[int]
-    mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]]
-    mm_hashes: Optional[list[str]]
-    mm_placeholders: Optional[list[PlaceholderRange]]
+    prompt_token_ids: Optional[list[int]]
+    mm_features: Optional[list[MultiModalFeatureSpec]]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     eos_token_id: Optional[int]
@@ -59,6 +57,7 @@ class EngineCoreRequest(
     lora_request: Optional[LoRARequest]
     cache_salt: Optional[str]
     data_parallel_rank: Optional[int]
+    prompt_embeds: Optional[torch.Tensor] = None
 
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
@@ -70,9 +69,12 @@ class EngineCoreRequest(
     current_wave: int = 0
     priority: int = 0
 
+    trace_headers: Optional[Mapping[str, str]] = None
+
 
 class EngineCoreEventType(enum.IntEnum):
     """The type of engine core request event."""
+
     QUEUED = 1
     SCHEDULED = 2
     PREEMPTED = 3
@@ -85,23 +87,24 @@ class EngineCoreEvent(msgspec.Struct):
     frontend to calculate intervals between engine core events. These
     timestamps should not be compared with timestamps from other processes.
     """
+
     type: EngineCoreEventType
     timestamp: float
 
     @classmethod
-    def new_event(cls,
-                  event_type: EngineCoreEventType,
-                  timestamp: Optional[float] = None) -> "EngineCoreEvent":
+    def new_event(
+        cls, event_type: EngineCoreEventType, timestamp: Optional[float] = None
+    ) -> "EngineCoreEvent":
         timestamp = time.monotonic() if timestamp is None else timestamp
         return cls(event_type, timestamp)
 
 
 class EngineCoreOutput(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
-
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
     request_id: str
     new_token_ids: list[int]
 
@@ -115,6 +118,7 @@ class EngineCoreOutput(
     events: Optional[list[EngineCoreEvent]] = None
     kv_transfer_params: Optional[dict[str, Any]] = None
 
+    trace_headers: Optional[Mapping[str, str]] = None
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
 
@@ -123,25 +127,32 @@ class EngineCoreOutput(
         return self.finish_reason is not None
 
 
-class UtilityOutput(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
+class UtilityResult:
+    """Wrapper for special handling when serializing/deserializing."""
 
+    def __init__(self, r: Any = None):
+        self.result = r
+
+
+class UtilityOutput(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
     call_id: int
 
     # Non-None implies the call failed, result should be None.
     failure_message: Optional[str] = None
-    result: Any = None
+    result: Optional[UtilityResult] = None
 
 
 class EngineCoreOutputs(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True,  # type: ignore[call-arg]
-        gc=False):  # type: ignore[call-arg]
-
-    #NOTE(Nick): We could consider ways to make this more compact,
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    # NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout
 
     engine_index: int = 0
@@ -171,9 +182,27 @@ class EngineCoreRequestType(enum.Enum):
     Request types defined as hex byte strings, so it can be sent over sockets
     without separate encoding step.
     """
-    ADD = b'\x00'
-    ABORT = b'\x01'
-    START_DP_WAVE = b'\x02'
-    UTILITY = b'\x03'
+
+    ADD = b"\x00"
+    ABORT = b"\x01"
+    START_DP_WAVE = b"\x02"
+    UTILITY = b"\x03"
     # Sentinel used within EngineCoreProc.
-    EXECUTOR_FAILED = b'\x04'
+    EXECUTOR_FAILED = b"\x04"
+
+
+class ReconfigureDistributedRequest(msgspec.Struct):
+    new_data_parallel_size: int
+    new_data_parallel_rank: int
+    new_data_parallel_rank_local: int
+    new_data_parallel_master_ip: str
+    new_data_parallel_master_port: int
+
+
+class ReconfigureRankType(enum.IntEnum):
+    """
+    Rank type for reconfiguring distributed request.
+    """
+
+    KEEP_CURRENT_RANK = -1
+    SHUTDOWN_CURRENT_RANK = -2

@@ -8,11 +8,11 @@ of logging configurations that range from simple-and-inflexible to
 more-complex-and-more-flexible.
 
 - No vLLM logging (simple and inflexible)
-  - Set `VLLM_CONFIGURE_LOGGING=0` (leaving `VLLM_LOGGING_CONFIG_PATH` unset)
+    - Set `VLLM_CONFIGURE_LOGGING=0` (leaving `VLLM_LOGGING_CONFIG_PATH` unset)
 - vLLM's default logging configuration (simple and inflexible)
-  - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1`
+    - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1`
 - Fine-grained custom logging configuration (more complex, more flexible)
-  - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1` and
+    - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1` and
     set `VLLM_LOGGING_CONFIG_PATH=<path-to-logging-config.json>`
 
 ## Logging Configuration Environment Variables

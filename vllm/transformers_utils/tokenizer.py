@@ -7,29 +7,30 @@ import os
 import warnings
 from functools import lru_cache
 from pathlib import Path
-from types import MethodType
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import huggingface_hub
-from transformers import (AutoTokenizer, PreTrainedTokenizer,
-                          PreTrainedTokenizerFast)
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from typing_extensions import assert_never
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer_base import (TokenizerBase,
-                                                    TokenizerRegistry)
+from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import make_async
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+    from vllm.lora.request import LoRARequest
+    from vllm.transformers_utils.tokenizer_base import TokenizerBase
+else:
+    ModelConfig = Any
+    LoRARequest = Any
+    TokenizerBase = Any
 
 logger = init_logger(__name__)
 
-AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast,
-                     TokenizerBase]
+AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast, TokenizerBase]
 
 
 def decode_tokens(
@@ -46,8 +47,7 @@ def decode_tokens(
     settings.
     """
     if skip_special_tokens is not None:
-        return tokenizer.decode(token_ids,
-                                skip_special_tokens=skip_special_tokens)
+        return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
 
     return tokenizer.decode(token_ids)
 
@@ -91,8 +91,7 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
 
     tokenizer_all_special_ids = tokenizer.all_special_ids
     tokenizer_all_special_tokens = tokenizer.all_special_tokens
-    tokenizer_all_special_tokens_extended = (
-        tokenizer.all_special_tokens_extended)
+    tokenizer_all_special_tokens_extended = tokenizer.all_special_tokens_extended
     tokenizer_vocab = tokenizer.get_vocab()
     tokenizer_len = len(tokenizer)
 
@@ -106,7 +105,6 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
             max_token_id = max(max_token_id, tokenizer.vocab_size)
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
-
         @property
         def all_special_ids(self) -> list[int]:
             return tokenizer_all_special_ids
@@ -130,32 +128,12 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
             return tokenizer_len
 
         def __reduce__(self):
-            return get_cached_tokenizer, (tokenizer, )
+            return get_cached_tokenizer, (tokenizer,)
 
     CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
 
     cached_tokenizer.__class__ = CachedTokenizer
     return cached_tokenizer
-
-
-def patch_padding_side(tokenizer: PreTrainedTokenizer) -> None:
-    """Patch _pad method to accept `padding_side` for older tokenizers."""
-    orig_pad = tokenizer._pad
-
-    def _pad(
-        self: PreTrainedTokenizer,
-        *args,
-        padding_side: Optional[str] = None,
-        **kwargs,
-    ):
-        if padding_side is not None and padding_side != self.padding_side:
-            msg = ("`padding_side` argument is not supported by "
-                   f"{type(tokenizer).__name__} and will be ignored.")
-            warnings.warn(msg, stacklevel=2)
-
-        return orig_pad(*args, **kwargs)
-
-    tokenizer._pad = MethodType(_pad, tokenizer)
 
 
 def get_tokenizer(
@@ -167,8 +145,7 @@ def get_tokenizer(
     download_dir: Optional[str] = None,
     **kwargs,
 ) -> AnyTokenizer:
-    """Gets a tokenizer for the given model name via HuggingFace or ModelScope.
-    """
+    """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
     if envs.VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
@@ -189,13 +166,13 @@ def get_tokenizer(
                     revision=revision,
                     local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
                     # Ignore weights - we only need the tokenizer.
-                    ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
+                    ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"],
+                )
                 tokenizer_name = tokenizer_path
 
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
-            raise ValueError(
-                "Cannot use the fast tokenizer in slow tokenizer mode.")
+            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
 
     if "truncation_side" not in kwargs:
@@ -211,22 +188,28 @@ def get_tokenizer(
     is_from_mistral_org = str(tokenizer_name).split("/")[0] == "mistralai"
     if is_from_mistral_org and tokenizer_mode != "mistral":
         warnings.warn(
-            'It is strongly recommended to run mistral models with '
+            "It is strongly recommended to run mistral models with "
             '`--tokenizer-mode "mistral"` to ensure correct '
-            'encoding and decoding.',
+            "encoding and decoding.",
             FutureWarning,
-            stacklevel=2)
+            stacklevel=2,
+        )
 
     tokenizer: AnyTokenizer
     if tokenizer_mode == "mistral":
-        tokenizer = MistralTokenizer.from_pretrained(str(tokenizer_name),
-                                                     revision=revision)
+        tokenizer = MistralTokenizer.from_pretrained(
+            str(tokenizer_name), revision=revision
+        )
     elif tokenizer_mode == "custom":
-        tokenizer = TokenizerRegistry.get_tokenizer(str(tokenizer_name),
-                                                    *args,
-                                                    revision=revision,
-                                                    download_dir=download_dir,
-                                                    **kwargs)
+        from vllm.transformers_utils.tokenizer_base import TokenizerRegistry
+
+        tokenizer = TokenizerRegistry.get_tokenizer(
+            str(tokenizer_name),
+            *args,
+            revision=revision,
+            download_dir=download_dir,
+            **kwargs,
+        )
     else:
         try:
             tokenizer = AutoTokenizer.from_pretrained(
@@ -241,27 +224,38 @@ def get_tokenizer(
             # currently being imported,
             # suggest using the --trust-remote-code flag.
             if not trust_remote_code and (
-                    "does not exist or is not currently imported." in str(e)
-                    or "requires you to execute the tokenizer file" in str(e)):
-                err_msg = ("Failed to load the tokenizer. If the tokenizer "
-                           "is a custom tokenizer not yet available in the "
-                           "HuggingFace transformers library, consider "
-                           "setting `trust_remote_code=True` in LLM or using "
-                           "the `--trust-remote-code` flag in the CLI.")
+                "does not exist or is not currently imported." in str(e)
+                or "requires you to execute the tokenizer file" in str(e)
+            ):
+                err_msg = (
+                    "Failed to load the tokenizer. If the tokenizer "
+                    "is a custom tokenizer not yet available in the "
+                    "HuggingFace transformers library, consider "
+                    "setting `trust_remote_code=True` in LLM or using "
+                    "the `--trust-remote-code` flag in the CLI."
+                )
                 raise RuntimeError(err_msg) from e
             else:
                 raise e
 
-        # NOTE: We can remove this after https://github.com/THUDM/ChatGLM3/issues/1324
-        if type(tokenizer).__name__ in ("ChatGLMTokenizer",
-                                        "ChatGLM4Tokenizer"):
-            assert isinstance(tokenizer, PreTrainedTokenizer)
-            patch_padding_side(tokenizer)
+        # The special_tokens in tokenizer should also be
+        # controlled by do_lower_case in encoder_config
+        encoder_config = get_sentence_transformer_tokenizer_config(
+            tokenizer_name, revision
+        )
+        if isinstance(encoder_config, dict) and encoder_config.get(
+            "do_lower_case", False
+        ):
+            special_tokens_map = {
+                k: v.lower() for k, v in tokenizer.special_tokens_map.items()
+            }
+            tokenizer.add_special_tokens(special_tokens_map)
 
         if not isinstance(tokenizer, PreTrainedTokenizerFast):
             logger.warning(
                 "Using a slow tokenizer. This might cause a significant "
-                "slowdown. Consider using a fast tokenizer instead.")
+                "slowdown. Consider using a fast tokenizer instead."
+            )
         tokenizer = get_cached_tokenizer(tokenizer)
 
     return tokenizer
@@ -271,32 +265,31 @@ cached_get_tokenizer = lru_cache(get_tokenizer)
 
 
 def cached_tokenizer_from_config(
-    model_config: "ModelConfig",
+    model_config: ModelConfig,
     **kwargs: Any,
 ):
     return cached_get_tokenizer(
         model_config.tokenizer,
         tokenizer_mode=model_config.tokenizer_mode,
-        tokenizer_revision=model_config.tokenizer_revision,
+        revision=model_config.tokenizer_revision,
         trust_remote_code=model_config.trust_remote_code,
         **kwargs,
     )
 
 
-def get_lora_tokenizer(lora_request: LoRARequest, *args,
-                       **kwargs) -> Optional[AnyTokenizer]:
-    if lora_request is None:
-        return None
-    try:
-        tokenizer = get_tokenizer(lora_request.lora_path, *args, **kwargs)
-    except Exception as e:
-        # No tokenizer was found in the LoRA folder,
-        # use base model tokenizer
-        logger.warning(
-            "No tokenizer found in %s, using base model tokenizer instead. "
-            "(Exception: %s)", lora_request.lora_path, e)
-        tokenizer = None
-    return tokenizer
+def init_tokenizer_from_configs(model_config: ModelConfig):
+    runner_type = model_config.runner_type
+    if runner_type == "generate" or runner_type == "draft":
+        truncation_side = "left"
+    elif runner_type == "pooling":
+        truncation_side = "right"
+    else:
+        assert_never(runner_type)
 
-
-get_lora_tokenizer_async = make_async(get_lora_tokenizer)
+    return get_tokenizer(
+        model_config.tokenizer,
+        tokenizer_mode=model_config.tokenizer_mode,
+        trust_remote_code=model_config.trust_remote_code,
+        revision=model_config.tokenizer_revision,
+        truncation_side=truncation_side,
+    )
