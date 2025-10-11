@@ -137,20 +137,22 @@ def main():
         start_ts = time.perf_counter()
         logger.info("[prefill] start request_id=%s url=%s", request_id, url)
         try:
-            async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-                async with session.post(url=url, json=payload, headers=headers) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        raise RuntimeError(
-                            f"Prefill backend error {resp.status}: {error_text}"
-                        )
-                    await resp.read()
-                    logger.info(
-                        "[prefill] done request_id=%s status=%s elapsed=%.2fs",
-                        request_id,
-                        resp.status,
-                        time.perf_counter() - start_ts,
+            async with (
+                aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session,
+                session.post(url=url, json=payload, headers=headers) as resp,
+            ):
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    raise RuntimeError(
+                        f"Prefill backend error {resp.status}: {error_text}"
                     )
+                await resp.read()
+                logger.info(
+                    "[prefill] done request_id=%s status=%s elapsed=%.2fs",
+                    request_id,
+                    resp.status,
+                    time.perf_counter() - start_ts,
+                )
         except asyncio.TimeoutError as exc:
             raise RuntimeError(f"Prefill service timeout at {url}") from exc
         except aiohttp.ClientError as exc:
@@ -167,27 +169,28 @@ def main():
         # materialized KV caches on the target workers.
         logger.info("[decode] start request_id=%s url=%s", request_id, url)
         try:
-            async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-                async with session.post(url=url, json=payload, headers=headers) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        logger.error(
-                            "Decode backend error %s - %s", resp.status, error_text
-                        )
-                        yield (
-                            f'{{"error": "Decode backend error {resp.status}"}}'.encode(
-                                "utf-8"
-                            )
-                        )
-                        return
-                    logger.info(
-                        "[decode] streaming response request_id=%s status=%s",
-                        request_id,
-                        resp.status,
+            async with (
+                aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session,
+                session.post(url=url, json=payload, headers=headers) as resp,
+            ):
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    logger.error(
+                        "Decode backend error %s - %s", resp.status, error_text
                     )
-                    async for chunk_bytes in resp.content.iter_chunked(1024):
-                        yield chunk_bytes
-                    logger.info("[decode] finished streaming request_id=%s", request_id)
+                    err_msg = (
+                        '{"error": "Decode backend error ' + str(resp.status) + '"}'
+                    )
+                    yield err_msg.encode()
+                    return
+                logger.info(
+                    "[decode] streaming response request_id=%s status=%s",
+                    request_id,
+                    resp.status,
+                )
+                async for chunk_bytes in resp.content.iter_chunked(1024):
+                    yield chunk_bytes
+                logger.info("[decode] finished streaming request_id=%s", request_id)
         except asyncio.TimeoutError:
             logger.error("Decode service timeout at %s", url)
             yield b'{"error": "Decode service timeout"}'
