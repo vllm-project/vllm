@@ -10,6 +10,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
+from types import UnionType
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -174,7 +175,8 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
 
     if origin is Annotated:
         type_hints.update(get_type_hints(args[0]))
-    elif origin is Union:
+    elif origin in {Union, UnionType}:
+        # Union for Union[X, Y] and UnionType for X | Y
         for arg in args:
             type_hints.update(get_type_hints(arg))
     else:
