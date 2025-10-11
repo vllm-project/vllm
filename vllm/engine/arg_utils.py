@@ -1536,10 +1536,7 @@ class EngineArgs:
         # Pass reasoning_parser into StructuredOutputsConfig
         if self.reasoning_parser:
             self.structured_outputs_config.reasoning_parser = self.reasoning_parser
-        if self.enable_in_reasoning:
-            self.structured_outputs_config.enable_in_reasoning = (
-                self.enable_in_reasoning
-            )
+
         # Forward the deprecated CLI args to the StructuredOutputsConfig
         so_config = self.structured_outputs_config
         if self.guided_decoding_backend is not None:
