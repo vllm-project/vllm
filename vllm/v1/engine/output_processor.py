@@ -348,13 +348,18 @@ class OutputProcessor:
                     )
                 ):
                     req_state.queue.put(request_output)
-            elif parent := self.parent_requests.get(request_id):
-                # Abort children prior to removing the parent.
-                if parent.child_requests:
+            else:
+                parent = self.parent_requests.pop(request_id, None)
+                if parent is None:
+                    # This may occur if the client tries to free the KV blocks
+                    # of finished requests that were previously marked with
+                    # delay_free.
+                    request_ids_to_abort.append(request_id)
+                elif parent.child_requests:
+                    # Abort children prior to removing the parent.
                     child_reqs = list(parent.child_requests)
                     child_reqs = self.abort_requests(child_reqs)
                     request_ids_to_abort.extend(child_reqs)
-                self.parent_requests.pop(request_id, None)
         return request_ids_to_abort
 
     def add_request(

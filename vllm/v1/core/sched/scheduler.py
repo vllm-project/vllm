@@ -1193,6 +1193,17 @@ class Scheduler(SchedulerInterface):
                 # Invalid request ID.
                 continue
 
+            if request.is_finished():
+                # If the request is already finished, only FINISHED_ABORTED is
+                # allowed, which is used to force resource cleanup.
+                assert finished_status == RequestStatus.FINISHED_ABORTED, (
+                    "Only FINISHED_ABORTED is allowed for requests that are "
+                    "already finished."
+                )
+                logger.info("Aborting request %s, freeing blocks.", req_id)
+                self._free_blocks(request)
+                continue
+
             valid_requests.append(request)
             if request.status == RequestStatus.RUNNING:
                 running_requests_to_remove.add(request)
