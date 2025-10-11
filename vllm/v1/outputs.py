@@ -102,8 +102,6 @@ class KVConnectorOutput:
 class ModelRunnerOutput:
     # [num_reqs]
     req_ids: list[str]
-    # req_id -> index
-    req_id_to_index: dict[str, int]
 
     # num_reqs x num_generated_tokens
     # num_generated_tokens is the number of tokens
@@ -154,7 +152,6 @@ class DraftTokenIds:
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
     req_ids=[],
-    req_id_to_index={},
     sampled_token_ids=[],
     logprobs=None,
     prompt_logprobs_dict={},
