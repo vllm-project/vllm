@@ -436,6 +436,7 @@ def selective_scan_fn(
         C = C.unsqueeze(0)
 
     intermediate_states = None
+    max_blocks = 0
     if return_intermediate_states:
         # Determine dimensions for intermediate states
         # Shape: (batch_or_cache_lines, num_blocks, dim, dstate)
@@ -445,7 +446,6 @@ def selective_scan_fn(
         dstate = A.shape[1]
         batch_size = query_start_loc.shape[0] - 1
         seqlen = u.shape[1]  # Total length for varlen
-
         max_blocks = (seqlen + block_size - 1) // block_size
 
         intermediate_states = torch.zeros(
