@@ -46,7 +46,7 @@ class TestReasoningStructuredOutput:
         config.scheduler_config = mock_scheduler_config
         config.structured_outputs_config = Mock()
         config.structured_outputs_config.reasoning_parser = None
-        config.structured_outputs_config.need_structured_in_reasoning = False
+        config.structured_outputs_config.enable_in_reasoning = False
         config.speculative_config = None
         return config
 
@@ -72,29 +72,29 @@ class TestReasoningStructuredOutput:
         request.all_token_ids = [1, 2, 3, 4, 5, 6, 7, 8]
         return request
 
-    def test_should_fill_bitmask_with_need_structured_in_reasoning(
+    def test_should_fill_bitmask_with_enable_in_reasoning(
         self, mock_vllm_config, mock_request_with_structured_output
     ):
-        """Test should_fill_bitmask when need_structured_in_reasoning is True."""
-        # Enable need_structured_in_reasoning
-        mock_vllm_config.structured_outputs_config.need_structured_in_reasoning = True
+        """Test should_fill_bitmask when enable_in_reasoning is True."""
+        # Enable enable_in_reasoning
+        mock_vllm_config.structured_outputs_config.enable_in_reasoning = True
 
         manager = StructuredOutputManager(mock_vllm_config)
 
-        # Should always return True when need_structured_in_reasoning is enabled
+        # Should always return True when enable_in_reasoning is enabled
         result = manager.should_fill_bitmask(mock_request_with_structured_output)
         assert result is True
 
-    def test_should_fill_bitmask_without_need_structured_in_reasoning(
+    def test_should_fill_bitmask_without_enable_in_reasoning(
         self,
         mock_vllm_config,
         mock_request_with_structured_output,
         mock_reasoning_parser,
     ):
-        """Test should_fill_bitmask when need_structured_in_reasoning is False."""
-        # Keep need_structured_in_reasoning as False (default)
+        """Test should_fill_bitmask when enable_in_reasoning is False."""
+        # Keep enable_in_reasoning as False (default)
         config = mock_vllm_config.structured_outputs_config
-        assert config.need_structured_in_reasoning is False
+        assert config.enable_in_reasoning is False
 
         manager = StructuredOutputManager(mock_vllm_config)
         manager.reasoner = mock_reasoning_parser
@@ -123,20 +123,20 @@ class TestReasoningStructuredOutput:
         # Should default to True when no reasoner
         assert result is True
 
-    def test_should_advance_with_need_structured_in_reasoning(
+    def test_should_advance_with_enable_in_reasoning(
         self,
         mock_vllm_config,
         mock_request_with_structured_output,
         mock_reasoning_parser,
     ):
-        """Test should_advance when need_structured_in_reasoning is True."""
-        # Enable need_structured_in_reasoning
-        mock_vllm_config.structured_outputs_config.need_structured_in_reasoning = True
+        """Test should_advance when enable_in_reasoning is True."""
+        # Enable enable_in_reasoning
+        mock_vllm_config.structured_outputs_config.enable_in_reasoning = True
 
         manager = StructuredOutputManager(mock_vllm_config)
         manager.reasoner = mock_reasoning_parser
 
-        # Should always return True when need_structured_in_reasoning is enabled
+        # Should always return True when enable_in_reasoning is enabled
         result = manager.should_advance(mock_request_with_structured_output)
         assert result is True
 
