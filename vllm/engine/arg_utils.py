@@ -264,7 +264,8 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
             type_hint = get_type(type_hints, list)
             types = get_args(type_hint)
             list_type = types[0]
-            if get_origin(list_type) is Union:
+            if get_origin(list_type) in {Union, UnionType}:
+                # Union for Union[X, Y] and UnionType for X | Y
                 msg = "List type must contain str if it is a Union."
                 assert str in get_args(list_type), msg
                 list_type = str
