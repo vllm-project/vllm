@@ -286,7 +286,7 @@ def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
             return packed_modules_mapping
         else:
             raise AttributeError(
-                "To support LoRA for MoE model, " \
+                "To support LoRA for MoE model, "
                 "'get_expert_mapping' must be implemented"
             )
     else:

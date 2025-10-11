@@ -215,9 +215,15 @@ class LoRAModel:
         def check_unexpected_modules(modules: dict):
             for lora_module in modules.keys():  # noqa
                 module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
-                part_name = module_name.split(".")[-1]
-                if part_name not in expected_lora_modules:
+                # Case for expert lora weights
+                if ".experts" in module_name:
+                    if not any(
+                        module_name.endswith(ele) for ele in expected_lora_modules
+                    ):
+                        unexpected_modules.append(module_name)
+                elif module_name.split(".")[-1] not in expected_lora_modules:
                     unexpected_modules.append(module_name)
+
             if unexpected_modules:
                 raise ValueError(
                     f"While loading {lora_dir}, expected"

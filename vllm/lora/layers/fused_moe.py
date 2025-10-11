@@ -14,7 +14,6 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.lora.layers.base import BaseLayerWithLoRA
-from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
@@ -388,12 +387,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             self.w2_lora_a_stacked[
                 index, eid, : w2_lora_a.shape[0], : w2_lora_a.shape[1]
             ].copy_(w2_lora_a, non_blocking=True)
-
-    def set_mapping(
-        self,
-        punica_wrapper,
-    ):
-        self.punica_wrapper: PunicaWrapperBase = punica_wrapper
 
     @classmethod
     def can_replace_layer(
