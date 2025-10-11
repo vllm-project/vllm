@@ -544,7 +544,10 @@ class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self.config = config
         self.quant_config = quant_config
         # Only perform the following mapping when Qwen2MoeMLP exists
-        if getattr(config, "mlp_only_layers", []):
+        if (
+            getattr(config, "mlp_only_layers", [])
+            or config.shared_expert_intermediate_size > 0
+        ):
             self.packed_modules_mapping["gate_up_proj"] = (
                 [
                     "gate_proj",
