@@ -547,24 +547,6 @@ def cp_gather_indexer_k_quant_cache(
     dst_scale.copy_(gather_scale)
 
 
-def ref_indexer_k_cache(
-    k,
-    kv_cache,
-    slot_mapping,
-):
-    num_tokens = k.size(0)
-    blk_size = kv_cache.size(1)
-    invalid_mask = slot_mapping < 0
-    slot_mapping[invalid_mask] = 0
-    blk_id = slot_mapping // blk_size
-    blk_off = slot_mapping % blk_size
-    for i in range(num_tokens):
-        blk_loc = blk_id[i]
-        blk_off_loc = blk_off[i]
-        kv_cache[blk_loc][blk_off_loc] = k[i]
-
-
-
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
     k_cache_prefix: str,
@@ -605,7 +587,6 @@ def sparse_attn_indexer(
     has_decode = attn_metadata.num_decodes > 0
     has_prefill = attn_metadata.num_prefills > 0
     num_decode_tokens = attn_metadata.num_decode_tokens
-    fp8_dtype = current_platform.fp8_dtype()
 
     ops.indexer_k_quant_and_cache(
         k,
@@ -1057,8 +1038,7 @@ class DeepseekV2MLAAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        out = self.mla_attn(positions, hidden_states)
-        return out
+        return self.mla_attn(positions, hidden_states)
 
 
 class DeepseekV2DecoderLayer(nn.Module):
