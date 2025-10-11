@@ -7,7 +7,9 @@ import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
 from vllm.attention.backends.abstract import AttentionLayer, AttentionType
+from vllm.config.cache import BlockSize
 from vllm.logger import init_logger
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonImpl,
@@ -41,6 +43,26 @@ class FlashInferMLABackend(MLACommonBackend):
     @staticmethod
     def get_builder_cls() -> type["FlashInferMLAMetadataBuilder"]:
         return FlashInferMLAMetadataBuilder
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "fp16", "bf16", "fp8", "fp8_e4m3"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[BlockSize]:
+        return [32, 64]
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[DeviceCapability]:
+        return DeviceCapability(10, 0)
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
+        return DeviceCapability(10, 3)
 
 
 g_fi_workspace = torch.zeros(

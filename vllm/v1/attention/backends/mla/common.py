@@ -301,24 +301,12 @@ class MLACommonBackend(AttentionBackend):
         return (num_blocks, block_size, head_size)
 
     @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
-
-    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [576]
 
     @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
+    def is_mla(cls) -> bool:
+        return True
 
 
 @dataclass

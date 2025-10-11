@@ -65,6 +65,31 @@ class DeviceCapability(NamedTuple):
     major: int
     minor: int
 
+    def __lt__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) < (other.major, other.minor)
+
+    def __le__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) <= (other.major, other.minor)
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) == (other.major, other.minor)
+
+    def __ge__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) >= (other.major, other.minor)
+
+    def __gt__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) > (other.major, other.minor)
+
     def as_version_str(self) -> str:
         return f"{self.major}.{self.minor}"
 

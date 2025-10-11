@@ -134,7 +134,7 @@ class CpuPlatform(Platform):
         has_sink: bool,
         use_sparse: bool,
     ) -> str:
-        from vllm.attention.backends.registry import _Backend
+        from vllm.attention.backends.registry import _Backend, backend_to_class_str
 
         if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
@@ -145,7 +145,7 @@ class CpuPlatform(Platform):
         logger.info("Using Torch SDPA backend.")
         if not use_v1:
             raise ValueError("CPU backend only supports V1.")
-        return "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend"
+        return backend_to_class_str(_Backend.TORCH_SDPA)
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:

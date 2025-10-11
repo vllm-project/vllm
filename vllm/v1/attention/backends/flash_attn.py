@@ -34,6 +34,7 @@ if is_flash_attn_varlen_func_available():
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
@@ -49,30 +50,6 @@ logger = init_logger(__name__)
 class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supports_quant_query_input: bool = True
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
-
-    @staticmethod
-    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
-        return [MultipleOf(16)]
-
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
 
     @staticmethod
     def get_name() -> str:
@@ -121,6 +98,58 @@ class FlashAttentionBackend(AttentionBackend):
             return torch.float8_e4m3fn
         else:
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return [32, 64, 96, 128, 160, 192, 224, 256]
+
+    @classmethod
+    def get_supported_kernel_block_size(cls) -> list[Union[int, MultipleOf]]:
+        return [MultipleOf(16)]
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: Optional[str]) -> bool:
+        if kv_cache_dtype is not None and kv_cache_dtype.startswith("fp8"):
+            return flash_attn_supports_fp8()
+        return kv_cache_dtype in [None, "auto", "fp16", "bf16"]
+
+    @classmethod
+    def supports_block_size(cls, block_size: Optional[int]) -> bool:
+        if block_size is None:
+            return True
+        return block_size % 16 == 0
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return False
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[DeviceCapability]:
+        return DeviceCapability(8, 0)
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
+        return None
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: Optional[str],
+        block_size: int,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: int,
+    ) -> Optional[str]:
+        if has_sink and device_capability < 90:
+            return "sink not supported on compute capability < 9.0"
+        return None
 
 
 @dataclass
@@ -432,8 +461,6 @@ class FlashAttentionImpl(AttentionImpl):
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        FlashAttentionBackend.validate_head_size(head_size)
 
         self.attn_type = attn_type
         self.vllm_flash_attn_version = get_flash_attn_version()

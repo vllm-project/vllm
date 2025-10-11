@@ -13,8 +13,10 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.attention.ops.triton_flash_attention import triton_attention
+from vllm.config.cache import BlockSize
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
@@ -33,6 +35,26 @@ class TritonMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["TritonMLAImpl"]:
         return TritonMLAImpl
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+        return ["auto", "fp16", "bf16"]
+
+    @classmethod
+    def get_supported_block_sizes(cls) -> list[BlockSize]:
+        return []
+
+    @classmethod
+    def get_min_compute_capability(cls) -> Optional[DeviceCapability]:
+        return None
+
+    @classmethod
+    def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
+        return None
 
 
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
