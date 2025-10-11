@@ -926,7 +926,7 @@ class Scheduler(SchedulerInterface):
         if kv_connector_stats and self.connector:
             stats = self.connector.get_kv_connector_stats()
             if stats:
-                kv_connector_stats.aggregate(stats)
+                kv_connector_stats = kv_connector_stats.aggregate(stats)
 
         failed_kv_load_req_ids = None
         if kv_connector_output and kv_connector_output.invalid_block_ids:
