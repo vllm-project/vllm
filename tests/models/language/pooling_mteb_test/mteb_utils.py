@@ -213,9 +213,13 @@ def mteb_test_embed_models(
         vllm_dtype = vllm_model.llm.llm_engine.model_config.dtype
         head_dtype = model_config.head_dtype
 
-        # Test embed_dims, isnan and whether to use normalize
-        vllm_outputs = vllm_model.embed(example_prompts, truncate_prompt_tokens=-1)
-        assert not torch.any(torch.isnan(torch.tensor(vllm_outputs)))
+        # Test embedding_size, isnan and whether to use normalize
+        vllm_outputs = vllm_model.embed(example_prompts,
+                                        truncate_prompt_tokens=-1)
+        outputs_tensor = torch.tensor(vllm_outputs)
+        assert not torch.any(torch.isnan(outputs_tensor))
+        embedding_size = model_config.embedding_size
+        assert torch.tensor(vllm_outputs).shape[-1] == embedding_size
 
     # Accelerate mteb test by setting
     # SentenceTransformers mteb score to a constant
@@ -232,7 +236,7 @@ def mteb_test_embed_models(
             st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
             st_dtype = next(hf_model.model.parameters()).dtype
 
-            # Test embed_dims and whether to use normalize
+            # Check embeddings close to hf outputs
             hf_outputs = hf_model.encode(example_prompts)
             check_embeddings_close(
                 embeddings_0_lst=hf_outputs,
