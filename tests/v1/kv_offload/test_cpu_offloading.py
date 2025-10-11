@@ -20,7 +20,10 @@ def test_cpu_offloading(cpu_block_size: int) -> None:
     kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
-        kv_connector_extra_config={"num_cpu_blocks": 100, "block_size": cpu_block_size},
+        kv_connector_extra_config={
+            "swap_space_bytes": 100 << 20,
+            "block_size": cpu_block_size,
+        },
     )
 
     llm = LLM(
