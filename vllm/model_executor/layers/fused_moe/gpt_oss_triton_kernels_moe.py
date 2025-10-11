@@ -3,6 +3,7 @@
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
@@ -14,7 +15,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils import has_triton_kernels
+from vllm.utils import has_triton_kernels, round_up
 
 logger = init_logger(__name__)
 
@@ -84,6 +85,7 @@ def triton_kernel_moe_forward(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
+    disable_rocm_padding: bool = False,
 ) -> torch.Tensor:
     routing_data, gather_idx, scatter_idx = routing(
         gating_output, topk, sm_first=not renormalize
@@ -102,7 +104,40 @@ def triton_kernel_moe_forward(
         apply_router_weight_on_input=apply_router_weight_on_input,
         global_num_experts=global_num_experts,
         expert_map=expert_map,
+        disable_rocm_padding=disable_rocm_padding,
     )
+
+
+def get_padding_alignment() -> int:
+    """
+    Get the padding alignment value based on the current AMD GPU architecture.
+
+    This function determines the optimal padding alignment for memory operations
+    on AMD GPUs to maximize performance and avoid masked loads.
+
+    Architecture-specific alignment:
+    - MI300 (gfx942): 128-byte alignment
+      -Aligns to BLOCK_SIZE_K to avoid masked loads
+      * Sufficient for standard operations
+
+    - MI350 (gfx950): 256-byte alignment
+      * Uses scale preshuffling on MI350 which requires 256-byte alignment
+      * Padding to 256 enables correct preshuffle arrangement
+
+    The padding alignment is set to the larger of BLOCK_SIZE_K or preshuffling
+    size requirements for the architecture.
+
+    Returns:
+        int: Padding alignment in bytes (128 or 256)
+    """
+    current_arch = triton.runtime.driver.active.get_current_target().arch
+
+    # MI350 (gfx950) requires 256-byte alignment for scale preshuffling
+    if current_arch in ("gfx950",):
+        return 256
+
+    # MI300 (gfx942) and other architectures use 128-byte alignment
+    return 128
 
 
 # This is a triton implementation of the fused_experts function
@@ -122,6 +157,7 @@ def triton_kernel_fused_experts(
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
     a1q_scale: Optional[torch.Tensor] = None,
+    disable_rocm_padding: bool = False,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
@@ -140,6 +176,46 @@ def triton_kernel_fused_experts(
     if global_num_experts == -1:
         global_num_experts = E
 
+    w1_bias_padded, w2_bias_padded = None, None
+    # Only apply padding optimization on AMD/ROCm hardware
+    if torch.version.hip is not None and not disable_rocm_padding:
+        # Apply padding for better memory alignment
+        pad_align = get_padding_alignment()
+        hidden_dim = hidden_states.shape[-1]
+        ffn_dim = N // 2  # w1 outputs 2*ffn_dim for SwiGLU
+
+        hidden_dim_padding = round_up(hidden_dim, pad_align) - hidden_dim
+        ffn_dim_padding = round_up(ffn_dim, pad_align) - ffn_dim
+
+        # Pad tensors for optimal memory alignment
+        if hidden_dim_padding > 0 or ffn_dim_padding > 0:
+            # Pad input tensor
+            hidden_states = F.pad(
+                hidden_states, (0, hidden_dim_padding, 0, 0), "constant", 0
+            )
+
+            # Pad weight tensors
+            w1 = F.pad(
+                w1, (0, 2 * ffn_dim_padding, 0, hidden_dim_padding, 0, 0), "constant", 0
+            )
+            w2 = F.pad(
+                w2, (0, hidden_dim_padding, 0, ffn_dim_padding, 0, 0), "constant", 0
+            )
+
+            # Pad bias tensors on if they exist
+            w1_bias_padded = quant_config.w1_bias
+            if w1_bias_padded is not None:
+                w1_bias_padded = F.pad(
+                    quant_config.w1_bias, (0, 2 * ffn_dim_padding, 0, 0), "constant", 0
+                )
+
+            # Pad bias tensors on if they exist
+            w2_bias_padded = quant_config.w2_bias
+            if w2_bias_padded is not None:
+                w2_bias_padded = F.pad(
+                    quant_config.w2_bias, (0, hidden_dim_padding, 0, 0), "constant", 0
+                )
+
     act = FusedActivation(
         FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
         (swiglu_alpha, swiglu_limit),
@@ -150,7 +226,7 @@ def triton_kernel_fused_experts(
     intermediate_cache1 = matmul_ogs(
         hidden_states,
         w1,
-        quant_config.w1_bias,
+        w1_bias_padded if w1_bias_padded is not None else quant_config.w1_bias,
         routing_data,
         gather_indx=gather_indx,
         precision_config=quant_config.w1_precision,
@@ -161,7 +237,7 @@ def triton_kernel_fused_experts(
     intermediate_cache3 = matmul_ogs(
         intermediate_cache1,
         w2,
-        quant_config.w2_bias,
+        w2_bias_padded if w2_bias_padded is not None else quant_config.w2_bias,
         routing_data,
         scatter_indx=scatter_indx,
         precision_config=quant_config.w2_precision,

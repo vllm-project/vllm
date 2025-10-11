@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     BatchedOAITritonExperts,
+    get_padding_alignment,
     triton_kernel_moe_forward,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
@@ -98,8 +99,9 @@ def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
     else:  # quantize to mx4
         # careful on the padding here, the activation padding need to be
         # multiple of 64, the actual engine is not implemented
-        w1_bottom_pad = round_up(w1_tri.shape[1], 64) - w1_tri.shape[1]
-        w1_right_pad = round_up(w1_tri.shape[2], 128) - w1_tri.shape[2]
+        pad_align = get_padding_alignment()
+        w1_bottom_pad = round_up(w1_tri.shape[1], pad_align) - w1_tri.shape[1]
+        w1_right_pad = round_up(w1_tri.shape[2], pad_align) - w1_tri.shape[2]
 
         w2_bottom_pad = w1_right_pad // 2
         w2_right_pad = w1_bottom_pad
@@ -306,7 +308,7 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
         w2_precision=pc2,
     )
 
-    out_triton_monolithic = triton_kernel_moe_forward(
+    out_triton_monolithic_w_pad = triton_kernel_moe_forward(
         hidden_states=x_tri,
         w1=w1_tri,
         w2=w2_tri,
@@ -315,7 +317,25 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
         renormalize=True,
         quant_config=quant_config,
     )
-    out_triton_monolithic = out_triton_monolithic[..., :K]
+
+    out_triton_monolithic_wo_pad = triton_kernel_moe_forward(
+        hidden_states=x_tri,
+        w1=w1_tri,
+        w2=w2_tri,
+        gating_output=exp_data_tri,
+        topk=topk,
+        renormalize=True,
+        quant_config=quant_config,
+        disable_rocm_padding=True,
+    )
+    assert_close(
+        ref=out_triton_monolithic_w_pad,
+        tri=out_triton_monolithic_wo_pad,
+        maxtol=0.025,
+        rmstol=0.005,
+    )
+
+    out_triton_monolithic_w_pad = out_triton_monolithic_w_pad[..., :K]
 
     out_ref = oai_moe_forward(
         hidden_states=x,
@@ -326,7 +346,9 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
         gating_output=exp_data,
         topk=topk,
     )
-    assert_close(ref=out_ref, tri=out_triton_monolithic, maxtol=0.025, rmstol=0.005)
+    assert_close(
+        ref=out_ref, tri=out_triton_monolithic_w_pad, maxtol=0.025, rmstol=0.005
+    )
 
 
 def batched_moe(
