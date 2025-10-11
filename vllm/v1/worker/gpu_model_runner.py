@@ -875,7 +875,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if mm_input.get("use_audio_in_video") is True:
                 use_audio_in_video = True
 
-        if supports_mrope(self.model):
+        if supports_mrope(self.get_model()):
             req_state.mrope_positions, req_state.mrope_position_delta = (
                 self.model.get_mrope_input_positions(
                     req_state.prompt_token_ids,
