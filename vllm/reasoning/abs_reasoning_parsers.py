@@ -7,8 +7,9 @@ import os
 from abc import abstractmethod
 from collections.abc import Sequence
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Callable, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
+from vllm.entrypoints.tool_server import ToolServer
 from vllm.logger import init_logger
 from vllm.utils import import_from_path, is_list_of
 
@@ -115,6 +116,17 @@ class ReasoningParser:
         the current tokens/diffs, but also the information about what has
         previously been parsed and extracted (see constructor)
         """
+
+    def prepare_structured_tag(
+        self,
+        original_tag: Optional[str],
+        tool_server: Optional[ToolServer],
+    ) -> str:
+        """
+        Instance method that is implemented for preparing the structured tag
+        Otherwise, None is returned
+        """
+        return None
 
 
 class ReasoningParserManager:
