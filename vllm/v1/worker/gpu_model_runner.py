@@ -2056,7 +2056,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output.append(output)
 
         return ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids,
+            # NOTE(woosuk): input_batch.req_ids may include requests that are
+            # not scheduled in this step. Therefore, we truncate it here.
+            req_ids=self.input_batch.req_ids[: self.input_batch.num_reqs],
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=[],
             logprobs=None,
@@ -2269,7 +2271,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Copy some objects so they don't get modified after returning.
         # This is important when using async scheduling.
-        req_ids_output_copy = self.input_batch.req_ids.copy()
+        # NOTE(woosuk): input_batch.req_ids may include requests that are
+        # not scheduled in this step. Therefore, we truncate it here.
+        num_reqs = self.input_batch.num_reqs
+        req_ids_output_copy = self.input_batch.req_ids[:num_reqs].copy()
         req_id_to_index_output_copy = self.input_batch.req_id_to_index.copy()
 
         # NOTE: GPU -> CPU Sync happens here.
