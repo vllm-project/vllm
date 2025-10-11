@@ -269,7 +269,7 @@ class GritLM(LlamaForCausalLM):
         if pooler_config is not None:
             self.pooler = DispatchPooler(
                 {
-                    "encode": Pooler.for_encode(pooler_config),
+                    "token_embed": Pooler.for_token_embed(pooler_config),
                     "embed": GritLMPooler(vllm_config.model_config),
                 }
             )
