@@ -2413,10 +2413,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
-        with record_function_or_nullcontext("Preprocess"):
+        with record_function_or_nullcontext("Model:Preprocess"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
-                self._update_states(scheduler_output)
+                with record_function_or_nullcontext("Model:UpdateState"):
+                    self._update_states(scheduler_output)
 
                 if not scheduler_output.total_num_scheduled_tokens:
                     if not has_kv_transfer_group():
@@ -2433,17 +2434,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     )
 
                 # Prepare the decoder inputs.
-                (
-                    attn_metadata,
-                    logits_indices,
-                    spec_decode_metadata,
-                    num_scheduled_tokens_np,
-                    spec_decode_common_attn_metadata,
-                    max_query_len,
-                    ubatch_slices,
-                    num_tokens_across_dp,
-                    use_cascade_attn,
-                ) = self._prepare_inputs(scheduler_output)
+                with record_function_or_nullcontext("Model:PrepareInput"):
+                    (
+                        attn_metadata,
+                        logits_indices,
+                        spec_decode_metadata,
+                        num_scheduled_tokens_np,
+                        spec_decode_common_attn_metadata,
+                        max_query_len,
+                        ubatch_slices,
+                        num_tokens_across_dp,
+                        use_cascade_attn,
+                    ) = self._prepare_inputs(scheduler_output)
 
             dp_rank = self.parallel_config.data_parallel_rank
             if ubatch_slices:
@@ -2502,7 +2504,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 batch_descriptor=batch_descriptor,
                 ubatch_slices=ubatch_slices,
             ),
-            record_function_or_nullcontext("Forward"),
+            record_function_or_nullcontext("Model:Forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
             model_output = self._model_forward(
@@ -2513,7 +2515,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **model_kwargs,
             )
 
-        with record_function_or_nullcontext("Postprocess"):
+        with record_function_or_nullcontext("Model:Postprocess"):
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
                 hidden_states, aux_hidden_states = model_output
@@ -2576,12 +2578,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     scheduler_output, self.input_batch, logits, self.device
                 )
 
-        with record_function_or_nullcontext("Sample"):
+        with record_function_or_nullcontext("Model:Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
-            with record_function_or_nullcontext("Draft"):
+            with record_function_or_nullcontext("Model:Draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,
                     sampled_token_ids,
@@ -2619,7 +2621,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # as inputs, and does not need to wait for bookkeeping to finish.
             propose_draft_token_ids(sampler_output.sampled_token_ids)
 
-        with record_function_or_nullcontext("Bookkeep"):
+        with record_function_or_nullcontext("Model:Bookkeep"):
             (
                 num_nans_in_logits,
                 logprobs_lists,
@@ -2645,7 +2647,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # tokens on the CPU, so they are run after bookkeeping.
             propose_draft_token_ids(valid_sampled_token_ids)
 
-        with record_function_or_nullcontext("EPLB"):
+        with record_function_or_nullcontext("Model:EPLB"):
             self.eplb_step()
 
         output = ModelRunnerOutput(
