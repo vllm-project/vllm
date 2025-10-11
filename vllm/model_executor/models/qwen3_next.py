@@ -217,7 +217,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
     @property
     def mamba_type(self) -> str:
-        return "linear_attention"
+        return "gdn_attention"
 
     def get_attn_backend(self) -> type["AttentionBackend"]:
         return self.mamba_attn_backend
@@ -363,9 +363,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        self.mamba_attn_backend = get_mamba_attn_backend(
-            self.mamba_type, "vllm.v1.attention.backends.gdn_attn.GDNAttentionBackend"
-        )
+        self.mamba_attn_backend = get_mamba_attn_backend(self.mamba_type)
 
     def fix_query_key_value_ordering(
         self,
