@@ -125,10 +125,10 @@ class CustomAllreduce:
             and symm_mem_enabled
             and device_capability is not None
         ):
-            cap_str = device_capability.as_version_str()
-            if cap_str in CUSTOM_ALL_REDUCE_MAX_SIZES:
+            device_capability_str = device_capability.as_version_str()
+            if device_capability_str in CUSTOM_ALL_REDUCE_MAX_SIZES:
                 max_size = min(
-                    CUSTOM_ALL_REDUCE_MAX_SIZES[cap_str][world_size],
+                    CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability_str][world_size],
                     max_size,
                 )
         cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
@@ -217,9 +217,8 @@ class CustomAllreduce:
         # We cannot directly use `dist.all_gather_object` here
         # because it is incompatible with `gloo` backend under inference mode.
         # see https://github.com/pytorch/pytorch/issues/126032 for details.
-        all_data: list[list[object]] = [
-            [None, None] for _ in range(dist.get_world_size(group=self.group))
-        ]
+        all_data: list[list[list[int] | None]]
+        all_data = [[None, None] for _ in range(dist.get_world_size(group=self.group))]
         all_data[self.rank] = [handle, offset]
         ranks = sorted(dist.get_process_group_ranks(group=self.group))
         for i, rank in enumerate(ranks):
@@ -229,11 +228,9 @@ class CustomAllreduce:
         # Unpack list of tuples to tuple of lists.
         handles = [d[0] for d in all_data]
         offsets = [d[1] for d in all_data]
-        ops.register_graph_buffers(
-            self._ptr,
-            handles,  # type: ignore[arg-type]
-            offsets,  # type: ignore[arg-type]
-        )
+        assert all(h is not None for h in handles)
+        assert all(o is not None for o in offsets)
+        ops.register_graph_buffers(self._ptr, handles, offsets)
 
     def should_custom_ar(self, inp: torch.Tensor):
         if self.disabled:
