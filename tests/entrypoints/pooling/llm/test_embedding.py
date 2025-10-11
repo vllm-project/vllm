@@ -35,7 +35,6 @@ def llm():
     cleanup_dist_env_and_memory()
 
 
-@pytest.mark.skip_global_cleanup
 def test_pooling_params(llm: LLM):
     def get_outputs(normalize):
         outputs = llm.embed(
