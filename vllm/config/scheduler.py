@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from dataclasses import InitVar, field
-from typing import Any, Literal, Union
+from dataclasses import InitVar
+from typing import Any, Literal, Optional, Union
 
-from pydantic import SkipValidation, model_validator
+from pydantic import Field, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -31,28 +31,28 @@ class SchedulerConfig:
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
 
-    max_num_batched_tokens: SkipValidation[int] = None  # type: ignore
+    max_num_batched_tokens: Optional[int] = Field(default=None, ge=1)
     """Maximum number of tokens to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_num_seqs: SkipValidation[int] = None  # type: ignore
+    max_num_seqs: Optional[int] = Field(default=None, ge=1)
     """Maximum number of sequences to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_model_len: SkipValidation[int] = None  # type: ignore
+    max_model_len: Optional[int] = Field(default=None, ge=1)
     """Maximum length of a sequence (including prompt and generated text). This
     is primarily set in `ModelConfig` and that value should be manually
     duplicated here."""
 
-    max_num_partial_prefills: int = 1
+    max_num_partial_prefills: int = Field(default=1, ge=1)
     """For chunked prefill, the maximum number of sequences that can be
     partially prefilled concurrently."""
 
-    max_long_partial_prefills: int = 1
+    max_long_partial_prefills: int = Field(default=1, ge=1)
     """For chunked prefill, the maximum number of prompts longer than
     long_prefill_token_threshold that will be prefilled concurrently. Setting
     this less than max_num_partial_prefills will allow shorter prompts to jump
@@ -62,7 +62,7 @@ class SchedulerConfig:
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens."""
 
-    num_lookahead_slots: int = 0
+    num_lookahead_slots: int = Field(default=0, ge=0)
     """The number of slots to allocate per sequence per
     step, beyond the known token ids. This is used in speculative
     decoding to store KV activations of tokens which may or may not be
@@ -71,7 +71,7 @@ class SchedulerConfig:
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
 
-    cuda_graph_sizes: list[int] = field(default_factory=list)
+    cuda_graph_sizes: list[int] = Field(default_factory=list)
     """Cuda graph capture sizes
     1. if none provided, then default set to [min(max_num_seqs * 2, 512)]
     2. if one value is provided, then the capture list would follow the
@@ -79,7 +79,7 @@ class SchedulerConfig:
     3. more than one value (e.g. 1 2 128) is provided, then the capture list
     will follow the provided list."""
 
-    enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
+    enable_chunked_prefill: bool = Field(default=None)
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
 
@@ -94,14 +94,14 @@ class SchedulerConfig:
     """
 
     # TODO (ywang96): Make this configurable.
-    max_num_encoder_input_tokens: int = field(init=False)
+    max_num_encoder_input_tokens: int = Field(init=False)
     """Multimodal encoder compute budget, only used in V1.
 
     NOTE: This is not currently configurable. It will be overridden by
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
     # TODO (ywang96): Make this configurable.
-    encoder_cache_size: int = field(init=False)
+    encoder_cache_size: int = Field(init=False)
     """Multimodal encoder cache size, only used in V1.
 
     NOTE: This is not currently configurable. It will be overridden by
@@ -120,7 +120,7 @@ class SchedulerConfig:
     - "priority" means requests are handled based on given priority (lower
     value means earlier handling) and time of arrival deciding any ties)."""
 
-    chunked_prefill_enabled: bool = field(init=False)
+    chunked_prefill_enabled: bool = Field(init=False)
     """True if chunked prefill is enabled."""
 
     disable_chunked_mm_input: bool = False
@@ -170,12 +170,7 @@ class SchedulerConfig:
         return hash_str
 
     def __post_init__(self, is_encoder_decoder: bool) -> None:
-        if self.max_model_len is None:
-            self.max_model_len = 8192
-
-        if self.max_num_seqs is None:
-            self.max_num_seqs = 128
-
+        """Post init to handle init vars."""
         if is_encoder_decoder:
             # Chunked prefill should be disabled for encoder-decoder models.
             self.disable_chunked_mm_input = True
@@ -186,6 +181,16 @@ class SchedulerConfig:
                 "Encoder-decoder models do not support chunked prefill nor"
                 " prefix caching; disabling both."
             )
+
+    @model_validator(mode="after")
+    def _validate_scheduler_config(self) -> Self:
+        if self.max_num_seqs is None:
+            logger.warning("max_num_seqs is not set, using arbitrary value 128.")
+            self.max_num_seqs = 128
+
+        if self.max_model_len is None:
+            logger.warning("max_model_len is not set, using arbitrary value 8192.")
+            self.max_model_len = 8192
 
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
@@ -251,8 +256,6 @@ class SchedulerConfig:
         if self.async_scheduling:
             self.scheduler_cls = "vllm.v1.core.sched.async_scheduler.AsyncScheduler"
 
-    @model_validator(mode="after")
-    def _verify_args(self) -> Self:
         if (
             self.max_num_batched_tokens < self.max_model_len
             and not self.chunked_prefill_enabled
@@ -281,24 +284,10 @@ class SchedulerConfig:
                 self.max_num_seqs * self.max_model_len,
             )
 
-        if self.num_lookahead_slots < 0:
+        if self.max_num_partial_prefills > 1 and not self.chunked_prefill_enabled:
             raise ValueError(
-                "num_lookahead_slots "
-                f"({self.num_lookahead_slots}) must be greater than or "
-                "equal to 0."
+                "Chunked prefill must be enabled to set max_num_partial_prefills > 1."
             )
-
-        if self.max_num_partial_prefills < 1:
-            raise ValueError(
-                f"max_num_partial_prefills ({self.max_num_partial_prefills}) "
-                "must be greater than or equal to 1."
-            )
-        elif self.max_num_partial_prefills > 1:
-            if not self.chunked_prefill_enabled:
-                raise ValueError(
-                    "Chunked prefill must be enabled to set "
-                    "max_num_partial_prefills > 1."
-                )
 
             if self.long_prefill_token_threshold > self.max_model_len:
                 raise ValueError(
@@ -307,12 +296,10 @@ class SchedulerConfig:
                     f"than the max_model_len ({self.max_model_len})."
                 )
 
-        if (self.max_long_partial_prefills < 1) or (
-            self.max_long_partial_prefills > self.max_num_partial_prefills
-        ):
+        if self.max_long_partial_prefills > self.max_num_partial_prefills:
             raise ValueError(
                 f"max_long_partial_prefills ({self.max_long_partial_prefills}) "
-                "must be greater than or equal to 1 and less than or equal to "
+                "must be less than or equal to "
                 f"max_num_partial_prefills ({self.max_num_partial_prefills})."
             )
 
