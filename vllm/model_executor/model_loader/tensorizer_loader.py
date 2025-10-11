@@ -69,6 +69,7 @@ class TensorizerLoader(BaseModelLoader):
     def _load_model_serialized_cpu(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ) -> nn.Module:
         """Load a serialized model with tensorizer to the CPU.
 
@@ -81,7 +82,7 @@ class TensorizerLoader(BaseModelLoader):
         model_config = vllm_config.model_config
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
-                model = initialize_model(vllm_config=vllm_config)
+                model = initialize_model(vllm_config=vllm_config, prefix=prefix)
 
             model.load_weights(self._get_weights_iterator())
         return model.eval()
@@ -113,7 +114,7 @@ class TensorizerLoader(BaseModelLoader):
             model.load_weights(self._get_weights_iterator())
 
     def load_model(
-        self, vllm_config: VllmConfig, model_config: ModelConfig
+        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
         parallel_config = vllm_config.parallel_config
         self._verify_config(model_config, parallel_config)
@@ -135,7 +136,7 @@ class TensorizerLoader(BaseModelLoader):
                     )
             self.load_weights(model, model_config)
             return model
-        return self._load_model_serialized_cpu(vllm_config=vllm_config)
+        return self._load_model_serialized_cpu(vllm_config=vllm_config, prefix=prefix)
 
     @staticmethod
     def save_model(
