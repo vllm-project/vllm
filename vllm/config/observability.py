@@ -88,7 +88,10 @@ class ObservabilityConfig:
         value = value.lstrip("v")
         parts = value.split(".")
         if len(parts) not in (2, 3) or not all(p.isdigit() for p in parts):
-            raise ValueError("show_hidden_metrics_for_version must look like '0.7' or '0.7.0'")
+            raise ValueError(
+                "show_hidden_metrics_for_version must look like "
+                "'0.7' or '0.7.0'"
+            )
         return value
 
     @field_validator("otlp_traces_endpoint", mode="after")
@@ -115,5 +118,8 @@ class ObservabilityConfig:
     @model_validator(mode="after")
     def _validate_tracing_config(self):
         if self.collect_detailed_traces and not self.otlp_traces_endpoint:
-            raise ValueError("collect_detailed_traces requires `--otlp-traces-endpoint` to be set.")
+            raise ValueError(
+                "collect_detailed_traces requires "
+                "`--otlp-traces-endpoint` to be set."
+            )
         return self
