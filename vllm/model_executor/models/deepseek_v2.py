@@ -24,7 +24,8 @@
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
-from collections.abc import Iterable
+import typing
+from collections.abc import Callable, Iterable
 from itertools import islice
 from typing import Any, Optional, Union
 
@@ -1336,14 +1337,17 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
             ("fused_qkv_a_proj", "q_a_proj", 0),
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
-        from vllm.distributed.eplb.gpu_model_register import (
-            get_expert_mapping,
-            load_expert_weight,
-        )
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = get_expert_mapping(self)
+        expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts,
+            num_redundant_experts=self.num_redundant_experts,
+        )
+
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
@@ -1390,19 +1394,37 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
                 break
             else:
                 is_expert_weight = False
-                is_continue = False
                 for mapping in expert_params_mapping:
-                    expert_matched, is_continue, success, name_mapped = (
-                        load_expert_weight(
-                            self, mapping, name, loaded_weight, params_dict
-                        )
-                    )
-                    if expert_matched:
-                        is_expert_weight = True
-
-                    if is_continue:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
                         continue
 
+                    # Anyway, this is an expert weight and should not be
+                    # attempted to load as other weights later
+                    is_expert_weight = True
+
+                    # Do not modify `name` since the loop may continue here
+                    # Instead, create a new variable
+                    name_mapped = name.replace(weight_name, param_name)
+
+                    if is_pp_missing_parameter(name_mapped, self):
+                        continue
+
+                    param = params_dict[name_mapped]
+                    # We should ask the weight loader to return success or not
+                    # here since otherwise we may skip experts with other
+                    # available replicas.
+                    weight_loader = typing.cast(
+                        Callable[..., bool], param.weight_loader
+                    )
+                    success = weight_loader(
+                        param,
+                        loaded_weight,
+                        name_mapped,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=True,
+                    )
                     if success:
                         name = name_mapped
                         break

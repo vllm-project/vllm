@@ -1008,58 +1008,25 @@ class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
         self.expert_weights = []
         self.num_expert_groups = 1
         self.moe_layers: list[SharedFusedMoE] = []
-        example_layer = None
+        self.example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
 
             assert isinstance(layer, HunYuanDecoderLayer)
             if isinstance(layer.mlp, HunYuanSparseMoeBlock):
-                example_layer = layer.mlp
+                self.example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
-        if example_layer is None:
+        if self.example_moe is None:
             raise RuntimeError("No HunYuanMoE layer found in model.layers.")
 
         self.num_moe_layers = len(self.moe_layers)
-        self.num_logical_experts = example_layer.n_logical_experts
-        self.num_physical_experts = example_layer.n_physical_experts
-        self.num_local_physical_experts = example_layer.n_local_physical_experts
-        self.num_routed_experts = example_layer.n_routed_experts
-        self.num_redundant_experts = example_layer.n_redundant_experts
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            self.expert_weights.append(layer.get_expert_weights())
-            # Register the expert weights.
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
-
-    def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
-    ) -> None:
-        assert self.num_local_physical_experts == num_local_physical_experts
-        self.num_physical_experts = num_physical_experts
-        self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
-        for layer in self.model.layers:
-            if isinstance(layer.mlp, HunYuanSparseMoeBlock):
-                moe = layer.mlp
-                moe.n_local_physical_experts = num_local_physical_experts
-                moe.n_physical_experts = num_physical_experts
-                moe.n_redundant_experts = self.num_redundant_experts
-                moe.experts.update_expert_map()
+        self.num_logical_experts = self.example_moe.n_logical_experts
+        self.num_physical_experts = self.example_moe.n_physical_experts
+        self.num_local_physical_experts = self.example_moe.n_local_physical_experts
+        self.num_routed_experts = self.example_moe.n_routed_experts
+        self.num_redundant_experts = self.example_moe.n_redundant_experts
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

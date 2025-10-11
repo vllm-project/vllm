@@ -23,7 +23,8 @@
 # limitations under the License.
 """Inference-only Qwen3MoE model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
+import typing
+from collections.abc import Callable, Iterable
 from itertools import islice
 from typing import Any, Optional, Union
 
@@ -451,6 +452,17 @@ class Qwen3MoeModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_experts,
+            num_redundant_experts=self.num_redundant_experts,
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -475,14 +487,9 @@ class Qwen3MoeModel(nn.Module):
             "_input_scale",
         )
 
-        from vllm.distributed.eplb.gpu_model_register import (
-            get_expert_mapping,
-            load_expert_weight,
-        )
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        expert_params_mapping = get_expert_mapping(self)
+        expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
@@ -522,19 +529,44 @@ class Qwen3MoeModel(nn.Module):
                 break
             else:
                 is_expert_weight = False
-                is_continue = False
                 for mapping in expert_params_mapping:
-                    expert_matched, is_continue, success, name_mapped = (
-                        load_expert_weight(
-                            self, mapping, name, loaded_weight, params_dict
-                        )
-                    )
-                    if expert_matched:
-                        is_expert_weight = True
-
-                    if is_continue:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
                         continue
 
+                    # Anyway, this is an expert weight and should not be
+                    # attempted to load as other weights later
+                    is_expert_weight = True
+
+                    # Do not modify `name` since the loop may continue here
+                    # Instead, create a new variable
+                    name_mapped = name.replace(weight_name, param_name)
+
+                    if is_pp_missing_parameter(name_mapped, self):
+                        continue
+
+                    # Skip loading extra parameters for GPTQ/modelopt models.
+                    if (
+                        name_mapped.endswith(ignore_suffixes)
+                        and name_mapped not in params_dict
+                    ):
+                        continue
+
+                    param = params_dict[name_mapped]
+                    # We should ask the weight loader to return success or not
+                    # here since otherwise we may skip experts with other
+                    # available replicas.
+                    weight_loader = typing.cast(
+                        Callable[..., bool], param.weight_loader
+                    )
+                    success = weight_loader(
+                        param,
+                        loaded_weight,
+                        name_mapped,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=True,
+                    )
                     if success:
                         name = name_mapped
                         break
