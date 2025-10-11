@@ -3303,6 +3303,12 @@ def has_tilelang() -> bool:
     return _has_module("tilelang")
 
 
+def has_arctic_inference() -> bool:
+    """Whether the optional `arctic_inference` package is available."""
+
+    return _has_module("arctic_inference")
+
+
 def set_process_title(
     name: str, suffix: str = "", prefix: str = envs.VLLM_PROCESS_NAME_PREFIX
 ) -> None:
