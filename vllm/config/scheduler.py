@@ -37,6 +37,11 @@ class SchedulerConfig:
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
+    prefill_max_num_batched_tokens: SkipValidation[int] = None
+    """Prefill maximum number of tokens to be processed in a single iteration.
+
+    This config is used when there are no decoding requests."""
+
     max_num_seqs: SkipValidation[int] = None  # type: ignore
     """Maximum number of sequences to be processed in a single iteration.
 
@@ -74,6 +79,11 @@ class SchedulerConfig:
     enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
+
+    enable_hybrid_chunked_prefill: SkipValidation[bool] = None  # type: ignore
+    """If True, prefill requests will only be chunked when there are decode 
+    requests present, otherwise they will proceed with normal prefill 
+    computation to increase throughput."""
 
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
@@ -173,6 +183,7 @@ class SchedulerConfig:
                 " prefix caching; disabling both."
             )
 
+        self.prefill_max_num_batched_tokens = max(self.max_model_len, DEFAULT_MAX_NUM_BATCHED_TOKENS)
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
                 self.max_num_batched_tokens = DEFAULT_MAX_NUM_BATCHED_TOKENS
@@ -190,20 +201,29 @@ class SchedulerConfig:
                     self.max_num_batched_tokens,
                     POOLING_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
+                self.prefill_max_num_batched_tokens = max(
+                    self.prefill_max_num_batched_tokens,
+                    POOLING_MODEL_MAX_NUM_BATCHED_TOKENS,
+                )
             if self.is_multimodal_model:
                 # The value needs to be at least the number of multimodal tokens
                 self.max_num_batched_tokens = max(
                     self.max_num_batched_tokens,
                     MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
-
+                self.prefill_max_num_batched_tokens = max(
+                    self.prefill_max_num_batched_tokens,
+                    MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
+                )
             # When using default settings,
             # Ensure max_num_batched_tokens does not exceed model limit.
             # Some models (e.g., Whisper) have embeddings tied to max length.
             self.max_num_batched_tokens = min(
                 self.max_num_seqs * self.max_model_len, self.max_num_batched_tokens
             )
-
+            self.prefill_max_num_batched_tokens = min(
+                self.max_num_seqs * self.max_model_len, self.prefill_max_num_batched_tokens
+            )
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
 
