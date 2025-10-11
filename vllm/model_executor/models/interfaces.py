@@ -2,8 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Mapping, MutableSequence
-from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
-                    Union, overload, runtime_checkable)
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    ClassVar,
+    Literal,
+    Optional,
+    Protocol,
+    Union,
+    overload,
+    runtime_checkable,
+)
 
 import numpy as np
 import torch
@@ -16,11 +25,10 @@ from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.inputs import TokensPrompt
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils import supports_kw
 
-from .interfaces_base import is_pooling_model
+from .interfaces_base import VllmModel, is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -77,10 +85,9 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    def get_multimodal_embeddings(self,
-                                  **kwargs: object) -> MultiModalEmbeddings:
+    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
         """
-        Returns multimodal embeddings generated from multimodal kwargs 
+        Returns multimodal embeddings generated from multimodal kwargs
         to be merged with text embeddings.
 
         Note:
@@ -90,11 +97,11 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    def get_language_model(self) -> torch.nn.Module:
+    def get_language_model(self) -> VllmModel:
         """
         Returns the underlying language model used for text generation.
 
-        This is typically the `torch.nn.Module` instance responsible for 
+        This is typically the `torch.nn.Module` instance responsible for
         processing the merged multimodal embeddings and producing hidden states
 
         Returns:
@@ -102,28 +109,130 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
+    @overload
+    def get_input_embeddings(self, input_ids: Tensor) -> Tensor: ...
+
+    @overload
+    def get_input_embeddings(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: MultiModalEmbeddings,
+        *,
+        is_multimodal: torch.Tensor,
+        handle_oov_mm_token: bool = False,
+    ) -> Tensor: ...
+
+    def _get_text_embeddings(
+        self,
+        input_ids: Tensor,
+        get_input_embeddings: Callable[[Tensor], Tensor],
+        *,
+        is_multimodal: Optional[Tensor],
+        handle_oov_mm_token: bool,
+    ) -> Tensor:
+        if handle_oov_mm_token and is_multimodal is not None:
+            is_text = ~is_multimodal
+            text_embeds = get_input_embeddings(input_ids[is_text])
+
+            return torch.empty(
+                (input_ids.shape[0], text_embeds.shape[1]),
+                dtype=text_embeds.dtype,
+                device=text_embeds.device,
+            ).masked_scatter_(is_text.unsqueeze_(-1), text_embeds)
+
+        return get_input_embeddings(input_ids)
+
     def get_input_embeddings(
         self,
         input_ids: Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        *,
+        is_multimodal: Optional[Tensor] = None,
+        handle_oov_mm_token: bool = False,
     ) -> Tensor:
         """
-        Returns the input embeddings merged from the text embeddings from 
-        input_ids and the multimodal embeddings generated from multimodal 
-        kwargs.
+        Apply token embeddings to `input_ids`.
+
+        If `multimodal_embeddings` is passed, scatter them into
+        `input_ids` according to the mask `is_multimodal`.
+
+        In case the multi-modal token IDs exceed the vocabulary size of
+        the language model, you can set `handle_oov_mm_token=False`
+        to avoid calling the language model's `get_input_embeddings` method
+        on those tokens. Note however that doing so increases memory usage
+        as an additional buffer is needed to hold the input embeddings.
+        """
+        from .utils import _merge_multimodal_embeddings
+
+        inputs_embeds = self._get_text_embeddings(
+            input_ids,
+            self.get_language_model().get_input_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
+        if is_multimodal is None:
+            raise ValueError(
+                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "please update your model runner according to "
+                "https://github.com/vllm-project/vllm/pull/16229."
+            )
+
+        return _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
+
+
+@runtime_checkable
+class SupportsMultiModalPruning(Protocol):
+    """The interface required for models that support returning both input
+    embeddings and positions. Model may require custom positions for dynamic
+    pruning of multimodal embeddings.
+    """
+
+    supports_multimodal_pruning: ClassVar[Literal[True]] = True
+
+    def recompute_mrope_positions(
+        self,
+        input_ids: list[int],
+        multimodal_embeddings: MultiModalEmbeddings,
+        mrope_positions: torch.LongTensor,
+        num_computed_tokens: int,
+    ) -> tuple[MultiModalEmbeddings, Tensor, int]:
+        """
+        Update part of input mrope positions (starting with
+        num_computed_tokens index). Original mrope_positions are computed
+        for unpruned sequence and becomes incorrect once pruning occurs,
+        so once we prune media tokens we should reflect this in the
+        mrope_positions before we feed it to LLM.
+
+        Args:
+            input_ids: (N,) All input tokens of the prompt containing
+                entire sequence.
+            multimodal_embeddings: Tuple of multimodal embeddings that
+                fits into the prefill chunk that is being processed.
+            mrope_positions: Existing mrope positions (3, N) for entire
+                sequence
+            num_computed_tokens: A number of computed tokens so far.
+
+        Returns:
+            Tuple of (multimodal_embeddings, mrope_positions,
+                mrope_position_delta).
         """
         ...
 
 
 @overload
-def supports_multimodal(
-        model: type[object]) -> TypeIs[type[SupportsMultiModal]]:
-    ...
+def supports_multimodal(model: type[object]) -> TypeIs[type[SupportsMultiModal]]: ...
 
 
 @overload
-def supports_multimodal(model: object) -> TypeIs[SupportsMultiModal]:
-    ...
+def supports_multimodal(model: object) -> TypeIs[SupportsMultiModal]: ...
 
 
 def supports_multimodal(
@@ -132,14 +241,28 @@ def supports_multimodal(
     return getattr(model, "supports_multimodal", False)
 
 
-def supports_multimodal_raw_input_only(
-        model: Union[type[object], object]) -> bool:
+def supports_multimodal_raw_input_only(model: Union[type[object], object]) -> bool:
     return getattr(model, "supports_multimodal_raw_input_only", False)
 
 
-def supports_multimodal_encoder_tp_data(
-        model: Union[type[object], object]) -> bool:
+def supports_multimodal_encoder_tp_data(model: Union[type[object], object]) -> bool:
     return getattr(model, "supports_encoder_tp_data", False)
+
+
+@overload
+def supports_multimodal_pruning(
+    model: type[object],
+) -> TypeIs[type[SupportsMultiModalPruning]]: ...
+
+
+@overload
+def supports_multimodal_pruning(model: object) -> TypeIs[SupportsMultiModalPruning]: ...
+
+
+def supports_multimodal_pruning(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsMultiModalPruning]], TypeIs[SupportsMultiModalPruning]]:
+    return getattr(model, "supports_multimodal_pruning", False)
 
 
 @runtime_checkable
@@ -159,7 +282,7 @@ class SupportsScoreTemplate(Protocol):
     def get_score_template(cls, query: str, document: str) -> Optional[str]:
         """
         Generate a full prompt by populating the score template with query and document content.
-        """ # noqa: E501
+        """  # noqa: E501
         ...
 
     @classmethod
@@ -172,13 +295,12 @@ class SupportsScoreTemplate(Protocol):
 
 @overload
 def supports_score_template(
-        model: type[object]) -> TypeIs[type[SupportsScoreTemplate]]:
-    ...
+    model: type[object],
+) -> TypeIs[type[SupportsScoreTemplate]]: ...
 
 
 @overload
-def supports_score_template(model: object) -> TypeIs[SupportsScoreTemplate]:
-    ...
+def supports_score_template(model: object) -> TypeIs[SupportsScoreTemplate]: ...
 
 
 def supports_score_template(
@@ -203,7 +325,7 @@ class SupportsLoRA(Protocol):
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
     embedding_padding_modules: ClassVar[list[str]] = []
-    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
+    packed_modules_mapping: dict[str, list[str]] = {}
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -218,13 +340,11 @@ class _SupportsLoRAType(Protocol):
 
 
 @overload
-def supports_lora(model: type[object]) -> TypeIs[type[SupportsLoRA]]:
-    ...
+def supports_lora(model: type[object]) -> TypeIs[type[SupportsLoRA]]: ...
 
 
 @overload
-def supports_lora(model: object) -> TypeIs[SupportsLoRA]:
-    ...
+def supports_lora(model: object) -> TypeIs[SupportsLoRA]: ...
 
 
 def supports_lora(
@@ -238,8 +358,7 @@ def supports_lora(
             "embedding_modules",
             "embedding_padding_modules",
         )
-        missing_attrs = tuple(attr for attr in lora_attrs
-                              if not hasattr(model, attr))
+        missing_attrs = tuple(attr for attr in lora_attrs if not hasattr(model, attr))
 
         if getattr(model, "supports_lora", False):
             if missing_attrs:
@@ -253,7 +372,9 @@ def supports_lora(
             if not missing_attrs:
                 logger.warning(
                     "The model (%s) contains all LoRA-specific attributes, "
-                    "but does not set `supports_lora=True`.", model)
+                    "but does not set `supports_lora=True`.",
+                    model,
+                )
 
     return result
 
@@ -313,25 +434,21 @@ class _SupportsPPType(Protocol):
         batch_size: int,
         dtype: torch.dtype,
         device: torch.device,
-    ) -> "IntermediateTensors":
-        ...
+    ) -> "IntermediateTensors": ...
 
     def forward(
         self,
         *,
         intermediate_tensors: Optional["IntermediateTensors"],
-    ) -> Union[Tensor, "IntermediateTensors"]:
-        ...
+    ) -> Union[Tensor, "IntermediateTensors"]: ...
 
 
 @overload
-def supports_pp(model: type[object]) -> TypeIs[type[SupportsPP]]:
-    ...
+def supports_pp(model: type[object]) -> TypeIs[type[SupportsPP]]: ...
 
 
 @overload
-def supports_pp(model: object) -> TypeIs[SupportsPP]:
-    ...
+def supports_pp(model: object) -> TypeIs[SupportsPP]: ...
 
 
 def supports_pp(
@@ -343,12 +460,13 @@ def supports_pp(
     if supports_attributes and not supports_inspect:
         logger.warning(
             "The model (%s) sets `supports_pp=True`, but does not accept "
-            "`intermediate_tensors` in its `forward` method", model)
+            "`intermediate_tensors` in its `forward` method",
+            model,
+        )
 
     if not supports_attributes:
-        pp_attrs = ("make_empty_intermediate_tensors", )
-        missing_attrs = tuple(attr for attr in pp_attrs
-                              if not hasattr(model, attr))
+        pp_attrs = ("make_empty_intermediate_tensors",)
+        missing_attrs = tuple(attr for attr in pp_attrs if not hasattr(model, attr))
 
         if getattr(model, "supports_pp", False):
             if missing_attrs:
@@ -362,7 +480,9 @@ def supports_pp(
             if not missing_attrs:
                 logger.warning(
                     "The model (%s) contains all PP-specific attributes, "
-                    "but does not set `supports_pp=True`.", model)
+                    "but does not set `supports_pp=True`.",
+                    model,
+                )
 
     return supports_attributes and supports_inspect
 
@@ -395,17 +515,15 @@ class HasInnerState(Protocol):
 
 
 @overload
-def has_inner_state(model: object) -> TypeIs[HasInnerState]:
-    ...
+def has_inner_state(model: object) -> TypeIs[HasInnerState]: ...
 
 
 @overload
-def has_inner_state(model: type[object]) -> TypeIs[type[HasInnerState]]:
-    ...
+def has_inner_state(model: type[object]) -> TypeIs[type[HasInnerState]]: ...
 
 
 def has_inner_state(
-    model: Union[type[object], object]
+    model: Union[type[object], object],
 ) -> Union[TypeIs[type[HasInnerState]], TypeIs[HasInnerState]]:
     return getattr(model, "has_inner_state", False)
 
@@ -424,17 +542,15 @@ class IsAttentionFree(Protocol):
 
 
 @overload
-def is_attention_free(model: object) -> TypeIs[IsAttentionFree]:
-    ...
+def is_attention_free(model: object) -> TypeIs[IsAttentionFree]: ...
 
 
 @overload
-def is_attention_free(model: type[object]) -> TypeIs[type[IsAttentionFree]]:
-    ...
+def is_attention_free(model: type[object]) -> TypeIs[type[IsAttentionFree]]: ...
 
 
 def is_attention_free(
-    model: Union[type[object], object]
+    model: Union[type[object], object],
 ) -> Union[TypeIs[type[IsAttentionFree]], TypeIs[IsAttentionFree]]:
     return getattr(model, "is_attention_free", False)
 
@@ -442,7 +558,7 @@ def is_attention_free(
 @runtime_checkable
 class IsHybrid(Protocol):
     """The interface required for all models like Jamba that have both
-    attention and mamba blocks, indicates that 
+    attention and mamba blocks, indicates that
     hf_config has 'layers_block_type'"""
 
     is_hybrid: ClassVar[Literal[True]] = True
@@ -472,17 +588,15 @@ class IsHybrid(Protocol):
 
 
 @overload
-def is_hybrid(model: object) -> TypeIs[IsHybrid]:
-    ...
+def is_hybrid(model: object) -> TypeIs[IsHybrid]: ...
 
 
 @overload
-def is_hybrid(model: type[object]) -> TypeIs[type[IsHybrid]]:
-    ...
+def is_hybrid(model: type[object]) -> TypeIs[type[IsHybrid]]: ...
 
 
 def is_hybrid(
-    model: Union[type[object], object]
+    model: Union[type[object], object],
 ) -> Union[TypeIs[type[IsHybrid]], TypeIs[IsHybrid]]:
     return getattr(model, "is_hybrid", False)
 
@@ -533,7 +647,7 @@ class MixtureOfExperts(Protocol):
     ) -> None:
         """
         Register the EPLB state in the MoE model.
-        
+
         Since these are views of the actual EPLB state, any changes made by
         the EPLB algorithm are automatically reflected in the model's behavior
         without requiring additional method calls to set new states.
@@ -553,8 +667,7 @@ class MixtureOfExperts(Protocol):
         self,
         num_physical_experts: int,
         num_local_physical_experts: int,
-    ) -> None:
-        ...
+    ) -> None: ...
 
 
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
@@ -567,17 +680,15 @@ class HasNoOps(Protocol):
 
 
 @overload
-def has_noops(model: object) -> TypeIs[HasNoOps]:
-    ...
+def has_noops(model: object) -> TypeIs[HasNoOps]: ...
 
 
 @overload
-def has_noops(model: type[object]) -> TypeIs[type[HasNoOps]]:
-    ...
+def has_noops(model: type[object]) -> TypeIs[type[HasNoOps]]: ...
 
 
 def has_noops(
-    model: Union[type[object], object]
+    model: Union[type[object], object],
 ) -> Union[TypeIs[type[HasNoOps]], TypeIs[HasNoOps]]:
     return getattr(model, "has_noops", False)
 
@@ -591,13 +702,12 @@ class SupportsCrossEncoding(Protocol):
 
 @overload
 def supports_cross_encoding(
-        model: type[object]) -> TypeIs[type[SupportsCrossEncoding]]:
-    ...
+    model: type[object],
+) -> TypeIs[type[SupportsCrossEncoding]]: ...
 
 
 @overload
-def supports_cross_encoding(model: object) -> TypeIs[SupportsCrossEncoding]:
-    ...
+def supports_cross_encoding(model: object) -> TypeIs[SupportsCrossEncoding]: ...
 
 
 def _supports_cross_encoding(
@@ -625,7 +735,6 @@ class SupportsQuant:
         # find config passed in arguments
         quant_config = cls._find_quant_config(*args, **kwargs)
         if quant_config is not None:
-
             # attach config to model for general use
             instance.quant_config = quant_config
 
@@ -634,7 +743,8 @@ class SupportsQuant:
                 instance.quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
             if instance.packed_modules_mapping is not None:
                 instance.quant_config.packed_modules_mapping.update(
-                    instance.packed_modules_mapping)
+                    instance.packed_modules_mapping
+                )
 
         return instance
 
@@ -657,6 +767,7 @@ class SupportsQuant:
 @runtime_checkable
 class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
+
     # Mapping from ISO639_1 language codes: language names
     supported_languages: ClassVar[Mapping[str, str]]
 
@@ -677,16 +788,20 @@ class SupportsTranscription(Protocol):
             raise ValueError(
                 f"{cls.__name__}.supported_languages contains invalid "
                 f"language codes: {sorted(invalid)}\n. "
-                f"Valid choices are: {sorted(LANGUAGES.keys())}")
+                f"Valid choices are: {sorted(LANGUAGES.keys())}"
+            )
 
     @classmethod
-    def get_generation_prompt(cls, audio: np.ndarray,
-                              stt_config: SpeechToTextConfig,
-                              model_config: ModelConfig,
-                              language: Optional[str],
-                              task_type: Literal["transcribe", "translate"],
-                              request_prompt: str,
-                              to_language: Optional[str]) -> PromptType:
+    def get_generation_prompt(
+        cls,
+        audio: np.ndarray,
+        stt_config: SpeechToTextConfig,
+        model_config: ModelConfig,
+        language: Optional[str],
+        task_type: Literal["transcribe", "translate"],
+        request_prompt: str,
+        to_language: Optional[str],
+    ) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
         returns a valid PromptType."""
@@ -695,17 +810,14 @@ class SupportsTranscription(Protocol):
     @classmethod
     def get_other_languages(cls) -> Mapping[str, str]:
         # other possible language codes from the whisper map
-        return {
-            k: v
-            for k, v in LANGUAGES.items() if k not in cls.supported_languages
-        }
+        return {k: v for k, v in LANGUAGES.items() if k not in cls.supported_languages}
 
     @classmethod
     def validate_language(cls, language: Optional[str]) -> Optional[str]:
         """
-        Ensure the language specified in the transcription request 
-        is a valid ISO 639-1 language code. If the request language is 
-        valid, but not natively supported by the model, trigger a 
+        Ensure the language specified in the transcription request
+        is a valid ISO 639-1 language code. If the request language is
+        valid, but not natively supported by the model, trigger a
         warning (but not an exception).
         """
         if language is None or language in cls.supported_languages:
@@ -722,22 +834,25 @@ class SupportsTranscription(Protocol):
         else:
             raise ValueError(
                 f"Unsupported language: {language!r}.  Must be one of "
-                f"{list(cls.supported_languages.keys())}.")
+                f"{list(cls.supported_languages.keys())}."
+            )
 
     @classmethod
     def get_speech_to_text_config(
-            cls, model_config: ModelConfig,
-            task_type: Literal["transcribe",
-                               "translate"]) -> SpeechToTextConfig:
+        cls, model_config: ModelConfig, task_type: Literal["transcribe", "translate"]
+    ) -> SpeechToTextConfig:
         """Get the speech to text config for the ASR model."""
         ...
 
     @classmethod
-    def get_num_audio_tokens(cls, audio_duration_s: float,
-                             stt_config: SpeechToTextConfig,
-                             model_config: ModelConfig) -> Optional[int]:
+    def get_num_audio_tokens(
+        cls,
+        audio_duration_s: float,
+        stt_config: SpeechToTextConfig,
+        model_config: ModelConfig,
+    ) -> Optional[int]:
         """
-        Map from audio duration to number of audio tokens produced by the ASR 
+        Map from audio duration to number of audio tokens produced by the ASR
         model, without running a forward pass.
         This is used for estimating the amount of processing for this audio.
         """
@@ -746,13 +861,12 @@ class SupportsTranscription(Protocol):
 
 @overload
 def supports_transcription(
-        model: type[object]) -> TypeIs[type[SupportsTranscription]]:
-    ...
+    model: type[object],
+) -> TypeIs[type[SupportsTranscription]]: ...
 
 
 @overload
-def supports_transcription(model: object) -> TypeIs[SupportsTranscription]:
-    ...
+def supports_transcription(model: object) -> TypeIs[SupportsTranscription]: ...
 
 
 def supports_transcription(
@@ -769,13 +883,11 @@ class SupportsV0Only(Protocol):
 
 
 @overload
-def supports_v0_only(model: type[object]) -> TypeIs[type[SupportsV0Only]]:
-    ...
+def supports_v0_only(model: type[object]) -> TypeIs[type[SupportsV0Only]]: ...
 
 
 @overload
-def supports_v0_only(model: object) -> TypeIs[SupportsV0Only]:
-    ...
+def supports_v0_only(model: object) -> TypeIs[SupportsV0Only]: ...
 
 
 def supports_v0_only(
@@ -786,7 +898,7 @@ def supports_v0_only(
 
 @runtime_checkable
 class SupportsEagle3(Protocol):
-    """The interface required for models that support 
+    """The interface required for models that support
     EAGLE3 speculative decoding."""
 
     supports_eagle3: ClassVar[Literal[True]] = True
@@ -803,7 +915,7 @@ class SupportsEagle3(Protocol):
         """
         Set which layers should output auxiliary
         hidden states for EAGLE3.
-        
+
         Args:
             layers: Tuple of layer indices that should output auxiliary
                 hidden states.
@@ -814,7 +926,7 @@ class SupportsEagle3(Protocol):
         """
         Get the layer indices that should output auxiliary hidden states
         for EAGLE3.
-        
+
         Returns:
             Tuple of layer indices for auxiliary hidden state outputs.
         """
@@ -822,13 +934,11 @@ class SupportsEagle3(Protocol):
 
 
 @overload
-def supports_eagle3(model: type[object]) -> TypeIs[type[SupportsEagle3]]:
-    ...
+def supports_eagle3(model: type[object]) -> TypeIs[type[SupportsEagle3]]: ...
 
 
 @overload
-def supports_eagle3(model: object) -> TypeIs[SupportsEagle3]:
-    ...
+def supports_eagle3(model: object) -> TypeIs[SupportsEagle3]: ...
 
 
 def supports_eagle3(
@@ -864,10 +974,10 @@ class SupportsMRoPE(Protocol):
     ) -> tuple[torch.Tensor, int]:
         """
         Get M-RoPE input positions and delta value for this specific model.
-        
+
         This method should be implemented by each model that supports M-RoPE
         to provide model-specific logic for computing input positions.
-        
+
         Args:
             input_tokens: List of input token IDs
             hf_config: HuggingFace model configuration
@@ -878,7 +988,7 @@ class SupportsMRoPE(Protocol):
             seq_len: Sequence length
             audio_feature_lengths: Audio feature lengths for multimodal models
             use_audio_in_video: Whether to use audio in video for interleaving
-            
+
         Returns:
             Tuple of (llm_positions, mrope_position_delta)
             - llm_positions: Tensor of shape [3, num_tokens]
@@ -889,13 +999,11 @@ class SupportsMRoPE(Protocol):
 
 
 @overload
-def supports_mrope(model: type[object]) -> TypeIs[type[SupportsMRoPE]]:
-    ...
+def supports_mrope(model: type[object]) -> TypeIs[type[SupportsMRoPE]]: ...
 
 
 @overload
-def supports_mrope(model: object) -> TypeIs[SupportsMRoPE]:
-    ...
+def supports_mrope(model: object) -> TypeIs[SupportsMRoPE]: ...
 
 
 def supports_mrope(

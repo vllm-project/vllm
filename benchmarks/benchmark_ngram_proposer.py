@@ -5,9 +5,9 @@ import time
 from unittest import mock
 
 import numpy as np
+from benchmark_utils import TimeCollector
 from tabulate import tabulate
 
-from benchmark_utils import TimeCollector
 from vllm.config import (
     CacheConfig,
     DeviceConfig,
@@ -164,7 +164,7 @@ def invoke_main() -> None:
     )
     parser.add_argument(
         "--batched", action="store_true", help="consider time to prepare batch"
-    )  # noqa: E501
+    )
     parser.add_argument(
         "--num-iteration",
         type=int,
