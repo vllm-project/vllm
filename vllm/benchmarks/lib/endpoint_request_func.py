@@ -581,29 +581,6 @@ async def async_request_openai_embeddings_chat(
     )
 
 
-async def async_request_openai_embeddings_clip(
-    request_func_input: RequestFuncInput,
-    session: aiohttp.ClientSession,
-    pbar: Optional[tqdm] = None,
-) -> RequestFuncOutput:
-    if request_func_input.multi_modal_content:
-        # Image input
-        request_func_input.prompt = ""
-
-    # max_model_len=77 is too short for most datasets,
-    # so by default we truncate the prompt to max_model_len
-    if request_func_input.extra_body is None:
-        request_func_input.extra_body = {}
-    if "truncate_prompt_tokens" not in request_func_input.extra_body:
-        request_func_input.extra_body["truncate_prompt_tokens"] = -1
-
-    return await async_request_openai_embeddings_chat(
-        request_func_input,
-        session,
-        pbar=pbar,
-    )
-
-
 def _try_extract_request_idx(request_func_input: RequestFuncInput):
     if request_func_input.request_id:
         match = re.search(r"(\d+)$", request_func_input.request_id)
@@ -616,11 +593,20 @@ def _try_extract_request_idx(request_func_input: RequestFuncInput):
     return None
 
 
-async def async_request_openai_embeddings_vlm2vec(
-    request_func_input: RequestFuncInput,
-    session: aiohttp.ClientSession,
-    pbar: Optional[tqdm] = None,
-) -> RequestFuncOutput:
+def _preprocess_clip(request_func_input: RequestFuncInput):
+    if request_func_input.multi_modal_content:
+        # Image input
+        request_func_input.prompt = ""
+
+    # max_model_len=77 is too short for most datasets,
+    # so by default we truncate the prompt to max_model_len
+    if request_func_input.extra_body is None:
+        request_func_input.extra_body = {}
+    if "truncate_prompt_tokens" not in request_func_input.extra_body:
+        request_func_input.extra_body["truncate_prompt_tokens"] = -1
+
+
+def _preprocess_vlm2vec(request_func_input: RequestFuncInput):
     if request_func_input.multi_modal_content:
         request_idx = _try_extract_request_idx(request_func_input)
 
@@ -637,11 +623,88 @@ async def async_request_openai_embeddings_vlm2vec(
                 f"{request_func_input.prompt}"
             )
 
+
+async def async_request_openai_embeddings_clip(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: Optional[tqdm] = None,
+) -> RequestFuncOutput:
+    _preprocess_clip(request_func_input)
+
+    return await async_request_openai_embeddings_chat(
+        request_func_input,
+        session,
+        pbar=pbar,
+    )
+
+
+async def async_request_openai_embeddings_vlm2vec(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: Optional[tqdm] = None,
+) -> RequestFuncOutput:
+    _preprocess_vlm2vec(request_func_input)
+
     return await async_request_openai_embeddings_chat(
         request_func_input,
         session,
         pbar=pbar,
         mm_position="first",
+    )
+
+
+async def async_request_infinity_embeddings(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: Optional[tqdm] = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    _validate_api_url(api_url, "Infinity Embeddings API", "embeddings")
+
+    payload = {
+        "model": request_func_input.model_name
+        if request_func_input.model_name
+        else request_func_input.model,
+    }
+
+    if request_func_input.prompt:
+        payload["input"] = request_func_input.prompt
+    else:
+        mm_content = request_func_input.multi_modal_content
+        assert isinstance(mm_content, dict)
+
+        mm_type = mm_content["type"]
+        payload["input"] = mm_content[mm_type]["url"]
+        payload["modality"] = mm_type.split("_", 1)[0]
+
+    _update_payload_common(payload, request_func_input)
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+    }
+    _update_headers_common(headers, request_func_input)
+
+    return await _run_openai_embeddings(
+        session,
+        api_url,
+        payload=payload,
+        headers=headers,
+        pbar=pbar,
+    )
+
+
+async def async_request_infinity_embeddings_clip(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: Optional[tqdm] = None,
+) -> RequestFuncOutput:
+    _preprocess_clip(request_func_input)
+
+    return await async_request_infinity_embeddings(
+        request_func_input,
+        session,
+        pbar=pbar,
     )
 
 
@@ -655,6 +718,10 @@ ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "openai-embeddings-chat": async_request_openai_embeddings_chat,
     "openai-embeddings-clip": async_request_openai_embeddings_clip,
     "openai-embeddings-vlm2vec": async_request_openai_embeddings_vlm2vec,
+    # Infinity embedding server: https://github.com/michaelfeil/infinity
+    "infinity-embeddings": async_request_infinity_embeddings,
+    "infinity-embeddings-clip": async_request_infinity_embeddings_clip,
+    # (Infinity embedding server does not support vlm2vec)
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [
