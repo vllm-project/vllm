@@ -147,17 +147,17 @@ class MultiModalConfig:
             else:
                 value[k] = BaseDummyOptions(**v)
         return value
-    
+
     @model_validator(mode="after")
-    def _validate_shm_cache(self):  
-        if self.mm_processor_cache_type != "shm":  
-            default_size = self.model_fields["mm_shm_cache_max_object_size_mb"].default  
-            if self.mm_shm_cache_max_object_size_mb != default_size:  
-                raise ValueError(  
-                    "`mm_shm_cache_max_object_size_mb` can only be set when "  
-                    "`mm_processor_cache_type` is 'shm'."  
-                )  
-        return self  
+    def _validate_multimodal_config(self):
+        if self.mm_processor_cache_type != "shm":
+            default_size = self.model_fields["mm_shm_cache_max_object_size_mb"].default
+            if self.mm_shm_cache_max_object_size_mb != default_size:
+                raise ValueError(
+                    "`mm_shm_cache_max_object_size_mb` can only be set when "
+                    "`mm_processor_cache_type` is 'shm'."
+                )
+        return self
 
     def compute_hash(self) -> str:
         """
