@@ -361,7 +361,7 @@ class ModelConfig:
 
     def _update_nested(
         self,
-        target: "PretrainedConfig" | dict[str, Any],
+        target: PretrainedConfig | dict[str, Any],
         updates: dict[str, Any],
     ) -> None:
         """Recursively updates a config or dict with nested updates."""
@@ -389,7 +389,7 @@ class ModelConfig:
 
     def _apply_dict_overrides(
         self,
-        config: "PretrainedConfig",
+        config: PretrainedConfig,
         overrides: dict[str, Any],
     ) -> None:
         """Apply dict overrides, handling both nested configs and dict values."""

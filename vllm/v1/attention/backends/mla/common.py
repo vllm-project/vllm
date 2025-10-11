@@ -243,6 +243,8 @@ try:
 
     flashinfer_available = True
 except ImportError:
+    BatchPrefillWithRaggedKVCacheWrapper = object
+
     flashinfer_available = False
 
 
@@ -351,8 +353,8 @@ class MLACommonPrefillMetadata:
 
 @dataclass
 class FlashInferPrefillMetadata(MLACommonPrefillMetadata):
-    prefill_main: "BatchPrefillWithRaggedKVCacheWrapper" | None = None
-    prefill_chunks: list["BatchPrefillWithRaggedKVCacheWrapper"] = field(
+    prefill_main: BatchPrefillWithRaggedKVCacheWrapper | None = None
+    prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = field(
         default_factory=list
     )
 

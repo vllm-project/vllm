@@ -195,7 +195,7 @@ NEEDS_HELP = (
 
 
 @functools.lru_cache(maxsize=30)
-def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
+def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     # Save time only getting attr docs if we're generating help text
     cls_docs = get_attr_docs(cls) if NEEDS_HELP else {}
     kwargs = {}
@@ -310,7 +310,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
     return kwargs
 
 
-def get_kwargs(cls: ConfigType) -> dict[str, Any]:
+def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     """Return argparse kwargs for the given Config dataclass.
 
     If `--help` or `mkdocs` are not present in the command line command, the

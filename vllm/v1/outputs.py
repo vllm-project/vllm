@@ -9,6 +9,8 @@ import torch
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+else:
+    KVConnectorStats = object
 
 
 class LogprobsLists(NamedTuple):
@@ -82,7 +84,7 @@ class KVConnectorOutput:
     # [req_ids]
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
-    kv_connector_stats: "KVConnectorStats" | None = None
+    kv_connector_stats: KVConnectorStats | None = None
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them.
     invalid_block_ids: set[int] = field(default_factory=set)
