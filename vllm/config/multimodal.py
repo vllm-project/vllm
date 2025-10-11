@@ -122,20 +122,11 @@ class MultiModalConfig:
     This reduces engine startup time but shifts the responsibility to users for
     estimating the peak memory usage of the activation of multimodal encoder and
     embedding cache."""
-    video_pruning_rate: Optional[float] = None
+    video_pruning_rate: Optional[float] = Field(default=None, ge=0.0, lt=1.0)
     """Sets pruning rate for video pruning via Efficient Video Sampling.
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
-
-    @field_validator("video_pruning_rate")
-    @classmethod
-    def _validate_video_pruning_rate(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and not (0.0 <= v < 1.0):
-            raise ValueError(
-                f"video_pruning_rate must be in the range [0, 1), but got {v}."
-            )
-        return v
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
@@ -158,14 +149,15 @@ class MultiModalConfig:
         return value
     
     @model_validator(mode="after")
-    def _validate_shm_cache(self):
-        if (self.mm_processor_cache_type != "shm"
-                and self.mm_shm_cache_max_object_size_mb != 128):
-            raise ValueError(
-                "`mm_shm_cache_max_object_size_mb` can only be set when "
-                "`mm_processor_cache_type` is 'shm'."
-            )
-        return self
+    def _validate_shm_cache(self):  
+        if self.mm_processor_cache_type != "shm":  
+            default_size = self.model_fields["mm_shm_cache_max_object_size_mb"].default  
+            if self.mm_shm_cache_max_object_size_mb != default_size:  
+                raise ValueError(  
+                    "`mm_shm_cache_max_object_size_mb` can only be set when "  
+                    "`mm_processor_cache_type` is 'shm'."  
+                )  
+        return self  
 
     def compute_hash(self) -> str:
         """
