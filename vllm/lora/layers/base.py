@@ -14,7 +14,6 @@ if TYPE_CHECKING:
 
 
 class BaseLayerWithLoRA(nn.Module):
-
     def slice_lora_a(
         self, lora_a: Union[torch.Tensor, list[Union[torch.Tensor, None]]]
     ) -> Union[torch.Tensor, list[Union[torch.Tensor, None]]]:
@@ -46,7 +45,6 @@ class BaseLayerWithLoRA(nn.Module):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
     ):
         """Overwrites lora tensors at index."""
         ...
