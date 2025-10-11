@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
-from pydantic import Field, SkipValidation, field_validator
+from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -30,7 +30,7 @@ PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: SkipValidation[BlockSize] = None  # type: ignore
+    block_size: BlockSize = Field(default=None)
     """Size of a contiguous cache block in number of tokens. On CUDA devices,
     only block sizes up to 32 are supported.
 

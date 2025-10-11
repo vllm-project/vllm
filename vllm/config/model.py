@@ -18,7 +18,7 @@ from typing import (
 )
 
 import torch
-from pydantic import ConfigDict, SkipValidation, field_validator, model_validator
+from pydantic import ConfigDict, Field, SkipValidation, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 
@@ -127,7 +127,7 @@ class ModelConfig:
 
     Note that the model may support other tasks using the same model runner.
     """
-    tokenizer: SkipValidation[str] = None  # type: ignore
+    tokenizer: str = Field(default=None)
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode = "auto"
@@ -178,7 +178,7 @@ class ModelConfig:
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    max_model_len: SkipValidation[int] = None  # type: ignore
+    max_model_len: int = Field(default=None)
     """Model context length (prompt and output). If unspecified, will be
     automatically derived from the model config.
 

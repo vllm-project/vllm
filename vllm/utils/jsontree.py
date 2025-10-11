@@ -83,7 +83,7 @@ def json_map_leaves(
 ) -> JSONTree[_U]: ...
 
 
-def json_map_leaves(
+def json_map_leaves(  # type: ignore[misc]
     func: Callable[[_T], _U],
     value: Union["BatchedTensorInputs", _JSONTree[_T]],
 ) -> Union["BatchedTensorInputs", _JSONTree[_U]]:
@@ -94,7 +94,7 @@ def json_map_leaves(
             for k, v in value.items()
         }
     elif isinstance(value, list):
-        return [json_map_leaves(func, v) for v in value]
+        return [json_map_leaves(func, v) for v in value]  # type: ignore[return-value]
     elif isinstance(value, tuple):
         return tuple(json_map_leaves(func, v) for v in value)
     else:
@@ -145,7 +145,7 @@ def json_reduce_leaves(
 def json_reduce_leaves(
     func: Callable[..., Union[_T, _U]],
     value: _JSONTree[_T],
-    initial: _U = cast(_U, ...),  # noqa: B008
+    initial: _U = cast(_U, ...),  # type: ignore  # noqa
     /,
 ) -> Union[_T, _U]:
     """
@@ -154,7 +154,7 @@ def json_reduce_leaves(
     sequence to a single value.
     """
     if initial is ...:
-        return reduce(func, json_iter_leaves(value))  # type: ignore[arg-type]
+        return reduce(func, json_iter_leaves(value))  # type: ignore
 
     return reduce(
         func,  # type: ignore[arg-type]

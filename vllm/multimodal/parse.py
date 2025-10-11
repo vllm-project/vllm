@@ -424,6 +424,7 @@ class MultiModalDataParser:
         if self._is_embeddings(data):
             return AudioEmbeddingItems(data)
 
+        data_items: list[AudioItem]
         if (
             is_list_of(data, float)
             or isinstance(data, (np.ndarray, torch.Tensor))
@@ -487,6 +488,7 @@ class MultiModalDataParser:
         if self._is_embeddings(data):
             return VideoEmbeddingItems(data)
 
+        data_items: list[VideoItem]
         if (
             is_list_of(data, PILImage.Image)
             or isinstance(data, (np.ndarray, torch.Tensor))

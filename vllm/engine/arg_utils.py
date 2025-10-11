@@ -54,6 +54,7 @@ from vllm.config import (
 )
 from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
 from vllm.config.device import Device
+from vllm.config.lora import LoRAExtraVocabSize, MaxLoRARanks
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -65,8 +66,13 @@ from vllm.config.model import (
 )
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
 from vllm.config.observability import DetailedTraceModules
-from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
+from vllm.config.parallel import (
+    DataParallelBackend,
+    DistributedExecutorBackend,
+    ExpertPlacementStrategy,
+)
 from vllm.config.scheduler import SchedulerPolicy
+from vllm.config.structured_outputs import StructuredOutputsBackend
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -212,11 +218,11 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
             default = field.default
             # Handle pydantic.Field defaults
             if isinstance(default, FieldInfo):
-                default = (
-                    default.default
-                    if default.default_factory is None
-                    else default.default_factory()
-                )
+                if default.default_factory is None:
+                    default = default.default
+                else:
+                    default_factory = cast(Callable[[], Any], default.default_factory)
+                    default = default_factory()
         elif field.default_factory is not MISSING:
             default = field.default_factory()
 
@@ -329,7 +335,7 @@ class EngineArgs:
 
     model: str = ModelConfig.model
     served_model_name: Optional[Union[str, list[str]]] = ModelConfig.served_model_name
-    tokenizer: Optional[str] = ModelConfig.tokenizer
+    tokenizer: Optional[str] = get_field(ModelConfig, "tokenizer")
     hf_config_path: Optional[str] = ModelConfig.hf_config_path
     runner: RunnerOption = ModelConfig.runner
     convert: ConvertOption = ModelConfig.convert
@@ -347,7 +353,7 @@ class EngineArgs:
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: Optional[int] = ModelConfig.seed
-    max_model_len: Optional[int] = ModelConfig.max_model_len
+    max_model_len: int = get_field(ModelConfig, "max_model_len")
     cuda_graph_sizes: list[int] = get_field(SchedulerConfig, "cuda_graph_sizes")
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
@@ -366,7 +372,7 @@ class EngineArgs:
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
     data_parallel_hybrid_lb: bool = False
-    data_parallel_backend: str = ParallelConfig.data_parallel_backend
+    data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_dbo: bool = ParallelConfig.enable_dbo
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
@@ -388,7 +394,7 @@ class EngineArgs:
     max_parallel_loading_workers: Optional[int] = (
         ParallelConfig.max_parallel_loading_workers
     )
-    block_size: Optional[BlockSize] = CacheConfig.block_size
+    block_size: BlockSize = get_field(CacheConfig, "block_size")
     enable_prefix_caching: Optional[bool] = CacheConfig.enable_prefix_caching
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
@@ -399,11 +405,11 @@ class EngineArgs:
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: Optional[int] = CacheConfig.kv_cache_memory_bytes
-    max_num_batched_tokens: Optional[int] = SchedulerConfig.max_num_batched_tokens
+    max_num_batched_tokens: int = get_field(SchedulerConfig, "max_num_batched_tokens")
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
-    max_num_seqs: Optional[int] = SchedulerConfig.max_num_seqs
+    max_num_seqs: int = get_field(SchedulerConfig, "max_num_seqs")
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
@@ -436,16 +442,16 @@ class EngineArgs:
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
-    video_pruning_rate: float = MultiModalConfig.video_pruning_rate
+    video_pruning_rate: Optional[float] = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
-    max_lora_rank: int = LoRAConfig.max_lora_rank
+    max_lora_rank: MaxLoRARanks = LoRAConfig.max_lora_rank
     default_mm_loras: Optional[dict[str, str]] = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
-    lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
+    lora_extra_vocab_size: LoRAExtraVocabSize = LoRAConfig.lora_extra_vocab_size
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[int] = CacheConfig.num_gpu_blocks_override
@@ -465,7 +471,7 @@ class EngineArgs:
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     # Deprecated guided decoding fields
-    guided_decoding_backend: Optional[str] = None
+    guided_decoding_backend: Optional[StructuredOutputsBackend] = None
     guided_decoding_disable_fallback: Optional[bool] = None
     guided_decoding_disable_any_whitespace: Optional[bool] = None
     guided_decoding_disable_additional_properties: Optional[bool] = None
@@ -501,7 +507,7 @@ class EngineArgs:
         ModelConfig, "override_generation_config"
     )
     model_impl: str = ModelConfig.model_impl
-    override_attention_dtype: str = ModelConfig.override_attention_dtype
+    override_attention_dtype: Optional[str] = ModelConfig.override_attention_dtype
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
@@ -510,7 +516,7 @@ class EngineArgs:
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
-    pt_load_map_location: str = LoadConfig.pt_load_map_location
+    pt_load_map_location: str | dict[str, str] = LoadConfig.pt_load_map_location
 
     # DEPRECATED
     enable_multimodal_encoder_data_parallel: bool = False
@@ -1093,13 +1099,16 @@ class EngineArgs:
 
             self.mm_encoder_tp_mode = "data"
 
+        kwargs = dict[str, Any]()
+        if self.tokenizer is not None:
+            kwargs["tokenizer"] = self.tokenizer
+
         return ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
             runner=self.runner,
             convert=self.convert,
             task=self.task,
-            tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
@@ -1144,6 +1153,7 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
+            **kwargs,
         )
 
     def validate_tensorizer_args(self):
@@ -1540,17 +1550,15 @@ class EngineArgs:
         # Forward the deprecated CLI args to the StructuredOutputsConfig
         so_config = self.structured_outputs_config
         if self.guided_decoding_backend is not None:
-            so_config.guided_decoding_backend = self.guided_decoding_backend
+            so_config.backend = self.guided_decoding_backend
         if self.guided_decoding_disable_fallback is not None:
-            so_config.guided_decoding_disable_fallback = (
-                self.guided_decoding_disable_fallback
-            )
+            so_config.disable_fallback = self.guided_decoding_disable_fallback
         if self.guided_decoding_disable_any_whitespace is not None:
-            so_config.guided_decoding_disable_any_whitespace = (
+            so_config.disable_any_whitespace = (
                 self.guided_decoding_disable_any_whitespace
             )
         if self.guided_decoding_disable_additional_properties is not None:
-            so_config.guided_decoding_disable_additional_properties = (
+            so_config.disable_additional_properties = (
                 self.guided_decoding_disable_additional_properties
             )
 
@@ -1594,7 +1602,7 @@ class EngineArgs:
         # No Mamba or Encoder-Decoder so far.
         if not model_config.is_v1_compatible:
             _raise_or_fallback(
-                feature_name=model_config.architectures, recommend_to_remove=False
+                feature_name=str(model_config.architectures), recommend_to_remove=False
             )
             return False
 
@@ -1682,7 +1690,7 @@ class EngineArgs:
         return True
 
     def _set_default_args(
-        self, usage_context: UsageContext, model_config: ModelConfig
+        self, usage_context: Optional[UsageContext], model_config: ModelConfig
     ) -> None:
         """Set Default Arguments for V1 Engine."""
 
@@ -1710,6 +1718,7 @@ class EngineArgs:
                 else:
                     self.enable_prefix_caching = True
         else:
+            assert model_config.pooler_config is not None
             pooling_type = model_config.pooler_config.pooling_type
             is_causal = getattr(model_config.hf_config, "is_causal", True)
             incremental_prefill_supported = (

@@ -513,8 +513,8 @@ class LoggingStatLogger(StatLoggerBase):
 
     def _reset(self, stats, prompt_throughput, generation_throughput) -> None:
         # Reset tracked stats for next interval.
-        self.num_prompt_tokens = []
-        self.num_generation_tokens = []
+        self.num_prompt_tokens: list[int] = []
+        self.num_generation_tokens: list[int] = []
         self.last_local_log = stats.now
         self.last_prompt_throughput = prompt_throughput
         self.last_generation_throughput = generation_throughput
@@ -660,9 +660,9 @@ class PrometheusStatLogger(StatLoggerBase):
         # Log locally every local_interval seconds.
         if local_interval_elapsed(stats.now, self.last_local_log, self.local_interval):
             # Reset tracked stats for next interval.
-            self.num_prompt_tokens = []
-            self.num_generation_tokens = []
-            self.last_local_log = stats.now
+            self.num_prompt_tokens: list[int] = []
+            self.num_generation_tokens: list[int] = []
+            self.last_local_log: float = stats.now
 
     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         # Info type metrics are syntactic sugar for a gauge permanently set to 1

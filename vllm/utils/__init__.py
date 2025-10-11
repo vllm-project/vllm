@@ -484,9 +484,9 @@ async def merge_async_iterators(
             yield 0, item
         return
 
-    loop = asyncio.get_running_loop()
-
-    awaits = {loop.create_task(anext(it)): (i, it) for i, it in enumerate(iterators)}
+    awaits: dict[asyncio.Task[T], tuple[int, AsyncGenerator[T, None]]] = {
+        asyncio.ensure_future(anext(it)): (i, it) for i, it in enumerate(iterators)
+    }
     try:
         while awaits:
             done, _ = await asyncio.wait(awaits.keys(), return_when=FIRST_COMPLETED)
@@ -495,7 +495,7 @@ async def merge_async_iterators(
                 try:
                     item = await d
                     i, it = pair
-                    awaits[loop.create_task(anext(it))] = pair
+                    awaits[asyncio.ensure_future(anext(it))] = pair
                     yield i, item
                 except StopAsyncIteration:
                     pass
@@ -1163,7 +1163,7 @@ def find_nccl_include_paths() -> list[str] | None:
         import importlib.util
 
         spec = importlib.util.find_spec("nvidia.nccl")
-        if spec and getattr(spec, "submodule_search_locations", None):
+        if spec is not None and spec.submodule_search_locations is not None:
             for loc in spec.submodule_search_locations:
                 inc_dir = os.path.join(loc, "include")
                 if os.path.exists(os.path.join(inc_dir, "nccl.h")):
