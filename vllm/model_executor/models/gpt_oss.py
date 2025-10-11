@@ -182,6 +182,7 @@ class MLPBlock(torch.nn.Module):
         if self.is_sequence_parallel:
             x = tensor_model_parallel_all_gather(x.contiguous(), 0)
             x = x[:num_tokens]
+
         return x
 
 
@@ -216,7 +217,9 @@ class TransformerBlock(torch.nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
         hidden_states = self.attn(hidden_states, positions)
+
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         output = self.mlp(hidden_states)
@@ -281,8 +284,10 @@ class GptOssModel(nn.Module):
             if i in self.aux_hidden_state_layers:
                 aux_hidden_states.append(x if residual is None else x + residual)
             x, residual = layer(x, positions, residual)
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": x, "residual": residual})
+
         x, _ = self.norm(x, residual)
 
         if len(aux_hidden_states) > 0:

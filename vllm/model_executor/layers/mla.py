@@ -161,7 +161,10 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
         )
-        return self.o_proj(attn_out)[0]
+
+        final_out = self.o_proj(attn_out)[0]
+
+        return final_out
 
     def forward_cuda(self, *args, **kwargs):
         return self.forward_native(*args, **kwargs)

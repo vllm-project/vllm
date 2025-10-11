@@ -3,7 +3,6 @@
 import contextlib
 import os
 import random
-import string
 
 import pytest
 import torch
@@ -12,45 +11,45 @@ from vllm import LLM, SamplingParams
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
-    # Lightweight random prompt generator to vary prompt lengths and content.
-    vocab = [
-        "alpha",
-        "bravo",
-        "charlie",
-        "delta",
-        "echo",
-        "foxtrot",
-        "golf",
-        "hotel",
-        "india",
-        "juliet",
-        "kilo",
-        "lima",
-        "mike",
-        "november",
-        "oscar",
-        "papa",
-        "quebec",
-        "romeo",
-        "sierra",
-        "tango",
-        "uniform",
-        "victor",
-        "whiskey",
-        "xray",
-        "yankee",
-        "zulu",
-    ]
-    n = random.randint(min_words, max_words)
-    words = random.choices(vocab, k=n)
+    # Generate more realistic prompts that will actually produce varied tokens
+    # Use a mix of common English text patterns
 
-    # Add some noise and punctuation variability
-    if random.random() < 0.5:
-        words[0] = words[0].capitalize()
-    if random.random() < 0.2:
-        words.append("".join(random.choices(string.ascii_lowercase, k=5)))
-    punct = random.choice([".", "?", "!", "...", ""])
-    return " ".join(words) + punct
+    prompt_templates = [
+        # Question-answer style
+        "Question: What is the capital of France?\nAnswer: The capital of France is",
+        "Q: How does photosynthesis work?\nA: Photosynthesis is the process by which",
+        "User: Can you explain quantum mechanics?\nAssistant: Quantum mechanics is",
+        # Story/narrative style
+        "Once upon a time in a distant galaxy, there lived",
+        "The old man walked slowly down the street, remembering",
+        "In the year 2157, humanity finally discovered",
+        # Technical/code style
+        "To implement a binary search tree in Python, first we need to",
+        "The algorithm works by iterating through the array and",
+        "Here's how to optimize database queries using indexing:",
+        # Factual/informative style
+        "The Renaissance was a period in European history that",
+        "Climate change is caused by several factors including",
+        "The human brain contains approximately 86 billion neurons which",
+        # Conversational style
+        "I've been thinking about getting a new laptop because",
+        "Yesterday I went to the store and bought",
+        "My favorite thing about summer is definitely",
+    ]
+
+    # Pick a random template
+    base_prompt = random.choice(prompt_templates)
+
+    # Add some padding to vary the length if needed
+    if min_words > 50:
+        # For longer prompts, repeat context
+        padding_text = (
+            " This is an interesting topic that deserves more explanation. "
+            * (min_words // 50)
+        )
+        base_prompt = base_prompt + padding_text
+
+    return base_prompt
 
 
 @pytest.mark.timeout(1000)
@@ -76,19 +75,21 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle():
       seed.
     - Keep max_tokens and max_model_len bounded for speed and memory use.
     """
-    random.seed(12345)
+    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
+    random.seed(seed)
 
     # Allow overrides from environment (useful for CI tuning)
     # "facebook/opt-125m" is too small, doesn't reliably test determinism
     model = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
     num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "5"))
-    batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "64"))
-    assert batch_size >= 2, "Batch size should be >= 2 to mix needle."
+    max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "128"))
+    min_random_prompt = int(os.getenv("VLLM_MIN_PROMPT", "1024"))
+    max_random_prompt = int(os.getenv("VLLM_MAX_PROMPT", "2048"))
+    assert max_batch_size >= 2, "Batch size should be >= 2 to mix needle."
 
     # Keep GPU memory usage low to avoid startup allocation failures.
-    gpu_mem_util = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.3"))
-    max_model_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "4096"))
-    swap_space_gb = int(os.getenv("VLLM_SWAP_SPACE_GB", "4"))
+    gpu_mem_util = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.4"))
+    max_model_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "5120"))
 
     # Sampling parameters: longer outputs with a more random-sounding
     # continuation,but still deterministic due to fixed seed.
@@ -111,10 +112,9 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle():
         # Engine with bs=1 behavior
         llm_bs1 = LLM_with_max_seqs(
             model=model,
-            max_num_seqs=1,
+            max_num_seqs=max_batch_size,
             gpu_memory_utilization=gpu_mem_util,
             max_model_len=max_model_len,
-            swap_space=swap_space_gb,
         )
 
         # Baseline generation for the needle prompt alone.
@@ -126,24 +126,24 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle():
         # Engine with larger batch limit (e.g., 64)
         llm_bsN = LLM_with_max_seqs(
             model=model,
-            max_num_seqs=batch_size,
+            max_num_seqs=max_batch_size,
             gpu_memory_utilization=gpu_mem_util,
             max_model_len=max_model_len,
-            swap_space=swap_space_gb,
         )
 
         mismatches = 0
 
         for trial in range(num_trials):
-            # Create a batch of size `batch_size` and insert the needle at
+            # Create a batch of size `max_batch_size` and insert the needle at
             # a random index
             prompts: list[str] = []
+            batch_size = random.randint(max_batch_size // 2, max_batch_size)
             needle_pos = random.randint(0, batch_size - 1)
             for i in range(batch_size):
                 if i == needle_pos:
                     prompts.append(needle_prompt)
                 else:
-                    prompts.append(_random_prompt())
+                    prompts.append(_random_prompt(min_random_prompt, max_random_prompt))
 
             # Generate with the larger-batch engine
             outputs = llm_bsN.generate(prompts, sampling)
@@ -154,19 +154,20 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle():
             text = needle_output.outputs[0].text
 
             if text != baseline_text:
+                print(f"{text}\n\n== Not the same as ==\n\n{baseline_text}\n\n")
                 mismatches += 1
 
         passes = num_trials - mismatches
         # Dump how many passed vs failed
         print(
             f"[determinism] total={num_trials}, passed={passes}, "
-            f"failed={mismatches}, batch_size={batch_size}"
+            f"failed={mismatches}, max_batch_size={max_batch_size}"
         )
 
         if mismatches > 0:
             pytest.fail(
                 f"Nondeterministic outputs detected: {mismatches} failed out "
-                f"of {num_trials} trials (batch_size={batch_size})."
+                f"of {num_trials} trials (max_batch_size={max_batch_size})."
             )
 
     finally:
@@ -190,85 +191,271 @@ def _extract_step_logprobs(request_output):
                 ],
                 dtype=torch.float32,
             )
-            return t
+            return t, inner.token_ids
 
-    return None
+    return None, None
 
 
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="Requires CUDA to match production inference path.",
 )
-def test_logprobs_bitwise_batch_invariance_bs1_vs_bs2():
-    # model_name = os.getenv("VLLM_TEST_MODEL", "facebook/opt-125m")
+@pytest.mark.parametrize("backend", ["FLEX_ATTENTION", "FLASH_ATTN", "FLASHINFER"])
+def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(backend):
+    backend = os.getenv("VLLM_ATTENTION_BACKEND", backend)
+    os.environ["VLLM_ATTENTION_BACKEND"] = backend
+
+    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
+    random.seed(seed)
     model_name = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
-    # Force float32 to avoid precision-induced differences.
+    # For batch invariance, disable custom all-reduce to ensure deterministic
+    # all-reduce operations (custom all-reduce may not be deterministic)
+    from vllm.model_executor.layers.batch_invariant import (
+        vllm_kernel_override_batch_invariant,
+    )
+
+    disable_custom_ar = vllm_kernel_override_batch_invariant()
+
+    if disable_custom_ar:
+        print(f"\n{'=' * 80}")
+        print(f"BATCH INVARIANCE MODE: Disabling custom all-reduce (TP={tp_size})")
+        print(f"{'=' * 80}\n")
+
     llm = LLM(
         model=model_name,
         tensor_parallel_size=tp_size,
-        enforce_eager=True,  # helps reduce nondeterminism from some backends
+        enable_prefix_caching=False,
+        max_num_seqs=32,
+        max_model_len=8192,
+        dtype="bfloat16",  # not everything is supported
     )
 
-    prompts = [
-        "The capital of France is",
-        "The capital of Germany is",
-    ]
+    # Use more realistic prompts for better token generation
+    prompts = [_random_prompt(10, 50) for i in range(3)]
 
     sp = SamplingParams(
-        temperature=0.0,
+        temperature=0.6,
         top_p=1.0,
         max_tokens=8,
-        # Seed shouldn't matter at temperature=0, but keeping it stable anyway.
         seed=1234,
         logprobs=5,
     )
 
     # BS=1: run prompts individually and collect logprobs per step.
+    print("\n" + "=" * 80)
+    print("STARTING BS=1 RUNS (each prompt individually)")
+    print("=" * 80 + "\n")
+
     bs1_logprobs_per_prompt = []
-    for p in prompts:
+    bs1_tokens_per_prompt = []
+    for idx, p in enumerate(prompts):
+        print(f"\n[BS=1] Running prompt {idx}/{len(prompts)} - Preview: {p[:80]}...")
         outs = llm.generate([p], sp, use_tqdm=False)
         assert len(outs) == 1
-        step_logprobs = _extract_step_logprobs(outs[0])
+        step_logprobs, token_ids = _extract_step_logprobs(outs[0])
         if step_logprobs is None:
             pytest.skip(
                 "Logits are not available on RequestOutput; "
                 "enable logprobs return to run this test."
             )
         bs1_logprobs_per_prompt.append(step_logprobs)
+        bs1_tokens_per_prompt.append(token_ids)
+        print(f"[BS=1] Prompt {idx} generated tokens: {token_ids}")
 
-    # BS=2: run prompts in a batch and collect logprobs per step for each
+    # BS=N: run prompts in a batch and collect logprobs per step for each
     # prompt.
+    print("\n" + "=" * 80)
+    print(f"STARTING BS={len(prompts)} RUN (all prompts batched)")
+    print("=" * 80 + "\n")
+
     outs_batched = llm.generate(prompts, sp, use_tqdm=False)
     assert len(outs_batched) == len(prompts)
-    bs2_logprobs_per_prompt = []
-    for o in outs_batched:
-        step_logprobs = _extract_step_logprobs(o)
+    bsN_logprobs_per_prompt = []
+    bsN_tokens_per_prompt = []
+
+    print(f"\n[BS={len(prompts)}] Processing batched outputs...")
+    for idx, o in enumerate(outs_batched):
+        tokens = o.outputs[0].token_ids if o.outputs else "N/A"
+        print(f"[BS={len(prompts)}] Prompt {idx} generated tokens: {tokens}")
+        step_logprobs, token_ids = _extract_step_logprobs(o)
         if step_logprobs is None:
             pytest.skip(
                 "Logits are not available on RequestOutput; "
                 "enable logprobs return to run this test."
             )
-        bs2_logprobs_per_prompt.append(step_logprobs)
+        bsN_logprobs_per_prompt.append(step_logprobs)
+        bsN_tokens_per_prompt.append(token_ids)
 
-    # Compare step-by-step logprobs for each prompt between BS=1 and BS=2 runs.
-    for i, (logprobs_bs1, logprobs_bs2) in enumerate(
-        zip(bs1_logprobs_per_prompt, bs2_logprobs_per_prompt)
-    ):
-        assert len(logprobs_bs1) == len(logprobs_bs2), (
-            f"Different number of generation steps for prompt index {i}: "
-            f"{len(logprobs_bs1)} (BS=1) vs {len(logprobs_bs2)} (BS=2)"
+    # Compare step-by-step logprobs for each prompt between BS=1 and BS=N runs.
+    failed_prompts = []
+    for i, (logprobs_bs1, logprobs_bsN, tokens_bs1, tokens_bsN) in enumerate(
+        zip(
+            bs1_logprobs_per_prompt,
+            bsN_logprobs_per_prompt,
+            bs1_tokens_per_prompt,
+            bsN_tokens_per_prompt,
         )
-        for t, (a, b) in enumerate(zip(logprobs_bs1, logprobs_bs2)):
-            assert a.shape == b.shape, (
-                f"Logits shape mismatch at prompt {i}, step {t}: {a.shape} vs {b.shape}"
+    ):
+        if len(logprobs_bs1) != len(logprobs_bsN):
+            reason = (
+                f"Different number of steps: {len(logprobs_bs1)} (BS=1) "
+                f"vs {len(logprobs_bsN)} (BS=N)"
             )
-            # Bitwise exact equality.
-            assert torch.equal(a, b), (
-                f"Bitwise logprobs mismatch at prompt {i}, step {t} "
-                f"(dtype={a.dtype}, shape={a.shape})."
+            failed_prompts.append(
+                {
+                    "prompt_idx": i,
+                    "step": "all",
+                    "reason": reason,
+                    "prompt_preview": prompts[i][:100],
+                    "bs1_tokens": tokens_bs1,
+                    "bsN_tokens": tokens_bsN,
+                }
             )
+            continue
+
+        # Check if tokens match first
+        if tokens_bs1 != tokens_bsN:
+            failed_prompts.append(
+                {
+                    "prompt_idx": i,
+                    "step": "sampling",
+                    "reason": "Different tokens sampled",
+                    "prompt_preview": prompts[i][:100],
+                    "bs1_tokens": tokens_bs1,
+                    "bsN_tokens": tokens_bsN,
+                    "bs1_all_logprobs": [
+                        logprobs_bs1[s].tolist() for s in range(len(logprobs_bs1))
+                    ],
+                    "bsN_all_logprobs": [
+                        logprobs_bsN[s].tolist() for s in range(len(logprobs_bsN))
+                    ],
+                }
+            )
+            continue
+
+        for t, (a, b) in enumerate(zip(logprobs_bs1, logprobs_bsN)):
+            if a.shape != b.shape:
+                failed_prompts.append(
+                    {
+                        "prompt_idx": i,
+                        "step": t,
+                        "reason": f"Shape mismatch: {a.shape} vs {b.shape}",
+                        "prompt_preview": prompts[i][:100],
+                        "bs1_tokens": tokens_bs1,
+                        "bsN_tokens": tokens_bsN,
+                    }
+                )
+                break
+
+            if not torch.equal(a, b):
+                max_diff = torch.abs(a - b).max().item()
+                # Print which token failed
+                print(f"\n[DIVERGENCE] Prompt {i}, Token {t}: max_diff={max_diff:.6e}")
+                bs1_tok = tokens_bs1[t] if t < len(tokens_bs1) else "N/A"
+                bsN_tok = tokens_bsN[t] if t < len(tokens_bsN) else "N/A"
+                print(f"  Token IDs: bs1={bs1_tok}, bsN={bsN_tok}")
+                print(f"  BS=1 logprob: {a.tolist()}")
+                print(f"  BS=N logprob: {b.tolist()}")
+                failed_prompts.append(
+                    {
+                        "prompt_idx": i,
+                        "step": t,
+                        "reason": f"Bitwise mismatch (max_diff={max_diff:.6e})",
+                        "prompt_preview": prompts[i][:100],
+                        "bs1_tokens": tokens_bs1,
+                        "bsN_tokens": tokens_bsN,
+                        "bs1_all_logprobs": [
+                            logprobs_bs1[s].tolist() for s in range(len(logprobs_bs1))
+                        ],
+                        "bsN_all_logprobs": [
+                            logprobs_bsN[s].tolist() for s in range(len(logprobs_bsN))
+                        ],
+                    }
+                )
+                break
+
+    # Print summary of all failures
+    if failed_prompts:
+        print(f"\n{'=' * 80}")
+        fail_msg = (
+            f"BATCH INVARIANCE FAILURES: {len(failed_prompts)}/"
+            f"{len(prompts)} prompts failed"
+        )
+        print(fail_msg)
+        print(f"{'=' * 80}")
+        for fail in failed_prompts:
+            print(f"\nPrompt {fail['prompt_idx']} (step {fail['step']}):")
+            print(f"  Reason: {fail['reason']}")
+            print(f"  Preview: {fail['prompt_preview']}...")
+
+            # Always show the tokens
+            if "bs1_tokens" in fail:
+                print(f"  BS=1 tokens: {fail['bs1_tokens']}")
+            if "bsN_tokens" in fail:
+                print(f"  BS=N tokens: {fail['bsN_tokens']}")
+
+            if "bs1_all_logprobs" in fail:
+                print(f"  BS=1 logprobs for all {len(fail['bs1_all_logprobs'])} steps:")
+                for step_idx, logprobs in enumerate(fail["bs1_all_logprobs"]):
+                    print(f"    Step {step_idx}: {logprobs}")
+                print(f"  BS=N logprobs for all {len(fail['bsN_all_logprobs'])} steps:")
+                for step_idx, logprobs in enumerate(fail["bsN_all_logprobs"]):
+                    print(f"    Step {step_idx}: {logprobs}")
+        print(f"{'=' * 80}\n")
+
+        # Fail the test with summary
+        msg = (
+            f"Batch invariance violated in {len(failed_prompts)}/"
+            f"{len(prompts)} prompts. See output above for details."
+        )
+        pytest.fail(msg)
+
+
+def test_simple_generation():
+    """
+    Simple test that runs the model with a basic prompt and prints the output.
+    Useful for quick smoke testing and debugging.
+    """
+    model = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
+
+    llm = LLM(
+        model=model,
+        max_num_seqs=1,
+        tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
+        enforce_eager=True,
+        gpu_memory_utilization=0.9,
+        max_model_len=2048,
+        dtype="bfloat16",
+        enable_prefix_caching=False,
+    )
+
+    prompt = "the capital of france is"
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=20,
+    )
+
+    print(f"\n{'=' * 80}")
+    print("Running simple generation test")
+    print(f"Prompt: '{prompt}'")
+    print(f"{'=' * 80}\n")
+
+    try:
+        outputs = llm.generate([prompt], sampling_params)
+
+        assert len(outputs) == 1
+        output_text = outputs[0].outputs[0].text
+
+        print(f"Output: '{output_text}'")
+        print(f"\n{'=' * 80}")
+        print(f"Full completion: '{prompt}{output_text}'")
+        print(f"{'=' * 80}\n")
+
+    finally:
+        with contextlib.suppress(Exception):
+            llm.shutdown()
 
 
 def LLM_with_max_seqs(
@@ -276,7 +463,6 @@ def LLM_with_max_seqs(
     max_num_seqs: int,
     gpu_memory_utilization: float,
     max_model_len: int,
-    swap_space: int,
 ) -> LLM:
     """
     Helper to construct an LLM with a specific max_num_seqs (batch-size limit)
@@ -285,18 +471,12 @@ def LLM_with_max_seqs(
     return LLM(
         model=model,
         max_num_seqs=max_num_seqs,
-        # Constrain GPU memory pool so test can run even on busy GPUs.
         gpu_memory_utilization=gpu_memory_utilization,
-        # Keep KV cache footprint small while allowing longer outputs.
         max_model_len=max_model_len,
-        # Allow some CPU offload if needed.
-        swap_space=swap_space,
-        # Keep things lean and CI-friendly.
-        dtype="auto",
-        # Single-GPU by default; override externally if desired.
+        dtype="bfloat16",
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
-        trust_remote_code=os.getenv("VLLM_TRUST_REMOTE_CODE", "0") == "1",
         enable_prefix_caching=False,
+        enforce_eager=True,
         # Enable for MOE models
         # enable_expert_parallel=True,
     )

@@ -70,6 +70,12 @@ def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) 
     from vllm.distributed.device_communicators.pynccl_allocator import (
         is_symmetric_memory_enabled,
     )
+    from vllm.model_executor.layers.batch_invariant import (
+        vllm_kernel_override_batch_invariant,
+    )
+
+    if vllm_kernel_override_batch_invariant():
+        return False
 
     if not is_symmetric_memory_enabled():
         return False

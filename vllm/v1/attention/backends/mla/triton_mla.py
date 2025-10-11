@@ -159,21 +159,63 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             B, q_num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
         )
         lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
-        num_kv_splits = 4  # TODO: heuristic
+
+        # For batch invariance, use only 1 split to ensure deterministic reduction
+
+        from vllm.model_executor.layers.batch_invariant import (
+            vllm_kernel_override_batch_invariant,
+        )
+
+        num_kv_splits = 1 if vllm_kernel_override_batch_invariant() else 4
+
+        # DEBUG: Print inputs and config (disabled - too much output)
+        # debug_enabled = (vllm_kernel_override_batch_invariant()
+        #                  and os.getenv("VLLM_DEBUG_TRITON_MLA") is not None)
+        # if debug_enabled:
+        #     print(f"  [BS={B}] [TritonMLA] q: shape={q.shape}, "
+        #           f"first5={q.flatten()[:5].tolist()}")
+        #     print(f"  [BS={B}] [TritonMLA] num_kv_splits={num_kv_splits}")
+        #     print(f"  [BS={B}] [TritonMLA] kv_cache: "
+        #           f"shape={kv_c_and_k_pe_cache.shape}")
+        #     print(f"  [BS={B}] [TritonMLA] "
+        #           f"seq_lens={attn_metadata.decode.seq_lens.tolist()}")
+        #     print(f"  [BS={B}] [TritonMLA] block_table: "
+        #           f"shape={attn_metadata.decode.block_table.shape}")
+        #     # Print KV cache content for first prompt
+        #     if B > 0:
+        #         kv_first5 = kv_c_and_k_pe_cache[0].flatten()[:5].tolist()
+        #         print(f"  [BS={B}] [TritonMLA] kv_cache[0] "
+        #               f"first5={kv_first5}")
 
         # TODO(lucas) Allocate ahead of time
-        attn_logits = torch.empty(
-            (
-                B,
-                q_num_heads,
-                num_kv_splits,
-                # NOTE(lucas) idk why the +1 is here but sglang has it so we
-                # just mirror that
-                self.kv_lora_rank + 1,
-            ),
-            dtype=torch.float32,
-            device=q.device,
-        )
+        # Use zeros instead of empty for batch invariance - uninitialized data
+        # from torch.empty can cause non-determinism across decode steps
+        if vllm_kernel_override_batch_invariant():
+            attn_logits = torch.zeros(
+                (
+                    B,
+                    q_num_heads,
+                    num_kv_splits,
+                    # NOTE(lucas) idk why the +1 is here but sglang has it so we
+                    # just mirror that
+                    self.kv_lora_rank + 1,
+                ),
+                dtype=torch.float32,
+                device=q.device,
+            )
+        else:
+            attn_logits = torch.empty(
+                (
+                    B,
+                    q_num_heads,
+                    num_kv_splits,
+                    # NOTE(lucas) idk why the +1 is here but sglang has it so we
+                    # just mirror that
+                    self.kv_lora_rank + 1,
+                ),
+                dtype=torch.float32,
+                device=q.device,
+            )
 
         # Add a head dim of 1
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)
@@ -194,5 +236,17 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self.scale,
             PAGE_SIZE,
         )
+
+        # DEBUG: Print outputs (disabled - too much output)
+        # if debug_enabled:
+        #     print(f"  [BS={B}] [TritonMLA] output: shape={o.shape}, "
+        #           f"first5={o.flatten()[:5].tolist()}")
+        #     print(f"  [BS={B}] [TritonMLA] lse: shape={lse.shape}, "
+        #           f"first5={lse.flatten()[:5].tolist()}")
+        #     # Print output for first prompt
+        #     if B > 0:
+        #         o_first5 = o[0].flatten()[:5].tolist()
+        #         print(f"  [BS={B}] [TritonMLA] output[0] first5={o_first5}")
+        #         print(f"  [BS={B}] [TritonMLA] lse[0]={lse[0].tolist()}")
 
         return o, lse
