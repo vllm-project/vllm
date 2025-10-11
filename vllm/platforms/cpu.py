@@ -4,6 +4,7 @@
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -336,6 +337,7 @@ class CpuPlatform(Platform):
         lscpu_output = subprocess.check_output(
             "lscpu -J -e=CPU,CORE,NODE", shell=True, text=True
         )
+        lscpu_output = re.sub(r'"node":\s*-\s*(,|\n)', r'"node": 0\1', lscpu_output)
         logical_cpu_list: list[LogicalCPUInfo] = json.loads(
             lscpu_output, object_hook=LogicalCPUInfo.json_decoder
         )["cpus"]
