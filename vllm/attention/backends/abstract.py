@@ -96,6 +96,10 @@ class AttentionBackend(ABC):
     def full_cls_name(cls) -> tuple[str, str]:
         return (cls.__module__, cls.__qualname__)
 
+    @classmethod
+    def enable_dsa_topk_indices_buffer(cls) -> bool:
+        return False
+
 
 class AttentionMetadata:
     pass
