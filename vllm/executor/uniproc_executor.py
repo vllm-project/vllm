@@ -85,6 +85,10 @@ class UniProcExecutor(ExecutorBase):
             future.set_exception(e)
         return [future]
 
+    def get_kv_connector_handshake_metadata(self) -> list[Optional[dict]]:
+        """Get KV connector handshake metadata from all workers."""
+        return self.collective_rpc("get_kv_connector_handshake_metadata")
+
     def check_health(self) -> None:
         # UniProcExecutor will always be healthy as long as
         # it's running.
