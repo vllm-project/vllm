@@ -6,6 +6,8 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
@@ -23,6 +25,8 @@ from vllm.v1.worker.ubatching import (
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
 DEEPEP_QUANT_BLOCK_SHAPE = [DEEPEP_QUANT_BLOCK_SIZE, DEEPEP_QUANT_BLOCK_SIZE]
+
+logger = init_logger(__name__)
 
 
 def dequant_fp8(
@@ -110,21 +114,31 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         assert isinstance(x, torch.Tensor)
 
         num_experts, max_tokens, hidden_dim = x.size()
+        if not envs.VLLM_DEEPEPLL_BF16_DISPATCH:
+            # TODO (varun): Optimization - Use a batched version of quant
+            x = x.view((-1, hidden_dim))
+            x, x_scales = moe_kernel_quantize_input(
+                x,
+                quant_config.a1_scale,
+                quant_config.quant_dtype,
+                quant_config.per_act_token_quant,
+                quant_config.block_shape,
+            )
+            x = x.view((num_experts, -1, hidden_dim))
 
-        # TODO (varun): Optimization - Use a batched version of quant
-        x = x.view((-1, hidden_dim))
-        x, x_scales = moe_kernel_quantize_input(
-            x,
-            quant_config.a1_scale,
-            quant_config.quant_dtype,
-            quant_config.per_act_token_quant,
-            quant_config.block_shape,
-        )
-        x = x.view((num_experts, -1, hidden_dim))
-
-        if quant_config.quant_dtype is not None:
-            assert x_scales is not None
-            x_scales = normalize_batched_scales_shape(x_scales, num_experts)
+            if quant_config.quant_dtype is not None:
+                assert x_scales is not None
+                x_scales = normalize_batched_scales_shape(x_scales, num_experts)
+        else:
+            # BF16 dispatch path - no quantization
+            # TODO(shuw@nvidia.com): enable nvfp4 dispatch once DEEPEP is ready.
+            logger.info_once("Using BF16 dispatch path for DeepEPLLPrepareAndFinalize")
+            assert x.dtype == torch.bfloat16, (
+                "BF16 dispatch requires input to be in BF16"
+            )
+            x_scales = None
+            x = x.view((num_experts, -1, hidden_dim))
+            # print(f"after deepepll: x.shape = {x.shape}")
 
         return x, x_scales
 
@@ -262,6 +276,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
+        # print("xxx"*100, fused_expert_output.shape)
+        # print("ttt"*100, fused_expert_output.dtype)
         _, _, recv_hook = self.buffer.low_latency_combine(
             fused_expert_output,
             topk_ids,
