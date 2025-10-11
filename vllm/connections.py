@@ -85,9 +85,9 @@ class HTTPConnection:
         extra_headers = extra_headers or {}
 
 
-+       # Use yarl.URL with encoded=True to prevent automatic decoding of
-+       # the path component, which is crucial for signed URLs (e.g., AWS S3).
-+       parsed_url = yarl.URL(url, encoded=True)
+        # Use yarl.URL with encoded=True to prevent automatic decoding of
+        # the path component, which is crucial for signed URLs (e.g., AWS S3).
+        parsed_url = yarl.URL(url, encoded=True)
 
         return client.get(
             parsed_url,
