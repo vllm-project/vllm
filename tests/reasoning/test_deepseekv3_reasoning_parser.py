@@ -25,7 +25,11 @@ def tokenizer():
     ],
 )
 def test_parser_selection(tokenizer, thinking, expected_parser_type):
-    parser = DeepSeekV3ReasoningParser(tokenizer, thinking=thinking)
+    parser = DeepSeekV3ReasoningParser(
+        tokenizer,
+        chat_template_kwargs={"thinking": thinking}
+    )
+
     assert isinstance(parser._parser, expected_parser_type)
 
 

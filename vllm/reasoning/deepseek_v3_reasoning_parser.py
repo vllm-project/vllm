@@ -27,7 +27,8 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 
-        thinking = bool(kwargs.pop("thinking", False))
+        chat_kwargs = kwargs.pop("chat_template_kwargs", {}) or {}
+        thinking = bool(chat_kwargs.pop("thinking", False))
 
         if thinking:
             self._parser = DeepSeekR1ReasoningParser(tokenizer, *args,
