@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import UnionType
 from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
 
 import torch
@@ -209,7 +210,8 @@ class TensorSchema:
                     actual_type = args[0]
 
                 # Check arg was provided as Union
-                if get_origin(actual_type) is Union:
+                if get_origin(actual_type) in {Union, UnionType}:
+                    # Union for Union[X, Y] and UnionType for X | Y
                     args = get_args(actual_type)
                     # Skip validation when Union contains None
                     if type(None) in args:
