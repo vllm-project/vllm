@@ -3,10 +3,9 @@
 
 import hashlib
 from collections.abc import Mapping
-from dataclasses import field
 from typing import Any, Literal, Optional, Union
 
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -55,7 +54,7 @@ DummyOptions = Union[
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
-    limit_per_prompt: dict[str, DummyOptions] = field(default_factory=dict)
+    limit_per_prompt: dict[str, DummyOptions] = Field(default_factory=dict)
     """The maximum number of input items and options allowed per 
         prompt for each modality.
     Defaults to 999 for each modality.
@@ -71,7 +70,7 @@ class MultiModalConfig:
         {"image": 16, "video": {"count": 1, "num_frames": 32, "width": 512, 
         "height": 512}}
     """
-    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    media_io_kwargs: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Additional args passed to process media inputs, keyed by modalities.
     For example, to set num_frames for video, set
     `--media-io-kwargs '{"video": {"num_frames": 40} }'`"""
@@ -84,7 +83,7 @@ class MultiModalConfig:
 
     For example, for Phi-3-Vision:
     `{"num_crops": 4}`."""
-    mm_processor_cache_gb: float = 4
+    mm_processor_cache_gb: float = Field(default=4, ge=0)
     """The size (in GiB) of the multi-modal processor cache, which is used to
     avoid re-processing past multi-modal inputs.
 
@@ -96,7 +95,7 @@ class MultiModalConfig:
     mm_processor_cache_type: MMCacheType = "lru"
     """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
     use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
-    mm_shm_cache_max_object_size_mb: int = 128
+    mm_shm_cache_max_object_size_mb: int = Field(default=128, ge=0)
     """Size limit (in MiB) for each object stored in the multi-modal processor
     shared memory cache. Only effective when `mm_processor_cache_type` is
     `"shm"`."""
@@ -129,6 +128,15 @@ class MultiModalConfig:
     from each video to be pruned.
     """
 
+    @field_validator("video_pruning_rate")
+    @classmethod
+    def _validate_video_pruning_rate(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and not (0.0 <= v < 1.0):
+            raise ValueError(
+                f"video_pruning_rate must be in the range [0, 1), but got {v}."
+            )
+        return v
+
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
     def _validate_limit_per_prompt(
@@ -148,6 +156,16 @@ class MultiModalConfig:
             else:
                 value[k] = BaseDummyOptions(**v)
         return value
+    
+    @model_validator(mode="after")
+    def _validate_shm_cache(self):
+        if (self.mm_processor_cache_type != "shm"
+                and self.mm_shm_cache_max_object_size_mb != 128):
+            raise ValueError(
+                "`mm_shm_cache_max_object_size_mb` can only be set when "
+                "`mm_processor_cache_type` is 'shm'."
+            )
+        return self
 
     def compute_hash(self) -> str:
         """
