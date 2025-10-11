@@ -4,7 +4,7 @@
 import multiprocessing as mp
 import os
 import tempfile
-from multiprocessing import Queue
+from multiprocessing.queues import Queue
 from unittest.mock import patch
 
 import pytest
