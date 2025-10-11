@@ -180,11 +180,12 @@ class Glm4MoE(nn.Module):
 
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_experts,
+            fused_output_scaling_factor=self.routed_scaling_factor,
+            shared_output_scaling_factor=1.0,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
@@ -206,23 +207,10 @@ class Glm4MoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits = self.gate(hidden_states.to(dtype=torch.float32))
 
-        fused_moe_out = self.experts(
+        final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
 
-        if self.shared_experts is not None:
-            shared_output, final_hidden_states = fused_moe_out
-            assert shared_output is not None
-            final_hidden_states = (
-                final_hidden_states * self.routed_scaling_factor + shared_output
-            )
-        else:
-            final_hidden_states = fused_moe_out * self.routed_scaling_factor
-
-        if self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states
-            )
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 

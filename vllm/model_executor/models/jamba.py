@@ -83,7 +83,6 @@ class JambaMoE(nn.Module):
             self.intermediate_size,
             tp_size=tp_size,
             params_dtype=params_dtype,
-            reduce_results=True,
             renormalize=False,
             use_grouped_topk=False,
             quant_config=quant_config,

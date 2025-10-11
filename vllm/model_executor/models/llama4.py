@@ -109,7 +109,6 @@ class Llama4MoE(nn.Module):
             custom_routing_function=Llama4MoE.custom_routing_function,
             intermediate_size=intermediate_size_moe,
             apply_router_weight_on_input=True,
-            reduce_results=False,
             renormalize=False,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -122,20 +121,13 @@ class Llama4MoE(nn.Module):
             hidden_states = sequence_parallel_chunk(hidden_states)
 
         router_logits, _ = self.router(hidden_states)
-
-        shared_out, routed_out = self.experts(
+        experts_out = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
-        experts_out = routed_out + shared_out
-
         if self.is_sequence_parallel:
             experts_out = tensor_model_parallel_all_gather(experts_out, 0)
             experts_out = experts_out[:num_tokens]
-        elif self.tp_size > 1:
-            experts_out = self.experts.maybe_all_reduce_tensor_model_parallel(
-                experts_out
-            )
 
         return experts_out
 

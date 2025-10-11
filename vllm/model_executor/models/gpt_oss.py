@@ -161,7 +161,6 @@ class MLPBlock(torch.nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
-            reduce_results=True,
             renormalize=True,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",

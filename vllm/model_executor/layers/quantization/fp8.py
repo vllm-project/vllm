@@ -600,6 +600,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.fp8_backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
         )
 
+        self.rocm_aiter_moe_enabled = False
+
     def create_weights(
         self,
         layer: Module,
@@ -740,8 +742,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         else:
             layer.w13_input_scale = None
             layer.w2_input_scale = None
-
-        self.rocm_aiter_moe_enabled = False
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
