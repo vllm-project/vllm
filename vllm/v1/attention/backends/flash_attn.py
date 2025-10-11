@@ -837,5 +837,8 @@ def cascade_attention(
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
     )
 
+    prefix_lse = prefix_lse.contiguous()
+    suffix_lse = suffix_lse.contiguous()
+
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
