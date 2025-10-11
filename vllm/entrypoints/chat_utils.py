@@ -224,6 +224,9 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     content: Union[str, list[ChatCompletionContentPartParam]]
     """The contents of the message."""
 
+    reasoning_content: str
+    """The reasoning content of the message."""
+
     name: str
     """An optional name for the participant.
 
@@ -252,6 +255,9 @@ class ConversationMessage(TypedDict, total=False):
 
     content: Union[Optional[str], list[dict[str, str]]]
     """The contents of the message"""
+
+    reasoning_content: Optional[str]
+    """The reasoning content of the message"""
 
     tool_call_id: Optional[str]
     """Tool call that this message is responding to."""
@@ -1373,6 +1379,9 @@ def _parse_chat_message_content(
             # follow the OpenAI spec.
             if "tool_calls" in parsed_msg and parsed_msg["tool_calls"] is not None:
                 result_msg["tool_calls"] = list(parsed_msg["tool_calls"])
+            
+            if "reasoning_content" in message:
+                result_msg["reasoning_content"] = message["reasoning_content"]
         elif role == "tool":
             parsed_msg = _ToolParser(message)
             if "tool_call_id" in parsed_msg:
