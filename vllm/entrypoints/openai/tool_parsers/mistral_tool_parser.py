@@ -7,9 +7,9 @@ from random import choices
 from string import ascii_letters, digits
 from typing import Union
 
-import partial_json_parser
+import vl_partial_json_parser
 import regex as re
-from partial_json_parser.core.options import Allow
+from vl_partial_json_parser.core.options import Allow
 from pydantic import Field
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -217,9 +217,9 @@ class MistralToolParser(ToolParser):
             # tool calls are generated in an array, so do partial JSON
             # parsing on the entire array
             try:
-                tool_call_arr: list[dict] = partial_json_parser.loads(
+                tool_call_arr: list[dict] = vl_partial_json_parser.loads(
                     parsable_arr, flags)
-            except partial_json_parser.core.exceptions.MalformedJSON:
+            except vl_partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
                 return None
 

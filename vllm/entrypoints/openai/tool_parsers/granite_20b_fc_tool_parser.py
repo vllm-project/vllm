@@ -6,9 +6,9 @@ from collections.abc import Sequence
 from json import JSONDecoder
 from typing import Union
 
-import partial_json_parser
+import vl_partial_json_parser
 import regex as re
-from partial_json_parser.core.options import Allow
+from vl_partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -143,7 +143,7 @@ class Granite20bFCToolParser(ToolParser):
                     start_idx += len(self.bot_token)
                     start_idx = consume_space(start_idx, current_text)
                     tool_call_arr.append(obj)
-            except partial_json_parser.core.exceptions.MalformedJSON:
+            except vl_partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
                 return None
 

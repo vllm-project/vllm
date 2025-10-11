@@ -5,9 +5,9 @@ import json
 from collections.abc import Sequence
 from typing import Union
 
-import partial_json_parser
+import vl_partial_json_parser
 import regex as re
-from partial_json_parser.core.options import Allow
+from vl_partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -294,11 +294,11 @@ class Hermes2ProToolParser(ToolParser):
 
             try:
 
-                current_tool_call = partial_json_parser.loads(
+                current_tool_call = vl_partial_json_parser.loads(
                     tool_call_portion or "{}",
                     flags) if tool_call_portion else None
                 logger.debug("Parsed tool call %s", current_tool_call)
-            except partial_json_parser.core.exceptions.MalformedJSON:
+            except vl_partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
                 return None
             except json.decoder.JSONDecodeError:

@@ -5,8 +5,8 @@ import json
 from collections.abc import Sequence
 from typing import Union
 
-import partial_json_parser
-from partial_json_parser.core.options import Allow
+import vl_partial_json_parser
+from vl_partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -92,9 +92,9 @@ class Internlm2ToolParser(ToolParser):
             # tool calls are generated in an object in internlm2
             # it's not support parallel tool calls
             try:
-                tool_call_arr: dict = partial_json_parser.loads(
+                tool_call_arr: dict = vl_partial_json_parser.loads(
                     parsable_arr, flags)
-            except partial_json_parser.core.exceptions.MalformedJSON:
+            except vl_partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
                 return None
 

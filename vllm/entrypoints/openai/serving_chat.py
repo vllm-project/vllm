@@ -9,7 +9,7 @@ from collections.abc import Sequence as GenericSequence
 from typing import Callable, Final, Optional, Union
 
 import jinja2
-import partial_json_parser
+import vl_partial_json_parser
 import regex as re
 from fastapi import Request
 from openai_harmony import Message as OpenAIMessage
@@ -403,8 +403,8 @@ class OpenAIServingChat(OpenAIServing):
             # if the current text is empty, we cannot parse it
             return None, function_name_returned
         try:
-            obj = partial_json_parser.loads(current_text)
-        except partial_json_parser.core.exceptions.MalformedJSON:
+            obj = vl_partial_json_parser.loads(current_text)
+        except vl_partial_json_parser.core.exceptions.MalformedJSON:
             logger.debug('not enough tokens to parse into JSON yet')
             obj = None
 

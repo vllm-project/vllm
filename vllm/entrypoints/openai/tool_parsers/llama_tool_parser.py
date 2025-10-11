@@ -5,9 +5,9 @@ import json
 from collections.abc import Sequence
 from typing import Union
 
-import partial_json_parser
+import vl_partial_json_parser
 import regex as re
-from partial_json_parser.core.options import Allow
+from vl_partial_json_parser.core.options import Allow
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -153,7 +153,7 @@ class Llama3JsonToolParser(ToolParser):
                             "model generated both parameters and arguments"
                         obj["arguments"] = obj["parameters"]
                     tool_call_arr.append(obj)
-            except partial_json_parser.core.exceptions.MalformedJSON:
+            except vl_partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
                 return None
 

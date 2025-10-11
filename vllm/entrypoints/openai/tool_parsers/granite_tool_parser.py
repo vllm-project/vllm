@@ -5,8 +5,8 @@ import json
 from collections.abc import Sequence
 from typing import Union
 
-import partial_json_parser
-from partial_json_parser.core.options import Allow
+import vl_partial_json_parser
+from vl_partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -129,7 +129,7 @@ class GraniteToolParser(ToolParser):
                 if not is_complete_json(
                         current_text[start_idx:start_idx + end_idx]):
                     is_complete[-1] = False
-            except partial_json_parser.core.exceptions.MalformedJSON:
+            except vl_partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
                 return None
 

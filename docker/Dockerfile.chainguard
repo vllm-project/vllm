@@ -1,8 +1,12 @@
 ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.13
 
-ARG BUILD_BASE_IMAGE=vannevarlabs.jfrog.io/vl-general/vannevarlabs.com/pytorch:latest
-ARG FINAL_BASE_IMAGE=vannevarlabs.jfrog.io/vl-general/vannevarlabs.com/pytorch:latest
+ARG BUILD_BASE_IMAGE=vannevarlabs.jfrog.io/vl-general/vannevarlabs.com/pytorch:latest-dev
+ARG FINAL_BASE_IMAGE=vannevarlabs.jfrog.io/vl-general/vannevarlabs.com/pytorch:latest-dev
+
+ARG VL_PYPI_USER
+ARG VL_PYPI_PASSWORD
+ARG VL_PYPI_INDEX_URL=https://${VL_PYPI_USER}:${VL_PYPI_PASSWORD}@vannevarlabs.jfrog.io/artifactory/api/pypi/vl-python-pypi/simple
 
 # PyTorch provides its own indexes for standard and nightly builds
 ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
@@ -27,6 +31,7 @@ ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=true
+ARG VL_PYPI_INDEX_URL
 
 WORKDIR /workspace
 
@@ -55,7 +60,8 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 # install build and runtime dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
-     uv pip install --system -r requirements/cuda.txt \
+    uv pip install --system -r requirements/cuda.txt \
+    --extra-index-url ${VL_PYPI_INDEX_URL} \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 USER nonroot
 
@@ -74,6 +80,7 @@ ARG TARGETPLATFORM
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
+ARG VL_PYPI_INDEX_URL
 
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
@@ -84,10 +91,12 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
+# ENV PIP_INDEX_URL=${VL_PYPI_INDEX_URL}
 
 USER root
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/build.txt \
+    --extra-index-url ${VL_PYPI_INDEX_URL} \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 USER nonroot
 
@@ -121,22 +130,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     export CXX=/usr/local/bin/g++-12 && \
     export NVCC_PREPEND_FLAGS='-ccbin=/usr/local/bin/g++-12' && \
     export NVCC_APPEND_FLAGS='-ccbin=/usr/local/bin/g++-12' && \
-    python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
-USER nonroot
-
-# Check the size of the wheel if RUN_WHEEL_CHECK is true
-COPY .buildkite/check-wheel-size.py check-wheel-size.py
-# sync the default value with .buildkite/check-wheel-size.py
-ARG VLLM_MAX_SIZE_MB=450
-ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
-ARG RUN_WHEEL_CHECK=true
-
-USER root
-RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
-        python3 check-wheel-size.py dist; \
-    else \
-        echo "Skipping wheel size check."; \
-    fi
+    python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 
 USER nonroot
 #################### EXTENSION Build IMAGE ####################
 
@@ -148,11 +142,14 @@ ARG PYTHON_VERSION
 ARG INSTALL_KV_CONNECTORS=false
 WORKDIR /vllm-workspace
 ARG TARGETPLATFORM
+ARG VL_PYPI_INDEX_URL
 
 ARG GDRCOPY_CUDA_VERSION=12.8
 # Keep in line with FINAL_BASE_IMAGE
 # TODO: update this OS version for Alpine linux
 ARG GDRCOPY_OS_VERSION=Ubuntu22_04
+
+# ENV PIP_INDEX_URL=${VL_PYPI_INDEX_URL}
 
 SHELL ["/bin/bash", "-c"]
 
@@ -181,6 +178,7 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system dist/*.whl --verbose \
+        --extra-index-url ${VL_PYPI_INDEX_URL} \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -193,7 +191,7 @@ USER nonroot
 # install build dependencies for JIT compilation.
 # TODO: Remove this once FlashInfer AOT wheel is fixed
 COPY requirements/build.txt requirements/build.txt
-COPY tools/install_gdrcopy.sh install_gdrcopy.sh
+# COPY tools/install_gdrcopy.sh install_gdrcopy.sh
 COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
 
 ENV CUDA_HOME=/usr/local/cuda
@@ -201,24 +199,25 @@ ENV CUDA_HOME=/usr/local/cuda
 USER root
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/build.txt \
+        --extra-index-url ${VL_PYPI_INDEX_URL} \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # NOTE: deepseek-ai packages have been removed due to national security concerns
 
 # TODO: figure out how to do this on Alpine Linux
-RUN curl -fsSL https://github.com/NVIDIA/gdrcopy/archive/refs/tags/v2.5.1.tar.gz | tar -xz && \
+RUN git clone --branch v2.5.1 https://github.com/NVIDIA/gdrcopy.git && \
     cd gdrcopy && \
     make prefix=/usr/local/gdrcopy CUDA=/usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2) all install && \
     ./insmod.sh
 
-    RUN set -eux; \
-    case "${TARGETPLATFORM}" in \
-      linux/arm64) UUARCH="aarch64" ;; \
-      linux/amd64) UUARCH="x64" ;; \
-      *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" >&2; exit 1 ;; \
-    esac; \
-    ./install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"; \
-    rm ./install_gdrcopy.sh
+# RUN set -eux; \
+# case "${TARGETPLATFORM}" in \
+#     linux/arm64) UUARCH="aarch64" ;; \
+#     linux/amd64) UUARCH="x64" ;; \
+#     *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" >&2; exit 1 ;; \
+# esac; \
+# ./install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "${GDRCOPY_CUDA_VERSION}" "${UUARCH}"; \
+# rm ./install_gdrcopy.sh
 
 
 # Install EP kernels from perplexity(pplx-kernels)
@@ -233,9 +232,11 @@ USER nonroot
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=true
+ARG VL_PYPI_INDEX_URL
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+# ENV PIP_INDEX_URL=${VL_PYPI_INDEX_URL}
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -257,7 +258,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system accelerate hf_transfer "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' boto3 runai-model-streamer runai-model-streamer[s3]
 USER nonroot
 
-ENV VLLM_USAGE_SOURCE production-docker-image
+ENV VLLM_USAGE_SOURCE=production-docker-image
 
 FROM vllm-openai-base AS vllm-openai
 

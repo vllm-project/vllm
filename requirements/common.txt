@@ -27,7 +27,7 @@ lark == 1.2.2
 xgrammar == 0.1.25; platform_machine == "x86_64" or platform_machine == "aarch64" or platform_machine == "arm64"
 typing_extensions >= 4.10
 filelock >= 3.16.1 # need to contain https://github.com/tox-dev/filelock/pull/317
-partial-json-parser # used for parsing partial JSON outputs
+vl-partial-json-parser == 0.2.1.1.post6 # used for parsing partial JSON outputs
 pyzmq >= 25.0.0
 msgspec
 gguf >= 0.13.0

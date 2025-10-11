@@ -5,9 +5,9 @@ import json
 from collections.abc import Generator
 from typing import Optional
 
-import partial_json_parser
+import vl_partial_json_parser
 import pytest
-from partial_json_parser.core.options import Allow
+from vl_partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.openai.protocol import (DeltaMessage, FunctionCall,
                                               ToolCall)
@@ -271,7 +271,7 @@ def test_extract_tool_calls_streaming(jamba_tool_parser, jamba_tokenizer,
         ToolCall(id=tool_call_id,
                  function=FunctionCall(
                      name=function_name,
-                     arguments=partial_json_parser.ensure_json(
+                     arguments=vl_partial_json_parser.ensure_json(
                          function_args_str, Allow.OBJ | Allow.STR)))
         for tool_call_id, function_name, function_args_str in zip(
             tool_call_ids, function_names, function_args_strs)

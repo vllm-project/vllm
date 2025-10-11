@@ -5,9 +5,9 @@ import json
 from collections.abc import Sequence
 from typing import Union
 
-import partial_json_parser
+import vl_partial_json_parser
 import regex as re
-from partial_json_parser.core.options import Allow
+from vl_partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -160,9 +160,9 @@ class JambaToolParser(ToolParser):
             # tool calls are generated in an array, so do partial JSON
             # parsing on the entire array
             try:
-                tool_call_arr: list[dict] = partial_json_parser.loads(
+                tool_call_arr: list[dict] = vl_partial_json_parser.loads(
                     parsable_arr, flags)
-            except partial_json_parser.core.exceptions.MalformedJSON:
+            except vl_partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
                 return None
 
