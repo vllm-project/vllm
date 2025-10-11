@@ -169,19 +169,6 @@ class SchedulerConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @model_validator(mode="before")
-    @classmethod
-    def _set_defaults(cls, data: Any) -> Any:
-        if data.get("max_num_seqs") is None:
-            logger.warning("max_num_seqs is not set, using arbitrary value 128.")
-            data["max_num_seqs"] = 128
-
-        if data.get("max_model_len") is None:
-            logger.warning("max_model_len is not set, using arbitrary value 8192.")
-            data["max_model_len"] = 8192
-
-        return data
-
     def __post_init__(self, is_encoder_decoder: bool) -> None:
         """Post init to handle init vars."""
         if is_encoder_decoder:
@@ -197,6 +184,14 @@ class SchedulerConfig:
 
     @model_validator(mode="after")
     def _validate_scheduler_config(self) -> Self:
+        if self.max_num_seqs is None:
+            logger.warning("max_num_seqs is not set, using arbitrary value 128.")
+            self.max_num_seqs = 128
+
+        if self.max_model_len is None:
+            logger.warning("max_model_len is not set, using arbitrary value 8192.")
+            self.max_model_len = 8192
+
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
                 self.max_num_batched_tokens = DEFAULT_MAX_NUM_BATCHED_TOKENS
