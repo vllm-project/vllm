@@ -13,7 +13,6 @@
 # This backward pass is faster for dimensions up to 8k, but after that it's much slower due to register spilling.
 # The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
 
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -270,10 +269,10 @@ class LayerNormGated(nn.Module):
         self,
         hidden_size,
         eps: float = 1e-5,
-        group_size: Optional[int] = None,
+        group_size: int | None = None,
         norm_before_gate: bool = True,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ):
         """If group_size is not None, we do GroupNorm with each group having group_size elements.
         group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
@@ -310,10 +309,10 @@ class RMSNormGated(nn.Module):
         self,
         hidden_size,
         eps: float = 1e-5,
-        group_size: Optional[int] = None,
+        group_size: int | None = None,
         norm_before_gate: bool = False,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
     ):
         """If group_size is not None, we do GroupNorm with each group having group_size elements.
         group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).

@@ -4,7 +4,7 @@
 import itertools
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional, Protocol, Union, overload
+from typing import Any, Literal, Protocol, overload
 
 import torch
 import torch.nn as nn
@@ -32,7 +32,7 @@ from vllm.utils import (
 
 logger = init_logger(__name__)
 
-WeightsMapping = Mapping[str, Optional[str]]
+WeightsMapping = Mapping[str, str | None]
 """If a key maps to a value of `None`, the corresponding weight is ignored."""
 
 
@@ -44,7 +44,7 @@ class WeightsMapper:
     orig_to_new_prefix: WeightsMapping = field(default_factory=dict)
     orig_to_new_suffix: WeightsMapping = field(default_factory=dict)
 
-    def _map_name(self, key: str) -> Optional[str]:
+    def _map_name(self, key: str) -> str | None:
         for substr, new_key in self.orig_to_new_substr.items():
             if substr in key:
                 if new_key is None:
@@ -120,10 +120,10 @@ class AutoWeightsLoader:
         self,
         module: nn.Module,
         *,
-        skip_prefixes: Optional[list[str]] = None,
-        skip_substrs: Optional[list[str]] = None,
-        ignore_unexpected_prefixes: Optional[list[str]] = None,
-        ignore_unexpected_suffixes: Optional[list[str]] = None,
+        skip_prefixes: list[str] | None = None,
+        skip_substrs: list[str] | None = None,
+        ignore_unexpected_prefixes: list[str] | None = None,
+        ignore_unexpected_suffixes: list[str] | None = None,
     ) -> None:
         super().__init__()
 
@@ -306,7 +306,7 @@ class AutoWeightsLoader:
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
         *,
-        mapper: Optional[WeightsMapper] = None,
+        mapper: WeightsMapper | None = None,
     ) -> set[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
@@ -323,8 +323,8 @@ def init_vllm_registered_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    hf_config: Optional[PretrainedConfig] = None,
-    architectures: Optional[list[str]] = None,
+    hf_config: PretrainedConfig | None = None,
+    architectures: list[str] | None = None,
 ) -> nn.Module:
     """
     Helper function to initialize an inner model registered to vLLM,
@@ -352,7 +352,7 @@ def flatten_bn(x: list[torch.Tensor]) -> list[torch.Tensor]: ...
 
 @overload
 def flatten_bn(
-    x: Union[list[torch.Tensor], torch.Tensor],
+    x: list[torch.Tensor] | torch.Tensor,
     *,
     concat: Literal[True],
 ) -> torch.Tensor: ...
@@ -360,17 +360,17 @@ def flatten_bn(
 
 @overload
 def flatten_bn(
-    x: Union[list[torch.Tensor], torch.Tensor],
+    x: list[torch.Tensor] | torch.Tensor,
     *,
     concat: bool = False,
-) -> Union[list[torch.Tensor], torch.Tensor]: ...
+) -> list[torch.Tensor] | torch.Tensor: ...
 
 
 def flatten_bn(
-    x: Union[list[torch.Tensor], torch.Tensor],
+    x: list[torch.Tensor] | torch.Tensor,
     *,
     concat: bool = False,
-) -> Union[list[torch.Tensor], torch.Tensor]:
+) -> list[torch.Tensor] | torch.Tensor:
     """
     Flatten the ``B`` and ``N`` dimensions of batched multimodal inputs.
 
@@ -472,7 +472,7 @@ def merge_multimodal_embeddings(
     input_ids: torch.Tensor,
     inputs_embeds: torch.Tensor,
     multimodal_embeddings: NestedTensors,
-    placeholder_token_id: Union[int, list[int]],
+    placeholder_token_id: int | list[int],
 ) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the

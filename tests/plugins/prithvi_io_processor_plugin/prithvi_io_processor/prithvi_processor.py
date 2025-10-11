@@ -9,7 +9,7 @@ import os
 import tempfile
 import urllib.request
 from collections.abc import Sequence
-from typing import Any, Union
+from typing import Any
 
 import albumentations
 import numpy as np
@@ -160,11 +160,11 @@ def read_geotiff(
 
 
 def load_image(
-    data: Union[list[str]],
+    data: list[str],
     path_type: str,
     mean: list[float] | None = None,
     std: list[float] | None = None,
-    indices: Union[list[int], None] | None = None,
+    indices: list[int] | None | None = None,
 ):
     """Build an input example by loading images in *file_paths*.
 
@@ -280,7 +280,7 @@ class PrithviMultimodalDataProcessor(IOProcessor):
         prompt: IOProcessorInput,
         request_id: str | None = None,
         **kwargs,
-    ) -> Union[PromptType, Sequence[PromptType]]:
+    ) -> PromptType | Sequence[PromptType]:
         image_data = dict(prompt)
 
         if request_id:

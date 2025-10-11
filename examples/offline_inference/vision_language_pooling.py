@@ -11,7 +11,7 @@ on HuggingFace model repository.
 from argparse import Namespace
 from dataclasses import asdict
 from pathlib import Path
-from typing import Literal, NamedTuple, Optional, TypedDict, Union, get_args
+from typing import Literal, NamedTuple, TypedDict, Union, get_args
 
 from PIL.Image import Image
 
@@ -52,10 +52,10 @@ Query = Union[TextQuery, ImageQuery, TextImageQuery, TextImagesQuery]
 
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
-    prompt: Optional[str] = None
-    image: Optional[Image] = None
-    query: Optional[str] = None
-    documents: Optional[ScoreMultiModalParam] = None
+    prompt: str | None = None
+    image: Image | None = None
+    query: str | None = None
+    documents: ScoreMultiModalParam | None = None
 
 
 def run_clip(query: Query) -> ModelRequestData:
@@ -281,7 +281,7 @@ def get_query(modality: QueryModality):
     raise ValueError(msg)
 
 
-def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
+def run_encode(model: str, modality: QueryModality, seed: int | None):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 
@@ -311,7 +311,7 @@ def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
         print("-" * 50)
 
 
-def run_score(model: str, modality: QueryModality, seed: Optional[int]):
+def run_score(model: str, modality: QueryModality, seed: int | None):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 

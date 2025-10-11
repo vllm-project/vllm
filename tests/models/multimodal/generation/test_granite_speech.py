@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Optional
 
 import pytest
 from transformers import AutoModelForSpeechSeq2Seq
@@ -18,8 +17,8 @@ HF_AUDIO_PROMPT = "<|start_of_role|>system<|end_of_role|>Knowledge Cutoff Date: 
 
 
 def vllm_to_hf_output(
-    vllm_output: tuple[list[int], str, Optional[SampleLogprobs]],
-) -> tuple[list[int], str, Optional[SampleLogprobs]]:
+    vllm_output: tuple[list[int], str, SampleLogprobs | None],
+) -> tuple[list[int], str, SampleLogprobs | None]:
     """Sanitize hf output to be comparable with vllm output."""
     output_ids, output_str, out_logprobs = vllm_output
 
@@ -46,7 +45,7 @@ def run_test(
     max_tokens: int,
     num_logprobs: int,
     tensor_parallel_size: int,
-    distributed_executor_backend: Optional[str] = None,
+    distributed_executor_backend: str | None = None,
 ):
     """Inference result should be the same between hf and vllm.
 

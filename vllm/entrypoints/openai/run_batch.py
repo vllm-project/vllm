@@ -4,10 +4,9 @@
 import asyncio
 import tempfile
 from argparse import Namespace
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from io import StringIO
-from typing import Callable, Optional
 
 import aiohttp
 import torch
@@ -124,7 +123,7 @@ _BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elap
 class BatchProgressTracker:
     def __init__(self):
         self._total = 0
-        self._pbar: Optional[tqdm] = None
+        self._pbar: tqdm | None = None
 
     def submitted(self):
         self._total += 1

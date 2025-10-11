@@ -8,7 +8,7 @@ import random
 import sys
 from datetime import timedelta
 from platform import uname
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
@@ -113,7 +113,7 @@ class Platform:
 
     additional_env_vars: list[str] = []
 
-    _global_graph_pool: Optional[Any] = None
+    _global_graph_pool: Any | None = None
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -191,7 +191,7 @@ class Platform:
         selected_backend: "_Backend",
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
+        kv_cache_dtype: str | None,
         block_size: int,
         use_v1: bool,
         use_mla: bool,
@@ -205,14 +205,14 @@ class Platform:
     def get_device_capability(
         cls,
         device_id: int = 0,
-    ) -> Optional[DeviceCapability]:
+    ) -> DeviceCapability | None:
         """Stateless version of [torch.cuda.get_device_capability][]."""
         return None
 
     @classmethod
     def has_device_capability(
         cls,
-        capability: Union[tuple[int, int], int],
+        capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
         """
@@ -236,7 +236,7 @@ class Platform:
     @classmethod
     def is_device_capability(
         cls,
-        capability: Union[tuple[int, int], int],
+        capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
         """
@@ -283,7 +283,7 @@ class Platform:
         return torch.inference_mode(mode=True)
 
     @classmethod
-    def seed_everything(cls, seed: Optional[int] = None) -> None:
+    def seed_everything(cls, seed: int | None = None) -> None:
         """
         Set the seed of each random module.
         `torch.manual_seed` will set seed on all devices.
@@ -304,7 +304,7 @@ class Platform:
 
     @classmethod
     def pre_register_and_update(
-        cls, parser: Optional[FlexibleArgumentParser] = None
+        cls, parser: FlexibleArgumentParser | None = None
     ) -> None:
         """
         Do some pre-registration or update action for the current platform.
@@ -389,7 +389,7 @@ class Platform:
 
     @classmethod
     def get_current_memory_usage(
-        cls, device: Optional[torch.types.Device] = None
+        cls, device: torch.types.Device | None = None
     ) -> float:
         """
         Return the memory usage in bytes.
@@ -501,7 +501,7 @@ class Platform:
     def validate_request(
         cls,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams | PoolingParams,
         processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""
@@ -617,7 +617,7 @@ class Platform:
         return {}
 
     @classmethod
-    def get_nixl_memory_type(cls) -> Optional[str]:
+    def get_nixl_memory_type(cls) -> str | None:
         """
         Returns the nixl memory type for the current platform.
         """

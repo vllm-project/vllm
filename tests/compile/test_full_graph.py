@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
-from typing import Any, Union
+from typing import Any
 
 import pytest
 import torch
@@ -217,7 +217,7 @@ def test_inductor_graph_partition_attn_fusion(caplog_vllm):
 
 
 def run_model(
-    compile_config: Union[int, CompilationConfig],
+    compile_config: int | CompilationConfig,
     model: str,
     model_kwargs: dict[str, Any],
 ):

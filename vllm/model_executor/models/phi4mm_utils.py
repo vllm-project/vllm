@@ -6,7 +6,7 @@
 # but implemented by the Phi-Speech team
 #!/usr/bin/env python3
 import math
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -917,7 +917,7 @@ class CausalConv1D(nn.Conv1d):
         out_channels: int,
         kernel_size: int,
         stride: int = 1,
-        padding: Union[str, int] = 0,
+        padding: str | int = 0,
         dilation: int = 1,
         groups: int = 1,
         bias: bool = True,
@@ -962,8 +962,8 @@ class CausalConv1D(nn.Conv1d):
         )
 
     def update_cache(
-        self, x: Tensor, cache: Optional[Tensor] = None
-    ) -> tuple[Tensor, Optional[Tensor]]:
+        self, x: Tensor, cache: Tensor | None = None
+    ) -> tuple[Tensor, Tensor | None]:
         if cache is None:
             new_x = F.pad(x, pad=(self._left_padding, self._right_padding))
             next_cache = cache
@@ -978,8 +978,8 @@ class CausalConv1D(nn.Conv1d):
         return new_x, next_cache
 
     def forward(
-        self, x: Tensor, cache: Optional[Tensor] = None
-    ) -> Union[Tensor, tuple[Tensor, Optional[Tensor]]]:
+        self, x: Tensor, cache: Tensor | None = None
+    ) -> Tensor | tuple[Tensor, Tensor | None]:
         x, cache = self.update_cache(x, cache=cache)
         x = super().forward(x)
         if cache is None:
@@ -1002,7 +1002,7 @@ class CausalConv2D(nn.Conv2d):
         out_channels: int,
         kernel_size: int,
         stride: int = 1,
-        padding: Union[str, int] = 0,
+        padding: str | int = 0,
         dilation: int = 1,
         groups: int = 1,
         bias: bool = True,
@@ -1371,9 +1371,7 @@ class NemoConvSubsampling(torch.nn.Module):
     def get_streaming_cache_size(self) -> list[int]:
         return [0, self.subsampling_factor + 1]
 
-    def forward(
-        self, x: Tensor, mask: Optional[Tensor]
-    ) -> tuple[Tensor, Optional[Tensor]]:
+    def forward(self, x: Tensor, mask: Tensor | None) -> tuple[Tensor, Tensor | None]:
         """
         Forward method for NeMo subsampling.
 
@@ -1615,10 +1613,10 @@ class AttModule(nn.Module):
     def forward(
         self,
         x: Tensor,
-        memory: Optional[Tensor] = None,
-        pos_emb: Optional[Tensor] = None,
-        att_mask: Optional[Tensor] = None,
-    ) -> tuple[Tensor, Tensor, Optional[Tensor], Optional[Tensor]]:
+        memory: Tensor | None = None,
+        pos_emb: Tensor | None = None,
+        att_mask: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor | None, Tensor | None]:
         """AttModule forward
 
         Args:
@@ -1640,7 +1638,7 @@ class AttBlock(BlockBase, AttModule):
 
 def masked_softmax(
     scores: Tensor,
-    mask: Optional[Tensor],
+    mask: Tensor | None,
 ) -> Tensor:
     if mask is not None:
         mask = mask.unsqueeze(1).eq(0)  # (batch, 1, time1, time2)
@@ -1741,10 +1739,10 @@ class MultiHeadedAttention(nn.Module):
         query: Tensor,
         key: Tensor,
         value: Tensor,
-        pos_k: Optional[Tensor],
-        pos_v: Optional[Tensor],
-        mask: Optional[Tensor],
-        relative_attention_bias: Optional[Tensor] = None,
+        pos_k: Tensor | None,
+        pos_v: Tensor | None,
+        mask: Tensor | None,
+        relative_attention_bias: Tensor | None = None,
     ) -> Tensor:
         """Compute 'Scaled Dot Product Attention'.
 

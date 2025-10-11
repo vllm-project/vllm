@@ -7,7 +7,7 @@ import functools
 import json
 from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
-from typing import Optional, Union, cast
+from typing import cast
 
 from vllm.sampling_params import SamplingParams
 from vllm.v1.structured_output.backend_types import (
@@ -20,9 +20,7 @@ from vllm.v1.structured_output.backend_types import (
 @dataclasses.dataclass
 class StructuredOutputRequest:
     sampling_params: SamplingParams
-    _grammar: Union[Future[StructuredOutputGrammar], StructuredOutputGrammar] | None = (
-        None
-    )
+    _grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar | None = None
     reasoning_ended: bool | None = None
 
     def _check_grammar_completion(self) -> bool:
@@ -46,14 +44,12 @@ class StructuredOutputRequest:
     def grammar(self) -> StructuredOutputGrammar | None:
         completed = self._check_grammar_completion()
         return (
-            cast(Optional[StructuredOutputGrammar], self._grammar)
-            if completed
-            else None
+            cast(StructuredOutputGrammar | None, self._grammar) if completed else None
         )
 
     @grammar.setter
     def grammar(
-        self, grammar: Union[StructuredOutputGrammar, Future[StructuredOutputGrammar]]
+        self, grammar: StructuredOutputGrammar | Future[StructuredOutputGrammar]
     ) -> None:
         self._grammar = grammar
 

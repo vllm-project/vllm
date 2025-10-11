@@ -7,7 +7,7 @@ See https://github.com/vllm-project/vllm/issues/11926 for more details.
 Run `pytest tests/quantization/test_register_quantization_config.py`.
 """
 
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 import torch
@@ -39,7 +39,7 @@ class FakeQuantLinearMethod(UnquantizedLinearMethod):
         self,
         layer: "torch.nn.Module",
         x: "torch.Tensor",
-        bias: Optional["torch.Tensor"] = None,
+        bias: "torch.Tensor" | None = None,
     ) -> "torch.Tensor":
         """Perform fake quantization before the linear layer."""
 
@@ -93,7 +93,7 @@ class CustomQuantConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: "torch.nn.Module", prefix: str
-    ) -> Optional["FakeQuantLinearMethod"]:
+    ) -> "FakeQuantLinearMethod" | None:
         """Get the quantize method to use for the quantized layer."""
         if isinstance(layer, LinearBase):
             return FakeQuantLinearMethod(num_bits=self.num_bits)

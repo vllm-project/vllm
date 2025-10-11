@@ -8,7 +8,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from importlib.util import find_spec
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -127,7 +127,7 @@ class CpuPlatform(Platform):
         selected_backend: "_Backend",
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
+        kv_cache_dtype: str | None,
         block_size: int,
         use_v1: bool,
         use_mla: bool,
