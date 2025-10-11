@@ -5,12 +5,12 @@ import enum
 import hashlib
 from collections import Counter
 from dataclasses import asdict, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
 
 from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
-import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -33,37 +33,49 @@ class CompilationLevel:
 
 
 class CUDAGraphMode(enum.Enum):
-    """ Constants for the cudagraph mode in CompilationConfig.
+    """Constants for the cudagraph mode in CompilationConfig.
     Meanwhile, the subset enum `NONE`, `PIECEWISE` and `FULL` are also
     treated as concrete runtime mode for cudagraph runtime dispatching.
     """
+
     NONE = 0
     PIECEWISE = 1
     FULL = 2
     FULL_DECODE_ONLY = (FULL, NONE)
     FULL_AND_PIECEWISE = (FULL, PIECEWISE)
 
-    def decode_mode(self) -> 'CUDAGraphMode':
-        return CUDAGraphMode(self.value[0]) if \
-            self.separate_routine() else self
+    def decode_mode(self) -> "CUDAGraphMode":
+        return CUDAGraphMode(self.value[0]) if self.separate_routine() else self
 
-    def mixed_mode(self) -> 'CUDAGraphMode':
-        return CUDAGraphMode(self.value[1]) if \
-            self.separate_routine() else self
+    def mixed_mode(self) -> "CUDAGraphMode":
+        return CUDAGraphMode(self.value[1]) if self.separate_routine() else self
+
+    def has_mode(self, mode: "CUDAGraphMode") -> bool:
+        assert not mode.separate_routine()
+        if self.separate_routine():
+            return mode.value in self.value
+        return self == mode
 
     def requires_piecewise_compilation(self) -> bool:
-        return (self.decode_mode() == CUDAGraphMode.PIECEWISE
-                or self.mixed_mode() == CUDAGraphMode.PIECEWISE)
+        return self.has_mode(CUDAGraphMode.PIECEWISE)
 
-    def max_cudagraph_mode(self) -> 'CUDAGraphMode':
-        return CUDAGraphMode(max(
-            self.value)) if self.separate_routine() else self
+    def max_cudagraph_mode(self) -> "CUDAGraphMode":
+        return CUDAGraphMode(max(self.value)) if self.separate_routine() else self
 
     def has_full_cudagraphs(self) -> bool:
         return self.max_cudagraph_mode() == CUDAGraphMode.FULL
 
+    def has_piecewise_cudagraphs(self) -> bool:
+        return self.requires_piecewise_compilation()
+
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
+
+    def valid_runtime_modes(self) -> bool:
+        return self in [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+
+    def __str__(self) -> str:
+        return self.name
 
 
 @config
@@ -75,11 +87,11 @@ class PassConfig:
     don't all have access to full configuration - that would create a cycle as
     the `PassManager` is set as a property of config."""
 
-    enable_fusion: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
+    enable_fusion: bool = False
     """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
     enable_attn_fusion: bool = False
     """Whether to enable the custom attention+quant fusion pass."""
-    enable_noop: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
+    enable_noop: bool = False
     """Whether to enable the custom no-op elimination pass."""
     enable_sequence_parallelism: bool = False
     """Whether to enable sequence parallelism."""
@@ -105,11 +117,13 @@ class PassConfig:
             if self.enable_fusion:
                 logger.warning_once(
                     "Fusion enabled but reshape elimination disabled. "
-                    "RMSNorm/SiluMul + quant (fp8) fusion might not work")
+                    "RMSNorm/SiluMul + quant (fp8) fusion might not work"
+                )
             if self.enable_attn_fusion:
                 logger.warning_once(
                     "Fusion enabled but reshape elimination disabled. "
-                    "Attention + quant (fp8) fusion might not work")
+                    "Attention + quant (fp8) fusion might not work"
+                )
 
 
 @config
@@ -152,6 +166,7 @@ class CompilationConfig:
         sufficient for most cases. It might be beneficial to compile for
         certain small batchsizes, where inductor is good at optimizing.
     """
+
     # Top-level Compilation control
     level: Optional[int] = None
     """The level of compilation:
@@ -162,7 +177,7 @@ class CompilationConfig:
     - 1: dynamo as is.
     - 2: dynamo once.
     - 3: piecewise compilation."""
-    debug_dump_path: str = ""
+    debug_dump_path: Optional[Path] = None
     """The path to dump the debug information."""
     cache_dir: str = ""
     """The directory to store the compiled graph, to accelerate Inductor
@@ -194,8 +209,23 @@ class CompilationConfig:
     disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: Optional[list[str]] = None
-    """A list of ops to split the full graph into subgraphs, used in piecewise
-    compilation."""
+    """A list of ops to exclude from cudagraphs, used in piecewise compilation.
+
+    The behavior depends on use_inductor_graph_partition:
+
+    - When use_inductor_graph_partition=False (default):
+        These ops are used for Dynamo FX-level graph splitting. The graph is
+        split at these ops before Inductor compilation, creating separate
+        subgraphs for cudagraph capture.
+
+    - When use_inductor_graph_partition=True:
+        These ops are used to register Inductor partition rules. The graph
+        partitioning happens at Inductor codegen time after all passes and
+        fusions are finished, allowing compilation and custom passes to operate
+        on the full graph while still excluding these ops from cudagraphs.
+
+    If None, defaults to attention ops for piecewise cudagraphs.
+    If empty list [], no ops are excluded (suitable for full cudagraphs)."""
 
     # Inductor capture
     use_inductor: bool = True
@@ -225,17 +255,17 @@ class CompilationConfig:
     # CudaGraph compilation
     cudagraph_mode: Optional[CUDAGraphMode] = None
     """
-    The mode of the cudagraph.
+    The mode of the cudagraph:
+
     - NONE, no cudagraph capture.
-    - PIECEWISE. (v1 default)
+    - PIECEWISE.
     - FULL.
     - FULL_DECODE_ONLY.
-    - FULL_AND_PIECEWISE.
+    - FULL_AND_PIECEWISE. (v1 default)
 
     PIECEWISE mode build piecewise cudagraph only, keeping the cudagraph
-    incompatiable ops (i.e. some attention ops) outside the cudagraph
+    incompatible ops (i.e. some attention ops) outside the cudagraph
     for general flexibility.
-    This is the default mode.
 
     FULL mode: Capture full cudagraph for all batches. Can be good for small
     models or workloads with small prompts; not supported by many backends.
@@ -248,7 +278,7 @@ class CompilationConfig:
     
     FULL_AND_PIECEWISE mode: Capture full cudagraph for decode batches and
     piecewise cudagraph for prefill and mixed prefill-decode batches.
-    This is like the most performant mode for most models.
+    This is the most performant mode for most models and is the default.
 
     Currently, the cudagraph mode is only used for the v1 engine.
     Note that the cudagraph logic is generally orthogonal to the 
@@ -270,7 +300,8 @@ class CompilationConfig:
     Note that this is orthogonal to the cudagraph capture logic
     outside of compilation.
     Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode instead.
+    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=PIECEWISE
+    instead.
     """
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
@@ -295,7 +326,28 @@ class CompilationConfig:
     flag cannot be used together with splitting_ops. This may provide
     performance benefits for smaller models.
     Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode instead.
+    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=
+    FULL_AND_PIECEWISE instead.
+    """
+
+    use_inductor_graph_partition: bool = False
+    """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
+    This partition happens at inductor codegen time after all passes and fusions
+    are finished. It generates a single `call` function which wraps
+    cudagraph-safe ops into partition functions and leave cudagraph-unsafe ops
+    outside the partition functions. For a graph with N cudagraph-unsafe ops
+    (e.g., Attention), there would be N+1 partitions. To mark an op as
+    cudagraph unsafe, we can add `tags=(torch._C.Tag.cudagraph_unsafe)` when
+    register the custom op. 
+
+    This config supports both full cudagraph and piecewise cudagraph without
+    compiling twice. For piecewise cudagraph, it applies vLLM CUDAGraph wrapper
+    to each partition. For N+1 partitions, there would be N+1
+    CUDAGraph wrapper instances.
+
+    For full CUDAGraph, we always apply a single CUDAGraph wrapper outside the
+    inductor `call` function in the model runner. The top-level full cudagraph
+    capture ignores all partitioning.
     """
 
     pass_config: PassConfig = field(default_factory=PassConfig)
@@ -307,37 +359,42 @@ class CompilationConfig:
     """local cache dir for each rank"""
     bs_to_padded_graph_size: list[int] = field(
         default=None,  # type: ignore
-        init=False)
+        init=False,
+    )
     """optimization:
     Intuitively, bs_to_padded_graph_size should be dict[int, int].
     since we know all keys are in a range [0, max_capture_size],
     we can optimize it to list[int] for better lookup performance."""
 
     # keep track of enabled and disabled custom ops
-    enabled_custom_ops: Counter[str] = field(default_factory=Counter,
-                                             init=False)
+    enabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)
     """custom ops that are enabled"""
-    disabled_custom_ops: Counter[str] = field(default_factory=Counter,
-                                              init=False)
+    disabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)
     """custom ops that are disabled"""
     traced_files: set[str] = field(default_factory=set, init=False)
     """files that are traced for compilation"""
     compilation_time: float = field(default=0.0, init=False)
     """time taken for compilation"""
 
-    static_forward_context: dict[str, Any] = field(default_factory=dict,
-                                                   init=False)
+    static_forward_context: dict[str, Any] = field(default_factory=dict, init=False)
     """Per-model forward context
     Map from layer name to layer objects that need to be accessed outside
     model code, e.g., Attention, FusedMOE when dp_size>1."""
 
     # Attention ops; used for piecewise cudagraphs
+    # Use PyTorch operator format: "namespace::name"
     _attention_ops: ClassVar[list[str]] = [
-        "vllm.unified_attention",
-        "vllm.unified_attention_with_output",
-        "vllm.mamba_mixer2",
-        "vllm.mamba_mixer",
-        "vllm.short_conv",
+        "vllm::unified_attention",
+        "vllm::unified_attention_with_output",
+        "vllm::unified_mla_attention",
+        "vllm::unified_mla_attention_with_output",
+        "vllm::mamba_mixer2",
+        "vllm::mamba_mixer",
+        "vllm::short_conv",
+        "vllm::linear_attention",
+        "vllm::plamo2_mamba_mixer",
+        "vllm::gdn_attention",
+        "vllm::sparse_attn_indexer",
     ]
 
     def compute_hash(self) -> str:
@@ -384,13 +441,11 @@ class CompilationConfig:
         if pass_config_exclude:
             exclude["pass_config"] = pass_config_exclude
 
-        # The cast to string is necessary because Pydantic is mocked in docs
-        # builds and sphinx-argparse doesn't know the return type of decode()
-        return str(
-            TypeAdapter(CompilationConfig).dump_json(
-                self,
-                exclude=exclude,  # type: ignore[arg-type]
-                exclude_unset=True).decode())
+        config = TypeAdapter(CompilationConfig).dump_python(
+            self, exclude=exclude, exclude_unset=True
+        )
+
+        return str(config)
 
     __str__ = __repr__
 
@@ -418,16 +473,16 @@ class CompilationConfig:
         #    https://github.com/vllm-project/vllm/issues/14703
 
         if is_torch_equal_or_newer("2.6"):
-            KEY = 'enable_auto_functionalized_v2'
+            KEY = "enable_auto_functionalized_v2"
             if KEY not in self.inductor_compile_config:
                 self.inductor_compile_config[KEY] = False
 
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
-                assert callable(v), (
-                    f"pass {k} should be callable or a qualified name")
-                self.inductor_compile_config[k] = v if isinstance(
-                    v, InductorPass) else CallableInductorPass(v)
+                assert callable(v), f"pass {k} should be callable or a qualified name"
+                self.inductor_compile_config[k] = (
+                    v if isinstance(v, InductorPass) else CallableInductorPass(v)
+                )
                 continue
 
             # resolve function from qualified name
@@ -435,40 +490,68 @@ class CompilationConfig:
             module = ".".join(names[:-1])
             func_name = names[-1]
             func = __import__(module).__dict__[func_name]
-            self.inductor_compile_config[k] = func if isinstance(
-                func, InductorPass) else CallableInductorPass(func)
+            self.inductor_compile_config[k] = (
+                func if isinstance(func, InductorPass) else CallableInductorPass(func)
+            )
 
         if isinstance(self.pass_config, dict):
             self.pass_config = PassConfig(**self.pass_config)
 
         # migrate the deprecated flags
         if not self.use_cudagraph:
-            logger.warning("use_cudagraph is deprecated, use "
-                           "cudagraph_mode=NONE instead.")
-            if self.cudagraph_mode is not None:
+            logger.warning(
+                "use_cudagraph is deprecated, use cudagraph_mode=NONE instead."
+            )
+            if (
+                self.cudagraph_mode is not None
+                and self.cudagraph_mode != CUDAGraphMode.NONE
+            ):
                 raise ValueError(
                     "use_cudagraph and cudagraph_mode are mutually"
                     " exclusive, prefer cudagraph_mode since "
-                    "use_cudagraph is deprecated.")
+                    "use_cudagraph is deprecated."
+                )
             self.cudagraph_mode = CUDAGraphMode.NONE
         if self.full_cuda_graph:
-            logger.warning("full_cuda_graph is deprecated, use "
-                           "cudagraph_mode=FULL instead.")
-            if self.cudagraph_mode is not None:
-                raise ValueError("full_cuda_graph and cudagraph_mode are "
-                                 "mutually exclusive, prefer cudagraph_mode "
-                                 "since full_cuda_graph is deprecated.")
+            logger.warning(
+                "full_cuda_graph is deprecated, use cudagraph_mode=FULL instead."
+            )
+            if (
+                self.cudagraph_mode is not None
+                and not self.cudagraph_mode.has_full_cudagraphs()
+            ):
+                raise ValueError(
+                    "full_cuda_graph and cudagraph_mode are "
+                    "mutually exclusive, prefer cudagraph_mode "
+                    "since full_cuda_graph is deprecated."
+                )
             self.cudagraph_mode = CUDAGraphMode.FULL
+
+        if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
+            "2.9.0.dev"
+        ):
+            raise ValueError(
+                "use_inductor_graph_partition is only "
+                "supported with torch>=2.9.0.dev. Set "
+                "use_inductor_graph_partition=False instead."
+            )
+
+        for op in self.custom_ops:
+            if op[0] not in {"+", "-"} and op not in {"all", "none"}:
+                raise ValueError(
+                    f"Invalid syntax '{op}' for custom op, "
+                    "must be 'all', 'none', '+op' or '-op' "
+                    "(where 'op' is the registered op name)"
+                )
 
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
         from torch._dynamo.backends.registry import list_backends
+
         torch_backends = list_backends(exclude_tags=tuple())
-        if self.level in [
-                CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE
-        ]:
+        if self.level in [CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE]:
             if self.backend == "":
                 return "eager"
             if self.backend in torch_backends:
@@ -480,10 +563,10 @@ class CompilationConfig:
         assert self.level == CompilationLevel.PIECEWISE
 
         from vllm.compilation.backends import VllmBackend
+
         return VllmBackend(vllm_config)
 
-    def init_with_cudagraph_sizes(self,
-                                  cudagraph_capture_sizes: list[int]) -> None:
+    def init_with_cudagraph_sizes(self, cudagraph_capture_sizes: list[int]) -> None:
         """To complete the initialization of config,
         we need to know the cudagraph sizes."""
 
@@ -493,9 +576,14 @@ class CompilationConfig:
             # de-duplicate the sizes provided by the config
             dedup_sizes = list(set(self.cudagraph_capture_sizes))
             if len(dedup_sizes) < len(self.cudagraph_capture_sizes):
-                logger.info(("cudagraph sizes specified by model runner"
-                             " %s is overridden by config %s"),
-                            cudagraph_capture_sizes, dedup_sizes)
+                logger.info(
+                    (
+                        "cudagraph sizes specified by model runner"
+                        " %s is overridden by config %s"
+                    ),
+                    cudagraph_capture_sizes,
+                    dedup_sizes,
+                )
             self.cudagraph_capture_sizes = dedup_sizes
 
         computed_compile_sizes = []
@@ -504,9 +592,10 @@ class CompilationConfig:
             self.compile_sizes = list(set(self.compile_sizes))
             for x in self.compile_sizes:
                 if isinstance(x, str):
-                    assert x == "cudagraph_capture_sizes", \
-                    "Unrecognized size type in compile_sizes, " \
-                    f"expect 'cudagraph_capture_sizes', got {x}"
+                    assert x == "cudagraph_capture_sizes", (
+                        "Unrecognized size type in compile_sizes, "
+                        f"expect 'cudagraph_capture_sizes', got {x}"
+                    )
                     computed_compile_sizes.extend(self.cudagraph_capture_sizes)
                 else:
                     assert isinstance(x, int)
@@ -515,52 +604,157 @@ class CompilationConfig:
 
         # sort to make sure cudagraph capture sizes are in descending order
         self.cudagraph_capture_sizes.sort(reverse=True)
-        self.max_capture_size = self.cudagraph_capture_sizes[
-            0] if self.cudagraph_capture_sizes else 0
+        self.max_capture_size = (
+            self.cudagraph_capture_sizes[0] if self.cudagraph_capture_sizes else 0
+        )
 
         # pre-compute the mapping from batch size to padded graph size
-        self.bs_to_padded_graph_size = [
-            0 for i in range(self.max_capture_size + 1)
-        ]
-        for end, start in zip(self.cudagraph_capture_sizes,
-                              self.cudagraph_capture_sizes[1:] + [0]):
+        self.bs_to_padded_graph_size = [0 for i in range(self.max_capture_size + 1)]
+        for end, start in zip(
+            self.cudagraph_capture_sizes, self.cudagraph_capture_sizes[1:] + [0]
+        ):
             for bs in range(start, end):
                 if bs == start:
                     self.bs_to_padded_graph_size[bs] = start
                 else:
                     self.bs_to_padded_graph_size[bs] = end
-        self.bs_to_padded_graph_size[
-            self.max_capture_size] = self.max_capture_size
+        self.bs_to_padded_graph_size[self.max_capture_size] = self.max_capture_size
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called only when level is
         # CompilationLevel.PIECEWISE
         assert self.level == CompilationLevel.PIECEWISE, (
             "set_splitting_ops_for_v1 should only be called when "
-            "level is CompilationLevel.PIECEWISE")
+            "level is CompilationLevel.PIECEWISE"
+        )
+
+        if self.use_inductor_graph_partition:
+            self.set_splitting_ops_for_inductor_graph_partition()
+            return
+
+        if self.pass_config.enable_attn_fusion:
+            # here use_inductor_graph_partition is False
+            self.set_splitting_ops_for_attn_fusion()
+            return
 
         if self.splitting_ops is None:
             # NOTE: When using full cudagraph, instead of setting an empty
             # list and capture the full cudagraph inside the flattened fx
-            # graph, we keep the piecewise fx graph structure but capture the
-            # full cudagraph outside the fx graph. This reduces some cpu
-            # overhead when the runtime batch_size is not cudagraph captured.
-            # see https://github.com/vllm-project/vllm/pull/20059 for details.
-            self.splitting_ops = self._attention_ops
+            # graph, we keep the piecewise fx graph structure but capture
+            # the full cudagraph outside the fx graph. This reduces some
+            # cpu overhead when the runtime batch_size is not cudagraph
+            # captured. see https://github.com/vllm-project/vllm/pull/20059
+            # for details. Make a copy to avoid mutating the class-level
+            # list via reference.
+            self.splitting_ops = list(self._attention_ops)
         elif len(self.splitting_ops) == 0:
-            logger.warning_once("Using piecewise compilation with empty "
-                                "splitting_ops.")
+            logger.warning_once("Using piecewise compilation with empty splitting_ops")
             if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
                 logger.warning_once(
-                    "When compilation level is piecewise with empty "
-                    "splitting_ops, PIECEWISE cudagraph_mode will be "
-                    "treated as FULL cudagraph_mode. Please ensure you are "
-                    "using attention backends that support cudagraph or set "
-                    "cudagraph_mode to NONE explicitly if encountering "
-                    "any problems.")
+                    "Piecewise compilation with empty splitting_ops do not"
+                    "contains piecewise cudagraph. Setting cudagraph_"
+                    "mode to NONE. Hint: If you are using attention backends "
+                    "that support cudagraph, consider manually setting "
+                    "cudagraph_mode to FULL or FULL_DECODE_ONLY to enable "
+                    "full cudagraphs."
+                )
+                self.cudagraph_mode = CUDAGraphMode.NONE
+            elif self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+                logger.warning_once(
+                    "Piecewise compilation with empty splitting_ops do not "
+                    "contains piecewise cudagraph. Setting cudagraph_mode "
+                    "to FULL."
+                )
                 self.cudagraph_mode = CUDAGraphMode.FULL
             self.splitting_ops = []
 
+    def set_splitting_ops_for_inductor_graph_partition(self):
+        assert self.use_inductor_graph_partition
+        if self.splitting_ops is None:
+            self.splitting_ops = list(self._attention_ops)
+
+    def set_splitting_ops_for_attn_fusion(self):
+        assert self.pass_config.enable_attn_fusion
+        # For dynamo-partition (non-inductor) attention fusion,
+        # set splitting_ops to empty to avoid splitting at attention ops
+        self.splitting_ops = []
+        if self.cudagraph_mode.has_piecewise_cudagraphs():
+            logger.warning_once(
+                "enable_attn_fusion is incompatible with piecewise "
+                "cudagraph when use_inductor_graph_partition is off. "
+                "In this case, splitting_ops will be set to empty "
+                "list, and cudagraph_mode will be set to FULL. "
+                "Please ensure you are using attention backends that "
+                "support cudagraph or set cudagraph_mode to NONE "
+                "explicitly if encountering any problems."
+            )
+            self.cudagraph_mode = CUDAGraphMode.FULL
+
+        assert not self.splitting_ops_contain_attention(), (
+            "attention ops should not be in splitting_ops "
+            "when enable_attn_fusion is True"
+        )
+
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and all(
-            op in self.splitting_ops for op in self._attention_ops)
+            op in self.splitting_ops for op in self._attention_ops
+        )
+
+    def is_attention_compiled_piecewise(self) -> bool:
+        if not self.splitting_ops_contain_attention():
+            return False
+
+        if not self.use_inductor_graph_partition:
+            # Dynamo-level FX split case
+            return self.level == CompilationLevel.PIECEWISE
+
+        # Inductor partition case
+        return (
+            self.level > CompilationLevel.NO_COMPILATION and self.backend == "inductor"
+        )
+
+    def custom_op_log_check(self):
+        """
+        This method logs the enabled/disabled custom ops and checks that the
+        passed custom_ops field only contains relevant ops.
+        It is called at the end of set_current_vllm_config,
+        after the custom ops have been instantiated.
+        """
+
+        if len(self.enabled_custom_ops) + len(self.disabled_custom_ops) == 0:
+            logger.debug("No custom ops found in model.")
+            return
+
+        logger.debug("enabled custom ops: %s", self.enabled_custom_ops)
+        logger.debug("disabled custom ops: %s", self.disabled_custom_ops)
+
+        all_ops_in_model = self.enabled_custom_ops | self.disabled_custom_ops
+        for op in self.custom_ops:
+            if op in {"all", "none"}:
+                continue
+
+            assert op[0] in {"+", "-"}, (
+                "Invalid custom op syntax (should be checked during init)"
+            )
+
+            # check if op name exists in model
+            op_name = op[1:]
+            if op_name not in all_ops_in_model:
+                from vllm.model_executor.custom_op import CustomOp
+
+                # Does op exist at all or is it just not present in this model?
+                # Note: Only imported op classes appear in the registry.
+                missing_str = (
+                    "doesn't exist (or wasn't imported/registered)"
+                    if op_name not in CustomOp.op_registry
+                    else "not present in model"
+                )
+
+                enable_str = "enabling" if op[0] == "+" else "disabling"
+                logger.warning_once(
+                    "Op '%s' %s, %s with '%s' has no effect",
+                    op_name,
+                    missing_str,
+                    enable_str,
+                    op,
+                )

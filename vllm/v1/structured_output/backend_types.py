@@ -103,14 +103,15 @@ class StructuredOutputBackend(ABC):
     vocab_size: int
 
     @abstractmethod
-    def compile_grammar(self, request_type: StructuredOutputOptions,
-                        grammar_spec: str) -> StructuredOutputGrammar:
+    def compile_grammar(
+        self, request_type: StructuredOutputOptions, grammar_spec: str
+    ) -> StructuredOutputGrammar:
         """
         Compiles a grammar specification into a structured output grammar.
 
         Args:
             request_type (StructuredOutputOptions): The type of structured
-              output request.
+                output request.
             grammar_spec (str): The grammar specification to compile.
 
         Returns:
@@ -124,7 +125,7 @@ class StructuredOutputBackend(ABC):
 
         Args:
             max_num_seqs (int): The maximum number of sequences for which
-              to allocate the bitmask.
+                to allocate the bitmask.
         """
 
     @abstractmethod

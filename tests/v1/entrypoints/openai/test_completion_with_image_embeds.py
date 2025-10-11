@@ -37,9 +37,9 @@ def default_image_embeds_server_args() -> list[str]:
 
 @pytest.fixture(scope="module")
 def server_with_image_embeds(default_image_embeds_server_args):
-    with RemoteOpenAIServer(MODEL_NAME,
-                            default_image_embeds_server_args,
-                            max_wait_seconds=600) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL_NAME, default_image_embeds_server_args, max_wait_seconds=600
+    ) as remote_server:
         yield remote_server
 
 
@@ -57,7 +57,7 @@ def encode_image_embedding_to_base64(image_embedding) -> str:
     torch.save(image_embedding, buffer)
     buffer.seek(0)
     binary_data = buffer.read()
-    base64_image_embedding = base64.b64encode(binary_data).decode('utf-8')
+    base64_image_embedding = base64.b64encode(binary_data).decode("utf-8")
     return base64_image_embedding
 
 
@@ -75,19 +75,13 @@ async def test_completions_with_image_embeds(
     base64_image_embedding = encode_image_embedding_to_base64(image_embeds)
     chat_completion = await client_with_image_embeds.chat.completions.create(
         messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
             {
-                "role": "system",
-                "content": "You are a helpful assistant."
-            },
-            {
-                "role":
-                "user",
+                "role": "user",
                 "content": [
                     {
-                        "type":
-                        "text",
-                        "text":
-                        "Describe these images separately. For each image,"
+                        "type": "text",
+                        "text": "Describe these images separately. For each image,"
                         "reply with a short sentence (no more than 10 words).",
                     },
                     {

@@ -7,7 +7,11 @@ import torch
 from typing_extensions import NotRequired, TypedDict, TypeIs, TypeVar
 
 if TYPE_CHECKING:
-    from vllm.multimodal.inputs import MultiModalDataDict, MultiModalInputs
+    from vllm.multimodal.inputs import (
+        MultiModalDataDict,
+        MultiModalInputs,
+        MultiModalUUIDDict,
+    )
 
 
 class TextPrompt(TypedDict):
@@ -16,18 +20,27 @@ class TextPrompt(TypedDict):
     prompt: str
     """The input text to be tokenized before passing to the model."""
 
-    multi_modal_data: NotRequired["MultiModalDataDict"]
+    multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
     """
 
-    mm_processor_kwargs: NotRequired[dict[str, Any]]
+    mm_processor_kwargs: NotRequired[Optional[dict[str, Any]]]
     """
     Optional multi-modal processor kwargs to be forwarded to the
     multimodal input mapper & processor. Note that if multiple modalities
     have registered mappers etc for the model being considered, we attempt
     to pass the mm_processor_kwargs to each of them.
+    """
+
+    multi_modal_uuids: NotRequired["MultiModalUUIDDict"]
+    """
+    Optional user-specified UUIDs for multimodal items, mapped by modality.
+    Lists must match the number of items per modality and may contain `None`.
+    For `None` entries, the hasher will compute IDs automatically; non-None
+    entries override the default hashes for caching, and MUST be unique per
+    multimodal item.
     """
 
     cache_salt: NotRequired[str]
@@ -42,21 +55,32 @@ class TokensPrompt(TypedDict):
     prompt_token_ids: list[int]
     """A list of token IDs to pass to the model."""
 
+    prompt: NotRequired[str]
+    """The prompt text corresponding to the token IDs, if available."""
+
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
-    multi_modal_data: NotRequired["MultiModalDataDict"]
+    multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
     """
 
-    mm_processor_kwargs: NotRequired[dict[str, Any]]
+    mm_processor_kwargs: NotRequired[Optional[dict[str, Any]]]
     """
     Optional multi-modal processor kwargs to be forwarded to the
     multimodal input mapper & processor. Note that if multiple modalities
     have registered mappers etc for the model being considered, we attempt
     to pass the mm_processor_kwargs to each of them.
+    """
+
+    multi_modal_uuids: NotRequired["MultiModalUUIDDict"]
+    """
+    Optional user-specified UUIDs for multimodal items, mapped by modality.
+    Lists must match the number of items per modality and may contain `None`.
+    For `None` entries, the hasher will compute IDs automatically; non-None
+    entries override the default hashes for caching.
     """
 
     cache_salt: NotRequired[str]
@@ -75,6 +99,16 @@ class EmbedsPrompt(TypedDict):
     """
     Optional cache salt to be used for prefix caching.
     """
+
+
+class DataPrompt(TypedDict):
+    """Represents generic inputs handled by IO processor plugins."""
+
+    data: Any
+    """The input data"""
+
+    data_format: str
+    """The input data format"""
 
 
 SingletonPrompt = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
@@ -103,23 +137,27 @@ more than one prompt, i.e.
 
 
 def is_tokens_prompt(prompt: SingletonPrompt) -> TypeIs[TokensPrompt]:
-    return (isinstance(prompt, dict) and "prompt_token_ids" in prompt
-            and "prompt_embeds" not in prompt)
+    return (
+        isinstance(prompt, dict)
+        and "prompt_token_ids" in prompt
+        and "prompt_embeds" not in prompt
+    )
 
 
 def is_embeds_prompt(prompt: SingletonPrompt) -> TypeIs[EmbedsPrompt]:
-    return (isinstance(prompt, dict) and "prompt_token_ids" not in prompt
-            and "prompt_embeds" in prompt)
+    return (
+        isinstance(prompt, dict)
+        and "prompt_token_ids" not in prompt
+        and "prompt_embeds" in prompt
+    )
 
 
-_T1_co = TypeVar("_T1_co",
-                 bound=SingletonPrompt,
-                 default=SingletonPrompt,
-                 covariant=True)
-_T2_co = TypeVar("_T2_co",
-                 bound=SingletonPrompt,
-                 default=SingletonPrompt,
-                 covariant=True)
+_T1_co = TypeVar(
+    "_T1_co", bound=SingletonPrompt, default=SingletonPrompt, covariant=True
+)
+_T2_co = TypeVar(
+    "_T2_co", bound=SingletonPrompt, default=SingletonPrompt, covariant=True
+)
 
 
 # TODO: Make fields ReadOnly once mypy supports it
@@ -174,14 +212,6 @@ class TokenInputs(TypedDict):
     prompt_token_ids: list[int]
     """The token IDs of the prompt."""
 
-    token_type_ids: NotRequired[list[int]]
-    """The token type IDs of the prompt."""
-
-    prompt: NotRequired[str]
-    """
-    The original prompt text corresponding to the token IDs, if available.
-    """
-
     cache_salt: NotRequired[str]
     """
     Optional cache salt to be used for prefix caching.
@@ -190,18 +220,12 @@ class TokenInputs(TypedDict):
 
 def token_inputs(
     prompt_token_ids: list[int],
-    token_type_ids: Optional[list[int]] = None,
-    prompt: Optional[str] = None,
     cache_salt: Optional[str] = None,
 ) -> TokenInputs:
     """Construct [`TokenInputs`][vllm.inputs.data.TokenInputs] from optional
     values."""
     inputs = TokenInputs(type="token", prompt_token_ids=prompt_token_ids)
 
-    if prompt is not None:
-        inputs["prompt"] = prompt
-    if token_type_ids is not None:
-        inputs["token_type_ids"] = token_type_ids
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
 
@@ -262,8 +286,8 @@ class EncoderDecoderInputs(TypedDict):
 
 SingletonInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
 """
-A processed [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt] which can be 
-passed to [`vllm.sequence.Sequence`][].
+A processed [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt] which can be
+passed to [`Sequence`][collections.abc.Sequence].
 """
 
 ProcessorInputs = Union[DecoderOnlyInputs, EncoderDecoderInputs]
@@ -292,8 +316,9 @@ def build_explicit_enc_dec_prompt(
 def zip_enc_dec_prompts(
     enc_prompts: Iterable[_T1],
     dec_prompts: Iterable[Optional[_T2]],
-    mm_processor_kwargs: Optional[Union[Iterable[dict[str, Any]],
-                                        dict[str, Any]]] = None,
+    mm_processor_kwargs: Optional[
+        Union[Iterable[dict[str, Any]], dict[str, Any]]
+    ] = None,
 ) -> list[ExplicitEncoderDecoderPrompt[_T1, _T2]]:
     """
     Zip encoder and decoder prompts together into a list of
@@ -312,20 +337,21 @@ def zip_enc_dec_prompts(
                 encoder_prompt,
                 decoder_prompt,
                 cast(dict[str, Any], mm_processor_kwargs),
-            ) for (encoder_prompt,
-                   decoder_prompt) in zip(enc_prompts, dec_prompts)
+            )
+            for (encoder_prompt, decoder_prompt) in zip(enc_prompts, dec_prompts)
         ]
     return [
-        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt,
-                                      mm_proc_kwargs)
-        for (encoder_prompt, decoder_prompt, mm_proc_kwargs
-             ) in zip(enc_prompts, dec_prompts, mm_processor_kwargs)
+        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt, mm_proc_kwargs)
+        for (encoder_prompt, decoder_prompt, mm_proc_kwargs) in zip(
+            enc_prompts, dec_prompts, mm_processor_kwargs
+        )
     ]
 
 
 def to_enc_dec_tuple_list(
     enc_dec_prompts: Iterable[ExplicitEncoderDecoderPrompt[_T1, _T2]],
 ) -> list[tuple[_T1, Optional[_T2]]]:
-    return [(enc_dec_prompt["encoder_prompt"],
-             enc_dec_prompt["decoder_prompt"])
-            for enc_dec_prompt in enc_dec_prompts]
+    return [
+        (enc_dec_prompt["encoder_prompt"], enc_dec_prompt["decoder_prompt"])
+        for enc_dec_prompt in enc_dec_prompts
+    ]

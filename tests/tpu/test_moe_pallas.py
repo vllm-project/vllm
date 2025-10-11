@@ -4,16 +4,15 @@
 
 Run `pytest tests/kernels/moe/test_moe_pallas.py`.
 """
+
 import pytest
 import torch
+import torch_xla
 
-# yapf conflicts with isort for this block
-# yapf: disable
-from vllm.model_executor.layers.fused_moe.moe_pallas import (
-    fused_moe as pallas_moe)
+from vllm.model_executor.layers.fused_moe.moe_pallas import fused_moe as pallas_moe
 from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
-    fused_moe as torch_moe)
-# yapf: enable
+    fused_moe as torch_moe,
+)
 from vllm.platforms import current_platform
 
 if not current_platform.is_tpu():
@@ -42,6 +41,7 @@ def test_pallas_moe(
     dtype: torch.dtype,
 ):
     import torch_xla.core.xla_model as xm
+
     with torch.device(xm.xla_device()):
         a = torch.randn((m, k), dtype=dtype) / 10
         w1 = torch.randn((e, 2 * n, k), dtype=dtype) / 10
@@ -77,7 +77,7 @@ def test_pallas_moe(
             expert_map=e_map,
             renormalize=False,
         )
-        xm.mark_step()
+        torch_xla.sync(wait=False)
 
     # Compare outputs
     torch.testing.assert_close(

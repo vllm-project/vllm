@@ -30,8 +30,7 @@ def set_weight_attrs(
     if weight_attrs is None:
         return
     for key, value in weight_attrs.items():
-        assert not hasattr(
-            weight, key), f"Overwriting existing tensor attribute: {key}"
+        assert not hasattr(weight, key), f"Overwriting existing tensor attribute: {key}"
 
         # NOTE(woosuk): During weight loading, we often do something like:
         # narrowed_tensor = param.data.narrow(0, offset, len)
@@ -44,20 +43,9 @@ def set_weight_attrs(
         # TODO(woosuk): Remove this hack once we have a better solution.
         from vllm.platforms import current_platform
 
-        if current_platform.is_tpu() and key == "weight_loader":
-            value = _make_synced_weight_loader(value)
+        if current_platform.use_sync_weight_loader() and key == "weight_loader":
+            value = current_platform.make_synced_weight_loader(value)
         setattr(weight, key, value)
-
-
-def _make_synced_weight_loader(original_weight_loader):
-
-    def _synced_weight_loader(param, *args, **kwargs):
-        original_weight_loader(param, *args, **kwargs)
-        # torch._sync doesn't support, is not needed for CPU tensors.
-        if param.device != torch.device("cpu"):
-            torch._sync(param)
-
-    return _synced_weight_loader
 
 
 def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
@@ -73,18 +61,19 @@ def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
         child_map = getattr(child, "packed_modules_mapping", None)
         child_map = copy.deepcopy(child_map) if child_map is not None else {}
 
-        if any((k in parent_map and parent_map[k] != v)
-               for k, v in child_map.items()):
+        if any((k in parent_map and parent_map[k] != v) for k, v in child_map.items()):
             raise ValueError(
                 f"Can't update {type(model).__name__}'s packed_modules_mapping "
-                f"safely because of conflicts from {type(child).__name__}.")
+                f"safely because of conflicts from {type(child).__name__}."
+            )
         else:
             parent_map.update(child_map)
     return parent_map
 
 
 def get_moe_expert_mapping(
-    model: torch.nn.Module, ) -> list[tuple[str, str, int, str]]:
+    model: torch.nn.Module,
+) -> list[tuple[str, str, int, str]]:
     if parent_map := getattr(model, "get_expert_mapping", None):
         return parent_map()
     else:
