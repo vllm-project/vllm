@@ -3,6 +3,7 @@
 
 from transformers import AutoTokenizer
 
+from vllm.config import VllmConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
@@ -21,7 +22,7 @@ def test_fast_inc_detok_invalid_utf8_err_case():
     https://gist.github.com/fpaupier/0ed1375bd7633c5be6c894b1c7ac1be3.
     """
     tokenizer = AutoTokenizer.from_pretrained("google/gemma-3-1b-it")
-
+    vllm_config = VllmConfig()
     # Create a test request
     prompt_token_ids = [107, 4606, 236787, 107]
     params = SamplingParams(skip_special_tokens=True)
@@ -38,7 +39,8 @@ def test_fast_inc_detok_invalid_utf8_err_case():
         data_parallel_rank=None,
     )
 
-    detokenizer = IncrementalDetokenizer.from_new_request(tokenizer, request)
+    detokenizer = IncrementalDetokenizer.from_new_request(
+        vllm_config, tokenizer, request)
 
     assert detokenizer.__class__.__name__ == "FastIncrementalDetokenizer", (
         "Should use FastIncrementalDetokenizer by default"

@@ -139,3 +139,32 @@ async def test_chat_full_of_tool_and_reasoning(client: openai.AsyncOpenAI):
     assert len(tool_calls.choices[0].message.reasoning_content) > 0
     assert tool_calls.choices[0].message.tool_calls[0].function.name == FUNC_NAME
     assert tool_calls.choices[0].message.tool_calls[0].function.arguments == FUNC_ARGS
+
+@pytest.mark.asyncio
+async def test_stop_str_with_reasoning(client: openai.AsyncOpenAI):
+    # check that the response is correctly stopped at "9.8"
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "user",
+            "content": "9.11 and 9.8, which is greater?"
+        }],
+        temperature=1.0,
+        stop="9.8",
+    )
+
+    assert response.choices[0].message.reasoning_content.find("9.8") != -1
+    assert response.choices[0].message.content.find("9.8") == -1
+
+    # check no stop string
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "user",
+            "content": "9.11 and 9.8, which is greater?"
+        }],
+        temperature=1.0,
+    )
+    assert response.choices[0].message.reasoning_content.find("9.8") != -1
+    # check that the response is not stopped at "9.8"
+    assert response.choices[0].message.content.find("9.8") != -1
