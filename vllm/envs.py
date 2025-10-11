@@ -214,6 +214,7 @@ if TYPE_CHECKING:
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
+    VLLM_LITE_PROFILER_LOG_PATH: str | None = None
 
 
 def get_default_cache_root():
@@ -1384,6 +1385,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: os.getenv(
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM", False
     ),
+    # Log path for the lightweight timing profiler.
+    # If this path is set (not None), lightweight profiling will be enabled,
+    # providing detailed analysis of the execution time for each function call.
+    "VLLM_LITE_PROFILER_LOG_PATH": lambda: os.getenv("VLLM_LITE_PROFILER_LOG_PATH"),
 }
 
 # --8<-- [end:env-vars-definition]

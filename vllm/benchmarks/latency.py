@@ -17,6 +17,7 @@ from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
 from vllm.sampling_params import BeamSearchParams
+from vllm.utils.lite_profiler import maybe_emit_lite_profiler_report
 
 
 def save_to_pytorch_benchmark_format(
@@ -170,3 +171,6 @@ def main(args: argparse.Namespace):
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
         save_to_pytorch_benchmark_format(args, results)
+
+    # Generate the lite-profiler report if enabled.
+    maybe_emit_lite_profiler_report()
