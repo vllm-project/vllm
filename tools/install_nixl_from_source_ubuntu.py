@@ -135,6 +135,7 @@ def build_and_install_prerequisites(args):
         "--enable-devel-headers",
         "--with-verbs",
         "--enable-mt",
+        "--with-ze=no",
     ]
     run_command(configure_command, cwd=ucx_source_path)
     run_command(["make", "-j", str(os.cpu_count() or 1)], cwd=ucx_source_path)
