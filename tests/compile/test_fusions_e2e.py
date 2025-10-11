@@ -69,7 +69,7 @@ if current_platform.is_cuda():
             model_kwargs=dict(max_model_len=1024),
             backend=_Backend.TRITON_ATTN,
             attention_fusions=0,
-            allreduce_fusions=64,
+            allreduce_fusions=65,
         ),
     ]
 
@@ -166,8 +166,7 @@ def test_attn_quant(
 
 
 # TODO(luka) test both in nightly
-# TODO(luka) change to -
-CUSTOM_OPS_RMS_NORM = ["+rms_norm"]  # , "+rms_norm"]
+CUSTOM_OPS_RMS_NORM = ["-rms_norm"]  # , "+rms_norm"]
 
 
 def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
@@ -180,8 +179,11 @@ def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
     "model_name, model_kwargs, backend, "
     "attention_fusions, allreduce_fusions, custom_ops",
     # Toggle RMSNorm and QuantFP8 for FP8 models
-    list(flat_product(MODELS_FP8, ["+quant_fp8,+rms_norm"]))
-    # custom_ops_product(CUSTOM_OPS_FP8, CUSTOM_OPS_RMS_NORM))) # TODO
+    list(
+        flat_product(
+            MODELS_FP8, custom_ops_product(CUSTOM_OPS_FP8, CUSTOM_OPS_RMS_NORM)
+        )
+    )  # TODO
     # Toggle RMSNorm for FP4 models and unquant models
     + list(flat_product(MODELS_FP4 + MODELS, CUSTOM_OPS_RMS_NORM)),
 )
@@ -245,16 +247,25 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
         run_model(
             compilation_config, model_name, tensor_parallel_size=2, **model_kwargs
         )
-
-    assert f"Fused quant onto {attention_fusions} attention nodes" in log_holder.text, (
-        log_holder.text
-    )
-
     matches = re.findall(
-        rf"\[collective_fusion.py:\d+] Replaced {allreduce_fusions} patterns",
+        r"\[compilation/fusion_attn.py:\d+] "
+        r"Fused quant onto (\d+) attention nodes",
         log_holder.text,
     )
     assert len(matches) == 2, log_holder.text
+
+    assert int(matches[0]) == attention_fusions
+    assert int(matches[1]) == attention_fusions
+
+    matches = re.findall(
+        r"\[compilation/collective_fusion.py:\d+] "
+        r"Replaced (\d+) patterns",
+        log_holder.text,
+    )
+    assert len(matches) == 2, log_holder.text
+
+    assert int(matches[0]) == allreduce_fusions
+    assert int(matches[1]) == allreduce_fusions
 
 
 def run_model(
