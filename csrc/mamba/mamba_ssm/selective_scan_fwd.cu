@@ -179,6 +179,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         int total_blocks_in_chunk = params.cache_enabled && params.block_size > 0 ?
                                    (chunk_seqlen + params.block_size - 1) / params.block_size : 1;
 
+        const int chunk_start_block_idx = params.cache_enabled ?
+                                         chunk_start_pos / params.block_size : 0;
+
         for (int current_block_in_chunk = 0; current_block_in_chunk < total_blocks_in_chunk; ++current_block_in_chunk) {
             // Calculate the range to process in this iteration
             int block_start_in_chunk = params.cache_enabled ? current_block_in_chunk * params.block_size : 0;
@@ -187,9 +190,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                                     chunk_seqlen;
             int tokens_to_process = block_end_in_chunk - block_start_in_chunk;
 
-            // Calculate block index within this sequence
             int block_idx_in_seq = params.cache_enabled ?
-                                  (chunk_start_pos + block_start_in_chunk) / params.block_size : 0;
+                                  chunk_start_block_idx + current_block_in_chunk : 0;
 
             // Pre-calculate block offset component for intermediate states (used in state loop)
             // intermediate_states has shape [batch_size, max_blocks, dim, dstate]
@@ -299,17 +301,11 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 // Initialize running total
                 scan_t running_prefix;
 
-                if (params.cache_enabled && intermediate_states != nullptr && block_idx_in_seq > 0) {
-                    // Load state from previous block (hence the - params.dim * params.dstate)
-                    int state_offset = block_state_offset - params.dim * params.dstate +
-                                      dim_id * kNRows * params.dstate +
-                                      r * params.dstate +
-                                      state_idx;
-                    running_prefix = make_float2(1.0, float(intermediate_states[state_offset]));
-                } else if (chunk > 0 || current_block_in_chunk > 0) {
+                if (chunk > 0 || current_block_in_chunk > 0) {
                     running_prefix = smem_running_prefix[state_idx + r * MAX_DSTATE];
-                } else {
-                    // Load initial state from cache_index location
+                }
+                // Priority 2: Load initial state from ssm_states (only for the very first block)
+                else {
                     running_prefix = make_float2(1.0, has_initial_state ? float(ssm_states[state_idx * params.ssm_states_dstate_stride]): 0.0);
                 }
 
