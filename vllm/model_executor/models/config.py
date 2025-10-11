@@ -287,19 +287,21 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config.mamba_block_size = model_config.max_model_len
 
         # TODO(@tdoublep) find a better way to do this than whitelist
-        MAMBA2_MODELS = [
+        MAMBA_MODELS = [
             "BambaForCausalLM",
             "FalconH1ForCausalLM",
             "GraniteMoeHybridForCausalLM",
             "Mamba2ForCausalLM",
             "NemotronHForCausalLM",
             "Zamba2ForCausalLM",
+            "JambaForCausalLM",
+            "MambaForCausalLM",
         ]
         if cache_config.enable_prefix_caching:
-            if model_config.architecture in MAMBA2_MODELS:
+            if model_config.architecture in MAMBA_MODELS:
                 logger.info(
                     "Warning: Prefix caching is currently enabled. "
-                    "Its support for Mamba2 layers is experimental. "
+                    "Its support for Mamba layers is experimental. "
                     "Please report any issues you may observe."
                 )
             else:
@@ -407,8 +409,17 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             base_chunk_size = model_config.get_mamba_chunk_size()
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
 
-            chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
-            attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
+            # Mamba1 does not have a chunk notion
+            if base_chunk_size is None:
+                # TODO(Josephasafg) Choose a more generic value
+                #  for the block size
+                attn_block_size = 1024 * cdiv(attn_tokens_per_mamba_state, 1024)
+            else:
+                chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
+                attn_block_size = chunk_size * cdiv(
+                    attn_tokens_per_mamba_state, chunk_size
+                )
+
             cache_config.mamba_block_size = attn_block_size
         else:
             # Without prefix caching, select minimum valid attention block size
