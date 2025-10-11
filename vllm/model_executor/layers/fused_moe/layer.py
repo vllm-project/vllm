@@ -70,8 +70,8 @@ if current_platform.is_cuda_alike():
         )
 else:
     fused_experts = None  # type: ignore
-    FusedMoEPermuteExpertsUnpermute = None  # type: ignore
-    FusedMoEPrepareAndFinalize = None  # type: ignore
+    FusedMoEPermuteExpertsUnpermute = object
+    FusedMoEPrepareAndFinalize = object
 
     def _eplb_map_to_physical_and_record(
         topk_ids: torch.Tensor,
