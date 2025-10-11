@@ -215,6 +215,10 @@ class LoRAModel:
         def check_unexpected_modules(modules: dict):
             for lora_module in modules.keys():  # noqa
                 module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
+                # Handle FSDP file format where experts.base_layer is the
+                # gate_up_proj and experts is the down_proj
+                if "base_layer" in lora_module:
+                    continue
                 # Case for expert lora weights
                 if ".experts" in module_name:
                     if not any(
