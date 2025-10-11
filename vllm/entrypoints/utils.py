@@ -236,4 +236,4 @@ def log_non_default_args(args: Union[Namespace, EngineArgs]):
             "Unsupported argument type. Must be Namespace or EngineArgs instance."
         )
 
-    logger.info("non-default args: %s", non_default_args)
+    logger.debug("non-default args: %s", non_default_args)
