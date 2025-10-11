@@ -20,18 +20,16 @@ from vllm.logger import init_logger
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.lora.request import LoRARequest
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils import FlexibleArgumentParser
 else:
-    _Backend = None
-    ModelConfig = None
-    VllmConfig = None
-    LoRARequest = None
-    PoolingParams = None
-    SamplingParams = None
-    FlexibleArgumentParser = None
+    _Backend = object
+    ModelConfig = object
+    VllmConfig = object
+    PoolingParams = object
+    SamplingParams = object
+    FlexibleArgumentParser = object
 
 logger = init_logger(__name__)
 
@@ -180,7 +178,7 @@ class Platform:
             import vllm._moe_C  # noqa: F401
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
+    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> _Backend:
         from vllm.attention.backends.registry import _Backend
 
         return _Backend.TORCH_SDPA
@@ -188,7 +186,7 @@ class Platform:
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "_Backend",
+        selected_backend: _Backend,
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: str | None,
@@ -557,7 +555,7 @@ class Platform:
 
     @classmethod
     def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
+        cls, kv_cache_dtype: str, model_config: ModelConfig
     ) -> bool:
         """
         Returns if the kv_cache_dtype is supported by the current platform.
