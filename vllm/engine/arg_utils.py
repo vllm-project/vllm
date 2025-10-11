@@ -466,9 +466,7 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config"
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
-    enable_in_reasoning: bool = (
-        StructuredOutputsConfig.enable_in_reasoning
-    )
+    enable_in_reasoning: bool = StructuredOutputsConfig.enable_in_reasoning
 
     # Deprecated guided decoding fields
     guided_decoding_backend: Optional[str] = None
