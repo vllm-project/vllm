@@ -94,6 +94,7 @@ class NixlAgentMetadata(KVConnectorHandshakeMetadata):
     engine_id: str
     agent_metadata: bytes
     kv_caches_base_addr: list[int]
+    device_id: list[int]
     num_blocks: int
     block_lens: list[int]
     attn_backend_name: str
@@ -684,6 +685,7 @@ class NixlConnectorWorker:
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         # rank will still only pull from a single remote TP worker.
         self.kv_caches_base_addr: dict[EngineId, list[int]] = {}
+        self.device_id: dict[EngineId, list[int]] = {}
 
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
@@ -903,6 +905,8 @@ class NixlConnectorWorker:
         caches_data = []
         # With hybrid allocator, layers can share a kv cache tensor
         seen_base_addresses = []
+        # Map from address to device ID
+        seen_addresses_device_id = []
 
         # Note(tms): I modified this from the original region setup code.
         # K and V are now in different regions. Advantage is that we can
@@ -926,6 +930,7 @@ class NixlConnectorWorker:
                     continue
 
                 seen_base_addresses.append(base_addr)
+                seen_addresses_device_id.append(cache.get_device())
                 curr_tensor_size_bytes = cache.numel() * cache.element_size()
 
                 if tensor_size_bytes is None:
@@ -949,7 +954,7 @@ class NixlConnectorWorker:
                         "All kv cache tensors must have the same size"
                     )
                 caches_data.append(
-                    (base_addr, curr_tensor_size_bytes, self.tp_rank, "")
+                    (base_addr, curr_tensor_size_bytes, cache.get_device(), "")
                 )
 
         logger.debug(
@@ -959,6 +964,7 @@ class NixlConnectorWorker:
         assert self.num_blocks != 0
 
         self.kv_caches_base_addr[self.engine_id] = seen_base_addresses
+        self.device_id[self.engine_id] = seen_addresses_device_id
         self.num_regions = len(caches_data)
         self.num_layers = len(xfer_buffers.keys())
 
@@ -985,7 +991,9 @@ class NixlConnectorWorker:
 
         # Register local/src descr for NIXL xfer.
         blocks_data = []
-        for i, base_addr in enumerate(seen_base_addresses):
+        for i, (base_addr, device_id) in enumerate(
+            zip(seen_base_addresses, seen_addresses_device_id)
+        ):
             kv_block_len = self.get_backend_aware_kv_block_len(layer_idx=i)
             # NOTE With heter-TP, more blocks are prepared than what are
             # needed as self.num_blocks >= nixl_agent_meta.num_blocks. We
@@ -996,7 +1004,7 @@ class NixlConnectorWorker:
                 block_offset = block_id * self.block_len_per_layer[i]
                 addr = base_addr + block_offset
                 # (addr, len, device id)
-                blocks_data.append((addr, kv_block_len, self.tp_rank))
+                blocks_data.append((addr, kv_block_len, device_id))
 
             if self._use_flashinfer:
                 # Separate and interleave K/V regions to maintain the same
@@ -1007,7 +1015,7 @@ class NixlConnectorWorker:
                     addr = base_addr + block_offset
                     # Register addresses for V cache (K registered first).
                     v_addr = addr + kv_block_len
-                    blocks_data.append((v_addr, kv_block_len, self.tp_rank))
+                    blocks_data.append((v_addr, kv_block_len, device_id))
         logger.debug(
             "Created %s blocks for src engine %s and rank %s",
             len(blocks_data),
@@ -1050,6 +1058,7 @@ class NixlConnectorWorker:
             engine_id=self.engine_id,
             agent_metadata=self.nixl_wrapper.get_agent_metadata(),
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
+            device_id=self.device_id[self.engine_id],
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_layer,
             attn_backend_name=self.backend_name,
@@ -1175,10 +1184,13 @@ class NixlConnectorWorker:
         # P KV cache along kv_head dim, of D worker's kv_head size (D>P).
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
         self.kv_caches_base_addr[engine_id] = nixl_agent_meta.kv_caches_base_addr
+        self.device_id[engine_id] = nixl_agent_meta.device_id
 
         assert len(nixl_agent_meta.kv_caches_base_addr) == len(self.block_len_per_layer)
         # Register all remote blocks, but only the corresponding kv heads.
-        for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
+        for i, (base_addr, device_id) in enumerate(
+            zip(nixl_agent_meta.kv_caches_base_addr, nixl_agent_meta.device_id)
+        ):
             kv_block_len = self.get_backend_aware_kv_block_len(layer_idx=i)
             rank_offset = (
                 self.tp_rank % tp_ratio * kv_block_len
@@ -1192,7 +1204,7 @@ class NixlConnectorWorker:
                 # self.block_len == remote_block_len//tp_ratio bytes.
                 addr = base_addr + block_offset + rank_offset
                 # (addr, len, device id)
-                blocks_data.append((addr, kv_block_len, remote_tp_rank))
+                blocks_data.append((addr, kv_block_len, device_id))
 
             if self._use_flashinfer:
                 # With FlashInfer index V separately to allow head splitting.
@@ -1200,7 +1212,7 @@ class NixlConnectorWorker:
                     block_offset = block_id * nixl_agent_meta.block_lens[i]
                     addr = base_addr + block_offset + rank_offset
                     v_addr = addr + nixl_agent_meta.block_lens[i] // 2
-                    blocks_data.append((v_addr, kv_block_len, remote_tp_rank))
+                    blocks_data.append((v_addr, kv_block_len, device_id))
 
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
