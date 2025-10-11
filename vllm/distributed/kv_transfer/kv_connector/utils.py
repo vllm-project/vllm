@@ -151,21 +151,21 @@ class KVOutputAggregator:
         aggregated_kv_connector_stats = None
         invalid_block_ids = set[int]()
         for model_runner_output in outputs:
-            output = model_runner_output.kv_connector_output
-            if not output:
+            kv_output = model_runner_output.kv_connector_output
+            if not kv_output:
                 continue
             update_finished_set(
-                output.finished_sending, self._send_remaining_count, finished_sending
+                kv_output.finished_sending, self._send_remaining_count, finished_sending
             )
             update_finished_set(
-                output.finished_recving, self._recv_remaining_count, finished_recving
+                kv_output.finished_recving, self._recv_remaining_count, finished_recving
             )
 
             # Aggregate kv_connector_stats from all workers.
             if aggregated_kv_connector_stats is None:
                 # Use the first worker's kv_connector_stats as accumulator.
-                aggregated_kv_connector_stats = output.kv_connector_stats
-            elif kv_connector_stats := output.kv_connector_stats:
+                aggregated_kv_connector_stats = kv_output.kv_connector_stats
+            elif kv_connector_stats := kv_output.kv_connector_stats:
                 if aggregated_kv_connector_stats is None:
                     aggregated_kv_connector_stats = kv_connector_stats
                 else:
@@ -176,7 +176,7 @@ class KVOutputAggregator:
                         aggregated_kv_connector_stats.aggregate(kv_connector_stats)
                     )
 
-            invalid_block_ids |= output.invalid_block_ids
+            invalid_block_ids |= kv_output.invalid_block_ids
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
