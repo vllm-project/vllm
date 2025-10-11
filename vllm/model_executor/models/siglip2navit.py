@@ -273,7 +273,6 @@ class Siglip2Attention(nn.Module):
                 # (1, seq_len, num_heads, head_dim) ->
                 # (1, num_heads, seq_len, head_dim)
                 q_i, k_i, v_i = [x.transpose(1, 2) for x in (q_i, k_i, v_i)]
-
                 if is_hpu:
                     output_i = FusedSDPA.apply(q_i, k_i, v_i, None, 0.0, False,
                                                None)

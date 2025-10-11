@@ -2770,12 +2770,12 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             vit_cfg = self.model.model.config.vit_config
             self.image_token_id = getattr(self.model.model.config,
                                           "image_token_id", -200)
-            image_h = 128
-            image_w = int(img_args / image_h)
+            image_w = 98
+            image_h = int(img_args / image_w)
             num_image_tokens = int(image_h * image_w //
                                    (vit_cfg.hidden_stride**2))
             image_grid_thw = torch.tensor([[1, image_h, image_w]],
-                                          dtype=torch.int64).to('hpu')
+                                          dtype=torch.int64)
 
             pixel_values = torch.randn(1,
                                        image_grid_thw[0].prod(),

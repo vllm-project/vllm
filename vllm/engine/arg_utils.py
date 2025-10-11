@@ -767,7 +767,11 @@ class EngineArgs:
                                       **multimodal_kwargs["limit_per_prompt"])
         multimodal_group.add_argument(
             "--mm-processor-kwargs",
-            **multimodal_kwargs["mm_processor_kwargs"])
+            type=json.loads,
+            default={"min_pixels": 200704, "max_pixels": 3211264},
+            help="JSON string of kwargs for multimodal processor"
+        )
+        
         multimodal_group.add_argument(
             "--disable-mm-preprocessor-cache",
             **multimodal_kwargs["disable_mm_preprocessor_cache"])
