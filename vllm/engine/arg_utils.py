@@ -439,7 +439,6 @@ class EngineArgs:
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
-    enable_lora_bias: bool = LoRAConfig.bias_enabled
     max_loras: int = LoRAConfig.max_loras
     max_lora_rank: int = LoRAConfig.max_lora_rank
     default_mm_loras: Optional[dict[str, str]] = LoRAConfig.default_mm_loras
@@ -452,7 +451,7 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[int] = CacheConfig.num_gpu_blocks_override
     num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
-    ignore_patterns: Optional[Union[str, list[str]]] = LoadConfig.ignore_patterns
+    ignore_patterns: Union[str, list[str]] = get_field(LoadConfig, "ignore_patterns")
 
     enable_chunked_prefill: Optional[bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
@@ -916,7 +915,6 @@ class EngineArgs:
             action=argparse.BooleanOptionalAction,
             help="If True, enable handling of LoRA adapters.",
         )
-        lora_group.add_argument("--enable-lora-bias", **lora_kwargs["bias_enabled"])
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank", **lora_kwargs["max_lora_rank"])
         lora_group.add_argument(
@@ -1515,7 +1513,6 @@ class EngineArgs:
 
         lora_config = (
             LoRAConfig(
-                bias_enabled=self.enable_lora_bias,
                 max_lora_rank=self.max_lora_rank,
                 max_loras=self.max_loras,
                 default_mm_loras=self.default_mm_loras,

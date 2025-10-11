@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Callable, Final, Optional, Union
+from typing import Final, Optional, Union
 
 import jinja2
 import partial_json_parser
@@ -15,7 +15,6 @@ from fastapi import Request
 from openai_harmony import Message as OpenAIMessage
 from pydantic import TypeAdapter
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -57,14 +56,13 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import (
@@ -81,7 +79,6 @@ class OpenAIServingChat(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         response_role: str,
         *,
@@ -101,7 +98,6 @@ class OpenAIServingChat(OpenAIServing):
     ) -> None:
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
@@ -115,42 +111,15 @@ class OpenAIServingChat(OpenAIServing):
         self.trust_request_chat_template = trust_request_chat_template
         self.enable_log_outputs = enable_log_outputs
 
+        # set up reasoning parser
+        self.reasoning_parser = self._get_reasoning_parser(
+            reasoning_parser_name=reasoning_parser
+        )
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
-        if self.enable_auto_tools:
-            logger.info(
-                '"auto" tool choice has been enabled please note that while'
-                " the parallel_tool_calls client option is preset for "
-                "compatibility reasons, it will be ignored."
-            )
-
-        self.reasoning_parser: Optional[Callable[[AnyTokenizer], ReasoningParser]] = (
-            None
+        self.tool_parser = self._get_tool_parser(
+            tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools
         )
-        if reasoning_parser:
-            try:
-                self.reasoning_parser = ReasoningParserManager.get_reasoning_parser(
-                    reasoning_parser
-                )
-                assert self.reasoning_parser is not None
-            except Exception as e:
-                raise TypeError(f"{reasoning_parser=} has not been registered") from e
-        self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
-        if self.enable_auto_tools:
-            try:
-                if tool_parser == "pythonic" and model_config.model.startswith(
-                    "meta-llama/Llama-3.2"
-                ):
-                    logger.warning(
-                        "Llama3.2 models may struggle to emit valid pythonic tool calls"
-                    )
-                self.tool_parser = ToolParserManager.get_tool_parser(tool_parser)
-            except Exception as e:
-                raise TypeError(
-                    "Error: --enable-auto-tool-choice requires "
-                    f"tool_parser:'{tool_parser}' which has not "
-                    "been registered"
-                ) from e
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
@@ -169,7 +138,7 @@ class OpenAIServingChat(OpenAIServing):
         else:
             self.tool_call_id_type = "random"
 
-        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
+        self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
                 self.default_sampling_params["stop_token_ids"] = []
@@ -338,7 +307,7 @@ class OpenAIServingChat(OpenAIServing):
                 )
 
                 if isinstance(sampling_params, BeamSearchParams):
-                    generator = self.engine_client.beam_search(
+                    generator = self.beam_search(
                         prompt=engine_prompt,
                         request_id=request_id,
                         params=sampling_params,
@@ -1646,7 +1615,7 @@ class OpenAIServingChat(OpenAIServing):
                 bytes=list(token.encode("utf-8", errors="replace")),
             )
             for i, p in enumerate(logprobs.items())
-            if top_logprobs and i < top_logprobs
+            if (top_logprobs and i < top_logprobs or top_logprobs == -1)
         ]
 
     def _create_chat_logprobs(

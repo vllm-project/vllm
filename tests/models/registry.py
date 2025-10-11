@@ -172,9 +172,8 @@ class _HfExamplesInfo:
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
     "ApertusForCausalLM": _HfExamplesInfo(
-        "swiss-ai/Apertus-8B-2509",
+        "swiss-ai/Apertus-8B-Instruct-2509",
         min_transformers_version="4.56.0",
-        trust_remote_code=True,
     ),
     "AquilaModel": _HfExamplesInfo("BAAI/AquilaChat-7B", trust_remote_code=True),
     "AquilaForCausalLM": _HfExamplesInfo("BAAI/AquilaChat2-7B", trust_remote_code=True),
@@ -251,6 +250,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
+    "FlexOlmoForCausalLM": _HfExamplesInfo("allenai/Flex-reddit-2x7B-1T"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-1.1-2b-it"),
     "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
@@ -772,6 +772,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         max_model_len=4096,
         min_transformers_version="4.57",
         is_available_online=False,
+    ),
+    "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
+        "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        max_model_len=4096,
+        min_transformers_version="4.57",
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
