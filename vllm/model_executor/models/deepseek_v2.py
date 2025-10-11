@@ -47,6 +47,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
@@ -754,7 +755,8 @@ direct_register_custom_op(
 )
 
 
-class Indexer(nn.Module):
+@CustomOp.register("deepseek_indexer")
+class DeepseekIndexer(CustomOp):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -985,7 +987,7 @@ class DeepseekV2MLAAttention(nn.Module):
         self.is_v32 = hasattr(config, "index_topk")
 
         if self.is_v32:
-            self.indexer = Indexer(
+            self.indexer = DeepseekIndexer(
                 vllm_config,
                 config,
                 hidden_size,
