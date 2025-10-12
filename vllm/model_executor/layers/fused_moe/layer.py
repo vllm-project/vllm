@@ -269,6 +269,10 @@ def maybe_roundup_hidden_size(
 
     return hidden_size
 
+def pp(msg, t):
+    #print(f"{msg} {t.shape}")
+    #print(f"{msg} {t.shape} {t}")
+    pass
 
 # --8<-- [start:fused_moe]
 @CustomOp.register("fused_moe")
@@ -577,6 +581,8 @@ class FusedMoE(CustomOp):
             )
 
         self.quant_config = quant_config
+
+        logger.debug("FusedMoEConfig = %s", self.moe_config)
 
         def _get_quant_method() -> FusedMoEMethodBase:
             """
