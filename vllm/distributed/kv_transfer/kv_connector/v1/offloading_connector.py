@@ -4,7 +4,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -46,8 +46,8 @@ class OffloadingConnector(KVConnectorBase_V1):
 
         spec = OffloadingSpecFactory.create_spec(vllm_config)
 
-        self.connector_scheduler: Optional[OffloadingConnectorScheduler] = None
-        self.connector_worker: Optional[OffloadingConnectorWorker] = None
+        self.connector_scheduler: OffloadingConnectorScheduler | None = None
+        self.connector_worker: OffloadingConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = OffloadingConnectorScheduler(spec)
         elif role == KVConnectorRole.WORKER:
@@ -113,7 +113,7 @@ class OffloadingConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
@@ -148,7 +148,7 @@ class OffloadingConnectorScheduler:
         self,
         req: Request,
         start_idx: int = 0,
-        end_idx: Optional[int] = None,
+        end_idx: int | None = None,
     ) -> Iterable[BlockHash]:
         return islice(
             req.block_hashes,
@@ -354,7 +354,7 @@ class OffloadingConnectorScheduler:
         self,
         request: Request,
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called when a request has finished, before its blocks are freed.
 
