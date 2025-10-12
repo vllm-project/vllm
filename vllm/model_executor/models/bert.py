@@ -609,8 +609,8 @@ class SPLADESparsePooler(Pooler):
     def __init__(
         self,
         mlm_head: nn.Module,
-        cls_token_id: Optional[int] = 101,
-        sep_token_id: Optional[int] = 102,
+        cls_token_id: int | None = 101,
+        sep_token_id: int | None = 102,
         pooling: str = "max",
         remove_cls_sep: bool = True,
     ):
