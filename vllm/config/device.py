@@ -5,9 +5,8 @@ import hashlib
 from typing import Any, Literal
 
 import torch
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
-from typing_extensions import Self
 
 from vllm.config.utils import config
 
@@ -19,12 +18,13 @@ Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
-    device: Device | str = "auto"
+    device: Device | str | torch.device | None = "auto"
     """Device type for vLLM execution.
     This parameter is deprecated and will be removed in a future release.
     It will now be set automatically based on the current platform."""
     device_type: str = Field(init=False)
-    """Device type from the current platform. Set during validation."""
+    """Device type from the current platform. This is set in
+    `__post_init__`."""
 
     def compute_hash(self) -> str:
         """
@@ -45,15 +45,7 @@ class DeviceConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @field_validator("device", mode="before")
-    @classmethod
-    def validate_device(cls, device: str | torch.device) -> str:
-        if isinstance(device, torch.device):
-            return device.type
-        return device
-
-    @model_validator(mode="after")
-    def _validate_device_type(self) -> Self:
+    def __post_init__(self):
         if self.device == "auto":
             # Automated device type detection
             from vllm.platforms import current_platform
@@ -78,5 +70,3 @@ class DeviceConfig:
         else:
             # Set device with device type
             self.device = torch.device(self.device_type)
-
-        return self
