@@ -86,9 +86,7 @@ ignore = [
     "UP032",
     # Can remove once 3.10+ is the minimum Python version
     "UP007",
-    "UP027",
     "UP035",
-    "UP038",
     "UP045",
 ]
 
