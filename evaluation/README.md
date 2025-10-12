@@ -44,8 +44,13 @@
     curl -X POST "http://localhost:8000/v1/completions" \
         -H "Content-Type: application/json" \
         -d '{
-            "prompt": "Who are you?", "temperature": 0, "top_p": 1, "top_k": 0, "repetition_penalty": 1.0, "presence_penalty": 0, "frequency_penalty": 0, "stream": false, "ignore_eos": false, "n": 1, "seed": 123 
+            "prompt": "The capital of China", "temperature": 0, "top_p": 1, "top_k": 0, "repetition_penalty": 1.0, "presence_penalty": 0, "frequency_penalty": 0, "stream": false, "ignore_eos": false, "n": 1, "seed": 123 
     }'
+   ```
+   The result should be:
+   ```
+   {"id":"cmpl-026a60769119489587e46d571b6ebb6a","object":"text_completion","created":1760272161,"model":"/mnt/raid0/zhangguopeng/deepseek-r1-FP8-Dynamic/","choices":[{"index":0,
+   "text":" is Beijing, and Shanghai is its most populous city by urban area population. China","logprobs":null,"finish_reason":"length","stop_reason":null,"token_ids":null,"prompt_logprobs":null,"prompt_token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":5,"total_tokens":21,"completion_tokens":16,"prompt_tokens_details":null},"kv_transfer_params":null}
    ```
 
 # Benchmark
@@ -82,18 +87,19 @@ Text model is evaluated using lm-eval (<https://github.com/EleutherAI/lm-evaluat
     #!/bin/bash
     rm -rf /root/.cache/vllm
     export  GPU_ARCHS=gfx942
-    MODEL=deepseek-ai/DeepSeek-R1
+    model="/path-to-model/deepseek-r1-FP8-Dynamic/"
     AITER_ENABLE_VSKIP=0 \
     VLLM_USE_V1=1 \
     VLLM_ROCM_USE_AITER=1 \
+    export VLLM_ROCM_USE_TRITON_ROPE=1 \
     VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE=1 \
-    vllm serve $MODEL \
+    vllm serve ${model} \
     --tensor-parallel-size 8 \
     --disable-log-requests \
     --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
     --trust-remote-code \
     --block-size 1 \
-    --port 6789 \
+    --port 8000 \
     > server-deepseek-ai_DeepSeek-R1-aiter-v1.log 2>&1
     ```
 
@@ -101,10 +107,11 @@ Text model is evaluated using lm-eval (<https://github.com/EleutherAI/lm-evaluat
 
     ```bash
     #!/bin/bash
+    model="/path-to-model/deepseek-r1-FP8-Dynamic/"
     lm_eval \
     --model local-completions \
     --tasks gsm8k \
-    --model_args model=deepseek-ai/DeepSeek-R1,base_url=http://127.0.0.1:6789/v1/completions \
+    --model_args model=${model},base_url=http://127.0.0.1:8000/v1/completions \
     --batch_size 100 \
     > lmeval_server-deepseek-ai_DeepSeek-R1-aiter-v1.log 2>&1
     ```
