@@ -108,7 +108,7 @@ def main(args: argparse.Namespace):
         detokenize=not args.disable_detokenize,
     )
     dummy_prompt_token_ids = np.random.randint(
-        10000, size=(args.batch_size, args.input_len)
+        llm.get_tokenizer().vocab_size, size=(args.batch_size, args.input_len)
     )
     dummy_prompts: list[PromptType] = [
         {"prompt_token_ids": batch} for batch in dummy_prompt_token_ids.tolist()
