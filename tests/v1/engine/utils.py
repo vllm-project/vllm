@@ -3,7 +3,7 @@
 
 import random
 from dataclasses import dataclass
-from typing import Union
+from typing import TypeAlias
 
 import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -12,7 +12,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.v1.engine import EngineCoreOutput, FinishReason
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
-GeneralTokenizerType = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+GeneralTokenizerType: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 
 # Number of sample logprobs to request when testing sample logprobs
 NUM_SAMPLE_LOGPROBS_UNDER_TEST = 5

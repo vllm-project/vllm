@@ -4,7 +4,7 @@ import tempfile
 from collections.abc import Iterable
 from contextlib import contextmanager
 from functools import partial
-from typing import Any, Union
+from typing import Any, TypeAlias
 
 import numpy as np
 import pytest
@@ -55,9 +55,9 @@ REPO_ID_TO_SKIP = {
 }
 
 ImageInput = list[Image.Image]
-VideoInput = Union[
-    list[Image.Image], list[np.ndarray], list[tuple[np.ndarray, dict[str, Any]]]
-]
+VideoInput: TypeAlias = (
+    list[Image.Image] | list[np.ndarray] | list[tuple[np.ndarray, dict[str, Any]]]
+)
 AudioInput = list[tuple[np.ndarray, int]]
 
 

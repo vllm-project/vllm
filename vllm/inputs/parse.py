@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Literal, NamedTuple, Optional, TypedDict, Union, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, TypeAlias, TypedDict, cast
 
 from typing_extensions import TypeIs
 
@@ -76,9 +76,9 @@ class ParsedEmbedsPrompt(TypedDict):
     content: EmbedsPrompt
 
 
-ParsedSingletonPrompt = Union[
-    ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt, ParsedEmbedsPrompt
-]
+ParsedSingletonPrompt: TypeAlias = (
+    ParsedStrPrompt | ParsedTextPrompt | ParsedTokensPrompt | ParsedEmbedsPrompt
+)
 
 
 def parse_singleton_prompt(prompt: SingletonPrompt) -> ParsedSingletonPrompt:
@@ -120,7 +120,7 @@ def split_enc_dec_inputs(
 class PromptComponents(NamedTuple):
     text: str | None = None
     token_ids: list[int] | None = None
-    embeds: Optional["torch.Tensor"] = None
+    embeds: torch.Tensor | None = None
 
 
 def get_prompt_components(prompt: PromptType) -> PromptComponents:

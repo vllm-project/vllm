@@ -16,7 +16,7 @@ from typing import (
     Annotated,
     Any,
     Literal,
-    Optional,
+    TypeAlias,
     TypeVar,
     Union,
     cast,
@@ -99,8 +99,8 @@ logger = init_logger(__name__)
 
 # object is used to allow for special typing forms
 T = TypeVar("T")
-TypeHint = Union[type[Any], object]
-TypeHintT = Union[type[T], object]
+TypeHint: TypeAlias = type[Any] | object
+TypeHintT: TypeAlias = type[T] | object
 
 
 def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
@@ -1190,7 +1190,7 @@ class EngineArgs:
         target_parallel_config: ParallelConfig,
         enable_chunked_prefill: bool,
         disable_log_stats: bool,
-    ) -> Optional["SpeculativeConfig"]:
+    ) -> SpeculativeConfig | None:
         """Initializes and returns a SpeculativeConfig object based on
         `speculative_config`.
 

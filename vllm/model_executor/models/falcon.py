@@ -23,7 +23,7 @@
 import math
 from collections.abc import Iterable
 from itertools import islice
-from typing import Union
+from typing import TypeAlias
 
 import torch
 from torch import nn
@@ -65,7 +65,7 @@ from .utils import (
     maybe_prefix,
 )
 
-FalconConfig = Union[HF_FalconConfig, RWConfig]
+FalconConfig: TypeAlias = HF_FalconConfig | RWConfig
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:

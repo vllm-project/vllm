@@ -6,7 +6,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -91,9 +91,9 @@ class DeepseekVL2VImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor | list[torch.Tensor], TensorShape("bn", "f", "h")]
 
 
-DeepseekVL2ImageInputs = Union[
-    DeepseekVL2ImagePixelInputs, DeepseekVL2VImageEmbeddingInputs
-]
+DeepseekVL2ImageInputs: TypeAlias = (
+    DeepseekVL2ImagePixelInputs | DeepseekVL2VImageEmbeddingInputs
+)
 
 
 class MlpProjector(nn.Module):

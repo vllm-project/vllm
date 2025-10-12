@@ -4,7 +4,7 @@
 import hashlib
 from collections.abc import Mapping
 from dataclasses import field
-from typing import Any, Literal, Union
+from typing import Any, Literal, TypeAlias
 
 from pydantic import ConfigDict, Field, field_validator
 from pydantic.dataclasses import dataclass
@@ -45,9 +45,9 @@ class AudioDummyOptions(BaseDummyOptions):
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
-DummyOptions = Union[
-    BaseDummyOptions, VideoDummyOptions, ImageDummyOptions, AudioDummyOptions
-]
+DummyOptions: TypeAlias = (
+    BaseDummyOptions | VideoDummyOptions | ImageDummyOptions | AudioDummyOptions
+)
 
 
 @config

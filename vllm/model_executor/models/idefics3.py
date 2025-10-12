@@ -18,7 +18,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, TypeAlias
 
 import torch
 from torch import nn
@@ -91,7 +91,7 @@ class Idefics3ImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor, TensorShape("bn", "f", "h")]
 
 
-ImageInputs = Union[Idefics3ImagePixelInputs, Idefics3ImageEmbeddingInputs]
+ImageInputs: TypeAlias = Idefics3ImagePixelInputs | Idefics3ImageEmbeddingInputs
 
 
 class Idefics3ProcessingInfo(BaseProcessingInfo):

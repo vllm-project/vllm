@@ -10,7 +10,7 @@
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, TypeVar, Union
+from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
 import numpy.typing as npt
 import torch
@@ -97,7 +97,7 @@ class InternVLImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor | list[torch.Tensor], TensorShape("n", "f", "h")]
 
 
-InternVLImageInputs = Union[InternVLImagePixelInputs, InternVLImageEmbeddingInputs]
+InternVLImageInputs: TypeAlias = InternVLImagePixelInputs | InternVLImageEmbeddingInputs
 
 
 class InternVLVideoPixelInputs(TensorSchema):
@@ -127,7 +127,7 @@ class InternVLVideoEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor | list[torch.Tensor], TensorShape("n", "f", "h")]
 
 
-InternVLVideoInputs = Union[InternVLVideoPixelInputs, InternVLVideoEmbeddingInputs]
+InternVLVideoInputs: TypeAlias = InternVLVideoPixelInputs | InternVLVideoEmbeddingInputs
 
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B

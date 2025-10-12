@@ -6,9 +6,8 @@ from typing import (
     TYPE_CHECKING,
     ClassVar,
     Literal,
-    Optional,
     Protocol,
-    Union,
+    TypeAlias,
     overload,
     runtime_checkable,
 )
@@ -33,10 +32,14 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.sequence import IntermediateTensors
+else:
+    VllmConfig = object
+    WeightsMapper = object
+    IntermediateTensors = object
 
 logger = init_logger(__name__)
 
-MultiModalEmbeddings = Union[list[Tensor], Tensor, tuple[Tensor, ...]]
+MultiModalEmbeddings: TypeAlias = list[Tensor] | Tensor | tuple[Tensor, ...]
 """
 The output embeddings must be one of the following formats:
 
@@ -403,15 +406,15 @@ class SupportsPP(Protocol):
         batch_size: int,
         dtype: torch.dtype,
         device: torch.device,
-    ) -> "IntermediateTensors":
+    ) -> IntermediateTensors:
         """Called when PP rank > 0 for profiling purposes."""
         ...
 
     def forward(
         self,
         *,
-        intermediate_tensors: Optional["IntermediateTensors"],
-    ) -> Union[Tensor, "IntermediateTensors"]:
+        intermediate_tensors: IntermediateTensors | None,
+    ) -> IntermediateTensors | None:
         """
         Accept [`IntermediateTensors`][vllm.sequence.IntermediateTensors] when
         PP rank > 0.
@@ -433,13 +436,13 @@ class _SupportsPPType(Protocol):
         batch_size: int,
         dtype: torch.dtype,
         device: torch.device,
-    ) -> "IntermediateTensors": ...
+    ) -> IntermediateTensors: ...
 
     def forward(
         self,
         *,
-        intermediate_tensors: Optional["IntermediateTensors"],
-    ) -> Union[Tensor, "IntermediateTensors"]: ...
+        intermediate_tensors: IntermediateTensors | None,
+    ) -> Tensor | IntermediateTensors: ...
 
 
 @overload
@@ -569,7 +572,7 @@ class IsHybrid(Protocol):
     @classmethod
     def get_mamba_state_shape_from_config(
         cls,
-        vllm_config: "VllmConfig",
+        vllm_config: VllmConfig,
         use_v1: bool = True,
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
@@ -724,7 +727,7 @@ def supports_cross_encoding(
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 
-    hf_to_vllm_mapper: ClassVar[Optional["WeightsMapper"]] = None
+    hf_to_vllm_mapper: ClassVar[WeightsMapper | None] = None
     packed_modules_mapping: ClassVar[dict[str, list[str]] | None] = None
     quant_config: QuantizationConfig | None = None
 

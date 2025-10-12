@@ -6,7 +6,7 @@
 import json
 import time
 from http import HTTPStatus
-from typing import Annotated, Any, ClassVar, Generic, Literal, TypeVar, Union
+from typing import Annotated, Any, ClassVar, Generic, Literal, TypeAlias, TypeVar
 
 import regex as re
 import torch
@@ -54,7 +54,6 @@ try:  # For older openai versions (< 1.100.0)
 except ImportError:  # For newer openai versions (>= 1.100.0)
     from openai.types.responses import ResponseFormatTextConfig as ResponseTextConfig
 
-from typing import TypeAlias
 
 from openai.types.responses.response import IncompleteDetails, ToolChoice
 from openai.types.responses.tool import Tool
@@ -208,7 +207,7 @@ class ResponseFormat(OpenAIBaseModel):
     json_schema: JsonSchemaResponseFormat | None = None
 
 
-AnyResponseFormat = Union[ResponseFormat, StructuralTagResponseFormat]
+AnyResponseFormat: TypeAlias = ResponseFormat | StructuralTagResponseFormat
 
 
 class StreamOptions(OpenAIBaseModel):
@@ -1616,7 +1615,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         )
 
 
-EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
+EmbeddingRequest: TypeAlias = EmbeddingCompletionRequest | EmbeddingChatRequest
 
 PoolingCompletionRequest = EmbeddingCompletionRequest
 PoolingChatRequest = EmbeddingChatRequest
@@ -1658,7 +1657,9 @@ class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
     """
 
 
-PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest, IOProcessorRequest]
+PoolingRequest: TypeAlias = (
+    PoolingCompletionRequest | PoolingChatRequest | IOProcessorRequest
+)
 
 
 class ScoreRequest(OpenAIBaseModel):
@@ -2244,31 +2245,31 @@ class ResponseInProgressEvent(OpenAIResponseInProgressEvent):
     response: ResponsesResponse  # type: ignore[override]
 
 
-StreamingResponsesResponse: TypeAlias = Union[
-    "ResponseCreatedEvent",
-    "ResponseInProgressEvent",
-    "ResponseCompletedEvent",
-    ResponseOutputItemAddedEvent,
-    ResponseOutputItemDoneEvent,
-    ResponseContentPartAddedEvent,
-    ResponseContentPartDoneEvent,
-    ResponseReasoningTextDeltaEvent,
-    ResponseReasoningTextDoneEvent,
-    ResponseReasoningPartAddedEvent,
-    ResponseReasoningPartDoneEvent,
-    ResponseCodeInterpreterCallInProgressEvent,
-    ResponseCodeInterpreterCallCodeDeltaEvent,
-    ResponseWebSearchCallInProgressEvent,
-    ResponseWebSearchCallSearchingEvent,
-    ResponseWebSearchCallCompletedEvent,
-    ResponseCodeInterpreterCallCodeDoneEvent,
-    ResponseCodeInterpreterCallInterpretingEvent,
-    ResponseCodeInterpreterCallCompletedEvent,
-]
+StreamingResponsesResponse: TypeAlias = (
+    "ResponseCreatedEvent"
+    | "ResponseInProgressEvent"
+    | "ResponseCompletedEvent"
+    | ResponseOutputItemAddedEvent
+    | ResponseOutputItemDoneEvent
+    | ResponseContentPartAddedEvent
+    | ResponseContentPartDoneEvent
+    | ResponseReasoningTextDeltaEvent
+    | ResponseReasoningTextDoneEvent
+    | ResponseReasoningPartAddedEvent
+    | ResponseReasoningPartDoneEvent
+    | ResponseCodeInterpreterCallInProgressEvent
+    | ResponseCodeInterpreterCallCodeDeltaEvent
+    | ResponseWebSearchCallInProgressEvent
+    | ResponseWebSearchCallSearchingEvent
+    | ResponseWebSearchCallCompletedEvent
+    | ResponseCodeInterpreterCallCodeDoneEvent
+    | ResponseCodeInterpreterCallInterpretingEvent
+    | ResponseCodeInterpreterCallCompletedEvent
+)
 
-BatchRequestInputBody = Union[
-    ChatCompletionRequest, EmbeddingRequest, ScoreRequest, RerankRequest
-]
+BatchRequestInputBody: TypeAlias = (
+    ChatCompletionRequest | EmbeddingRequest | ScoreRequest | RerankRequest
+)
 
 
 class BatchRequestInput(OpenAIBaseModel):
@@ -2437,7 +2438,7 @@ class TokenizeChatRequest(OpenAIBaseModel):
         return data
 
 
-TokenizeRequest = Union[TokenizeCompletionRequest, TokenizeChatRequest]
+TokenizeRequest: TypeAlias = TokenizeCompletionRequest | TokenizeChatRequest
 
 
 class TokenizeResponse(OpenAIBaseModel):

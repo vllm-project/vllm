@@ -6,7 +6,7 @@ import math
 import time
 from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
-from typing import Literal, TypeVar, Union, cast
+from typing import Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
 from fastapi import Request
@@ -39,7 +39,7 @@ try:
 except ImportError:
     librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
-SpeechToTextResponse = Union[TranscriptionResponse, TranslationResponse]
+SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
 T = TypeVar("T", bound=SpeechToTextResponse)
 
 logger = init_logger(__name__)

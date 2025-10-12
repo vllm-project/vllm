@@ -11,7 +11,7 @@ on HuggingFace model repository.
 from argparse import Namespace
 from dataclasses import asdict
 from pathlib import Path
-from typing import Literal, NamedTuple, TypedDict, Union, get_args
+from typing import Literal, NamedTuple, TypeAlias, TypedDict, get_args
 
 from PIL.Image import Image
 
@@ -47,7 +47,7 @@ class TextImagesQuery(TypedDict):
 
 
 QueryModality = Literal["text", "image", "text+image", "text+images"]
-Query = Union[TextQuery, ImageQuery, TextImageQuery, TextImagesQuery]
+Query: TypeAlias = TextQuery | ImageQuery | TextImageQuery | TextImagesQuery
 
 
 class ModelRequestData(NamedTuple):

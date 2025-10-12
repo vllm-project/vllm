@@ -7,7 +7,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal, TypeAlias
 
 import regex as re
 import torch
@@ -114,7 +114,7 @@ class InternS1ImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor | list[torch.Tensor], TensorShape("ni", "tifs", "hs")]
 
 
-InternS1ImageInputs = Union[InternS1ImagePixelInputs, InternS1ImageEmbeddingInputs]
+InternS1ImageInputs: TypeAlias = InternS1ImagePixelInputs | InternS1ImageEmbeddingInputs
 
 
 class InternS1VideoPixelInputs(TensorSchema):
@@ -144,7 +144,7 @@ class InternS1VideoEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor | list[torch.Tensor], TensorShape("nv", "tvfs", "hs")]
 
 
-InternS1VideoInputs = Union[InternS1VideoPixelInputs, InternS1VideoEmbeddingInputs]
+InternS1VideoInputs: TypeAlias = InternS1VideoPixelInputs | InternS1VideoEmbeddingInputs
 
 
 def resolve_interns1_min_max_num(
@@ -194,7 +194,7 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional["GotOcr2ImageProcessorFast"] = None,
+        processor: GotOcr2ImageProcessorFast | None = None,
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor().image_processor

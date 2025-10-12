@@ -8,7 +8,7 @@ import traceback
 from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
-from typing import Any, ClassVar, Generic, TypeVar, Union
+from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
 
 import torch
 from fastapi import Request
@@ -102,38 +102,38 @@ from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
 
-CompletionLikeRequest = Union[
-    CompletionRequest,
-    DetokenizeRequest,
-    EmbeddingCompletionRequest,
-    RerankRequest,
-    ClassificationRequest,
-    ScoreRequest,
-    TokenizeCompletionRequest,
-]
+CompletionLikeRequest: TypeAlias = (
+    CompletionRequest
+    | DetokenizeRequest
+    | EmbeddingCompletionRequest
+    | RerankRequest
+    | ClassificationRequest
+    | ScoreRequest
+    | TokenizeCompletionRequest
+)
 
-ChatLikeRequest = Union[
-    ChatCompletionRequest, EmbeddingChatRequest, TokenizeChatRequest
-]
-SpeechToTextRequest = Union[TranscriptionRequest, TranslationRequest]
-AnyRequest = Union[
-    CompletionLikeRequest,
-    ChatLikeRequest,
-    SpeechToTextRequest,
-    ResponsesRequest,
-    IOProcessorRequest,
-]
+ChatLikeRequest: TypeAlias = (
+    ChatCompletionRequest | EmbeddingChatRequest | TokenizeChatRequest
+)
+SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
+AnyRequest: TypeAlias = (
+    CompletionLikeRequest
+    | ChatLikeRequest
+    | SpeechToTextRequest
+    | ResponsesRequest
+    | IOProcessorRequest
+)
 
-AnyResponse = Union[
-    CompletionResponse,
-    ChatCompletionResponse,
-    EmbeddingResponse,
-    TranscriptionResponse,
-    TokenizeResponse,
-    PoolingResponse,
-    ClassificationResponse,
-    ScoreResponse,
-]
+AnyResponse: TypeAlias = (
+    CompletionResponse
+    | ChatCompletionResponse
+    | EmbeddingResponse
+    | TranscriptionResponse
+    | TokenizeResponse
+    | PoolingResponse
+    | ClassificationResponse
+    | ScoreResponse
+)
 
 
 class TextTokensPrompt(TypedDict):
@@ -145,7 +145,7 @@ class EmbedsPrompt(TypedDict):
     prompt_embeds: torch.Tensor
 
 
-RequestPrompt = Union[list[int], str, TextTokensPrompt, EmbedsPrompt]
+RequestPrompt: TypeAlias = list[int] | str | TextTokensPrompt | EmbedsPrompt
 
 
 def is_text_tokens_prompt(prompt: RequestPrompt) -> TypeIs[TextTokensPrompt]:

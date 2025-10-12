@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, cast
 
 import torch
 from typing_extensions import NotRequired, TypedDict, TypeIs, TypeVar
@@ -12,6 +12,10 @@ if TYPE_CHECKING:
         MultiModalInputs,
         MultiModalUUIDDict,
     )
+else:
+    MultiModalDataDict = object
+    MultiModalInputs = object
+    MultiModalUUIDDict = object
 
 
 class TextPrompt(TypedDict):
@@ -20,7 +24,7 @@ class TextPrompt(TypedDict):
     prompt: str
     """The input text to be tokenized before passing to the model."""
 
-    multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
+    multi_modal_data: NotRequired[MultiModalDataDict | None]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
@@ -34,7 +38,7 @@ class TextPrompt(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
-    multi_modal_uuids: NotRequired["MultiModalUUIDDict"]
+    multi_modal_uuids: NotRequired[MultiModalUUIDDict]
     """
     Optional user-specified UUIDs for multimodal items, mapped by modality.
     Lists must match the number of items per modality and may contain `None`.
@@ -61,7 +65,7 @@ class TokensPrompt(TypedDict):
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
-    multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
+    multi_modal_data: NotRequired[MultiModalDataDict | None]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
@@ -75,7 +79,7 @@ class TokensPrompt(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
-    multi_modal_uuids: NotRequired["MultiModalUUIDDict"]
+    multi_modal_uuids: NotRequired[MultiModalUUIDDict]
     """
     Optional user-specified UUIDs for multimodal items, mapped by modality.
     Lists must match the number of items per modality and may contain `None`.
@@ -111,7 +115,7 @@ class DataPrompt(TypedDict):
     """The input data format"""
 
 
-SingletonPrompt = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
+SingletonPrompt: TypeAlias = str | TextPrompt | TokensPrompt | EmbedsPrompt
 """
 Set of possible schemas for a single prompt:
 
@@ -190,7 +194,7 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
     mm_processor_kwargs: NotRequired[dict[str, Any]]
 
 
-PromptType = Union[SingletonPrompt, ExplicitEncoderDecoderPrompt]
+PromptType: TypeAlias = SingletonPrompt | ExplicitEncoderDecoderPrompt
 """
 Set of possible schemas for an LLM input, including
 both decoder-only and encoder/decoder input types:
@@ -261,7 +265,7 @@ def embeds_inputs(
     return inputs
 
 
-DecoderOnlyInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
+DecoderOnlyInputs: TypeAlias = TokenInputs | EmbedsInputs | MultiModalInputs
 """
 The inputs in [`LLMEngine`][vllm.engine.llm_engine.LLMEngine] before they are
 passed to the model executor.
@@ -277,20 +281,20 @@ class EncoderDecoderInputs(TypedDict):
     This specifies the required data for encoder-decoder models.
     """
 
-    encoder: Union[TokenInputs, "MultiModalInputs"]
+    encoder: TokenInputs | MultiModalInputs
     """The inputs for the encoder portion."""
 
-    decoder: Union[TokenInputs, "MultiModalInputs"]
+    decoder: TokenInputs | MultiModalInputs
     """The inputs for the decoder portion."""
 
 
-SingletonInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
+SingletonInputs: TypeAlias = TokenInputs | EmbedsInputs | MultiModalInputs
 """
 A processed [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt] which can be
 passed to [`Sequence`][collections.abc.Sequence].
 """
 
-ProcessorInputs = Union[DecoderOnlyInputs, EncoderDecoderInputs]
+ProcessorInputs: TypeAlias = DecoderOnlyInputs | EncoderDecoderInputs
 """
 The outputs from [`vllm.inputs.preprocess.InputPreprocessor`][].
 """

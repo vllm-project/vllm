@@ -3,7 +3,7 @@
 
 import random
 from collections.abc import Callable
-from typing import NamedTuple, Union
+from typing import NamedTuple, TypeAlias
 
 import numpy as np
 import pytest
@@ -48,7 +48,7 @@ REQS_PER_LOGITPROC = 50
 STR_NO_LOGITPROC = "none"
 
 # LogitsProcessor subclass or "none"
-LogitprocType = Union[type[LogitsProcessor], str]
+LogitprocType: TypeAlias = type[LogitsProcessor] | str
 
 
 class LogitsProcsRequestParams:
