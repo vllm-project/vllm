@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://huggingface.co/docs/transformers/perplexity
-from typing import Optional, cast
+from typing import cast
 
 import pytest
 import torch
@@ -51,7 +51,6 @@ def wikitext_ppl_test(
         gpu_memory_utilization=0.7,
         max_model_len=max_length,
         max_num_seqs=1,
-        enforce_eager=True,
         **vllm_extra_kwargs,
     ) as vllm_model:
         # Use max_num_seqs=1 to avoid OOM,
@@ -86,7 +85,7 @@ def wikitext_ppl_test(
         n_tokens = 0
         for output in outputs:
             output = cast(TokensTextLogprobsPromptLogprobs, output)
-            token_datas = cast(list[Optional[dict[int, Logprob]]], output[3])
+            token_datas = cast(list[dict[int, Logprob] | None], output[3])
 
             assert token_datas[0] is None
             token_log_probs = []

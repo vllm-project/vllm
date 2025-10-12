@@ -10,9 +10,9 @@ aenum==3.1.16
     # via lightly
 affine==2.4.0
     # via rasterio
-aiohappyeyeballs==2.4.3
+aiohappyeyeballs==2.6.1
     # via aiohttp
-aiohttp==3.10.11
+aiohttp==3.13.0
     # via
     #   aiohttp-cors
     #   datasets
@@ -21,7 +21,7 @@ aiohttp==3.10.11
     #   ray
 aiohttp-cors==0.8.1
     # via ray
-aiosignal==1.3.1
+aiosignal==1.4.0
     # via aiohttp
 albucore==0.0.16
     # via terratorch
@@ -43,6 +43,10 @@ argcomplete==3.5.1
     # via datamodel-code-generator
 arrow==1.3.0
     # via isoduration
+async-timeout==5.0.1
+    # via
+    #   aiohttp
+    #   redis
 attrs==24.2.0
     # via
     #   aiohttp
@@ -198,6 +202,11 @@ eval-type-backport==0.2.2
     # via mteb
 evaluate==0.4.3
     # via lm-eval
+exceptiongroup==1.3.0
+    # via
+    #   anyio
+    #   hypothesis
+    #   pytest
 fastapi==0.116.1
     # via mlflow-skinny
 fastparquet==2024.11.0
@@ -462,7 +471,7 @@ mbstrdecoder==1.1.3
     #   typepy
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.8.2
+mistral-common==1.8.5
     # via -r requirements/test.in
 mlflow==2.22.0
     # via terratorch
@@ -726,7 +735,9 @@ prometheus-client==0.22.0
     #   opentelemetry-exporter-prometheus
     #   ray
 propcache==0.2.0
-    # via yarl
+    # via
+    #   aiohttp
+    #   yarl
 proto-plus==1.26.1
     # via google-api-core
 protobuf==5.28.3
@@ -769,7 +780,7 @@ pycparser==2.22
     # via cffi
 pycryptodomex==3.22.0
     # via blobfile
-pydantic==2.11.7
+pydantic==2.12.0
     # via
     #   -r requirements/test.in
     #   albumentations
@@ -781,7 +792,7 @@ pydantic==2.11.7
     #   mteb
     #   pydantic-extra-types
     #   ray
-pydantic-core==2.33.2
+pydantic-core==2.41.1
     # via pydantic
 pydantic-extra-types==2.10.5
     # via mistral-common
@@ -995,13 +1006,10 @@ sentence-transformers==3.2.1
     # via
     #   -r requirements/test.in
     #   mteb
-sentencepiece==0.2.0
-    # via mistral-common
 setuptools==77.0.3
     # via
     #   lightning-utilities
     #   pytablewriter
-    #   torch
 shapely==2.1.1
     # via
     #   geopandas
@@ -1065,7 +1073,7 @@ tblib==3.1.0
     # via -r requirements/test.in
 tcolorpy==0.1.6
     # via pytablewriter
-tenacity==9.0.0
+tenacity==9.1.2
     # via
     #   lm-eval
     #   plotly
@@ -1081,7 +1089,7 @@ tifffile==2025.3.30
     # via
     #   scikit-image
     #   terratorch
-tiktoken==0.7.0
+tiktoken==0.12.0
     # via
     #   lm-eval
     #   mistral-common
@@ -1096,8 +1104,15 @@ tokenizers==0.22.0
     # via
     #   -r requirements/test.in
     #   transformers
+toml==0.10.2
+    # via datamodel-code-generator
 tomli==2.2.1
-    # via schemathesis
+    # via
+    #   alembic
+    #   black
+    #   coverage
+    #   pytest
+    #   schemathesis
 tomli-w==1.2.0
     # via schemathesis
 torch==2.9.0+cu128
@@ -1134,7 +1149,7 @@ torchaudio==2.9.0+cu128
     #   -r requirements/test.in
     #   encodec
     #   vocos
-torchgeo==0.7.0
+torchgeo==0.6.2
     # via terratorch
 torchmetrics==1.7.4
     # via
@@ -1200,10 +1215,14 @@ types-python-dateutil==2.9.0.20241206
     # via arrow
 typeshed-client==2.8.2
     # via jsonargparse
-typing-extensions==4.12.2
+typing-extensions==4.15.0
     # via
+    #   aiosignal
     #   albumentations
     #   alembic
+    #   anyio
+    #   black
+    #   exceptiongroup
     #   fastapi
     #   graphene
     #   huggingface-hub
@@ -1213,6 +1232,7 @@ typing-extensions==4.12.2
     #   mistral-common
     #   mlflow-skinny
     #   mteb
+    #   multidict
     #   opentelemetry-api
     #   opentelemetry-sdk
     #   opentelemetry-semantic-conventions
@@ -1221,13 +1241,14 @@ typing-extensions==4.12.2
     #   pydantic-core
     #   pydantic-extra-types
     #   pytorch-lightning
+    #   rich
     #   sqlalchemy
     #   torch
-    #   torchgeo
     #   typer
     #   typeshed-client
     #   typing-inspection
-typing-inspection==0.4.1
+    #   uvicorn
+typing-inspection==0.4.2
     # via pydantic
 tzdata==2024.2
     # via pandas
@@ -1262,7 +1283,7 @@ word2number==1.1
     # via lm-eval
 wrapt==1.17.2
     # via smart-open
-xarray==2025.7.1
+xarray==2025.6.1
     # via rioxarray
 xxhash==3.5.0
     # via

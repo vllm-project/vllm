@@ -33,8 +33,6 @@ Output:    ' in the hands of the people.\n\nThe future of AI is in the'
 ------------------------------------------------------------
 """
 
-from typing import Optional
-
 import torch
 
 from vllm import LLM, SamplingParams
@@ -58,7 +56,7 @@ class DummyLogitsProcessor(LogitsProcessor):
     def is_argmax_invariant(self) -> bool:
         return False
 
-    def update_state(self, batch_update: Optional[BatchUpdate]):
+    def update_state(self, batch_update: BatchUpdate | None):
         process_dict_updates(
             self.req_info,
             batch_update,

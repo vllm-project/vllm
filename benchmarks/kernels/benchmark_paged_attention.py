@@ -3,7 +3,6 @@
 
 import random
 import time
-from typing import Optional
 
 import torch
 
@@ -37,7 +36,7 @@ def main(
     seed: int,
     do_profile: bool,
     device: str = "cuda",
-    kv_cache_dtype: Optional[str] = None,
+    kv_cache_dtype: str | None = None,
 ) -> None:
     current_platform.seed_everything(seed)
 

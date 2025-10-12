@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import asyncio
 import concurrent
 import contextlib
@@ -46,12 +44,12 @@ from collections import UserDict, defaultdict
 from collections.abc import (
     AsyncGenerator,
     Awaitable,
+    Callable,
     Collection,
     Generator,
     Hashable,
     Iterable,
     Iterator,
-    KeysView,
     Mapping,
     Sequence,
 )
@@ -60,24 +58,17 @@ from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from pathlib import Path
-from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Generic,
     Literal,
-    NamedTuple,
     TextIO,
     TypeVar,
-    Union,
-    cast,
-    overload,
 )
 from urllib.parse import urlparse
 from uuid import uuid4
 
-import cachetools
 import cbor2
 import cloudpickle
 import numpy as np
@@ -105,6 +96,12 @@ if TYPE_CHECKING:
 
     from vllm.config import ModelConfig, VllmConfig
     from vllm.sequence import IntermediateTensors
+else:
+    Namespace = object
+
+    ModelConfig = object
+    VllmConfig = object
+    IntermediateTensors = object
 
 logger = init_logger(__name__)
 
@@ -183,13 +180,6 @@ U = TypeVar("U")
 
 _K = TypeVar("_K", bound=Hashable)
 _V = TypeVar("_V")
-_T = TypeVar("_T")
-
-
-class _Sentinel: ...
-
-
-ALL_PINNED_SENTINEL = _Sentinel()
 
 
 class Device(enum.Enum):
@@ -213,243 +203,6 @@ class Counter:
 
     def reset(self) -> None:
         self.counter = 0
-
-
-class _MappingOrderCacheView(UserDict[_K, _V]):
-    def __init__(self, data: Mapping[_K, _V], ordered_keys: Mapping[_K, None]):
-        super().__init__(data)
-        self.ordered_keys = ordered_keys
-
-    def __iter__(self) -> Iterator[_K]:
-        return iter(self.ordered_keys)
-
-    def keys(self) -> KeysView[_K]:
-        return KeysView(self.ordered_keys)
-
-
-class CacheInfo(NamedTuple):
-    hits: int
-    total: int
-
-    @property
-    def hit_ratio(self) -> float:
-        if self.total == 0:
-            return 0
-
-        return self.hits / self.total
-
-    def __sub__(self, other: CacheInfo):
-        return CacheInfo(
-            hits=self.hits - other.hits,
-            total=self.total - other.total,
-        )
-
-
-class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
-    def __init__(self, capacity: float, getsizeof: Callable[[_V], float] | None = None):
-        super().__init__(capacity, getsizeof)
-
-        self.pinned_items = set[_K]()
-
-        self._hits = 0
-        self._total = 0
-        self._last_info = CacheInfo(hits=0, total=0)
-
-    def __getitem__(self, key: _K, *, update_info: bool = True) -> _V:
-        value = super().__getitem__(key)
-
-        if update_info:
-            self._hits += 1
-            self._total += 1
-
-        return value
-
-    def __delitem__(self, key: _K) -> None:
-        run_on_remove = key in self
-        value = self.__getitem__(key, update_info=False)  # type: ignore[call-arg]
-        super().__delitem__(key)
-        if key in self.pinned_items:
-            # Todo: add warning to inform that del pinned item
-            self._unpin(key)
-        if run_on_remove:
-            self._on_remove(key, value)
-
-    @property
-    def cache(self) -> Mapping[_K, _V]:
-        """Return the internal cache dictionary in order (read-only)."""
-        return _MappingOrderCacheView(
-            self._Cache__data,  # type: ignore
-            self.order,
-        )
-
-    @property
-    def order(self) -> Mapping[_K, None]:
-        """Return the internal order dictionary (read-only)."""
-        return MappingProxyType(self._LRUCache__order)  # type: ignore
-
-    @property
-    def capacity(self) -> float:
-        return self.maxsize
-
-    @property
-    def usage(self) -> float:
-        if self.maxsize == 0:
-            return 0
-
-        return self.currsize / self.maxsize
-
-    def stat(self, *, delta: bool = False) -> CacheInfo:
-        """
-        Gets the cumulative number of hits and queries against this cache.
-
-        If `delta=True`, instead gets these statistics
-        since the last call that also passed `delta=True`.
-        """
-        info = CacheInfo(hits=self._hits, total=self._total)
-
-        if delta:
-            info_delta = info - self._last_info
-            self._last_info = info
-            info = info_delta
-
-        return info
-
-    def touch(self, key: _K) -> None:
-        try:
-            self._LRUCache__order.move_to_end(key)  # type: ignore
-        except KeyError:
-            self._LRUCache__order[key] = None  # type: ignore
-
-    @overload
-    def get(self, key: _K, /) -> _V | None: ...
-
-    @overload
-    def get(self, key: _K, /, default: Union[_V, _T]) -> Union[_V, _T]: ...
-
-    def get(
-        self, key: _K, /, default: Union[_V, _T] | None = None
-    ) -> Union[_V, _T] | None:
-        value: Union[_V, _T] | None
-        if key in self:
-            value = self.__getitem__(key, update_info=False)  # type: ignore[call-arg]
-
-            self._hits += 1
-        else:
-            value = default
-
-        self._total += 1
-        return value
-
-    @overload
-    def pop(self, key: _K) -> _V: ...
-
-    @overload
-    def pop(self, key: _K, default: Union[_V, _T]) -> Union[_V, _T]: ...
-
-    def pop(
-        self, key: _K, default: Union[_V, _T] | None = None
-    ) -> Union[_V, _T] | None:
-        value: Union[_V, _T] | None
-        if key not in self:
-            return default
-
-        value = self.__getitem__(key, update_info=False)  # type: ignore[call-arg]
-        self.__delitem__(key)
-        return value
-
-    def put(self, key: _K, value: _V) -> None:
-        self.__setitem__(key, value)
-
-    def pin(self, key: _K) -> None:
-        """
-        Pins a key in the cache preventing it from being
-        evicted in the LRU order.
-        """
-        if key not in self:
-            raise ValueError(f"Cannot pin key: {key} not in cache.")
-        self.pinned_items.add(key)
-
-    def _unpin(self, key: _K) -> None:
-        """
-        Unpins a key in the cache allowing it to be
-        evicted in the LRU order.
-        """
-        self.pinned_items.remove(key)
-
-    def _on_remove(self, key: _K, value: _V | None) -> None:
-        pass
-
-    def remove_oldest(self, *, remove_pinned: bool = False) -> None:
-        if len(self) == 0:
-            return
-
-        self.popitem(remove_pinned=remove_pinned)
-
-    def _remove_old_if_needed(self) -> None:
-        while self.currsize > self.capacity:
-            self.remove_oldest()
-
-    def popitem(self, remove_pinned: bool = False):
-        """Remove and return the `(key, value)` pair least recently used."""
-        if not remove_pinned:
-            # pop the oldest item in the cache that is not pinned
-            lru_key = next(
-                (key for key in self.order if key not in self.pinned_items),
-                ALL_PINNED_SENTINEL,
-            )
-            if lru_key is ALL_PINNED_SENTINEL:
-                raise RuntimeError(
-                    "All items are pinned, cannot remove oldest from the cache."
-                )
-        else:
-            lru_key = next(iter(self.order))
-        value = self.pop(cast(_K, lru_key))
-        return (lru_key, value)
-
-    def clear(self) -> None:
-        while len(self) > 0:
-            self.remove_oldest(remove_pinned=True)
-
-        self._hits = 0
-        self._total = 0
-        self._last_info = CacheInfo(hits=0, total=0)
-
-
-class PyObjectCache:
-    """Used to cache python objects to avoid object allocations
-    across scheduler iterations.
-    """
-
-    def __init__(self, obj_builder):
-        self._obj_builder = obj_builder
-        self._index = 0
-
-        self._obj_cache = []
-        for _ in range(128):
-            self._obj_cache.append(self._obj_builder())
-
-    def _grow_cache(self):
-        # Double the size of the cache
-        num_objs = len(self._obj_cache)
-        for _ in range(num_objs):
-            self._obj_cache.append(self._obj_builder())
-
-    def get_object(self):
-        """Returns a pre-allocated cached object. If there is not enough
-        objects, then the cache size will double.
-        """
-        if self._index >= len(self._obj_cache):
-            self._grow_cache()
-            assert self._index < len(self._obj_cache)
-
-        obj = self._obj_cache[self._index]
-        self._index += 1
-
-        return obj
-
-    def reset(self):
-        """Makes all cached-objects available for the next scheduler iteration."""
-        self._index = 0
 
 
 @cache
@@ -495,9 +248,7 @@ class AsyncMicrobatchTokenizer:
         self._queues: dict[
             tuple,
             asyncio.Queue[
-                Union[
-                    tuple[str, dict, asyncio.Future], tuple[list[int], asyncio.Future]
-                ]
+                tuple[str, dict, asyncio.Future] | tuple[list[int], asyncio.Future]
             ],
         ] = {}
         self._batcher_tasks: list[asyncio.Task] = []
@@ -524,7 +275,7 @@ class AsyncMicrobatchTokenizer:
     def _get_queue(
         self, loop: asyncio.AbstractEventLoop, key: tuple
     ) -> asyncio.Queue[
-        Union[tuple[str, dict, asyncio.Future], tuple[list[int], asyncio.Future]]
+        tuple[str, dict, asyncio.Future] | tuple[list[int], asyncio.Future]
     ]:
         """Get the request queue for the given operation key, creating a new
         queue and batcher task if needed."""
@@ -681,7 +432,7 @@ def cancel_task_threadsafe(task: Task):
         run_in_loop(task.get_loop(), task.cancel)
 
 
-def close_sockets(sockets: Sequence[Union[zmq.Socket, zmq.asyncio.Socket]]):
+def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
     for sock in sockets:
         if sock is not None:
             sock.close(linger=0)
@@ -719,11 +470,6 @@ def make_async(
     return _async_wrapper
 
 
-def _next_task(iterator: AsyncGenerator[T, None], loop: AbstractEventLoop) -> Task:
-    # Can use anext() in python >= 3.10
-    return loop.create_task(iterator.__anext__())  # type: ignore[arg-type]
-
-
 async def merge_async_iterators(
     *iterators: AsyncGenerator[T, None],
 ) -> AsyncGenerator[tuple[int, T], None]:
@@ -741,7 +487,7 @@ async def merge_async_iterators(
 
     loop = asyncio.get_running_loop()
 
-    awaits = {_next_task(pair[1], loop): pair for pair in enumerate(iterators)}
+    awaits = {loop.create_task(anext(it)): (i, it) for i, it in enumerate(iterators)}
     try:
         while awaits:
             done, _ = await asyncio.wait(awaits.keys(), return_when=FIRST_COMPLETED)
@@ -750,7 +496,7 @@ async def merge_async_iterators(
                 try:
                     item = await d
                     i, it = pair
-                    awaits[_next_task(it, loop)] = pair
+                    awaits[loop.create_task(anext(it))] = pair
                     yield i, item
                 except StopAsyncIteration:
                     pass
@@ -1022,8 +768,8 @@ def _generate_random_fp8(
 
 
 def get_kv_cache_torch_dtype(
-    cache_dtype: Union[str, torch.dtype] | None,
-    model_dtype: Union[str, torch.dtype] | None = None,
+    cache_dtype: str | torch.dtype | None,
+    model_dtype: str | torch.dtype | None = None,
 ) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
@@ -1050,8 +796,8 @@ def create_kv_caches_with_random_flash(
     num_layers: int,
     num_heads: int,
     head_size: int,
-    cache_dtype: Union[str, torch.dtype] | None,
-    model_dtype: Union[str, torch.dtype] | None = None,
+    cache_dtype: str | torch.dtype | None,
+    model_dtype: str | torch.dtype | None = None,
     seed: int | None = None,
     device: str | None = "cuda",
     cache_layout: str | None = "NHD",
@@ -1092,8 +838,8 @@ def create_kv_caches_with_random(
     num_layers: int,
     num_heads: int,
     head_size: int,
-    cache_dtype: Union[str, torch.dtype] | None,
-    model_dtype: Union[str, torch.dtype] | None = None,
+    cache_dtype: str | torch.dtype | None,
+    model_dtype: str | torch.dtype | None = None,
     seed: int | None = None,
     device: str | None = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
@@ -1207,7 +953,7 @@ def make_tensor_with_pad(
     dtype: torch.dtype,
     *,
     max_len: int | None = None,
-    device: Union[str, torch.device] | None = None,
+    device: str | torch.device | None = None,
     pin_memory: bool = False,
 ) -> torch.Tensor:
     """
@@ -1229,7 +975,7 @@ def make_tensor_with_pad(
 def async_tensor_h2d(
     data: list,
     dtype: torch.dtype,
-    target_device: Union[str, torch.device],
+    target_device: str | torch.device,
     pin_memory: bool,
 ) -> torch.Tensor:
     """Asynchronously create a tensor and copy it from host to device."""
@@ -1296,7 +1042,7 @@ def as_list(maybe_list: Iterable[T]) -> list[T]:
     return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
 
 
-def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
+def as_iter(obj: T | Iterable[T]) -> Iterable[T]:
     if isinstance(obj, str) or not isinstance(obj, Iterable):
         return [obj]  # type: ignore[list-item]
     return obj
@@ -1305,7 +1051,7 @@ def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
 # `collections` helpers
 def is_list_of(
     value: object,
-    typ: Union[type[T], tuple[type[T], ...]],
+    typ: type[T] | tuple[type[T], ...],
     *,
     check: Literal["first", "all"] = "first",
 ) -> TypeIs[list[T]]:
@@ -1521,7 +1267,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 def deprecate_args(
     start_index: int,
-    is_deprecated: Union[bool, Callable[[], bool]] = True,
+    is_deprecated: bool | Callable[[], bool] = True,
     additional_message: str | None = None,
 ) -> Callable[[F], F]:
     if not callable(is_deprecated):
@@ -1561,7 +1307,7 @@ def deprecate_args(
 
 def deprecate_kwargs(
     *kws: str,
-    is_deprecated: Union[bool, Callable[[], bool]] = True,
+    is_deprecated: bool | Callable[[], bool] = True,
     additional_message: str | None = None,
 ) -> Callable[[F], F]:
     deprecated_kws = set(kws)
@@ -2147,7 +1893,7 @@ class FlexibleArgumentParser(ArgumentParser):
         # only expecting a flat dictionary of atomic types
         processed_args: list[str] = []
 
-        config: dict[str, Union[int, str]] = {}
+        config: dict[str, int | str] = {}
         try:
             with open(file_path) as config_file:
                 config = yaml.safe_load(config_file)
@@ -2404,10 +2150,11 @@ def weak_ref_tensor(tensor: Any) -> Any:
 
 
 def weak_ref_tensors(
-    tensors: Union[
-        torch.Tensor, list[torch.Tensor], tuple[torch.Tensor], IntermediateTensors
-    ],
-) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
+    tensors: torch.Tensor
+    | list[torch.Tensor]
+    | tuple[torch.Tensor]
+    | IntermediateTensors,
+) -> torch.Tensor | list[Any] | tuple[Any] | Any:
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
@@ -2438,7 +2185,7 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
 
 
-def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
+def import_from_path(module_name: str, file_path: str | os.PathLike):
     """
     Import a Python file according to its file path.
 
@@ -2839,7 +2586,7 @@ class MemorySnapshot:
         self.non_torch_memory = self.cuda_memory - self.torch_memory
         self.timestamp = time.time()
 
-    def __sub__(self, other: MemorySnapshot) -> MemorySnapshot:
+    def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
             free_memory=self.free_memory - other.free_memory,
@@ -3033,13 +2780,13 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
 def make_zmq_socket(
-    ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
+    ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
     path: str,
     socket_type: Any,
     bind: bool | None = None,
     identity: bytes | None = None,
     linger: int | None = None,
-) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
+) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
     mem = psutil.virtual_memory()
@@ -3205,7 +2952,7 @@ def bind_kv_cache(
 
 def run_method(
     obj: Any,
-    method: Union[str, bytes, Callable],
+    method: str | bytes | Callable,
     args: tuple[Any],
     kwargs: dict[str, Any],
 ) -> Any:

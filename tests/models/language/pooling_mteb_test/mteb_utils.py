@@ -3,7 +3,6 @@
 
 import tempfile
 from collections.abc import Sequence
-from typing import Optional
 
 import mteb
 import numpy as np
@@ -51,7 +50,7 @@ class VllmMtebEncoder(mteb.Encoder):
 
     def predict(
         self,
-        sentences: list[tuple[str, str, Optional[str]]],  # query, corpus, prompt
+        sentences: list[tuple[str, str, str | None]],  # query, corpus, prompt
         *args,
         **kwargs,
     ) -> np.ndarray:
@@ -100,7 +99,7 @@ class ScoreClientMtebEncoder(mteb.Encoder):
 
     def predict(
         self,
-        sentences: list[tuple[str, str, Optional[str]]],  # query, corpus, prompt
+        sentences: list[tuple[str, str, str | None]],  # query, corpus, prompt
         *args,
         **kwargs,
     ) -> np.ndarray:
@@ -191,8 +190,7 @@ def mteb_test_embed_models(
     with vllm_runner(
         model_info.name,
         runner="pooling",
-        max_model_len=None,
-        enforce_eager=True,
+        max_model_len=model_info.max_model_len,
         **vllm_extra_kwargs,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
@@ -295,7 +293,7 @@ def mteb_test_rerank_models_hf(
         original_predict = hf_model.predict
 
         def _predict(
-            sentences: list[tuple[str, str, Optional[str]]],  # query, corpus, prompt
+            sentences: list[tuple[str, str, str | None]],  # query, corpus, prompt
             *args,
             **kwargs,
         ):
@@ -349,7 +347,6 @@ def mteb_test_rerank_models(
         runner="pooling",
         max_model_len=None,
         max_num_seqs=8,
-        enforce_eager=True,
         **vllm_extra_kwargs,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
