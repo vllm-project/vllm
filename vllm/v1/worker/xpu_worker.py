@@ -39,6 +39,7 @@ class XPUWorker(Worker):
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+            worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
             logger.info(
                 "Profiling enabled. Traces will be saved to: %s",
                 torch_profiler_trace_dir,
@@ -61,7 +62,7 @@ class XPUWorker(Worker):
                 with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
                 with_flops=envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    torch_profiler_trace_dir, use_gzip=True
+                    torch_profiler_trace_dir, worker_name=worker_name, use_gzip=True
                 ),
             )
         else:
