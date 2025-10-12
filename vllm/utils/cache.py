@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 from collections import UserDict
 from collections.abc import Callable, Hashable, Iterator, KeysView, Mapping
 from types import MappingProxyType
@@ -43,7 +41,7 @@ class CacheInfo(NamedTuple):
 
         return self.hits / self.total
 
-    def __sub__(self, other: CacheInfo):
+    def __sub__(self, other: "CacheInfo"):
         return CacheInfo(
             hits=self.hits - other.hits,
             total=self.total - other.total,

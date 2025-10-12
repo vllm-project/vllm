@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -39,7 +37,7 @@ class NewRequestData:
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
-    ) -> NewRequestData:
+    ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
@@ -110,7 +108,7 @@ class CachedRequestData:
         return len(self.req_ids)
 
     @classmethod
-    def make_empty(cls) -> CachedRequestData:
+    def make_empty(cls) -> "CachedRequestData":
         return cls(
             req_ids=[],
             resumed_from_preemption=[],

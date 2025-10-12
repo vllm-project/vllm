@@ -5,8 +5,6 @@
 Users of vLLM should always import **only** these wrappers.
 """
 
-from __future__ import annotations
-
 import contextlib
 import functools
 import importlib

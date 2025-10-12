@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -190,15 +188,15 @@ class FlashInferBackend(AttentionBackend):
         return "FLASHINFER"
 
     @staticmethod
-    def get_impl_cls() -> type[FlashInferImpl]:
+    def get_impl_cls() -> type["FlashInferImpl"]:
         return FlashInferImpl
 
     @staticmethod
-    def get_metadata_cls() -> type[FlashInferMetadata]:
+    def get_metadata_cls() -> type["FlashInferMetadata"]:
         return FlashInferMetadata
 
     @staticmethod
-    def get_builder_cls() -> type[FlashInferMetadataBuilder]:
+    def get_builder_cls() -> type["FlashInferMetadataBuilder"]:
         return FlashInferMetadataBuilder
 
     @staticmethod
