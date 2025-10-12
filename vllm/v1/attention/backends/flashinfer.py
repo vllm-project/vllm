@@ -2,10 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import ClassVar, Union
+from typing import ClassVar
 
 import numpy as np
 import torch
@@ -167,7 +165,7 @@ class FlashInferBackend(AttentionBackend):
         return [64, 128, 256]
 
     @staticmethod
-    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
+    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
         # Note: Not sure for all platforms,
         # but on Blackwell, only support a page size of
         # 16, 32, 64
@@ -190,15 +188,15 @@ class FlashInferBackend(AttentionBackend):
         return "FLASHINFER"
 
     @staticmethod
-    def get_impl_cls() -> type[FlashInferImpl]:
+    def get_impl_cls() -> type["FlashInferImpl"]:
         return FlashInferImpl
 
     @staticmethod
-    def get_metadata_cls() -> type[FlashInferMetadata]:
+    def get_metadata_cls() -> type["FlashInferMetadata"]:
         return FlashInferMetadata
 
     @staticmethod
-    def get_builder_cls() -> type[FlashInferMetadataBuilder]:
+    def get_builder_cls() -> type["FlashInferMetadataBuilder"]:
         return FlashInferMetadataBuilder
 
     @staticmethod
@@ -296,6 +294,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
+        speculative_config = vllm_config.speculative_config
+        num_spec_tokens = (
+            speculative_config.num_speculative_tokens
+            if speculative_config is not None
+            else 0
+        )
         self.enable_cuda_graph = (
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
         )
@@ -306,7 +310,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 int, BatchDecodeWithPagedKVCacheWrapper
             ] = {}
             self._decode_cudagraph_max_bs = min(
-                max_num_reqs, self.compilation_config.max_capture_size
+                (1 + num_spec_tokens) * max_num_reqs,
+                self.compilation_config.max_capture_size,
             )
 
         self.num_qo_heads = self.model_config.get_num_attention_heads(
@@ -679,7 +684,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 use_cudagraph = (
                     self.enable_cuda_graph
                     and pure_decode
-                    and num_decodes <= self._decode_cudagraph_max_bs
+                    and num_decode_tokens <= self._decode_cudagraph_max_bs
                 )
                 if use_cudagraph:
                     num_input_tokens = self.vllm_config.pad_for_cudagraph(
@@ -1109,9 +1114,9 @@ def fast_plan_decode(
     pos_encoding_mode: str = "NONE",
     window_left: int = -1,
     logits_soft_cap: float | None = None,
-    q_data_type: Union[str, torch.dtype] | None = "float16",
-    kv_data_type: Union[str, torch.dtype] | None = None,
-    data_type: Union[str, torch.dtype] | None = None,
+    q_data_type: str | torch.dtype | None = "float16",
+    kv_data_type: str | torch.dtype | None = None,
+    data_type: str | torch.dtype | None = None,
     sm_scale: float | None = None,
     rope_scale: float | None = None,
     rope_theta: float | None = None,

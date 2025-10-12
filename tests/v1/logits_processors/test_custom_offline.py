@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 import sys
-from typing import Any, Union
+from typing import Any
 
 import pytest
 
@@ -159,7 +159,7 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
         _run_test({}, logitproc_loaded=True)
         return
 
-    kwargs: dict[str, list[Union[str, type[LogitsProcessor]]]] = {}
+    kwargs: dict[str, list[str | type[LogitsProcessor]]] = {}
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_FQCN:
         # Scenario: load logitproc based on fully-qualified class name (FQCN)
         # Inject dummy module which defines logitproc
