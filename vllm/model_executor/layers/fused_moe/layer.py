@@ -2169,6 +2169,23 @@ class FusedMoE(CustomOp):
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
 
+    def _reduce_output(
+        self,
+        states: torch.Tensor,
+        do_combine: bool,
+    ) -> torch.Tensor:
+        if do_combine:
+            states = get_ep_group().combine(states, self.is_sequence_parallel)
+
+        if (
+            not self.is_sequence_parallel
+            and self.reduce_results
+            and (self.tp_size > 1 or self.ep_size > 1)
+        ):
+            states = self.maybe_all_reduce_tensor_model_parallel(states)
+
+        return states
+
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -2382,23 +2399,6 @@ class FusedMoE(CustomOp):
         else:
             full_hidden_states.copy_(full_fused_final_hidden_states)
             return full_shared_final_hidden_states
-
-    def _reduce_output(
-        self,
-        states: torch.Tensor,
-        do_combine: bool,
-    ) -> torch.Tensor:
-        if do_combine:
-            states = get_ep_group().combine(states, self.is_sequence_parallel)
-
-        if (
-            not self.is_sequence_parallel
-            and self.reduce_results
-            and (self.tp_size > 1 or self.ep_size > 1)
-        ):
-            states = self.maybe_all_reduce_tensor_model_parallel(states)
-
-        return states
 
     def forward_impl(
         self,
