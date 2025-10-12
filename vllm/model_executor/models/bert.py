@@ -631,64 +631,55 @@ class SPLADESparsePooler(Pooler):
 
     def forward(
         self,
-        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+        hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+    ) -> torch.Tensor:
+        assert isinstance(hidden_states, torch.Tensor) and hidden_states.dim() == 2
+
         lens_tensor: torch.Tensor = pooling_metadata.prompt_lens
         lens: list[int] = lens_tensor.tolist()
         B: int = len(lens)
-        max_len: int = int(lens_tensor.max().item())
-
-        if isinstance(hidden_states, list):
-            hs_list = hidden_states
-        else:
-            hs_list = torch.split(hidden_states, lens, dim=0)
-
-        device = hs_list[0].device
-        H = hs_list[0].size(-1)
-
-        padded = hidden_states.new_zeros((B, max_len, H))
-        valid_mask = torch.zeros((B, max_len), dtype=torch.bool, device=device)
-        for i, (hs, L) in enumerate(zip(hs_list, lens)):
-            L = int(L)
-            padded[i, :L] = hs
-            valid_mask[i, :L] = True
 
         token_ids = pooling_metadata.prompt_token_ids
-        if self.remove_cls_sep and token_ids is not None:
-            for i, L in enumerate(lens):
+        offset = 0
+        pooled_list: list[torch.Tensor] = []
+
+        for i in range(B):
+            L = int(lens[i])
+            hs = hidden_states[offset : offset + L]
+
+            start_idx = 0
+            end_idx = L
+            if self.remove_cls_sep and token_ids is not None:
                 if (
                     self.cls_token_id is not None
-                    and int(token_ids[i, 0].item()) == self.cls_token_id
+                    and token_ids[i, 0].item() == self.cls_token_id
                 ):
-                    valid_mask[i, 0] = False
+                    start_idx = 1
                 if (
                     self.sep_token_id is not None
-                    and int(token_ids[i, L - 1].item()) == self.sep_token_id
+                    and token_ids[i, L - 1].item() == self.sep_token_id
                 ):
-                    valid_mask[i, L - 1] = False
+                    end_idx = max(start_idx, L - 1)
 
-        flat = padded.reshape(B * max_len, H)
-        logits = self.mlm_head(flat)
-        V = int(logits.size(-1))
-        logits = logits.view(B, max_len, V)
+            if end_idx <= start_idx:
+                V = int(self.mlm_head.decoder.out_features)
+                pooled_list.append(hs.new_zeros((V,)))
+                offset += L
+                continue
 
-        # SPLADE activation
-        scores = torch.log1p(torch.relu(logits))  # [B, T, V]
+            logits_i = self.mlm_head(hs[start_idx:end_idx])
+            scores_i = torch.log1p(torch.relu(logits_i))
 
-        if self.pooling == "sum":
-            pooled = (scores * valid_mask.to(scores.dtype).unsqueeze(-1)).sum(dim=1)
-        else:
-            neg_inf = torch.tensor(
-                float("-inf"), device=scores.device, dtype=scores.dtype
-            )
-            masked = scores.masked_fill(~valid_mask.unsqueeze(-1), neg_inf)
-            pooled = masked.amax(dim=1)
-            pooled = torch.where(
-                torch.isneginf(pooled), torch.zeros_like(pooled), pooled
-            )
+            if self.pooling == "sum":
+                pooled_i = scores_i.sum(dim=0)
+            else:  # "max"
+                pooled_i = scores_i.max(dim=0).values
 
-        return pooled.contiguous()
+            pooled_list.append(pooled_i.contiguous())
+            offset += L
+
+        return torch.stack(pooled_list, dim=0).contiguous()
 
 
 @default_pooling_type("CLS")
