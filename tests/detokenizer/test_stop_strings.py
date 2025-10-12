@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 
@@ -15,8 +15,8 @@ def _test_stopping(
     llm: LLM,
     expected_output: str,
     expected_reason: Any,
-    stop: Optional[list[str]] = None,
-    stop_token_ids: Optional[list[int]] = None,
+    stop: list[str] | None = None,
+    stop_token_ids: list[int] | None = None,
     include_in_output: bool = False,
 ) -> None:
     output = llm.generate(

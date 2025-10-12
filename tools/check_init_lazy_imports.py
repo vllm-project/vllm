@@ -5,8 +5,6 @@ i.e: appears only within the ``if typing.TYPE_CHECKING:`` guard,
 **except** for a short whitelist.
 """
 
-from __future__ import annotations
-
 import ast
 import pathlib
 import sys

@@ -3,7 +3,7 @@
 # ruff: noqa: E501
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -81,7 +81,7 @@ class RogueSharedStorageConnector(SharedStorageConnector):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[set[str] | None, set[str] | None]:
         if self._async_load:
             meta = self._get_connector_metadata()
             assert isinstance(meta, RogueSharedStorageConnectorMetadata)

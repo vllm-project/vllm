@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -24,7 +23,7 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def forward(
         self, input_: torch.Tensor
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
         """Forward of ReplicatedLinearWithLoRA
 
         Args:
@@ -54,6 +53,6 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None,
     ) -> bool:
         return type(source_layer) is ReplicatedLinear

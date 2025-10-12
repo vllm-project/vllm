@@ -3,7 +3,6 @@
 # code modified from deepseekv3_tool_parser.py
 
 from collections.abc import Sequence
-from typing import Union
 
 import regex as re
 
@@ -131,7 +130,7 @@ class KimiK2ToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         logger.debug("delta_text: %s", delta_text)
         logger.debug("delta_token_ids: %s", delta_token_ids)
         # check to see if we should be streaming a tool call - is there a
@@ -278,7 +277,7 @@ class KimiK2ToolParser(ToolParser):
             if not self.current_tool_name_sent:
                 if current_tool_call is None:
                     return None
-                function_name: Union[str, None] = current_tool_call.get("name")
+                function_name: str | None = current_tool_call.get("name")
                 tool_id = current_tool_call.get("id")
                 if function_name:
                     self.current_tool_name_sent = True

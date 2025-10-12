@@ -19,7 +19,7 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch import nn
@@ -148,12 +148,12 @@ class Llama4Attention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
+        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         bias: bool = False,
         bias_o_proj: bool = False,
-        cache_config: Optional[CacheConfig] = None,
+        cache_config: CacheConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -296,7 +296,7 @@ class Llama4DecoderLayer(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
-        config: Optional[Llama4TextConfig] = None,
+        config: Llama4TextConfig | None = None,
     ) -> None:
         super().__init__()
 
@@ -352,7 +352,7 @@ class Llama4DecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:

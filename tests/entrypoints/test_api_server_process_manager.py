@@ -5,7 +5,6 @@ import multiprocessing
 import socket
 import threading
 import time
-from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -105,7 +104,7 @@ def test_wait_for_completion_or_failure(api_server_args):
         assert len(manager.processes) == 3
 
         # Create a result capture for the thread
-        result: dict[str, Optional[Exception]] = {"exception": None}
+        result: dict[str, Exception | None] = {"exception": None}
 
         def run_with_exception_capture():
             try:
@@ -218,7 +217,7 @@ def test_external_process_monitoring(api_server_args):
         assert len(manager.processes) == 3
 
         # Create a result capture for the thread
-        result: dict[str, Optional[Exception]] = {"exception": None}
+        result: dict[str, Exception | None] = {"exception": None}
 
         def run_with_exception_capture():
             try:

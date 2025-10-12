@@ -3,7 +3,7 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Final, Literal, Optional, Protocol, TypeVar, Union
+from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
@@ -93,7 +93,7 @@ class PixtralHFImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values_pixtral"] = "pixel_values_pixtral"
     pixel_values: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "c", "h", "w", dynamic_dims={"h", "w"}),
     ]
 
@@ -110,9 +110,9 @@ class LlavaImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor, TensorShape("bn", "ifs", "hs")]
 
 
-LlavaImageInputs = Union[
-    LlavaImagePixelInputs, PixtralHFImagePixelInputs, LlavaImageEmbeddingInputs
-]
+LlavaImageInputs: TypeAlias = (
+    LlavaImagePixelInputs | PixtralHFImagePixelInputs | LlavaImageEmbeddingInputs
+)
 
 
 class LlavaMultiModalProjector(nn.Module):
@@ -122,7 +122,7 @@ class LlavaMultiModalProjector(nn.Module):
         text_hidden_size: int,
         projector_hidden_act: str,
         multimodal_projector_bias: bool,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -154,7 +154,7 @@ class LlavaLikeConfig(Protocol):
     vision_config: Final[PretrainedConfig]
     image_token_index: Final[int]
     vision_feature_select_strategy: Final[str]
-    vision_feature_layer: Final[Union[int, list[int]]]
+    vision_feature_layer: Final[int | list[int]]
 
 
 class LlavaLikeProcessor(Protocol):
@@ -172,7 +172,7 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> LlavaLikeProcessor:
         raise NotImplementedError
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_num_image_tokens(
@@ -222,7 +222,7 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -406,7 +406,7 @@ def _build_llava_or_pixtral_hf_processor(
     info: _I,
     dummy_inputs: BaseDummyInputsBuilder[_I],
     *,
-    cache: Optional[BaseMultiModalProcessorCache] = None,
+    cache: BaseMultiModalProcessorCache | None = None,
 ) -> BaseMultiModalProcessor:
     if isinstance(info, PixtralHFProcessingInfo):
         return PixtralHFMultiModalProcessor(
@@ -461,11 +461,11 @@ def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
 
 def init_vision_tower_for_llava(
     hf_config: LlavaLikeConfig,
-    quant_config: Optional[QuantizationConfig],
+    quant_config: QuantizationConfig | None,
     *,
-    require_post_norm: Optional[bool] = None,
+    require_post_norm: bool | None = None,
     prefix: str = "",
-) -> Union[CLIPVisionModel, SiglipVisionModel, PixtralHFVisionModel]:
+) -> CLIPVisionModel | SiglipVisionModel | PixtralHFVisionModel:
     vision_config = hf_config.vision_config
 
     # Initialize the vision tower only up to the deepest required feature layer
@@ -524,7 +524,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<image>"
 
@@ -585,7 +585,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[LlavaImageInputs]:
+    ) -> LlavaImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -619,9 +619,9 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _image_pixels_to_features(
         self,
-        vision_tower: Union[CLIPVisionModel, SiglipVisionModel, PixtralHFVisionModel],
-        pixel_values: Union[torch.Tensor, list[torch.Tensor]],
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+        vision_tower: CLIPVisionModel | SiglipVisionModel | PixtralHFVisionModel,
+        pixel_values: torch.Tensor | list[torch.Tensor],
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
         return vision_tower(
@@ -631,8 +631,8 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _process_image_pixels(
         self,
-        inputs: Union[LlavaImagePixelInputs, PixtralHFImagePixelInputs],
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+        inputs: LlavaImagePixelInputs | PixtralHFImagePixelInputs,
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         assert self.vision_tower is not None
 
         pixel_values = inputs["pixel_values"]
@@ -642,7 +642,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     def _process_image_input(
         self,
         image_input: LlavaImageInputs,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
@@ -672,10 +672,10 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for LLaVA-1.5.
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -725,7 +725,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -754,11 +754,11 @@ class MantisProcessingInfo(LlavaProcessingInfo):
 class MantisMultiModalProcessor(LlavaMultiModalProcessor):
     def apply(
         self,
-        prompt: Union[str, list[int]],
+        prompt: str | list[int],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        tokenization_kwargs: Mapping[str, object] | None = None,
+        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index

@@ -7,7 +7,6 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
-from typing import Optional
 
 import torch
 
@@ -257,12 +256,12 @@ def chunk_gated_delta_rule_fwd_h(
     k: torch.Tensor,
     w: torch.Tensor,
     u: torch.Tensor,
-    g: Optional[torch.Tensor] = None,
-    initial_state: Optional[torch.Tensor] = None,
+    g: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     chunk_size: int = 64,  # SY: remove this argument and force chunk size 64?
     save_new_value: bool = True,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, Hg, K, V = *k.shape, u.shape[-1]
     H = u.shape[-2]

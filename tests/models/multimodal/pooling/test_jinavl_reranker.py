@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Union
 
 import pytest
 from transformers import AutoModel
@@ -32,7 +31,7 @@ def vllm_reranker(
     def create_image_param(url: str) -> ChatCompletionContentPartImageParam:
         return {"type": "image_url", "image_url": {"url": f"{url}"}}
 
-    query: Union[list[str], ScoreMultiModalParam]
+    query: list[str] | ScoreMultiModalParam
     if query_type == "text":
         query = query_strs
     elif query_type == "image":
@@ -40,7 +39,7 @@ def vllm_reranker(
             content=[create_image_param(url) for url in query_strs]
         )
 
-    documents: Union[list[str], ScoreMultiModalParam]
+    documents: list[str] | ScoreMultiModalParam
     if doc_type == "text":
         documents = document_strs
     elif doc_type == "image":

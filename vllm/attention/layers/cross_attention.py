@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 from copy import copy
-from typing import Optional
 
 import numpy as np
 import torch
@@ -138,8 +137,8 @@ class CrossAttention(Attention):
         num_heads: int,
         head_size: int,
         scale: float,
-        cache_config: Optional[CacheConfig] = None,
-        attn_type: Optional[str] = None,
+        cache_config: CacheConfig | None = None,
+        attn_type: str | None = None,
         **kwargs,
     ):
         dtype = torch.get_default_dtype()

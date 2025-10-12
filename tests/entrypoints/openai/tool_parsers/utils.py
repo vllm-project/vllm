@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Union
 
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
@@ -84,10 +83,10 @@ class StreamingToolReconstructor:
 def run_tool_extraction(
     tool_parser: ToolParser,
     model_output: str,
-    request: Union[ChatCompletionRequest, None] = None,
+    request: ChatCompletionRequest | None = None,
     streaming: bool = False,
     assert_one_tool_per_delta: bool = True,
-) -> tuple[Union[str, None], list[ToolCall]]:
+) -> tuple[str | None, list[ToolCall]]:
     if streaming:
         reconstructor = run_tool_extraction_streaming(
             tool_parser,
@@ -105,7 +104,7 @@ def run_tool_extraction(
 def run_tool_extraction_nonstreaming(
     tool_parser: ToolParser,
     model_output: str,
-    request: Union[ChatCompletionRequest, None] = None,
+    request: ChatCompletionRequest | None = None,
 ) -> ExtractedToolCallInformation:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     return tool_parser.extract_tool_calls(model_output, request)
@@ -114,7 +113,7 @@ def run_tool_extraction_nonstreaming(
 def run_tool_extraction_streaming(
     tool_parser: ToolParser,
     model_deltas: Iterable[str],
-    request: Union[ChatCompletionRequest, None] = None,
+    request: ChatCompletionRequest | None = None,
     assert_one_tool_per_delta: bool = True,
 ) -> StreamingToolReconstructor:
     request = request or ChatCompletionRequest(messages=[], model="test-model")

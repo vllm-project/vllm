@@ -5,7 +5,6 @@ import functools
 import struct
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Union
 
 _SCALAR_TYPES_ID_MAP = {}
 
@@ -105,7 +104,7 @@ class ScalarType:
         double_raw = self._floating_point_max_int()
         return struct.unpack("!d", struct.pack("!Q", double_raw))[0]
 
-    def _raw_max(self) -> Union[int, float]:
+    def _raw_max(self) -> int | float:
         if self.is_floating_point():
             return self._floating_point_max()
         else:
@@ -114,7 +113,7 @@ class ScalarType:
             )
             return (1 << self.mantissa) - 1
 
-    def _raw_min(self) -> Union[int, float]:
+    def _raw_min(self) -> int | float:
         if self.is_floating_point():
             assert self.is_signed(), (
                 "We currently assume all floating point types are signed"
@@ -168,14 +167,14 @@ class ScalarType:
     def size_bits(self) -> int:
         return self.exponent + self.mantissa + int(self.signed)
 
-    def min(self) -> Union[int, float]:
+    def min(self) -> int | float:
         """
         Min representable value for this scalar type.
         (accounting for bias if there is one)
         """
         return self._raw_min() - self.bias
 
-    def max(self) -> Union[int, float]:
+    def max(self) -> int | float:
         """
         Max representable value for this scalar type.
         (accounting for bias if there is one)
@@ -265,14 +264,14 @@ class ScalarType:
     #
 
     @classmethod
-    def int_(cls, size_bits: int, bias: Optional[int]) -> "ScalarType":
+    def int_(cls, size_bits: int, bias: int | None) -> "ScalarType":
         "Create a signed integer scalar type (size_bits includes sign-bit)."
         ret = cls(0, size_bits - 1, True, bias if bias else 0)
         ret.id  # noqa B018: make sure the id is cached
         return ret
 
     @classmethod
-    def uint(cls, size_bits: int, bias: Optional[int]) -> "ScalarType":
+    def uint(cls, size_bits: int, bias: int | None) -> "ScalarType":
         """Create an unsigned integer scalar type."""
         ret = cls(0, size_bits, False, bias if bias else 0)
         ret.id  # noqa B018: make sure the id is cached

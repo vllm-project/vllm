@@ -17,7 +17,6 @@
 # limitations under the License.
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -49,7 +48,7 @@ class LlamaModel(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         start_layer_id: int = 0,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -81,10 +80,10 @@ class LlamaModel(nn.Module):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings(input_ids)
@@ -136,7 +135,7 @@ class LlamaModel(nn.Module):
         return loaded_params
 
     def validate_and_update_config(
-        self, start_layer_id: int, quant_config: Optional[QuantizationConfig] = None
+        self, start_layer_id: int, quant_config: QuantizationConfig | None = None
     ) -> None:
         # yoco and moe is not supported by draft model yet
         assert self.config.yoco_global_kv_layer is None
@@ -193,7 +192,7 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states, inputs_embeds)
 

@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import datetime
 import json
 from collections.abc import Iterable, Sequence
-from typing import Literal, Union
+from typing import Literal
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -122,7 +120,7 @@ def get_system_message(
     return sys_msg
 
 
-def create_tool_definition(tool: Union[ChatCompletionToolsParam, Tool]):
+def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
     if isinstance(tool, ChatCompletionToolsParam):
         return ToolDescription.new(
             name=tool.function.name,
@@ -138,13 +136,13 @@ def create_tool_definition(tool: Union[ChatCompletionToolsParam, Tool]):
 
 def get_developer_message(
     instructions: str | None = None,
-    tools: list[Union[Tool, ChatCompletionToolsParam]] | None = None,
+    tools: list[Tool | ChatCompletionToolsParam] | None = None,
 ) -> Message:
     dev_msg_content = DeveloperContent.new()
     if instructions is not None and not envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
         dev_msg_content = dev_msg_content.with_instructions(instructions)
     if tools is not None:
-        function_tools: list[Union[Tool, ChatCompletionToolsParam]] = []
+        function_tools: list[Tool | ChatCompletionToolsParam] = []
         for tool in tools:
             if tool.type in (
                 "web_search_preview",
@@ -178,7 +176,7 @@ def get_user_message(content: str) -> Message:
 
 def parse_response_input(
     response_msg: ResponseInputOutputItem,
-    prev_responses: list[Union[ResponseOutputItem, ResponseReasoningItem]],
+    prev_responses: list[ResponseOutputItem | ResponseReasoningItem],
 ) -> Message:
     if not isinstance(response_msg, dict):
         response_msg = response_msg.model_dump()

@@ -3,7 +3,7 @@
 import functools
 import operator
 import time
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 import regex as re
 import torch
@@ -24,7 +24,7 @@ class VllmInductorPass(InductorPass):
     It provides timing, logging, and dumping utilities.
     """
 
-    dump_prefix: ClassVar[Optional[int]] = None
+    dump_prefix: ClassVar[int | None] = None
     """Keep track of pass index for debug dump ordering."""
 
     def __init__(self, config: VllmConfig):

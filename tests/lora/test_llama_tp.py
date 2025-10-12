@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import subprocess
 import sys
-from typing import Union
 
 import vllm
 from vllm import LLM
@@ -27,7 +26,7 @@ def do_sample(
     llm: vllm.LLM,
     lora_path: str,
     lora_id: int,
-    tensorizer_config_dict: Union[dict, None] = None,
+    tensorizer_config_dict: dict | None = None,
 ) -> list[str]:
     prompts = [
         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_74 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]",  # noqa: E501
@@ -73,9 +72,7 @@ def do_sample(
     return generated_texts
 
 
-def generate_and_test(
-    llm, sql_lora_files, tensorizer_config_dict: Union[dict, None] = None
-):
+def generate_and_test(llm, sql_lora_files, tensorizer_config_dict: dict | None = None):
     print("lora adapter created")
     print("lora 1")
     assert (

@@ -21,8 +21,8 @@ class LoRALayerWeights:
         lora_alpha: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor] = None,
-        scaling: Optional[float] = None,
+        embeddings_tensor: torch.Tensor | None = None,
+        scaling: float | None = None,
     ) -> None:
         self.module_name = module_name
         self.rank = rank
@@ -67,7 +67,7 @@ class LoRALayerWeights:
         cls,
         module_name: str,
         peft_helper: PEFTHelper,
-        embeddings_tensor: Optional[torch.Tensor] = None,
+        embeddings_tensor: torch.Tensor | None = None,
     ) -> "LoRALayerWeights":
         # lora_a and lora_b are set to None for config-based construction
         return cls(
@@ -89,7 +89,7 @@ class LoRALayerWeights:
         rank: int,
         dtype: torch.dtype,
         device: torch.types.Device,
-        embeddings_tensor_dim: Optional[int] = None,
+        embeddings_tensor_dim: int | None = None,
     ) -> "LoRALayerWeights":
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         lora_a = torch.zeros(
@@ -127,10 +127,10 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         self,
         module_name: str,
         rank: int,
-        lora_alphas: list[Optional[int]],
-        lora_a: list[Optional[torch.Tensor]],
-        lora_b: list[Optional[torch.Tensor]],
-        scaling: Optional[list[float]] = None,
+        lora_alphas: list[int | None],
+        lora_a: list[torch.Tensor | None],
+        lora_b: list[torch.Tensor | None],
+        scaling: list[float] | None = None,
     ) -> None:
         super().__init__(
             module_name=module_name,

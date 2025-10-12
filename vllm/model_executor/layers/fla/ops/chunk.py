@@ -8,7 +8,6 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 import warnings
-from typing import Optional
 
 import torch
 from einops import rearrange
@@ -32,7 +31,7 @@ def chunk_gated_delta_rule_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
     # obtain WY representation. u is actually the new v.
@@ -86,7 +85,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        cu_seqlens: torch.LongTensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
     ):
         if use_qk_l2norm_in_kernel:
@@ -119,7 +118,7 @@ def chunk_gated_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
 ):

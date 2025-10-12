@@ -4,7 +4,6 @@
 import pickle
 import uuid
 from collections.abc import Iterable
-from typing import Union
 
 import numpy as np
 import torch
@@ -18,7 +17,7 @@ logger = init_logger(__name__)
 
 class MultiModalHasher:
     @classmethod
-    def serialize_item(cls, obj: object) -> Iterable[Union[bytes, memoryview]]:
+    def serialize_item(cls, obj: object) -> Iterable[bytes | memoryview]:
         # Simple cases
         if isinstance(obj, (bytes, memoryview)):
             return (obj,)
@@ -84,7 +83,7 @@ class MultiModalHasher:
         cls,
         key: str,
         obj: object,
-    ) -> Iterable[Union[bytes, memoryview]]:
+    ) -> Iterable[bytes | memoryview]:
         # Recursive cases
         if isinstance(obj, (list, tuple)):
             for i, elem in enumerate(obj):

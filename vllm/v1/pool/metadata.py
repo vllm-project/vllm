@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
@@ -37,9 +36,9 @@ class PoolingMetadata:
     """Tensors for pooling."""
 
     prompt_lens: torch.Tensor  # CPU Tensor
-    prompt_token_ids: Optional[torch.Tensor]
+    prompt_token_ids: torch.Tensor | None
     pooling_params: list[PoolingParams]
-    pooling_cursor: Optional[PoolingCursor] = None
+    pooling_cursor: PoolingCursor | None = None
 
     def __getitem__(self, indices: slice):
         return PoolingMetadata(

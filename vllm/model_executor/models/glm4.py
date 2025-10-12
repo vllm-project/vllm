@@ -24,7 +24,6 @@
 """Inference-only GLM-4-0414 model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -56,12 +55,12 @@ class Glm4Attention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position: int = 4096 * 32,
-        head_dim: Optional[int] = None,
+        head_dim: int | None = None,
         qkv_bias: bool = False,
         rope_theta: float = 10000,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        rope_scaling: Optional[tuple] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        rope_scaling: tuple | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -142,7 +141,7 @@ class Glm4DecoderLayer(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
-        config: Optional[Glm4Config] = None,
+        config: Glm4Config | None = None,
     ) -> None:
         super().__init__()
 
@@ -189,7 +188,7 @@ class Glm4DecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -285,9 +284,9 @@ class Glm4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -296,7 +295,7 @@ class Glm4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

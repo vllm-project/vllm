@@ -3,7 +3,7 @@
 
 # Supports FP-Quant compression, see https://arxiv.org/abs/2509.23202
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch.nn.parameter import Parameter
@@ -36,7 +36,7 @@ class FPQuantConfig(QuantizationConfig):
         forward_dtype: str = "mxfp4",
         forward_method: str = "abs_max",
         pseudoquantization: bool = False,
-        modules_to_not_convert: Optional[list[str]] = None,
+        modules_to_not_convert: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.hadamard_group_size = hadamard_group_size
@@ -90,7 +90,7 @@ class FPQuantConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional[LinearMethodBase]:
+    ) -> LinearMethodBase | None:
         if self.modules_to_not_convert is not None and any(
             prefix.endswith(module) for module in self.modules_to_not_convert
         ):
@@ -233,7 +233,7 @@ class FPQuantLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return quantized_forward(
             x,
@@ -381,7 +381,7 @@ def quantized_forward(
     weight_scales: torch.Tensor,
     weight_global_scale: torch.Tensor,
     act_global_scale: torch.Tensor,
-    bias: Optional[torch.Tensor],
+    bias: torch.Tensor | None,
     forward_hadamard_matrix: torch.Tensor,
     forward_method: str,
     forward_dtype: str,

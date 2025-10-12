@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import platform
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 
@@ -91,7 +91,7 @@ class CPUWorker(Worker):
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 
-    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+    def wake_up(self, tags: list[str] | None = None) -> None:
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 

@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import tempfile
 from collections import defaultdict
+from collections.abc import Callable
 from itertools import count
-from typing import Any, Callable, Optional
+from typing import Any
 
 import torch
 
@@ -147,7 +148,7 @@ _none_hash_initialized = False
 
 
 def create_request(
-    request_id: Optional[int] = None,
+    request_id: int | None = None,
     num_tokens: int = 10,
     common_prefix_len=0,
     max_tokens: int = 16,
@@ -168,7 +169,7 @@ def create_request(
         init_none_hash(hash_fn)
         _none_hash_initialized = True
 
-    kv_transfer_params: Optional[dict[str, Any]] = None
+    kv_transfer_params: dict[str, Any] | None = None
 
     if do_remote_decode:
         assert not do_remote_prefill
@@ -205,9 +206,9 @@ def create_request(
 
 def create_model_runner_output(
     reqs: list[Request],
-    finished_sending: Optional[set[str]] = None,
-    finished_recving: Optional[set[str]] = None,
-    invalid_block_ids: Optional[set[int]] = None,
+    finished_sending: set[str] | None = None,
+    finished_recving: set[str] | None = None,
+    invalid_block_ids: set[int] | None = None,
     use_eos: bool = False,
     token_id: int = 0,
 ) -> ModelRunnerOutput:

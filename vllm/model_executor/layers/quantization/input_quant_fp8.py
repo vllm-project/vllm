@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -30,9 +29,9 @@ class QuantFP8(CustomOp):
         self,
         static: bool,
         group_shape: GroupShape,
-        num_token_padding: Optional[int] = None,
+        num_token_padding: int | None = None,
         column_major_scales: bool = False,
-        use_ue8m0: Optional[bool] = None,  # for Torch compile
+        use_ue8m0: bool | None = None,  # for Torch compile
     ):
         """
         :param static: static or dynamic quantization
@@ -64,8 +63,8 @@ class QuantFP8(CustomOp):
     def forward_cuda(
         self,
         x: torch.Tensor,
-        scale: Optional[torch.Tensor] = None,
-        scale_ub: Optional[torch.Tensor] = None,
+        scale: torch.Tensor | None = None,
+        scale_ub: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.is_group_quant:
             assert scale is None, "Group quantization is always dynamic"
@@ -96,8 +95,8 @@ class QuantFP8(CustomOp):
     def forward_native(
         self,
         x: torch.Tensor,
-        scale: Optional[torch.Tensor] = None,
-        scale_ub: Optional[torch.Tensor] = None,
+        scale: torch.Tensor | None = None,
+        scale_ub: torch.Tensor | None = None,
     ):
         if self.is_group_quant:
             assert scale is None, "Group quantization is always dynamic"

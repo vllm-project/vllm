@@ -7,7 +7,7 @@ import dataclasses
 import json
 import os
 import time
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 from tqdm import tqdm
@@ -127,7 +127,7 @@ def main(args: argparse.Namespace):
                 ),
             )
 
-    def run_to_completion(profile_dir: Optional[str] = None):
+    def run_to_completion(profile_dir: str | None = None):
         if profile_dir:
             llm.start_profile()
             llm_generate()

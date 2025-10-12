@@ -5,7 +5,6 @@ Tests compute_expert_num_tokens kernels
 """
 
 import dataclasses
-from typing import Optional
 
 import pytest
 import torch
@@ -16,7 +15,7 @@ from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
 @dataclasses.dataclass
 class TestTensors:
     topk_ids: torch.Tensor
-    expert_map: Optional[torch.Tensor] = None
+    expert_map: torch.Tensor | None = None
 
     def to_device(self, device: str):
         self.topk_ids = self.topk_ids.to(device=device)

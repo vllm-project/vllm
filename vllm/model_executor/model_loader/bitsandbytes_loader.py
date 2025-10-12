@@ -6,8 +6,8 @@ import glob
 import itertools
 import math
 import os
-from collections.abc import Generator
-from typing import Any, Callable, Optional
+from collections.abc import Callable, Generator
+from typing import Any
 
 import numpy as np
 import torch
@@ -88,7 +88,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         self,
         model_name_or_path: str,
         allowed_patterns: list[str],
-        revision: Optional[str] = None,
+        revision: str | None = None,
     ) -> tuple[str, list[str], str]:
         """Retrieve weight files. Download the files if necessary.
 
@@ -122,7 +122,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         raise RuntimeError(f"No model weights found in: `{model_name_or_path}`")
 
     def _prepare_weights(
-        self, model_name_or_path: str, revision: Optional[str]
+        self, model_name_or_path: str, revision: str | None
     ) -> tuple[list[str], bool]:
         """Prepare weight files for the model."""
 
@@ -196,7 +196,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def _get_quantized_weights_iterator(
         self,
         model_name_or_path: str,
-        revision: Optional[str],
+        revision: str | None,
     ) -> tuple[Generator[tuple[str, torch.Tensor], None, None], dict[str, Any]]:
         """Get an iterator to the model weights with bitsandbytes quantization,
         as well as the quantization state dictionary."""

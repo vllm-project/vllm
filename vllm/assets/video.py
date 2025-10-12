@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, ClassVar, Literal, Optional
+from typing import Any, ClassVar, Literal
 
 import cv2
 import numpy as np
@@ -137,7 +137,7 @@ class VideoAsset:
         ret = video_get_metadata(self.video_path, self.num_frames)
         return ret
 
-    def get_audio(self, sampling_rate: Optional[float] = None) -> npt.NDArray:
+    def get_audio(self, sampling_rate: float | None = None) -> npt.NDArray:
         """
         Read audio data from the video asset, used in Qwen2.5-Omni examples.
 

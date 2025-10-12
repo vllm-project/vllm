@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from mistral_common.multimodal import download_image
@@ -117,7 +117,7 @@ FIXTURE_LOGPROBS_CHAT = {
     MISTRAL_SMALL_3_1_ID: FIXTURES_PATH / "mistral_small_3_chat.json",
 }
 
-OutputsLogprobs = list[tuple[list[int], str, Optional[SampleLogprobs]]]
+OutputsLogprobs = list[tuple[list[int], str, SampleLogprobs | None]]
 
 
 # For the test author to store golden output in JSON

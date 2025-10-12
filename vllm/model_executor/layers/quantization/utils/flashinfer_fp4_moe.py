@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility helpers for NVFP4 + FlashInfer fused-MoE path"""
 
-from __future__ import annotations
-
 import torch
 
 import vllm.envs as envs

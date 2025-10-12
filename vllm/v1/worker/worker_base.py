@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import os
-from typing import TYPE_CHECKING, Any, Callable, TypeVar, Union
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
 import torch.nn as nn
@@ -26,6 +25,9 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.outputs import ModelRunnerOutput
+else:
+    SchedulerOutput = object
+    ModelRunnerOutput = object
 
 logger = init_logger(__name__)
 
@@ -329,7 +331,7 @@ class WorkerWrapperBase:
             # To make vLLM config available during device initialization
             self.worker.init_device()  # type: ignore
 
-    def execute_method(self, method: Union[str, bytes], *args, **kwargs):
+    def execute_method(self, method: str | bytes, *args, **kwargs):
         try:
             # method resolution order:
             # if a method is defined in this class, it will be called directly.

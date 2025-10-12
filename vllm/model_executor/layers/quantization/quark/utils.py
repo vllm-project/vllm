@@ -3,7 +3,7 @@
 
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
-from typing import Any, Optional
+from typing import Any
 
 import regex as re
 
@@ -22,7 +22,7 @@ def deep_compare(dict1: Any, dict2: Any) -> bool:
 
 
 def should_ignore_layer(
-    layer_name: Optional[str],
+    layer_name: str | None,
     ignore: Iterable[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
 ) -> bool:

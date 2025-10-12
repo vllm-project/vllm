@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -17,7 +16,7 @@ class TritonScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         return 75
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
+    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if current_platform.is_cpu():
             return (
                 False,
@@ -38,6 +37,6 @@ class TritonScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return super().apply_weights(layer, x, bias)

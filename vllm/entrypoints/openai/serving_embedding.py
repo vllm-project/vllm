@@ -3,7 +3,7 @@
 
 import base64
 from collections.abc import AsyncGenerator, Mapping
-from typing import Any, Final, Literal, Optional, Union, cast
+from typing import Any, Final, Literal, cast
 
 import numpy as np
 import torch
@@ -48,7 +48,7 @@ logger = init_logger(__name__)
 def _get_embedding(
     output: EmbeddingOutput,
     encoding_format: Literal["float", "base64"],
-) -> Union[list[float], str]:
+) -> list[float] | str:
     if encoding_format == "float":
         return output.embedding
     elif encoding_format == "base64":
@@ -80,7 +80,7 @@ class EmbeddingMixin(OpenAIServing):
     async def _preprocess(
         self,
         ctx: ServeContext,
-    ) -> Optional[ErrorResponse]:
+    ) -> ErrorResponse | None:
         ctx = cast(EmbeddingServeContext, ctx)
         try:
             ctx.lora_request = self._maybe_get_adapters(ctx.request)
@@ -130,7 +130,7 @@ class EmbeddingMixin(OpenAIServing):
     def _build_response(
         self,
         ctx: ServeContext,
-    ) -> Union[EmbeddingResponse, ErrorResponse]:
+    ) -> EmbeddingResponse | ErrorResponse:
         items: list[EmbeddingResponseData] = []
         num_prompt_tokens = 0
 
@@ -314,9 +314,9 @@ class EmbeddingMixin(OpenAIServing):
         ctx: EmbeddingServeContext,
         engine_prompt: EngineTokensPrompt,
         pooling_params: PoolingParams,
-        trace_headers: Optional[Mapping[str, str]],
+        trace_headers: Mapping[str, str] | None,
         prompt_index: int,
-    ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
+    ) -> AsyncGenerator[RequestOutput | PoolingRequestOutput, None]:
         """Create a generator for a single prompt using standard processing."""
         request_id_item = f"{ctx.request_id}-{prompt_index}"
 
@@ -341,7 +341,7 @@ class EmbeddingMixin(OpenAIServing):
     async def _prepare_generators(
         self,
         ctx: ServeContext,
-    ) -> Optional[ErrorResponse]:
+    ) -> ErrorResponse | None:
         """Override to support chunked processing."""
         ctx = cast(EmbeddingServeContext, ctx)
 
@@ -354,7 +354,7 @@ class EmbeddingMixin(OpenAIServing):
 
         # Custom logic for chunked processing
         generators: list[
-            AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]
+            AsyncGenerator[RequestOutput | PoolingRequestOutput, None]
         ] = []
 
         try:
@@ -413,7 +413,7 @@ class EmbeddingMixin(OpenAIServing):
     async def _collect_batch(
         self,
         ctx: ServeContext,
-    ) -> Optional[ErrorResponse]:
+    ) -> ErrorResponse | None:
         """Collect and aggregate batch results
         with support for chunked processing.
 
@@ -522,9 +522,7 @@ class EmbeddingMixin(OpenAIServing):
                     )
 
             # Finalize aggregated results
-            final_res_batch: list[
-                Union[PoolingRequestOutput, EmbeddingRequestOutput]
-            ] = []
+            final_res_batch: list[PoolingRequestOutput | EmbeddingRequestOutput] = []
             num_prompts = len(ctx.engine_prompts)
 
             for prompt_idx in range(num_prompts):
@@ -581,7 +579,7 @@ class EmbeddingMixin(OpenAIServing):
                     )
 
             ctx.final_res_batch = cast(
-                list[Union[RequestOutput, PoolingRequestOutput]], final_res_batch
+                list[RequestOutput | PoolingRequestOutput], final_res_batch
             )
 
             return None
@@ -598,8 +596,8 @@ class OpenAIServingEmbedding(EmbeddingMixin):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
-        chat_template: Optional[str],
+        request_logger: RequestLogger | None,
+        chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         trust_request_chat_template: bool = False,
         log_error_stack: bool = False,
@@ -618,8 +616,8 @@ class OpenAIServingEmbedding(EmbeddingMixin):
     async def create_embedding(
         self,
         request: EmbeddingRequest,
-        raw_request: Optional[Request] = None,
-    ) -> Union[EmbeddingResponse, ErrorResponse]:
+        raw_request: Request | None = None,
+    ) -> EmbeddingResponse | ErrorResponse:
         """
         Embedding API similar to OpenAI's API.
 
@@ -647,7 +645,7 @@ class OpenAIServingEmbedding(EmbeddingMixin):
     def _create_pooling_params(
         self,
         ctx: ServeContext[EmbeddingRequest],
-    ) -> Union[PoolingParams, ErrorResponse]:
+    ) -> PoolingParams | ErrorResponse:
         pooling_params = super()._create_pooling_params(ctx)
         if isinstance(pooling_params, ErrorResponse):
             return pooling_params
@@ -662,7 +660,7 @@ class OpenAIServingEmbedding(EmbeddingMixin):
     async def _preprocess(
         self,
         ctx: ServeContext,
-    ) -> Optional[ErrorResponse]:
+    ) -> ErrorResponse | None:
         if isinstance(ctx.request, EmbeddingChatRequest):
             error_check_ret = self._validate_chat_template(
                 request_chat_template=ctx.request.chat_template,

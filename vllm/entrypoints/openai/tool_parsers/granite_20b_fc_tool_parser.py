@@ -4,7 +4,6 @@
 import json
 from collections.abc import Sequence
 from json import JSONDecoder
-from typing import Union
 
 import partial_json_parser
 import regex as re
@@ -121,7 +120,7 @@ class Granite20bFCToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         if len(current_text) < len(self.bot_token) and self.bot_token.startswith(
             current_text
         ):

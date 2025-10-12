@@ -29,7 +29,7 @@ class ParentRequest:
     max_num_generation_tokens: int
 
     # To efficiently obtain child sampling params
-    cached_child_sampling_params: Optional[SamplingParams]
+    cached_child_sampling_params: SamplingParams | None
 
     def __init__(self, request_id: str, sampling_params: SamplingParams) -> None:
         self.request_id = request_id

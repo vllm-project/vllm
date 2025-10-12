@@ -25,9 +25,9 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Any, Callable, Literal, Optional, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -167,7 +167,7 @@ class Qwen2VLImageEmbeddingInputs(TensorSchema):
     ]
 
 
-Qwen2VLImageInputs = Union[Qwen2VLImagePixelInputs, Qwen2VLImageEmbeddingInputs]
+Qwen2VLImageInputs: TypeAlias = Qwen2VLImagePixelInputs | Qwen2VLImageEmbeddingInputs
 
 
 class Qwen2VLVideoPixelInputs(TensorSchema):
@@ -228,7 +228,7 @@ class Qwen2VLVideoEmbeddingInputs(TensorSchema):
     ]
 
 
-Qwen2VLVideoInputs = Union[Qwen2VLVideoPixelInputs, Qwen2VLVideoEmbeddingInputs]
+Qwen2VLVideoInputs: TypeAlias = Qwen2VLVideoPixelInputs | Qwen2VLVideoEmbeddingInputs
 
 # === Vision Encoder === #
 
@@ -239,7 +239,7 @@ class Qwen2VisionMLP(nn.Module):
         in_features: int,
         hidden_features: int,
         act_layer: type[nn.Module] = QuickGELU,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -317,7 +317,7 @@ class Qwen2VisionAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         projection_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -413,8 +413,8 @@ class Qwen2VisionAttention(nn.Module):
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
-        max_seqlen: Optional[int] = None,  # Only used for Flash Attention
-        seqlens: Optional[list[int]] = None,  # Only used for xFormers
+        max_seqlen: int | None = None,  # Only used for Flash Attention
+        seqlens: list[int] | None = None,  # Only used for xFormers
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, 3 * head * head_dim]
         x, _ = self.qkv(x)
@@ -493,8 +493,8 @@ class Qwen2VisionBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float,
         act_layer: type[nn.Module] = QuickGELU,
-        norm_layer: Optional[Callable[[int], nn.Module]] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        norm_layer: Callable[[int], nn.Module] | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -527,8 +527,8 @@ class Qwen2VisionBlock(nn.Module):
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
-        max_seqlen: Optional[int] = None,  # Only used for Flash Attention
-        seqlens: Optional[list[int]] = None,  # Only used for xFormers
+        max_seqlen: int | None = None,  # Only used for Flash Attention
+        seqlens: list[int] | None = None,  # Only used for xFormers
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
@@ -576,9 +576,9 @@ class Qwen2VisionPatchMerger(nn.Module):
         self,
         d_model: int,
         context_dim: int,
-        norm_layer: Optional[Callable[[int], nn.Module]] = None,
+        norm_layer: Callable[[int], nn.Module] | None = None,
         spatial_merge_size: int = 2,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -659,7 +659,7 @@ class Qwen2VisionTransformer(nn.Module):
         self,
         vision_config: Qwen2VLVisionConfig,
         norm_eps: float = 1e-6,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -766,7 +766,7 @@ class Qwen2VisionTransformer(nn.Module):
 
     def compute_attn_mask_seqlen(
         self, cu_seqlens: torch.Tensor
-    ) -> tuple[Optional[int], Optional[list[int]]]:
+    ) -> tuple[int | None, list[int] | None]:
         max_seqlen, seqlens = None, None
         if (
             self.attn_backend == _Backend.FLASH_ATTN
@@ -889,8 +889,8 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
 
     def _parse_image_data(
         self,
-        data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
-    ) -> Optional[ModalityDataItems[Any, Any]]:
+        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
@@ -903,8 +903,8 @@ class Qwen2VLMultiModalDataParser(MultiModalDataParser):
 
     def _parse_video_data(
         self,
-        data: Union[dict[str, torch.Tensor], ModalityData[VideoItem]],
-    ) -> Optional[ModalityDataItems[Any, Any]]:
+        data: dict[str, torch.Tensor] | ModalityData[VideoItem],
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
@@ -930,7 +930,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object) -> Qwen2VLImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
 
     def get_mm_max_tokens_per_item(
@@ -949,7 +949,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int = 1,
         do_resize: bool = True,
-        image_processor: Optional[Qwen2VLImageProcessor],
+        image_processor: Qwen2VLImageProcessor | None,
     ) -> tuple[ImageSize, int]:
         if image_processor is None:
             image_processor = self.get_image_processor()
@@ -990,7 +990,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        image_processor: Optional[Qwen2VLImageProcessor],
+        image_processor: Qwen2VLImageProcessor | None,
     ) -> int:
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
@@ -1006,7 +1006,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         num_frames: int,
-        image_processor: Optional[Qwen2VLImageProcessor],
+        image_processor: Qwen2VLImageProcessor | None,
     ) -> int:
         _, num_video_tokens = self._get_vision_info(
             image_width=image_width,
@@ -1100,7 +1100,7 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1207,12 +1207,12 @@ class Qwen2VLForConditionalGeneration(
         self,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
-        image_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
-        video_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
-        second_per_grid_ts: Optional[list[float]] = None,
+        image_grid_thw: list[list[int]] | torch.Tensor | None,
+        video_grid_thw: list[list[int]] | torch.Tensor | None,
+        second_per_grid_ts: list[float] | None = None,
         context_len: int = 0,
-        seq_len: Optional[int] = None,
-        audio_feature_lengths: Optional[torch.Tensor] = None,
+        seq_len: int | None = None,
+        audio_feature_lengths: torch.Tensor | None = None,
         use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
         """Get M-RoPE input positions for Qwen2-VL model."""
@@ -1335,7 +1335,7 @@ class Qwen2VLForConditionalGeneration(
         return llm_positions, mrope_position_delta
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|vision_start|><|image_pad|><|vision_end|>"
         if modality.startswith("video"):
@@ -1396,7 +1396,7 @@ class Qwen2VLForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[Qwen2VLImageInputs]:
+    ) -> Qwen2VLImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
         image_grid_thw = kwargs.pop("image_grid_thw", None)
@@ -1434,7 +1434,7 @@ class Qwen2VLForConditionalGeneration(
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
-    ) -> Optional[Qwen2VLVideoInputs]:
+    ) -> Qwen2VLVideoInputs | None:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         video_embeds = kwargs.pop("video_embeds", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
@@ -1574,10 +1574,10 @@ class Qwen2VLForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for Qwen2-VL.
 
         Args:
@@ -1606,7 +1606,7 @@ class Qwen2VLForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1634,7 +1634,7 @@ class Tarsier2MultiModalProcessor(Qwen2VLMultiModalProcessor):
 class Tarsier2ImageProcessor(Qwen2VLImageProcessor):
     def __init__(
         self,
-        size: Optional[dict[str, int]] = None,
+        size: dict[str, int] | None = None,
         **kwargs,
     ) -> None:
         if size is not None and "min_pixels" in size and "max_pixels" in size:

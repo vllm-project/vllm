@@ -4,7 +4,7 @@ import ast
 import json
 import uuid
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any
 from xml.parsers.expat import ParserCreate
 
 import regex as re
@@ -39,7 +39,7 @@ class StreamingXMLToolCallParser:
         self.reset_streaming_state()
 
         # Tool configuration information
-        self.tools: Union[list[ChatCompletionToolsParam], None] = None
+        self.tools: list[ChatCompletionToolsParam] | None = None
         self.tool_call_start_token: str = "<tool_call>"
         self.tool_call_end_token: str = "</tool_call>"
         self.function_start_token: str = "<function="
@@ -341,7 +341,7 @@ class StreamingXMLToolCallParser:
         # Skip blank content
         return not element
 
-    def _find_next_complete_element(self, start_pos: int) -> tuple[Optional[str], int]:
+    def _find_next_complete_element(self, start_pos: int) -> tuple[str | None, int]:
         """
         Find next complete XML element from specified position
 
@@ -584,7 +584,7 @@ class StreamingXMLToolCallParser:
         """Emit Delta response (streaming output)"""
         self.deltas.append(delta)
 
-    def _auto_close_open_parameter_if_needed(self, incoming_tag: Optional[str] = None):
+    def _auto_close_open_parameter_if_needed(self, incoming_tag: str | None = None):
         """Before starting to process new elements,
         if there are unclosed tags from before,
         automatically complete their endings to the parser.
@@ -953,7 +953,7 @@ class StreamingXMLToolCallParser:
         self.parser.EndElementHandler = self._end_element
         self.parser.CharacterDataHandler = self._char_data
 
-    def set_tools(self, tools: Union[list[ChatCompletionToolsParam], None]):
+    def set_tools(self, tools: list[ChatCompletionToolsParam] | None):
         """Set tool configuration information"""
         self.tools = tools
 
@@ -961,7 +961,7 @@ class StreamingXMLToolCallParser:
         """Generate unique call ID"""
         return f"call_{uuid.uuid4().hex[:24]}"
 
-    def _extract_function_name(self, name: str, attrs: dict[str, str]) -> Optional[str]:
+    def _extract_function_name(self, name: str, attrs: dict[str, str]) -> str | None:
         """Extract function name from various formats"""
         if attrs and "name" in attrs:
             return attrs["name"]
@@ -973,9 +973,7 @@ class StreamingXMLToolCallParser:
 
         return None
 
-    def _extract_parameter_name(
-        self, name: str, attrs: dict[str, str]
-    ) -> Optional[str]:
+    def _extract_parameter_name(self, name: str, attrs: dict[str, str]) -> str | None:
         """Extract parameter name from various formats"""
         if attrs and "name" in attrs:
             return attrs["name"]
@@ -1218,7 +1216,7 @@ class Qwen3XMLToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         if not previous_text:
             self.parser.reset_streaming_state()
             if request:

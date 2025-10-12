@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from dataclasses import field, replace
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
 from pydantic import ConfigDict
@@ -69,17 +69,17 @@ class VllmConfig:
     """Device configuration."""
     load_config: LoadConfig = field(default_factory=LoadConfig)
     """Load configuration."""
-    lora_config: Optional[LoRAConfig] = None
+    lora_config: LoRAConfig | None = None
     """LoRA configuration."""
-    speculative_config: Optional[SpeculativeConfig] = None
+    speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
     structured_outputs_config: StructuredOutputsConfig = field(
         default_factory=StructuredOutputsConfig
     )
     """Structured outputs configuration."""
-    observability_config: Optional[ObservabilityConfig] = None
+    observability_config: ObservabilityConfig | None = None
     """Observability configuration."""
-    quant_config: Optional[QuantizationConfig] = None
+    quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
     compilation_config: CompilationConfig = field(default_factory=CompilationConfig)
     """`torch.compile` and cudagraph capture configuration for the model.
@@ -96,14 +96,14 @@ class VllmConfig:
     You can specify the full compilation config like so:
     `{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
-    kv_transfer_config: Optional[KVTransferConfig] = None
+    kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
-    kv_events_config: Optional[KVEventsConfig] = None
+    kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
-    additional_config: Union[dict, SupportsHash] = field(default_factory=dict)
+    additional_config: dict | SupportsHash = field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
     you are using. Contents must be hashable."""
@@ -212,7 +212,7 @@ class VllmConfig:
     @staticmethod
     def _get_quantization_config(
         model_config: ModelConfig, load_config: LoadConfig
-    ) -> Optional[QuantizationConfig]:
+    ) -> QuantizationConfig | None:
         """Get the quantization config."""
         from vllm.platforms import current_platform
 
@@ -245,7 +245,7 @@ class VllmConfig:
     @staticmethod
     def get_quantization_config(
         model_config: ModelConfig, load_config: LoadConfig
-    ) -> Optional[QuantizationConfig]:
+    ) -> QuantizationConfig | None:
         import copy
 
         # For some reason, the _ version of this modifies the model_config
@@ -257,7 +257,7 @@ class VllmConfig:
     def with_hf_config(
         self,
         hf_config: PretrainedConfig,
-        architectures: Optional[list[str]] = None,
+        architectures: list[str] | None = None,
     ) -> "VllmConfig":
         if architectures is not None:
             hf_config = copy.deepcopy(hf_config)
@@ -740,7 +740,7 @@ class VllmConfig:
                     f"Model: {self.model_config.model}"
                 )
 
-    def compile_debug_dump_path(self) -> Optional[Path]:
+    def compile_debug_dump_path(self) -> Path | None:
         """Returns a rank-aware path for dumping
         torch.compile debug information.
         """
@@ -790,13 +790,13 @@ class VllmConfig:
         )
 
 
-_current_vllm_config: Optional[VllmConfig] = None
-_current_prefix: Optional[str] = None
+_current_vllm_config: VllmConfig | None = None
+_current_prefix: str | None = None
 
 
 @contextmanager
 def set_current_vllm_config(
-    vllm_config: VllmConfig, check_compile=False, prefix: Optional[str] = None
+    vllm_config: VllmConfig, check_compile=False, prefix: str | None = None
 ):
     """
     Temporarily set the current vLLM config.
@@ -866,7 +866,7 @@ T = TypeVar("T")
 def get_layers_from_vllm_config(
     vllm_config: VllmConfig,
     layer_type: type[T],
-    layer_names: Optional[list[str]] = None,
+    layer_names: list[str] | None = None,
 ) -> dict[str, T]:
     """
     Get layers from the vLLM config.

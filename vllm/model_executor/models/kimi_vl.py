@@ -46,7 +46,7 @@ import copy
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Annotated, Any, Literal
 
 import torch
 from torch import nn
@@ -153,7 +153,7 @@ class KimiVLImagePixelInputs(TensorSchema):
     type: Literal["pixel_values"] = "pixel_values"
 
     pixel_values: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("np", 3, "ps", "ps"),
     ]
 
@@ -169,7 +169,7 @@ class KimiVLProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(KimiVLConfig)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_num_image_tokens(
@@ -227,7 +227,7 @@ class KimiVLDummyInputsBuilder(BaseDummyInputsBuilder[KimiVLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -305,7 +305,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     supports_encoder_tp_data = True
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|media_start|>image<|media_content|><|media_pad|><|media_end|>"
 
@@ -370,7 +370,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[KimiVLImageInputs]:
+    ) -> KimiVLImageInputs | None:
         # image input type must be pixel values now
         pixel_values = kwargs.pop("pixel_values", None)
         image_grid_hws = kwargs.pop("image_grid_hws", None)
@@ -411,7 +411,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> Optional[NestedTensors]:
+    def get_multimodal_embeddings(self, **kwargs: object) -> NestedTensors | None:
         # Validate the multimodal input keyword arguments
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -425,8 +425,8 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> IntermediateTensors:
         if intermediate_tensors is not None:
@@ -570,7 +570,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
 def get_spec_layer_idx_from_weight_name(
     config: DeepseekV2Config, weight_name: str
-) -> Optional[int]:
+) -> int | None:
     if hasattr(config, "num_nextn_predict_layers") and (
         config.num_nextn_predict_layers > 0
     ):

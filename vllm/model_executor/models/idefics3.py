@@ -18,7 +18,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal, TypeAlias
 
 import torch
 from torch import nn
@@ -91,14 +91,14 @@ class Idefics3ImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor, TensorShape("bn", "f", "h")]
 
 
-ImageInputs = Union[Idefics3ImagePixelInputs, Idefics3ImageEmbeddingInputs]
+ImageInputs: TypeAlias = Idefics3ImagePixelInputs | Idefics3ImageEmbeddingInputs
 
 
 class Idefics3ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> Idefics3Processor:
         return self.ctx.get_hf_processor(Idefics3Processor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def _resize_output_size(
@@ -106,9 +106,9 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         *,
         height: int,
         width: int,
-        max_len: Optional[int] = None,
+        max_len: int | None = None,
         min_len: int = 1,
-        max_size: Optional[int] = None,
+        max_size: int | None = None,
     ) -> tuple[int, int]:
         # Set default value for max_len if not provided
         max_len = max(height, width) if max_len is None else max_len
@@ -165,7 +165,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[Idefics3Processor],
+        processor: Idefics3Processor | None,
     ) -> tuple[int, int]:
         if processor is None:
             processor = self.get_hf_processor()
@@ -197,7 +197,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[Idefics3Processor],
+        processor: Idefics3Processor | None,
     ) -> int:
         grid_w, grid_h = self._get_image_feature_grid_size(
             image_width=image_width,
@@ -208,7 +208,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         return grid_w * grid_h + 1
 
     def _get_image_token(
-        self, processor: Optional[Idefics3Processor]
+        self, processor: Idefics3Processor | None
     ) -> tuple[str, str, str]:
         if processor is None:
             processor = self.get_hf_processor()
@@ -223,7 +223,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[Idefics3Processor],
+        processor: Idefics3Processor | None,
     ) -> str:
         if processor is None:
             processor = self.get_hf_processor()
@@ -269,7 +269,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[Idefics3Processor],
+        processor: Idefics3Processor | None,
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor()
@@ -305,7 +305,7 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         hf_processor = self.info.get_hf_processor()
@@ -425,7 +425,7 @@ class Idefics3SimpleMLP(nn.Module):
     def __init__(
         self,
         config: Idefics3Config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -448,7 +448,7 @@ class Idefics3Connector(nn.Module):
     def __init__(
         self,
         config: Idefics3Config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -557,9 +557,9 @@ class Idefics3Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.text_model(
             input_ids,
             positions,
@@ -590,7 +590,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
     }
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<image>"
 
@@ -621,9 +621,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
             self.lm_head.weight = self.model.text_model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
 
-    def _parse_and_validate_image_input(
-        self, **kwargs: object
-    ) -> Optional[ImageInputs]:
+    def _parse_and_validate_image_input(self, **kwargs: object) -> ImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -663,7 +661,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
     def _process_image_input(
         self,
         image_input: ImageInputs,
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+    ) -> torch.Tensor | list[torch.Tensor]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
@@ -687,10 +685,10 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 

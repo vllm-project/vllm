@@ -5,7 +5,7 @@ import asyncio
 import signal
 import socket
 from http import HTTPStatus
-from typing import Any, Optional
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 
 async def serve_http(
     app: FastAPI,
-    sock: Optional[socket.socket],
+    sock: socket.socket | None,
     enable_ssl_refresh: bool = False,
     **uvicorn_kwargs: Any,
 ):

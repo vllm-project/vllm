@@ -7,7 +7,7 @@ convenient for use when we just need to call a few functions.
 
 import ctypes
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 # this line makes it possible to directly load `libcudart.so` using `ctypes`
 import torch  # noqa
@@ -36,7 +36,7 @@ class Function:
     argtypes: list[Any]
 
 
-def find_loaded_library(lib_name) -> Optional[str]:
+def find_loaded_library(lib_name) -> str | None:
     """
     According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
     the file `/proc/self/maps` contains the memory maps of the process, which includes the
@@ -113,7 +113,7 @@ class CudaRTLibrary:
     #  to the corresponding dictionary
     path_to_dict_mapping: dict[str, dict[str, Any]] = {}
 
-    def __init__(self, so_file: Optional[str] = None):
+    def __init__(self, so_file: str | None = None):
         if so_file is None:
             so_file = find_loaded_library("libcudart")
             if so_file is None:

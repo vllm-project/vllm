@@ -4,7 +4,6 @@
 import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Optional
 
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
@@ -24,19 +23,19 @@ NONES = itertools.repeat(None)
 class LogprobsProcessor:
     # Tokenizer for this request,
     # None if detokenization is disabled.
-    tokenizer: Optional[AnyTokenizer]
+    tokenizer: AnyTokenizer | None
 
     # Logprobs for this request
-    logprobs: Optional[SampleLogprobs]
-    prompt_logprobs: Optional[PromptLogprobs]
-    cumulative_logprob: Optional[float]
-    num_logprobs: Optional[int]
-    num_prompt_logprobs: Optional[int]
+    logprobs: SampleLogprobs | None
+    prompt_logprobs: PromptLogprobs | None
+    cumulative_logprob: float | None
+    num_logprobs: int | None
+    num_prompt_logprobs: int | None
 
     @classmethod
     def from_new_request(
         cls,
-        tokenizer: Optional[AnyTokenizer],
+        tokenizer: AnyTokenizer | None,
         request: EngineCoreRequest,
     ) -> "LogprobsProcessor":
         assert request.sampling_params is not None
@@ -148,7 +147,7 @@ class LogprobsProcessor:
                 )
             )
 
-    def pop_prompt_logprobs(self) -> Optional[PromptLogprobs]:
+    def pop_prompt_logprobs(self) -> PromptLogprobs | None:
         """Pop and return all request prompt logprobs
 
         The logprobs processor aggregates prompt chunk logprobs
@@ -171,7 +170,7 @@ class LogprobsProcessor:
     def _make_logprob_dict(
         logprobs: list[float],
         logprob_token_ids: list[int],
-        decoded_tokens: Iterable[Optional[str]],
+        decoded_tokens: Iterable[str | None],
         rank: int,
         num_logprobs: int,
     ) -> dict[int, Logprob]:

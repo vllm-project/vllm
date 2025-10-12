@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import asyncio
 import concurrent
 import contextlib
@@ -46,6 +44,7 @@ from collections import UserDict, defaultdict
 from collections.abc import (
     AsyncGenerator,
     Awaitable,
+    Callable,
     Collection,
     Generator,
     Hashable,
@@ -62,12 +61,10 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Generic,
     Literal,
     TextIO,
     TypeVar,
-    Union,
 )
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -99,6 +96,12 @@ if TYPE_CHECKING:
 
     from vllm.config import ModelConfig, VllmConfig
     from vllm.sequence import IntermediateTensors
+else:
+    Namespace = object
+
+    ModelConfig = object
+    VllmConfig = object
+    IntermediateTensors = object
 
 logger = init_logger(__name__)
 
@@ -245,9 +248,7 @@ class AsyncMicrobatchTokenizer:
         self._queues: dict[
             tuple,
             asyncio.Queue[
-                Union[
-                    tuple[str, dict, asyncio.Future], tuple[list[int], asyncio.Future]
-                ]
+                tuple[str, dict, asyncio.Future] | tuple[list[int], asyncio.Future]
             ],
         ] = {}
         self._batcher_tasks: list[asyncio.Task] = []
@@ -274,7 +275,7 @@ class AsyncMicrobatchTokenizer:
     def _get_queue(
         self, loop: asyncio.AbstractEventLoop, key: tuple
     ) -> asyncio.Queue[
-        Union[tuple[str, dict, asyncio.Future], tuple[list[int], asyncio.Future]]
+        tuple[str, dict, asyncio.Future] | tuple[list[int], asyncio.Future]
     ]:
         """Get the request queue for the given operation key, creating a new
         queue and batcher task if needed."""
@@ -431,7 +432,7 @@ def cancel_task_threadsafe(task: Task):
         run_in_loop(task.get_loop(), task.cancel)
 
 
-def close_sockets(sockets: Sequence[Union[zmq.Socket, zmq.asyncio.Socket]]):
+def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
     for sock in sockets:
         if sock is not None:
             sock.close(linger=0)
@@ -767,8 +768,8 @@ def _generate_random_fp8(
 
 
 def get_kv_cache_torch_dtype(
-    cache_dtype: Union[str, torch.dtype] | None,
-    model_dtype: Union[str, torch.dtype] | None = None,
+    cache_dtype: str | torch.dtype | None,
+    model_dtype: str | torch.dtype | None = None,
 ) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
@@ -795,8 +796,8 @@ def create_kv_caches_with_random_flash(
     num_layers: int,
     num_heads: int,
     head_size: int,
-    cache_dtype: Union[str, torch.dtype] | None,
-    model_dtype: Union[str, torch.dtype] | None = None,
+    cache_dtype: str | torch.dtype | None,
+    model_dtype: str | torch.dtype | None = None,
     seed: int | None = None,
     device: str | None = "cuda",
     cache_layout: str | None = "NHD",
@@ -837,8 +838,8 @@ def create_kv_caches_with_random(
     num_layers: int,
     num_heads: int,
     head_size: int,
-    cache_dtype: Union[str, torch.dtype] | None,
-    model_dtype: Union[str, torch.dtype] | None = None,
+    cache_dtype: str | torch.dtype | None,
+    model_dtype: str | torch.dtype | None = None,
     seed: int | None = None,
     device: str | None = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
@@ -952,7 +953,7 @@ def make_tensor_with_pad(
     dtype: torch.dtype,
     *,
     max_len: int | None = None,
-    device: Union[str, torch.device] | None = None,
+    device: str | torch.device | None = None,
     pin_memory: bool = False,
 ) -> torch.Tensor:
     """
@@ -974,7 +975,7 @@ def make_tensor_with_pad(
 def async_tensor_h2d(
     data: list,
     dtype: torch.dtype,
-    target_device: Union[str, torch.device],
+    target_device: str | torch.device,
     pin_memory: bool,
 ) -> torch.Tensor:
     """Asynchronously create a tensor and copy it from host to device."""
@@ -1041,7 +1042,7 @@ def as_list(maybe_list: Iterable[T]) -> list[T]:
     return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
 
 
-def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
+def as_iter(obj: T | Iterable[T]) -> Iterable[T]:
     if isinstance(obj, str) or not isinstance(obj, Iterable):
         return [obj]  # type: ignore[list-item]
     return obj
@@ -1050,7 +1051,7 @@ def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
 # `collections` helpers
 def is_list_of(
     value: object,
-    typ: Union[type[T], tuple[type[T], ...]],
+    typ: type[T] | tuple[type[T], ...],
     *,
     check: Literal["first", "all"] = "first",
 ) -> TypeIs[list[T]]:
@@ -1266,7 +1267,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 def deprecate_args(
     start_index: int,
-    is_deprecated: Union[bool, Callable[[], bool]] = True,
+    is_deprecated: bool | Callable[[], bool] = True,
     additional_message: str | None = None,
 ) -> Callable[[F], F]:
     if not callable(is_deprecated):
@@ -1306,7 +1307,7 @@ def deprecate_args(
 
 def deprecate_kwargs(
     *kws: str,
-    is_deprecated: Union[bool, Callable[[], bool]] = True,
+    is_deprecated: bool | Callable[[], bool] = True,
     additional_message: str | None = None,
 ) -> Callable[[F], F]:
     deprecated_kws = set(kws)
@@ -1892,7 +1893,7 @@ class FlexibleArgumentParser(ArgumentParser):
         # only expecting a flat dictionary of atomic types
         processed_args: list[str] = []
 
-        config: dict[str, Union[int, str]] = {}
+        config: dict[str, int | str] = {}
         try:
             with open(file_path) as config_file:
                 config = yaml.safe_load(config_file)
@@ -2149,10 +2150,11 @@ def weak_ref_tensor(tensor: Any) -> Any:
 
 
 def weak_ref_tensors(
-    tensors: Union[
-        torch.Tensor, list[torch.Tensor], tuple[torch.Tensor], IntermediateTensors
-    ],
-) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
+    tensors: torch.Tensor
+    | list[torch.Tensor]
+    | tuple[torch.Tensor]
+    | IntermediateTensors,
+) -> torch.Tensor | list[Any] | tuple[Any] | Any:
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
@@ -2183,7 +2185,7 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
 
 
-def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
+def import_from_path(module_name: str, file_path: str | os.PathLike):
     """
     Import a Python file according to its file path.
 
@@ -2584,7 +2586,7 @@ class MemorySnapshot:
         self.non_torch_memory = self.cuda_memory - self.torch_memory
         self.timestamp = time.time()
 
-    def __sub__(self, other: MemorySnapshot) -> MemorySnapshot:
+    def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
         return MemorySnapshot(
             torch_peak=self.torch_peak - other.torch_peak,
             free_memory=self.free_memory - other.free_memory,
@@ -2778,13 +2780,13 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
 def make_zmq_socket(
-    ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
+    ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
     path: str,
     socket_type: Any,
     bind: bool | None = None,
     identity: bytes | None = None,
     linger: int | None = None,
-) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
+) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
     mem = psutil.virtual_memory()
@@ -2950,7 +2952,7 @@ def bind_kv_cache(
 
 def run_method(
     obj: Any,
-    method: Union[str, bytes, Callable],
+    method: str | bytes | Callable,
     args: tuple[Any],
     kwargs: dict[str, Any],
 ) -> Any:

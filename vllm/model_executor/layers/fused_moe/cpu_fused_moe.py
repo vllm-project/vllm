@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 from torch.nn import functional as F
@@ -33,7 +33,7 @@ def grouped_topk(
     topk_group: int = 0,
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
-    e_score_correction_bias: Optional[torch.Tensor] = None,
+    e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
 
@@ -88,12 +88,12 @@ def select_experts(
     top_k: int,
     use_grouped_topk: bool,
     renormalize: bool,
-    topk_group: Optional[int] = None,
-    num_expert_group: Optional[int] = None,
-    custom_routing_function: Optional[Callable] = None,
+    topk_group: int | None = None,
+    num_expert_group: int | None = None,
+    custom_routing_function: Callable | None = None,
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
-    e_score_correction_bias: Optional[torch.Tensor] = None,
+    e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if use_grouped_topk:
         assert topk_group is not None
@@ -147,14 +147,14 @@ class IPEXFusedMOE:
         top_k: int,
         router_logits: torch.Tensor,
         renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
@@ -189,14 +189,14 @@ class SGLFusedMOE:
         top_k: int,
         router_logits: torch.Tensor,
         renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:
@@ -247,14 +247,14 @@ class CPUFusedMOE:
         top_k: int,
         router_logits: torch.Tensor,
         renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
     ) -> torch.Tensor:

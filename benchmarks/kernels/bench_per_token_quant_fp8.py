@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
-from typing import Callable
+from collections.abc import Callable
 from unittest.mock import patch
 
 import pandas as pd

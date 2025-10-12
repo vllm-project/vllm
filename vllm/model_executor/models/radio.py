@@ -11,7 +11,7 @@
 import math
 from collections.abc import Iterable
 from itertools import repeat
-from typing import Optional, Union
+from typing import TypeAlias
 
 import torch
 import torch.nn as nn
@@ -23,8 +23,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.intern_vit import InternVisionEncoder
 
-input_dim_t = Union[int, tuple[int, int]]
-norm_t = Union[tuple[float, float, float], torch.Tensor]
+input_dim_t: TypeAlias = int | tuple[int, int]
+norm_t: TypeAlias = tuple[float, float, float] | torch.Tensor
 
 
 def _ntuple(n):
@@ -75,8 +75,8 @@ class ClsToken(nn.Module):
         ndim: int,
         num_tokens: int = 1,
         enabled: bool = True,
-        register_multiple: Optional[int] = None,
-        num_registers: Optional[int] = None,
+        register_multiple: int | None = None,
+        num_registers: int | None = None,
     ):
         super().__init__()
 
@@ -128,12 +128,12 @@ class ViTPatchGenerator(nn.Module):
         abs_pos: bool = True,
         normalize_patches: bool = False,
         cls_token: bool = False,
-        max_input_dims: Optional[input_dim_t] = None,
+        max_input_dims: input_dim_t | None = None,
         pos_dropout: float = 0.0,
         return_pos_enc: bool = False,
         num_cls_tokens: int = 1,
-        register_multiple: Optional[int] = None,
-        num_registers: Optional[int] = None,
+        register_multiple: int | None = None,
+        num_registers: int | None = None,
         patch_bias: bool = False,
         device=None,
         dtype=None,
@@ -275,8 +275,8 @@ class ViTPatchGenerator(nn.Module):
     def apply_pos_enc(
         self,
         patches: torch.Tensor,
-        patch_idxs: Optional[torch.Tensor] = None,
-        input_size: Optional[tuple[int, int]] = None,
+        patch_idxs: torch.Tensor | None = None,
+        input_size: tuple[int, int] | None = None,
     ) -> torch.Tensor:
         if not self.abs_pos:
             return patches
@@ -299,8 +299,8 @@ class ViTPatchGenerator(nn.Module):
     def get_pos_enc(
         self,
         batch_size: int,
-        patch_idxs: Optional[torch.Tensor] = None,
-        input_size: Optional[tuple[int, int]] = None,
+        patch_idxs: torch.Tensor | None = None,
+        input_size: tuple[int, int] | None = None,
     ) -> torch.Tensor:
         if input_size is None:
             input_dims = self.input_dims
@@ -440,9 +440,9 @@ class RadioInternVisionModel(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
+        num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
     ) -> None:
@@ -472,7 +472,7 @@ class RadioInternVisionModel(nn.Module):
             prefix=f"{prefix}.encoder",
         )
 
-    def _init_img_size(self, patch_size, img_size: Union[int, tuple[int, int]]):
+    def _init_img_size(self, patch_size, img_size: int | tuple[int, int]):
         if img_size is None:
             return None, None, None
         img_size = to_2tuple(img_size)
@@ -498,9 +498,9 @@ class RadioModel(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
+        num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
     ) -> None:
@@ -522,8 +522,8 @@ class RadioModel(nn.Module):
 
     def forward(
         self,
-        pixel_values: Optional[torch.Tensor] = None,
-        pixel_embeds: Optional[torch.Tensor] = None,
+        pixel_values: torch.Tensor | None = None,
+        pixel_embeds: torch.Tensor | None = None,
     ) -> torch.FloatTensor:
         x = self.input_conditioner(pixel_values)
         y = self.model(x)

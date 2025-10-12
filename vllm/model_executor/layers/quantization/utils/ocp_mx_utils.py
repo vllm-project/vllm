@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import Union
 
 from vllm.logger import init_logger
 
@@ -28,9 +27,7 @@ class OCP_MX_Scheme(str, Enum):
     w_mxfp6_e2m3_a_mxfp6_e2m3 = "w_mxfp6_e2m3_a_mxfp6_e2m3"
 
     @classmethod
-    def from_quant_dtype(
-        cls, input_dtype: Union[str, None], weight_dtype: Union[str, None]
-    ):
+    def from_quant_dtype(cls, input_dtype: str | None, weight_dtype: str | None):
         if input_dtype not in OCP_MX_DTYPES or weight_dtype not in OCP_MX_DTYPES:
             return None
         elif input_dtype == "mxfp4" and weight_dtype == "mxfp4":

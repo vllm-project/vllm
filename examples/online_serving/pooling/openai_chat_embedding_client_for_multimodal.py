@@ -9,7 +9,7 @@ Refer to each `run_*` function for the command to run the server for that model.
 import argparse
 import base64
 import io
-from typing import Literal, Union
+from typing import Literal
 
 from openai import OpenAI
 from openai._types import NOT_GIVEN, NotGiven
@@ -29,7 +29,7 @@ def create_chat_embeddings(
     *,
     messages: list[ChatCompletionMessageParam],
     model: str,
-    encoding_format: Union[Literal["base64", "float"], NotGiven] = NOT_GIVEN,
+    encoding_format: Literal["base64", "float"] | NotGiven = NOT_GIVEN,
 ) -> CreateEmbeddingResponse:
     """
     Convenience function for accessing vLLM's Chat Embeddings API,

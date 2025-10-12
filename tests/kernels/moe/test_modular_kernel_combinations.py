@@ -5,7 +5,7 @@ import copy
 import textwrap
 import traceback
 from itertools import product
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 import torch
@@ -245,10 +245,10 @@ def test_modular_kernel_combinations_multigpu(
     n: int,
     e: int,
     dtype: torch.dtype,
-    quant_config: Optional[TestMoEQuantConfig],
+    quant_config: TestMoEQuantConfig | None,
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
     fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
-    chunk_size: Optional[int],
+    chunk_size: int | None,
     world_size: int,
     pytestconfig,
 ):
@@ -287,10 +287,10 @@ def test_modular_kernel_combinations_singlegpu(
     n: int,
     e: int,
     dtype: torch.dtype,
-    quant_config: Optional[TestMoEQuantConfig],
+    quant_config: TestMoEQuantConfig | None,
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
     fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
-    chunk_size: Optional[int],
+    chunk_size: int | None,
     world_size: int,
     pytestconfig,
 ):

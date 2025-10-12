@@ -3,7 +3,6 @@
 
 import os
 from collections.abc import Sequence
-from typing import Optional
 
 import librosa
 import pytest
@@ -48,7 +47,7 @@ models = [model_path]
 
 
 def vllm_to_hf_output(
-    vllm_output: tuple[list[int], str, Optional[SampleLogprobs]], model: str
+    vllm_output: tuple[list[int], str, SampleLogprobs | None], model: str
 ):
     """Sanitize vllm output to be comparable with hf output."""
     _, output_str, out_logprobs = vllm_output
@@ -79,7 +78,7 @@ if current_platform.is_rocm():
 def run_test(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    inputs: Sequence[tuple[list[str], PromptImageInput, Optional[PromptAudioInput]]],
+    inputs: Sequence[tuple[list[str], PromptImageInput, PromptAudioInput | None]],
     model: str,
     *,
     max_model_len: int,
@@ -88,7 +87,7 @@ def run_test(
     num_logprobs: int,
     mm_limit: int,
     tensor_parallel_size: int,
-    distributed_executor_backend: Optional[str] = None,
+    distributed_executor_backend: str | None = None,
 ):
     """Inference result should be the same between hf and vllm.
 

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -29,7 +29,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         self,
         max_num_batched_tokens: int,
         max_batches: int,
-        device: Union[torch.device, str],
+        device: torch.device | str,
         **kwargs,
     ):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
@@ -105,12 +105,12 @@ class PunicaWrapperTPU(PunicaWrapperBase):
 
     def add_shrink(
         self,
-        y: Union[tuple[torch.Tensor, ...], torch.Tensor],
+        y: tuple[torch.Tensor, ...] | torch.Tensor,
         x: torch.Tensor,
         lora_a_stacked: tuple[torch.Tensor, ...],
         scale: float,
         **kwargs,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         """
         Performs GEMM for multiple slices of lora_a.
 
@@ -137,7 +137,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     def add_expand(
         self,
         y: torch.Tensor,
-        x: Union[tuple[torch.Tensor, ...], torch.Tensor],
+        x: tuple[torch.Tensor, ...] | torch.Tensor,
         lora_b_stacked: tuple[torch.Tensor, ...],
         output_slices: tuple[int, ...],
         offset_start: int = 0,
@@ -209,7 +209,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         scale: float,
         output_slices: tuple[int, ...],
         *,
-        buffer: Optional[tuple[torch.Tensor, ...]] = None,
+        buffer: tuple[torch.Tensor, ...] | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -257,7 +257,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         lora_b_stacked: torch.Tensor,
         scale,
         *,
-        buffer: Optional[torch.Tensor] = None,
+        buffer: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -289,7 +289,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
     def _update_base_metadata(
         self,
         mapping: "LoRAMapping",
-        lora_index_to_id: list[Optional[int]],
+        lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
         extra_vocab_size: int,

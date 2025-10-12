@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
-from typing import Callable, Union
+from collections.abc import Callable
 
 from torch._C._profiler import _EventType, _ProfilerEvent, _TensorMetadata
 
@@ -78,7 +78,7 @@ class TablePrinter:
 
 
 def indent_string(
-    string: str, indent: int, indent_style: Union[Callable[[int], str], str] = " "
+    string: str, indent: int, indent_style: Callable[[int], str] | str = " "
 ) -> str:
     if indent:
         if isinstance(indent_style, str):

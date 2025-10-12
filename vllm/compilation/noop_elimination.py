@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Union
 
 import torch.fx
 from torch import SymInt
@@ -105,9 +104,7 @@ class NoOpEliminationPass(VllmInductorPass):
         logger.debug("Removed %s no-op reshapes and slices", count)
 
     # ---------------------- Shape comparison helpers ----------------------
-    def dims_equivalent(
-        self, dim: Union[int, SymInt], i_dim: Union[int, SymInt]
-    ) -> bool:
+    def dims_equivalent(self, dim: int | SymInt, i_dim: int | SymInt) -> bool:
         """
         This function checks if two dimensions are equivalent.
         :param dim: The dimension arg to reshape/slice
@@ -127,7 +124,7 @@ class NoOpEliminationPass(VllmInductorPass):
         return False
 
     def all_dims_equivalent(
-        self, dims: Iterable[Union[int, SymInt]], i_dims: Iterable[Union[int, SymInt]]
+        self, dims: Iterable[int | SymInt], i_dims: Iterable[int | SymInt]
     ) -> bool:
         dims_ = list(dims)
         i_dims_ = list(i_dims)

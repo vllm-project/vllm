@@ -11,7 +11,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import json
 import os
 from dataclasses import dataclass
-from typing import Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple
 
 import pytest
 
@@ -36,7 +36,7 @@ class ParallelSetup(NamedTuple):
 
 class SPTestOptions(NamedTuple):
     multi_node_only: bool
-    load_format: Optional[str] = None
+    load_format: str | None = None
 
 
 @dataclass
@@ -53,7 +53,7 @@ class SPTestSettings:
         pp_base: int = 1,
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
-        load_format: Optional[str] = None,
+        load_format: str | None = None,
     ):
         parallel_setups = []
         for eager_mode_val in [False, True]:
@@ -84,7 +84,7 @@ class SPTestSettings:
         pp_base: int = 1,
         runner: RunnerOption = "auto",
         multi_node_only: bool = False,
-        load_format: Optional[str] = None,
+        load_format: str | None = None,
     ):
         parallel_setups = []
         for eager_mode_val in [False, True]:
@@ -115,7 +115,7 @@ class SPTestSettings:
         pp_base: int = 1,
         runner: RunnerOption = "auto",
         multi_node_only: bool = False,
-        load_format: Optional[str] = None,
+        load_format: str | None = None,
     ):
         parallel_setups = []
         for fusion_val in [False, True]:

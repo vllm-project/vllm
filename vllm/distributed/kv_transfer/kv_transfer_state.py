@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
@@ -13,7 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-_KV_CONNECTOR_AGENT: Optional[KVConnectorBaseType] = None
+_KV_CONNECTOR_AGENT: KVConnectorBaseType | None = None
 
 
 def get_kv_transfer_group() -> KVConnectorBaseType:
@@ -27,7 +27,7 @@ def has_kv_transfer_group() -> bool:
     return _KV_CONNECTOR_AGENT is not None
 
 
-def is_v1_kv_transfer_group(connector: Optional[KVConnectorBaseType] = None) -> bool:
+def is_v1_kv_transfer_group(connector: KVConnectorBaseType | None = None) -> bool:
     """Check if the KV connector is the v1 connector.
     If the argument is None, it will check the global KV connector
 

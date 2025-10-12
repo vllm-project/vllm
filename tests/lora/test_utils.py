@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import OrderedDict
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 from unittest.mock import patch
 
 import pytest
@@ -21,7 +21,7 @@ class LoRANameParserTestConfig(NamedTuple):
     name: str
     module_name: str
     is_lora_a: bool
-    weights_mapper: Optional[WeightsMapper] = None
+    weights_mapper: WeightsMapper | None = None
 
 
 def test_parse_fine_tuned_lora_name_valid():

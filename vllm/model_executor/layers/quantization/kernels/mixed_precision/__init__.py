@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
-
 import vllm.envs as envs
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.allspark import (  # noqa: E501
     AllSparkLinearKernel,
@@ -48,7 +46,7 @@ _POSSIBLE_KERNELS: list[type[MPLinearKernel]] = [
 
 
 def choose_mp_linear_kernel(
-    config: MPLinearLayerConfig, compute_capability: Optional[int] = None
+    config: MPLinearLayerConfig, compute_capability: int | None = None
 ) -> type[MPLinearKernel]:
     """
     Choose an MPLinearKernel that can implement the given config for the given

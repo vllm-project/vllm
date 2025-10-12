@@ -20,7 +20,6 @@ Args:
 
 import subprocess
 import sys
-from typing import Optional
 
 import regex as re
 
@@ -96,8 +95,8 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
 
 def mypy(
     targets: list[str],
-    python_version: Optional[str],
-    follow_imports: Optional[str],
+    python_version: str | None,
+    follow_imports: str | None,
     file_group: str,
 ) -> int:
     """

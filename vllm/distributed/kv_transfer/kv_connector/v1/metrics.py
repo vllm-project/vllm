@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import Any, Optional, Union
+from typing import Any
 
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
@@ -32,7 +32,7 @@ class KVConnectorStats:
         """
         raise NotImplementedError
 
-    def reduce(self) -> dict[str, Union[int, float]]:
+    def reduce(self) -> dict[str, int | float]:
         """
         Reduce the observations collected during a time interval to one or
         more representative values (eg avg/median/sum of the series).
@@ -58,7 +58,7 @@ class KVConnectorLogging:
         self.reset()
 
     def reset(self):
-        self.transfer_stats_accumulator: Optional[KVConnectorStats] = None
+        self.transfer_stats_accumulator: KVConnectorStats | None = None
 
     def observe(self, transfer_stats_data: dict[str, Any]):
         # Should not be called when a KVConnector is not configured.

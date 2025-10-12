@@ -5,10 +5,10 @@ import json
 import sys
 import time
 import traceback
-from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
-from typing import Any, Callable, ClassVar, Generic, Optional, TypeVar, Union
+from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
 
 import torch
 from fastapi import Request
@@ -102,38 +102,38 @@ from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
 
-CompletionLikeRequest = Union[
-    CompletionRequest,
-    DetokenizeRequest,
-    EmbeddingCompletionRequest,
-    RerankRequest,
-    ClassificationRequest,
-    ScoreRequest,
-    TokenizeCompletionRequest,
-]
+CompletionLikeRequest: TypeAlias = (
+    CompletionRequest
+    | DetokenizeRequest
+    | EmbeddingCompletionRequest
+    | RerankRequest
+    | ClassificationRequest
+    | ScoreRequest
+    | TokenizeCompletionRequest
+)
 
-ChatLikeRequest = Union[
-    ChatCompletionRequest, EmbeddingChatRequest, TokenizeChatRequest
-]
-SpeechToTextRequest = Union[TranscriptionRequest, TranslationRequest]
-AnyRequest = Union[
-    CompletionLikeRequest,
-    ChatLikeRequest,
-    SpeechToTextRequest,
-    ResponsesRequest,
-    IOProcessorRequest,
-]
+ChatLikeRequest: TypeAlias = (
+    ChatCompletionRequest | EmbeddingChatRequest | TokenizeChatRequest
+)
+SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
+AnyRequest: TypeAlias = (
+    CompletionLikeRequest
+    | ChatLikeRequest
+    | SpeechToTextRequest
+    | ResponsesRequest
+    | IOProcessorRequest
+)
 
-AnyResponse = Union[
-    CompletionResponse,
-    ChatCompletionResponse,
-    EmbeddingResponse,
-    TranscriptionResponse,
-    TokenizeResponse,
-    PoolingResponse,
-    ClassificationResponse,
-    ScoreResponse,
-]
+AnyResponse: TypeAlias = (
+    CompletionResponse
+    | ChatCompletionResponse
+    | EmbeddingResponse
+    | TranscriptionResponse
+    | TokenizeResponse
+    | PoolingResponse
+    | ClassificationResponse
+    | ScoreResponse
+)
 
 
 class TextTokensPrompt(TypedDict):
@@ -145,7 +145,7 @@ class EmbedsPrompt(TypedDict):
     prompt_embeds: torch.Tensor
 
 
-RequestPrompt = Union[list[int], str, TextTokensPrompt, EmbedsPrompt]
+RequestPrompt: TypeAlias = list[int] | str | TextTokensPrompt | EmbedsPrompt
 
 
 def is_text_tokens_prompt(prompt: RequestPrompt) -> TypeIs[TextTokensPrompt]:
@@ -173,8 +173,8 @@ class RequestProcessingMixin(BaseModel):
     handling prompt preparation and engine input.
     """
 
-    request_prompts: Optional[Sequence[RequestPrompt]] = []
-    engine_prompts: Optional[list[EngineTokensPrompt]] = []
+    request_prompts: Sequence[RequestPrompt] | None = []
+    engine_prompts: list[EngineTokensPrompt] | None = []
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -185,10 +185,10 @@ class ResponseGenerationMixin(BaseModel):
     managing result generators and final batch results.
     """
 
-    result_generator: Optional[
-        AsyncGenerator[tuple[int, Union[RequestOutput, PoolingRequestOutput]], None]
-    ] = None
-    final_res_batch: list[Union[RequestOutput, PoolingRequestOutput]] = Field(
+    result_generator: (
+        AsyncGenerator[tuple[int, RequestOutput | PoolingRequestOutput], None] | None
+    ) = None
+    final_res_batch: list[RequestOutput | PoolingRequestOutput] = Field(
         default_factory=list
     )
 
@@ -203,14 +203,14 @@ class ServeContext(
 ):
     # Shared across all requests
     request: RequestT
-    raw_request: Optional[Request] = None
+    raw_request: Request | None = None
     model_name: str
     request_id: str
     created_time: int = Field(default_factory=lambda: int(time.time()))
-    lora_request: Optional[LoRARequest] = None
+    lora_request: LoRARequest | None = None
 
     # Shared across most requests
-    tokenizer: Optional[AnyTokenizer] = None
+    tokenizer: AnyTokenizer | None = None
 
     # `protected_namespaces` resolves Pydantic v2's warning
     # on conflict with protected namespace "model_"
@@ -224,7 +224,7 @@ ClassificationServeContext = ServeContext[ClassificationRequest]
 
 
 class EmbeddingServeContext(ServeContext[EmbeddingRequest]):
-    chat_template: Optional[str] = None
+    chat_template: str | None = None
     chat_template_content_format: ChatTemplateContentFormatOption
 
 
@@ -247,7 +247,7 @@ class OpenAIServing:
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
+        request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         enable_force_include_usage: bool = False,
         log_error_stack: bool = False,
@@ -276,8 +276,8 @@ class OpenAIServing:
         self.max_model_len = self.model_config.max_model_len
 
     def _get_tool_parser(
-        self, tool_parser_name: Optional[str] = None, enable_auto_tools: bool = False
-    ) -> Optional[Callable[[AnyTokenizer], ToolParser]]:
+        self, tool_parser_name: str | None = None, enable_auto_tools: bool = False
+    ) -> Callable[[AnyTokenizer], ToolParser] | None:
         """Get the tool parser based on the name."""
         parser = None
         if not enable_auto_tools or tool_parser_name is None:
@@ -307,7 +307,7 @@ class OpenAIServing:
     def _get_reasoning_parser(
         self,
         reasoning_parser_name: str,
-    ) -> Optional[Callable[[AnyTokenizer], ReasoningParser]]:
+    ) -> Callable[[AnyTokenizer], ReasoningParser] | None:
         """Get the reasoning parser based on the name."""
         parser = None
         if not reasoning_parser_name:
@@ -328,7 +328,7 @@ class OpenAIServing:
         prompt: PromptType,
         request_id: str,
         params: BeamSearchParams,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: LoRARequest | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         beam_width = params.beam_width
         max_tokens = params.max_tokens
@@ -364,9 +364,9 @@ class OpenAIServing:
         #    this happens again in generation, so the double expansion causes
         #    a mismatch.
         # TODO - would be ideal to handle this more gracefully.
-        prompt_text: Optional[str]
+        prompt_text: str | None
         prompt_token_ids: list[int]
-        multi_modal_data: Optional[MultiModalDataDict]
+        multi_modal_data: MultiModalDataDict | None
         if isinstance(prompt, str):
             prompt_text = prompt
             prompt_token_ids = []
@@ -376,7 +376,7 @@ class OpenAIServing:
             prompt_token_ids = prompt.get("prompt_token_ids", [])  # type: ignore
             multi_modal_data = prompt.get("multi_modal_data")  # type: ignore
 
-        mm_processor_kwargs: Optional[dict[str, Any]] = processed_inputs.get(
+        mm_processor_kwargs: dict[str, Any] | None = processed_inputs.get(
             "mm_processor_kwargs"
         )  # type: ignore
 
@@ -507,7 +507,7 @@ class OpenAIServing:
             prompt_logprobs=None,
         )
 
-    def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:
+    def _get_renderer(self, tokenizer: AnyTokenizer | None) -> BaseRenderer:
         """
         Get a Renderer instance with the provided tokenizer.
         Uses shared async tokenizer pool for efficiency.
@@ -545,7 +545,7 @@ class OpenAIServing:
     async def _preprocess(
         self,
         ctx: ServeContext,
-    ) -> Optional[ErrorResponse]:
+    ) -> ErrorResponse | None:
         """
         Default preprocessing hook. Subclasses may override
         to prepare `ctx` (classification, embedding, etc.).
@@ -555,7 +555,7 @@ class OpenAIServing:
     def _build_response(
         self,
         ctx: ServeContext,
-    ) -> Union[AnyResponse, ErrorResponse]:
+    ) -> AnyResponse | ErrorResponse:
         """
         Default response builder. Subclass may override this method
         to return the appropriate response object.
@@ -565,8 +565,8 @@ class OpenAIServing:
     async def handle(
         self,
         ctx: ServeContext,
-    ) -> Union[AnyResponse, ErrorResponse]:
-        generation: AsyncGenerator[Union[AnyResponse, ErrorResponse], None]
+    ) -> AnyResponse | ErrorResponse:
+        generation: AsyncGenerator[AnyResponse | ErrorResponse, None]
         generation = self._pipeline(ctx)
 
         async for response in generation:
@@ -577,7 +577,7 @@ class OpenAIServing:
     async def _pipeline(
         self,
         ctx: ServeContext,
-    ) -> AsyncGenerator[Union[AnyResponse, ErrorResponse], None]:
+    ) -> AsyncGenerator[AnyResponse | ErrorResponse, None]:
         """Execute the request processing pipeline yielding responses."""
         if error := await self._check_model(ctx.request):
             yield error
@@ -598,7 +598,7 @@ class OpenAIServing:
 
         yield self._build_response(ctx)
 
-    def _validate_request(self, ctx: ServeContext) -> Optional[ErrorResponse]:
+    def _validate_request(self, ctx: ServeContext) -> ErrorResponse | None:
         truncate_prompt_tokens = getattr(ctx.request, "truncate_prompt_tokens", None)
 
         if (
@@ -615,7 +615,7 @@ class OpenAIServing:
     def _create_pooling_params(
         self,
         ctx: ServeContext,
-    ) -> Union[PoolingParams, ErrorResponse]:
+    ) -> PoolingParams | ErrorResponse:
         if not hasattr(ctx.request, "to_pooling_params"):
             return self.create_error_response(
                 "Request type does not support pooling parameters"
@@ -626,10 +626,10 @@ class OpenAIServing:
     async def _prepare_generators(
         self,
         ctx: ServeContext,
-    ) -> Optional[ErrorResponse]:
+    ) -> ErrorResponse | None:
         """Schedule the request and get the result generator."""
         generators: list[
-            AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]
+            AsyncGenerator[RequestOutput | PoolingRequestOutput, None]
         ] = []
 
         try:
@@ -678,14 +678,14 @@ class OpenAIServing:
     async def _collect_batch(
         self,
         ctx: ServeContext,
-    ) -> Optional[ErrorResponse]:
+    ) -> ErrorResponse | None:
         """Collect batch results from the result generator."""
         try:
             if ctx.engine_prompts is None:
                 return self.create_error_response("Engine prompts not available")
 
             num_prompts = len(ctx.engine_prompts)
-            final_res_batch: list[Optional[Union[RequestOutput, PoolingRequestOutput]]]
+            final_res_batch: list[RequestOutput | PoolingRequestOutput | None]
             final_res_batch = [None] * num_prompts
 
             if ctx.result_generator is None:
@@ -738,7 +738,7 @@ class OpenAIServing:
     async def _check_model(
         self,
         request: AnyRequest,
-    ) -> Optional[ErrorResponse]:
+    ) -> ErrorResponse | None:
         error_response = None
 
         if self._is_model_supported(request.model):
@@ -764,9 +764,7 @@ class OpenAIServing:
             status_code=HTTPStatus.NOT_FOUND,
         )
 
-    def _get_active_default_mm_loras(
-        self, request: AnyRequest
-    ) -> Optional[LoRARequest]:
+    def _get_active_default_mm_loras(self, request: AnyRequest) -> LoRARequest | None:
         """Determine if there are any active default multimodal loras."""
         # TODO: Currently this is only enabled for chat completions
         # to be better aligned with only being enabled for .generate
@@ -793,7 +791,7 @@ class OpenAIServing:
         self,
         request: AnyRequest,
         supports_default_mm_loras: bool = False,
-    ) -> Optional[LoRARequest]:
+    ) -> LoRARequest | None:
         if request.model in self.models.lora_requests:
             return self.models.lora_requests[request.model]
 
@@ -877,7 +875,7 @@ class OpenAIServing:
         self,
         request: AnyRequest,
         prompt_ids: list[int],
-        tokenizer: Optional[AnyTokenizer],
+        tokenizer: AnyTokenizer | None,
     ) -> TextTokensPrompt:
         truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
 
@@ -972,7 +970,7 @@ class OpenAIServing:
         self,
         request: AnyRequest,
         tokenizer: AnyTokenizer,
-        prompt_input: Union[str, list[int]],
+        prompt_input: str | list[int],
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
         """
@@ -991,7 +989,7 @@ class OpenAIServing:
         self,
         request: AnyRequest,
         tokenizer: AnyTokenizer,
-        prompt_inputs: Iterable[Union[str, list[int]]],
+        prompt_inputs: Iterable[str | list[int]],
         add_special_tokens: bool = True,
     ) -> AsyncGenerator[TextTokensPrompt, None]:
         """
@@ -1014,10 +1012,10 @@ class OpenAIServing:
 
     def _validate_chat_template(
         self,
-        request_chat_template: Optional[str],
-        chat_template_kwargs: Optional[dict[str, Any]],
+        request_chat_template: str | None,
+        chat_template_kwargs: dict[str, Any] | None,
         trust_request_chat_template: bool,
-    ) -> Optional[ErrorResponse]:
+    ) -> ErrorResponse | None:
         if not trust_request_chat_template and (
             request_chat_template is not None
             or (
@@ -1034,17 +1032,17 @@ class OpenAIServing:
 
     async def _preprocess_chat(
         self,
-        request: Union[ChatLikeRequest, ResponsesRequest],
+        request: ChatLikeRequest | ResponsesRequest,
         tokenizer: AnyTokenizer,
         messages: list[ChatCompletionMessageParam],
-        chat_template: Optional[str],
+        chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
-        tool_dicts: Optional[list[dict[str, Any]]] = None,
-        documents: Optional[list[dict[str, str]]] = None,
-        chat_template_kwargs: Optional[dict[str, Any]] = None,
-        tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None,
+        tool_dicts: list[dict[str, Any]] | None = None,
+        documents: list[dict[str, str]] | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        tool_parser: Callable[[AnyTokenizer], ToolParser] | None = None,
         add_special_tokens: bool = False,
     ) -> tuple[
         list[ConversationMessage],
@@ -1076,7 +1074,7 @@ class OpenAIServing:
         )
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
-        request_prompt: Union[str, list[int]]
+        request_prompt: str | list[int]
 
         if tokenizer is None:
             request_prompt = "placeholder"
@@ -1158,10 +1156,10 @@ class OpenAIServing:
         self,
         request_id: str,
         engine_prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams | PoolingParams,
         *,
-        lora_request: Optional[LoRARequest],
-        trace_headers: Optional[Mapping[str, str]],
+        lora_request: LoRARequest | None,
+        trace_headers: Mapping[str, str] | None,
         priority: int,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for AsyncLLM."""
@@ -1188,7 +1186,7 @@ class OpenAIServing:
         engine_prompt: EngineTokensPrompt,
         sampling_params: SamplingParams,
         context: ConversationContext,
-        lora_request: Optional[LoRARequest] = None,
+        lora_request: LoRARequest | None = None,
         priority: int = 0,
         **kwargs,
     ):
@@ -1250,7 +1248,7 @@ class OpenAIServing:
 
     def _get_prompt_components(
         self,
-        prompt: Union[RequestPrompt, PromptType],
+        prompt: RequestPrompt | PromptType,
     ) -> PromptComponents:
         if isinstance(prompt, list):
             return PromptComponents(token_ids=prompt)
@@ -1260,9 +1258,9 @@ class OpenAIServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: Union[RequestPrompt, PromptType],
-        params: Optional[Union[SamplingParams, PoolingParams, BeamSearchParams]],
-        lora_request: Optional[LoRARequest],
+        inputs: RequestPrompt | PromptType,
+        params: SamplingParams | PoolingParams | BeamSearchParams | None,
+        lora_request: LoRARequest | None,
     ) -> None:
         if self.request_logger is None:
             return
@@ -1281,7 +1279,7 @@ class OpenAIServing:
     async def _get_trace_headers(
         self,
         headers: Headers,
-    ) -> Optional[Mapping[str, str]]:
+    ) -> Mapping[str, str] | None:
         is_tracing_enabled = await self.engine_client.is_tracing_enabled()
 
         if is_tracing_enabled:
@@ -1294,8 +1292,8 @@ class OpenAIServing:
 
     @staticmethod
     def _base_request_id(
-        raw_request: Optional[Request], default: Optional[str] = None
-    ) -> Optional[str]:
+        raw_request: Request | None, default: str | None = None
+    ) -> str | None:
         """Pulls the request id to use from a header, if provided"""
         default = default or random_uuid()
         if raw_request is None:
@@ -1317,15 +1315,15 @@ class OpenAIServing:
             return logprob.decoded_token
         return tokenizer.decode(token_id)
 
-    def _is_model_supported(self, model_name: Optional[str]) -> bool:
+    def _is_model_supported(self, model_name: str | None) -> bool:
         if not model_name:
             return True
         return self.models.is_base_model(model_name)
 
 
 def clamp_prompt_logprobs(
-    prompt_logprobs: Union[PromptLogprobs, None],
-) -> Union[PromptLogprobs, None]:
+    prompt_logprobs: PromptLogprobs | None,
+) -> PromptLogprobs | None:
     if prompt_logprobs is None:
         return prompt_logprobs
 

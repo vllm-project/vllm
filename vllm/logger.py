@@ -13,7 +13,7 @@ from logging import Logger
 from logging.config import dictConfig
 from os import path
 from types import MethodType
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 import vllm.envs as envs
 
@@ -217,7 +217,7 @@ def _trace_calls(log_path, root_dir, frame, event, arg=None):
     return partial(_trace_calls, log_path, root_dir)
 
 
-def enable_trace_function_call(log_file_path: str, root_dir: Optional[str] = None):
+def enable_trace_function_call(log_file_path: str, root_dir: str | None = None):
     """
     Enable tracing of every function call in code under `root_dir`.
     This is useful for debugging hangs or crashes.

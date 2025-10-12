@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import pytest
 import torch
@@ -73,7 +72,7 @@ def pplx_cutlass_moe(
     out_dtype,
     per_act_token: bool,
     per_out_ch: bool,
-    group_name: Optional[str],
+    group_name: str | None,
 ):
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize,

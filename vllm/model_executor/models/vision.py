@@ -4,7 +4,8 @@
 import itertools
 import math
 from abc import ABC, abstractmethod
-from typing import Callable, Final, Generic, Literal, Optional, Protocol, TypeVar, Union
+from collections.abc import Callable
+from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 from transformers import PretrainedConfig
@@ -84,7 +85,7 @@ def get_vit_attn_backend(head_size: int, dtype: torch.dtype) -> _Backend:
     # Lazy import to avoid circular dependency
     from vllm.attention.selector import get_env_variable_attn_backend
 
-    selected_backend: Optional[_Backend] = get_env_variable_attn_backend()
+    selected_backend: _Backend | None = get_env_variable_attn_backend()
     if selected_backend is not None:
         return selected_backend
 
@@ -93,14 +94,13 @@ def get_vit_attn_backend(head_size: int, dtype: torch.dtype) -> _Backend:
 
 VisionFeatureSelectStrategyStr = Literal["class", "default", "full"]
 
-VisionFeatureSelectStrategy = Union[
-    VisionFeatureSelectStrategyStr,
-    Callable[[torch.Tensor], torch.Tensor],
-]
+VisionFeatureSelectStrategy: TypeAlias = (
+    VisionFeatureSelectStrategyStr | Callable[[torch.Tensor], torch.Tensor]
+)
 
 
 def _get_vision_feature_selector(
-    strategy: Union[VisionFeatureSelectStrategy, str],
+    strategy: VisionFeatureSelectStrategy | str,
 ) -> Callable[[torch.Tensor], torch.Tensor]:
     if callable(strategy):
         return strategy
@@ -121,7 +121,7 @@ def _get_vision_feature_selector(
 
 def get_num_selected_vision_tokens(
     num_vision_tokens: int,
-    strategy: Union[VisionFeatureSelectStrategy, str],
+    strategy: VisionFeatureSelectStrategy | str,
 ) -> int:
     if callable(strategy):
         dummy_features = torch.empty(1, num_vision_tokens, 64)  # [B, L, D]
@@ -141,12 +141,12 @@ def get_num_selected_vision_tokens(
 
 
 def resolve_visual_encoder_outputs(
-    encoder_outputs: Union[torch.Tensor, list[torch.Tensor]],
-    post_layer_norm: Optional[torch.nn.LayerNorm],
+    encoder_outputs: torch.Tensor | list[torch.Tensor],
+    post_layer_norm: torch.nn.LayerNorm | None,
     *,
-    select_layers: Optional[list[int]] = None,
-    max_possible_layers: Optional[int] = None,
-    feature_select_strategy: Optional[VisionFeatureSelectStrategy] = None,
+    select_layers: list[int] | None = None,
+    max_possible_layers: int | None = None,
+    feature_select_strategy: VisionFeatureSelectStrategy | None = None,
 ) -> torch.Tensor:
     """Given the outputs a visual encoder module that may correspond to the
     output of the last layer, or a list of hidden states to be stacked,

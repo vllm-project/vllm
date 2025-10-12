@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional
 
 import huggingface_hub
 import regex as re
@@ -66,7 +66,7 @@ def from_layer(
     max_loras: int,
     lora_config: LoRAConfig,
     packed_modules_list: list,
-    model_config: Optional[PretrainedConfig] = None,
+    model_config: PretrainedConfig | None = None,
 ) -> nn.Module:
     for lora_cls in _all_lora_classes:
         # specifying kwargs so they can be easily accessed in decorator
@@ -87,7 +87,7 @@ def from_layer_logits_processor(
     lm_head: "ParallelLMHead",
     max_loras: int,
     lora_config: LoRAConfig,
-    model_config: Optional[PretrainedConfig] = None,
+    model_config: PretrainedConfig | None = None,
 ) -> LogitsProcessorWithLoRA:
     ret = LogitsProcessorWithLoRA(
         layer,
@@ -155,7 +155,7 @@ def parse_fine_tuned_lora_name(
 
 
 def is_regex_target_modules(
-    load_modules: Union[str, list[str]], expected_lora_modules: list[str]
+    load_modules: str | list[str], expected_lora_modules: list[str]
 ) -> bool:
     """
     PEFT supports passing `target_modules` in the form of regular expressions,

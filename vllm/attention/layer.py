@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 
-from typing import Callable, Optional, cast
+from collections.abc import Callable
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -128,16 +129,16 @@ class Attention(nn.Module, AttentionLayerBase):
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[list[float]] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        logits_soft_cap: Optional[float] = None,
-        per_layer_sliding_window: Optional[int] = None,
+        num_kv_heads: int | None = None,
+        alibi_slopes: list[float] | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        logits_soft_cap: float | None = None,
+        per_layer_sliding_window: int | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[str] = None,
-        attn_backend: Optional[type[AttentionBackend]] = None,
+        kv_sharing_target_layer_name: str | None = None,
+        attn_backend: type[AttentionBackend] | None = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -191,7 +192,7 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # The output scale on host memory. This should be the input scale of
         # the quant op after this attention layer.
-        self._o_scale_float: Optional[float] = None
+        self._o_scale_float: float | None = None
 
         self.num_heads = num_heads
         self.head_size = head_size
@@ -319,7 +320,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # For some alternate attention backends like MLA the attention output
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
-        output_shape: Optional[torch.Size] = None,
+        output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
         """
         The KV cache is stored inside this class and is accessed via
@@ -427,7 +428,7 @@ class MultiHeadAttention(nn.Module):
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: Optional[int] = None,
+        num_kv_heads: int | None = None,
         # This has no effect, it is only here to make it easier to swap
         # between Attention and MultiHeadAttention
         prefix: str = "",
@@ -582,14 +583,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         v_head_dim: int,
-        q_lora_rank: Optional[int],
+        q_lora_rank: int | None,
         kv_lora_rank: int,
         kv_b_proj: ColumnParallelLinear,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_sparse: bool = False,
-        indexer: Optional[object] = None,
+        indexer: object | None = None,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -670,7 +671,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self._q_scale_float = 1.0
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
-        self._o_scale_float: Optional[float] = None
+        self._o_scale_float: float | None = None
 
         self.use_sparse = use_sparse
 
@@ -688,7 +689,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        output_shape: Optional[torch.Size] = None,
+        output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
@@ -888,8 +889,8 @@ def unified_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    output_scale: Optional[torch.Tensor] = None,
-    output_block_scale: Optional[torch.Tensor] = None,
+    output_scale: torch.Tensor | None = None,
+    output_block_scale: torch.Tensor | None = None,
 ) -> None:
     wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
@@ -919,8 +920,8 @@ def unified_attention_with_output_fake(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    output_scale: Optional[torch.Tensor] = None,
-    output_block_scale: Optional[torch.Tensor] = None,
+    output_scale: torch.Tensor | None = None,
+    output_block_scale: torch.Tensor | None = None,
 ) -> None:
     return
 
@@ -978,8 +979,8 @@ def unified_mla_attention_with_output(
     k_pe: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    output_scale: Optional[torch.Tensor] = None,
-    output_block_scale: Optional[torch.Tensor] = None,
+    output_scale: torch.Tensor | None = None,
+    output_block_scale: torch.Tensor | None = None,
 ) -> None:
     wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
@@ -1009,8 +1010,8 @@ def unified_mla_attention_with_output_fake(
     k_pe: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    output_scale: Optional[torch.Tensor] = None,
-    output_block_scale: Optional[torch.Tensor] = None,
+    output_scale: torch.Tensor | None = None,
+    output_block_scale: torch.Tensor | None = None,
 ) -> None:
     return
 

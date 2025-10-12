@@ -3,13 +3,13 @@
 
 import pickle
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import chain
 from multiprocessing import shared_memory
 from multiprocessing.synchronize import Lock as LockType
-from typing import Any, Callable, Optional, Union
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -109,7 +109,7 @@ class SingleWriterShmRingBuffer:
     def __init__(
         self,
         data_buffer_size: int,
-        name: Optional[str] = None,
+        name: str | None = None,
         create: bool = False,
     ):
         self.data_buffer_size = data_buffer_size
@@ -252,7 +252,7 @@ class SingleWriterShmRingBuffer:
     def free_buf(
         self,
         is_free_fn: Callable[[int, memoryview], bool],
-        nbytes: Optional[int] = None,
+        nbytes: int | None = None,
     ) -> Iterable[int]:
         """
         Free a buffer of the given size. This is a no-op in shared memory,
@@ -340,9 +340,7 @@ class MsgpackSerde(ObjectSerde):
         self.mm_decoder = MsgpackDecoder(MultiModalKwargsItem)
         self._mm_kwargs_item_cls = MultiModalKwargsItem
 
-    def serialize(
-        self, value: Any
-    ) -> tuple[Union[bytes, list[bytes]], int, bytes, int]:
+    def serialize(self, value: Any) -> tuple[bytes | list[bytes], int, bytes, int]:
         len_arr = None
         if isinstance(value, (torch.Tensor, self._mm_kwargs_item_cls)):
             type_name = type(value).__name__
@@ -396,7 +394,7 @@ class ShmObjectStorageHandle:
     n_readers: int
     ring_buffer_handle: tuple[int, str]
     serde_class: type[ObjectSerde]
-    reader_lock: Optional[LockType]
+    reader_lock: LockType | None
 
 
 class SingleWriterShmObjectStorage:
@@ -444,7 +442,7 @@ class SingleWriterShmObjectStorage:
         n_readers: int,
         ring_buffer: SingleWriterShmRingBuffer,
         serde_class: type[ObjectSerde] = MsgpackSerde,
-        reader_lock: Optional[LockType] = None,
+        reader_lock: LockType | None = None,
     ):
         """
         Initialize the object storage.
@@ -492,7 +490,7 @@ class SingleWriterShmObjectStorage:
 
     def copy_to_buffer(
         self,
-        data: Union[bytes, list[bytes]],
+        data: bytes | list[bytes],
         data_bytes: int,
         metadata: bytes,
         md_bytes: int,

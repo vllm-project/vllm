@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
-from typing import Callable, Union
+from collections.abc import Callable, Sequence
+from typing import TypeAlias
 
 import torch
 
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-LogitsProcessor = Union[
-    Callable[[list[int], torch.Tensor], torch.Tensor],
-    Callable[[list[int], list[int], torch.Tensor], torch.Tensor],
-]
+LogitsProcessor: TypeAlias = (
+    Callable[[list[int], torch.Tensor], torch.Tensor]
+    | Callable[[list[int], list[int], torch.Tensor], torch.Tensor]
+)
 """LogitsProcessor is a function that takes a list
 of previously generated tokens, the logits tensor
 for the next token and, optionally, prompt tokens as a

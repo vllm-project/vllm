@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -31,10 +30,10 @@ class SymmMemCommunicator:
     def __init__(
         self,
         group: ProcessGroup,
-        device: Union[int, str, torch.device],
+        device: int | str | torch.device,
         # add options for testing
-        force_multimem: Optional[bool] = None,
-        max_size_override: Optional[int] = None,
+        force_multimem: bool | None = None,
+        max_size_override: int | None = None,
     ):
         self.disabled = True
 
@@ -108,8 +107,8 @@ class SymmMemCommunicator:
         return inp_size < self.max_size
 
     def all_reduce(
-        self, inp: torch.Tensor, *, out: Optional[torch.Tensor] = None
-    ) -> Optional[torch.Tensor]:
+        self, inp: torch.Tensor, *, out: torch.Tensor | None = None
+    ) -> torch.Tensor | None:
         if not self.should_use_symm_mem(inp):
             return None
         if out is None:

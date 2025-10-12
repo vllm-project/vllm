@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Iterable, Mapping
-from typing import Any, Optional, Union
+from typing import Any
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs.data import PromptType
@@ -28,7 +28,7 @@ class EngineClient(ABC):
     vllm_config: VllmConfig
     model_config: ModelConfig
     processor: Processor
-    io_processor: Optional[IOProcessor]
+    io_processor: IOProcessor | None
 
     @property
     @abstractmethod
@@ -49,16 +49,16 @@ class EngineClient(ABC):
     @abstractmethod
     def generate(
         self,
-        prompt: Union[EngineCoreRequest, PromptType],
+        prompt: EngineCoreRequest | PromptType,
         sampling_params: SamplingParams,
         request_id: str,
         *,
-        prompt_text: Optional[str] = None,
-        lora_request: Optional[LoRARequest] = None,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_text: str | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        data_parallel_rank: Optional[int] = None,
+        data_parallel_rank: int | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...
@@ -69,16 +69,16 @@ class EngineClient(ABC):
         prompt: PromptType,
         pooling_params: PoolingParams,
         request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
+        lora_request: LoRARequest | None = None,
+        trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model."""
         ...
 
     @abstractmethod
-    async def abort(self, request_id: Union[str, Iterable[str]]) -> None:
+    async def abort(self, request_id: str | Iterable[str]) -> None:
         """Abort a request.
 
         Args:
@@ -119,7 +119,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def reset_prefix_cache(self, device: Optional[Device] = None) -> None:
+    async def reset_prefix_cache(self, device: Device | None = None) -> None:
         """Reset the prefix cache"""
         ...
 
@@ -129,7 +129,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def wake_up(self, tags: Optional[list[str]] = None) -> None:
+    async def wake_up(self, tags: list[str] | None = None) -> None:
         """Wake up the engine"""
         ...
 
@@ -152,9 +152,9 @@ class EngineClient(ABC):
     async def collective_rpc(
         self,
         method: str,
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict] = None,
+        kwargs: dict | None = None,
     ):
         """Perform a collective RPC call to the given path."""
         raise NotImplementedError

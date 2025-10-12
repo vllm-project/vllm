@@ -5,7 +5,6 @@ within a vision language model."""
 
 import math
 from collections.abc import Iterable
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -153,7 +152,7 @@ class SiglipAttention(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -211,7 +210,7 @@ class SiglipMLP(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -251,7 +250,7 @@ class SiglipEncoderLayer(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -293,8 +292,8 @@ class SiglipEncoder(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        num_hidden_layers_override: Optional[int] = None,
+        quant_config: QuantizationConfig | None = None,
+        num_hidden_layers_override: int | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -321,7 +320,7 @@ class SiglipEncoder(nn.Module):
         self,
         inputs_embeds: torch.Tensor,
         return_all_hidden_states: bool,
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+    ) -> torch.Tensor | list[torch.Tensor]:
         hidden_states_pool = [inputs_embeds]
         hidden_states = inputs_embeds
 
@@ -342,7 +341,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -375,10 +374,10 @@ class SiglipVisionTransformer(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
-        require_post_norm: Optional[bool] = None,
+        num_hidden_layers_override: int | None = None,
+        require_post_norm: bool | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -426,8 +425,8 @@ class SiglipVisionTransformer(nn.Module):
         pixel_values: torch.Tensor,
         *,
         interpolate_pos_encoding: bool = False,
-        select_layers: Optional[list[int]] = None,
-        feature_select_strategy: Optional[VisionFeatureSelectStrategy] = None,
+        select_layers: list[int] | None = None,
+        feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embeddings(
             pixel_values,
@@ -464,10 +463,10 @@ class SiglipVisionModel(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
-        require_post_norm: Optional[bool] = None,
+        num_hidden_layers_override: int | None = None,
+        require_post_norm: bool | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -491,8 +490,8 @@ class SiglipVisionModel(nn.Module):
         self,
         pixel_values: torch.Tensor,
         interpolate_pos_encoding: bool = False,
-        select_layers: Optional[list[int]] = None,
-        feature_select_strategy: Optional[VisionFeatureSelectStrategy] = None,
+        select_layers: list[int] | None = None,
+        feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
         return self.vision_model(
             pixel_values=pixel_values,

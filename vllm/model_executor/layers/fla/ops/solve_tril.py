@@ -7,7 +7,6 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
-from typing import Optional
 
 import torch
 
@@ -407,7 +406,7 @@ def merge_16x16_to_64x64_inverse_kernel(
 @input_guard
 def solve_tril(
     A: torch.Tensor,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float,
 ) -> torch.Tensor:
     """

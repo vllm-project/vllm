@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
@@ -19,14 +18,14 @@ class MLAModules:
     kv_b_proj: torch.nn.Module
     rotary_emb: torch.nn.Module
     o_proj: torch.nn.Module
-    fused_qkv_a_proj: Optional[torch.nn.Module]
-    kv_a_proj_with_mqa: Optional[torch.nn.Module]
-    q_a_layernorm: Optional[torch.nn.Module]
-    q_b_proj: Optional[torch.nn.Module]
-    q_proj: Optional[torch.nn.Module]
-    indexer: Optional[torch.nn.Module]
+    fused_qkv_a_proj: torch.nn.Module | None
+    kv_a_proj_with_mqa: torch.nn.Module | None
+    q_a_layernorm: torch.nn.Module | None
+    q_b_proj: torch.nn.Module | None
+    q_proj: torch.nn.Module | None
+    indexer: torch.nn.Module | None
     is_sparse: bool
-    topk_indices_buffer: Optional[torch.Tensor]
+    topk_indices_buffer: torch.Tensor | None
 
 
 @CustomOp.register("multi_head_latent_attention")
@@ -55,11 +54,11 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         v_head_dim: int,
-        q_lora_rank: Optional[int],
+        q_lora_rank: int | None,
         kv_lora_rank: int,
         mla_modules: MLAModules,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()

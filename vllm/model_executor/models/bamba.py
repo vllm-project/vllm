@@ -4,7 +4,6 @@
 
 # Added by the IBM Team, 2024
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 from torch import nn
@@ -52,7 +51,7 @@ class BambaMLP(nn.Module):
     def __init__(
         self,
         config: BambaConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         bias: bool = False,
     ) -> None:
         super().__init__()
@@ -87,9 +86,9 @@ class BambaMixerDecoderLayer(nn.Module):
         self,
         config: BambaConfig,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -119,7 +118,7 @@ class BambaMixerDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ):
         if residual is None:
@@ -141,9 +140,9 @@ class BambaAttentionDecoderLayer(nn.Module):
         self,
         config: BambaConfig,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -235,7 +234,7 @@ class BambaAttentionDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ):
         if residual is None:
@@ -314,8 +313,8 @@ class BambaModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -497,8 +496,8 @@ class BambaForCausalLM(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ):
         hidden_states = self.model(
@@ -510,7 +509,7 @@ class BambaForCausalLM(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -30,9 +29,9 @@ def aiter_mla_decode_fwd(
     sm_scale: float,
     qo_indptr: torch.Tensor,
     max_seqlen_qo: int,
-    kv_indptr: Optional[torch.Tensor] = None,
-    kv_indices: Optional[torch.Tensor] = None,
-    kv_last_page_lens: Optional[torch.Tensor] = None,
+    kv_indptr: torch.Tensor | None = None,
+    kv_indices: torch.Tensor | None = None,
+    kv_last_page_lens: torch.Tensor | None = None,
     logit_cap: float = 0.0,
 ):
     torch.ops.vllm.rocm_aiter_mla_decode_fwd(
@@ -55,9 +54,9 @@ def mla_decode_fwd_impl(
     o: torch.Tensor,
     qo_indptr: torch.Tensor,
     max_seqlen_qo: int,
-    kv_indptr: Optional[torch.Tensor] = None,
-    kv_indices: Optional[torch.Tensor] = None,
-    kv_last_page_lens: Optional[torch.Tensor] = None,
+    kv_indptr: torch.Tensor | None = None,
+    kv_indices: torch.Tensor | None = None,
+    kv_last_page_lens: torch.Tensor | None = None,
     sm_scale: float = 1.0,
     logit_cap: float = 0.0,
 ) -> None:
@@ -83,9 +82,9 @@ def mla_decode_fwd_fake(
     o: torch.Tensor,
     qo_indptr: torch.Tensor,
     max_seqlen_qo: int,
-    kv_indptr: Optional[torch.Tensor] = None,
-    kv_indices: Optional[torch.Tensor] = None,
-    kv_last_page_lens: Optional[torch.Tensor] = None,
+    kv_indptr: torch.Tensor | None = None,
+    kv_indices: torch.Tensor | None = None,
+    kv_last_page_lens: torch.Tensor | None = None,
     sm_scale: float = 1.0,
     logit_cap: float = 0.0,
 ) -> None:

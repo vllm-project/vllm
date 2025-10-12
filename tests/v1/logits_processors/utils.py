@@ -3,7 +3,7 @@
 
 import types
 from enum import Enum, auto
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -61,7 +61,7 @@ class DummyLogitsProcessor(LogitsProcessor):
         """Never impacts greedy sampling"""
         return False
 
-    def update_state(self, batch_update: Optional[BatchUpdate]):
+    def update_state(self, batch_update: BatchUpdate | None):
         process_dict_updates(
             self.req_info,
             batch_update,
@@ -145,7 +145,7 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
     def new_req_logits_processor(
         self,
         params: SamplingParams,
-    ) -> Optional[RequestLogitsProcessor]:
+    ) -> RequestLogitsProcessor | None:
         """This method returns a new request-level logits processor, customized
         to the `target_token` value associated with a particular request.
 
@@ -159,7 +159,7 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
         Returns:
           `Callable` request logits processor, or None
         """
-        target_token: Optional[Any] = params.extra_args and params.extra_args.get(
+        target_token: Any | None = params.extra_args and params.extra_args.get(
             "target_token"
         )
         if target_token is None:

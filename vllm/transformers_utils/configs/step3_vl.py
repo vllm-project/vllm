@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional, Union
+from typing import Any
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -53,7 +53,7 @@ class Step3TextConfig(PretrainedConfig):
         moe_num_experts: int = 48,
         moe_top_k: int = 3,
         rope_theta: float = 500000,
-        rope_scaling: Optional[dict[str, Any]] = None,
+        rope_scaling: dict[str, Any] | None = None,
         max_position_embedding: int = 65536,
         share_expert_dim: int = 5120,
         share_q_dim: int = 2048,
@@ -147,8 +147,8 @@ class Step3VLConfig(PretrainedConfig):
 
     def __init__(
         self,
-        vision_config: Optional[Union[dict, Step3VisionEncoderConfig]] = None,
-        text_config: Optional[Union[dict, Step3TextConfig]] = None,
+        vision_config: dict | Step3VisionEncoderConfig | None = None,
+        text_config: dict | Step3TextConfig | None = None,
         understand_projector_stride: int = 1,
         projector_bias: bool = True,
         image_token_id: int = 128001,
