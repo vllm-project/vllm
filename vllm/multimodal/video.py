@@ -6,7 +6,7 @@ from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Union
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -175,6 +175,16 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         max_duration: int = 300,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
+        """
+        Args:
+            num_frames (int): Maximum number of frames to load.
+            A total sampled number of frames will never be larger
+            than this value. Set it -1 to remove the upper limit.
+
+            fps (int): Desired video sampling rate. A real samping
+            rate may be lower if we encounter long video and
+            num_frames upper limit is set to positive value.
+        """
         import cv2
 
         backend = cls().get_cv2_video_api()
@@ -183,36 +193,42 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
             raise ValueError("Could not open video stream")
 
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames_num == 0:
+            raise ValueError("CAP_PROP_FRAME_COUNT returned 0")
+
         original_fps = cap.get(cv2.CAP_PROP_FPS)
-        duration = total_frames_num / original_fps if original_fps > 0 else 0
-
-        # resample video to target num_frames
-        max_frame_idx = total_frames_num - 1
-        duration = duration or round(max_frame_idx / original_fps) + 1
-
-        # Refer to:
-        # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
-        frame_indices: Union[range, list[int]]
-        if duration <= max_duration:
-            n = int(math.floor(duration * fps))
-            frame_indices = sorted(
-                {
-                    min(max_frame_idx, int(math.ceil(i * original_fps / fps)))
-                    for i in range(n)
-                }
+        if not (original_fps > 0):
+            print(
+                f"WARNING: CAP_PROP_FPS returned {original_fps}. "
+                f"We will use 30 FPS as default fallback."
             )
+            original_fps = 30
+
+        duration = total_frames_num / original_fps
+
+        # Determine target number of samples
+        if num_frames > 0:
+            # Hard upper bound
+            max_samples = int(num_frames)
         else:
-            num_samples = int(max_duration * fps)
-            if num_samples >= total_frames_num:
-                frame_indices = range(total_frames_num)
-            else:
-                target_seconds = np.linspace(0, duration, num_samples, endpoint=True)
-                frame_indices = sorted(
-                    {
-                        min(max_frame_idx, int(math.ceil(t * original_fps)))
-                        for t in target_seconds
-                    }
-                )
+            # No cap -> sample at desired fps
+            max_samples = int(max(1, math.floor(duration * fps)))
+
+        # Clamp to available frames if count is known
+        max_samples = max(1, min(max_samples, total_frames_num))
+
+        # Uniform coverage of the entire timeline within the cap
+        # Use linspace over [0, total_frames-1]
+        raw = np.linspace(0, total_frames_num - 1, max_samples, endpoint=True)
+        frame_indices = np.unique(raw.round().astype(int)).tolist()
+
+        effective_fps = len(frame_indices) / duration
+        print(
+            f"Video [{total_frames_num} fames]({duration:.2f}sec "
+            f"at {original_fps:.2f}fps) sampled "
+            f"into frame [{len(frame_indices)}] indexes {frame_indices} "
+            f"at {effective_fps:.2f}fps."
+        )
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
