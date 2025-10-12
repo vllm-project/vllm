@@ -4,8 +4,9 @@
 import asyncio
 import os
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 import cloudpickle
 import msgspec
@@ -71,7 +72,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
     uses_ray: bool = True
 
     def _init_executor(self) -> None:
-        self.forward_dag: Optional[ray.dag.CompiledDAG] = None
+        self.forward_dag: ray.dag.CompiledDAG | None = None
         if envs.VLLM_USE_V1:
             # V1 uses SPMD worker and compiled DAG
             os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
@@ -114,10 +115,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
         self._init_workers_ray(placement_group)
 
         self.input_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
-        self.output_decoder = msgspec.msgpack.Decoder(Optional[list[SamplerOutput]])
+        self.output_decoder = msgspec.msgpack.Decoder(list[SamplerOutput] | None)
         self.use_v1 = envs.VLLM_USE_V1
 
-        self.pp_locks: Optional[list[asyncio.Lock]] = None
+        self.pp_locks: list[asyncio.Lock] | None = None
         if not self.use_ray_compiled_dag:
             self.driver_exec_method = make_async(self.driver_worker.execute_method)
 
@@ -162,7 +163,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
-        self.driver_dummy_worker: Optional[RayWorkerWrapper] = None
+        self.driver_dummy_worker: RayWorkerWrapper | None = None
         # The remaining workers are the actual ray actors.
         self.workers: list[RayWorkerWrapper] = []
 
@@ -432,8 +433,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 self.non_driver_workers.append(worker)
 
     def _driver_execute_model(
-        self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[list[SamplerOutput]]:
+        self, execute_model_req: ExecuteModelRequest | None
+    ) -> list[SamplerOutput] | None:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution
@@ -463,10 +464,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _run_workers(
         self,
-        method: Union[str, Callable],
+        method: str | Callable,
         *args,
         async_run_tensor_parallel_workers_only: bool = False,
-        max_concurrent_workers: Optional[int] = None,
+        max_concurrent_workers: int | None = None,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers. Can be used in the following
@@ -683,7 +684,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         return self.output_decoder.decode(output)
 
     async def _driver_execute_model_async(
-        self, execute_model_req: Optional[ExecuteModelRequest] = None
+        self, execute_model_req: ExecuteModelRequest | None = None
     ) -> list[SamplerOutput]:
         assert not self.use_ray_spmd_worker, (
             "driver_worker does not exist for VLLM_USE_RAY_SPMD_WORKER=1"

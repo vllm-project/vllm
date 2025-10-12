@@ -6,7 +6,8 @@ import hashlib
 import inspect
 import os
 import sys
-from typing import Callable, Optional, TypeVar, Union, overload
+from collections.abc import Callable
+from typing import TypeVar, overload
 from unittest.mock import patch
 
 import torch
@@ -61,14 +62,14 @@ def _should_ignore_torch_compile(cls) -> bool:
 @overload
 def support_torch_compile(
     *,
-    enable_if: Optional[Callable[[VllmConfig], bool]] = None,
+    enable_if: Callable[[VllmConfig], bool] | None = None,
 ) -> Callable[[_T], _T]: ...
 
 
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]],
+    dynamic_arg_dims: dict[str, int | list[int]] | None,
 ) -> Callable[[_T], _T]: ...
 
 
@@ -77,11 +78,11 @@ def support_torch_compile(cls: _T) -> _T: ...
 
 
 def support_torch_compile(
-    cls: Optional[_T] = None,
+    cls: _T | None = None,
     *,
-    dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]] = None,
-    enable_if: Optional[Callable[[VllmConfig], bool]] = None,
-) -> Union[Callable[[_T], _T], _T]:
+    dynamic_arg_dims: dict[str, int | list[int]] | None = None,
+    enable_if: Callable[[VllmConfig], bool] | None = None,
+) -> Callable[[_T], _T] | _T:
     """
     A decorator to add support for compiling the forward method of a class.
 
@@ -147,9 +148,9 @@ def support_torch_compile(
             for k, v in sig.parameters.items():
                 if v.annotation in [
                     torch.Tensor,
-                    Optional[torch.Tensor],
+                    torch.Tensor | None,
                     IntermediateTensors,
-                    Optional[IntermediateTensors],
+                    IntermediateTensors | None,
                 ]:
                     inferred_dynamic_arg_dims[k] = 0
 
@@ -209,8 +210,8 @@ def _verify_source_unchanged(source_info, vllm_config) -> None:
 
 def _support_torch_compile(
     cls: _T,
-    dynamic_arg_dims: dict[str, Union[int, list[int]]],
-    enable_if: Optional[Callable[[VllmConfig], bool]] = None,
+    dynamic_arg_dims: dict[str, int | list[int]],
+    enable_if: Callable[[VllmConfig], bool] | None = None,
 ) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.

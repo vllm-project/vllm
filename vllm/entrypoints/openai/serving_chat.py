@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Final, Optional, Union
+from typing import Final
 
 import jinja2
 import partial_json_parser
@@ -82,15 +82,15 @@ class OpenAIServingChat(OpenAIServing):
         models: OpenAIServingModels,
         response_role: str,
         *,
-        request_logger: Optional[RequestLogger],
-        chat_template: Optional[str],
+        request_logger: RequestLogger | None,
+        chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         trust_request_chat_template: bool = False,
         return_tokens_as_token_ids: bool = False,
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         exclude_tools_when_tool_choice_none: bool = False,
-        tool_parser: Optional[str] = None,
+        tool_parser: str | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
@@ -159,8 +159,8 @@ class OpenAIServingChat(OpenAIServing):
     async def create_chat_completion(
         self,
         request: ChatCompletionRequest,
-        raw_request: Optional[Request] = None,
-    ) -> Union[AsyncGenerator[str, None], ChatCompletionResponse, ErrorResponse]:
+        raw_request: Request | None = None,
+    ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
         """
         Chat Completion API similar to OpenAI's API.
 
@@ -281,7 +281,7 @@ class OpenAIServingChat(OpenAIServing):
                     default_sampling_params=self.default_sampling_params,
                 )
 
-                sampling_params: Union[SamplingParams, BeamSearchParams]
+                sampling_params: SamplingParams | BeamSearchParams
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
                         max_tokens, self.default_sampling_params
@@ -416,11 +416,11 @@ class OpenAIServingChat(OpenAIServing):
     def extract_tool_call_required_streaming(
         self,
         previous_text: str,
-        current_text: Optional[str],
+        current_text: str | None,
         delta_text: str,
         function_name_returned: bool,
-        tool_call_idx: Optional[int] = None,
-    ) -> tuple[Optional[DeltaMessage], bool]:
+        tool_call_idx: int | None = None,
+    ) -> tuple[DeltaMessage | None, bool]:
         if current_text is None or current_text == "":
             # if the current text is empty, we cannot parse it
             return None, function_name_returned
@@ -548,7 +548,7 @@ class OpenAIServingChat(OpenAIServing):
             and self._should_stream_with_auto_tool_parsing(request)
         )
 
-        all_previous_token_ids: Optional[list[list[int]]]
+        all_previous_token_ids: list[list[int]] | None
         function_name_returned = [False] * num_choices
         if self.tool_call_id_type == "kimi_k2":
             history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
@@ -583,7 +583,7 @@ class OpenAIServingChat(OpenAIServing):
         # Prepare the tool parser if it's needed
         try:
             if tool_choice_auto and self.tool_parser:
-                tool_parsers: list[Optional[ToolParser]] = [
+                tool_parsers: list[ToolParser | None] = [
                     self.tool_parser(tokenizer)
                 ] * num_choices
             else:
@@ -661,7 +661,7 @@ class OpenAIServingChat(OpenAIServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo:
-                        last_msg_content: Union[str, list[dict[str, str]]] = ""
+                        last_msg_content: str | list[dict[str, str]] = ""
                         if (
                             conversation
                             and "content" in conversation[-1]
@@ -734,7 +734,7 @@ class OpenAIServingChat(OpenAIServing):
                         # Chunked prefill case, don't return empty chunks
                         continue
 
-                    delta_message: Optional[DeltaMessage]
+                    delta_message: DeltaMessage | None
 
                     # just update previous_texts and previous_token_ids
                     if tool_choice_auto or self.reasoning_parser:
@@ -1260,9 +1260,9 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-    ) -> Union[ErrorResponse, ChatCompletionResponse]:
+    ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
-        final_res: Optional[RequestOutput] = None
+        final_res: RequestOutput | None = None
 
         try:
             async for res in result_generator:
@@ -1512,7 +1512,7 @@ class OpenAIServingChat(OpenAIServing):
             choices.append(choice_data)
 
         if request.echo:
-            last_msg_content: Union[str, list[dict[str, str]]] = ""
+            last_msg_content: str | list[dict[str, str]] = ""
             if (
                 conversation
                 and "content" in conversation[-1]
@@ -1597,7 +1597,7 @@ class OpenAIServingChat(OpenAIServing):
     def _get_top_logprobs(
         self,
         logprobs: dict[int, Logprob],
-        top_logprobs: Optional[int],
+        top_logprobs: int | None,
         tokenizer: AnyTokenizer,
         should_return_as_token_id: bool,
     ) -> list[ChatCompletionLogProb]:
@@ -1621,10 +1621,10 @@ class OpenAIServingChat(OpenAIServing):
     def _create_chat_logprobs(
         self,
         token_ids: GenericSequence[int],
-        top_logprobs: GenericSequence[Optional[dict[int, Logprob]]],
+        top_logprobs: GenericSequence[dict[int, Logprob] | None],
         tokenizer: AnyTokenizer,
-        num_output_top_logprobs: Optional[int] = None,
-        return_as_token_id: Optional[bool] = None,
+        num_output_top_logprobs: int | None = None,
+        return_as_token_id: bool | None = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""
         logprobs_content: list[ChatCompletionLogProbsContent] = []
@@ -1693,7 +1693,7 @@ class OpenAIServingChat(OpenAIServing):
 
     def _should_check_for_unstreamed_tool_arg_tokens(
         self,
-        delta_message: Optional[DeltaMessage],
+        delta_message: DeltaMessage | None,
         output: CompletionOutput,
     ) -> bool:
         """

@@ -3,7 +3,6 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
-from typing import Optional
 
 import numpy as np
 import torch
@@ -79,8 +78,8 @@ class EagleProposer:
             vllm_config.model_config
         )
 
-        self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
-        self.draft_indexer_metadata_builder: Optional[AttentionMetadataBuilder] = None
+        self.attn_metadata_builder: AttentionMetadataBuilder | None = None
+        self.draft_indexer_metadata_builder: AttentionMetadataBuilder | None = None
         self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
 
@@ -149,7 +148,7 @@ class EagleProposer:
         )
 
         # Determine allowed attention backends once during initialization.
-        self.allowed_attn_types: Optional[tuple] = None
+        self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
             # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
@@ -207,10 +206,10 @@ class EagleProposer:
         target_hidden_states: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
-        last_token_indices: Optional[torch.Tensor],
+        last_token_indices: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]] = None,
+        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]

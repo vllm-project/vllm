@@ -3,7 +3,7 @@
 
 from collections.abc import Mapping, Set
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import pytest
 import torch
@@ -21,29 +21,29 @@ class _HfExamplesInfo:
     extras: Mapping[str, str] = field(default_factory=dict)
     """Extra models to use for testing this architecture."""
 
-    tokenizer: Optional[str] = None
+    tokenizer: str | None = None
     """Set the tokenizer to load for this architecture."""
 
     tokenizer_mode: TokenizerMode = "auto"
     """Set the tokenizer type for this architecture."""
 
-    speculative_model: Optional[str] = None
+    speculative_model: str | None = None
     """
     The default model to use for testing this architecture, which is only used
     for speculative decoding.
     """
 
-    min_transformers_version: Optional[str] = None
+    min_transformers_version: str | None = None
     """
     The minimum version of HF Transformers that is required to run this model.
     """
 
-    max_transformers_version: Optional[str] = None
+    max_transformers_version: str | None = None
     """
     The maximum version of HF Transformers that this model runs on.
     """
 
-    transformers_version_reason: Optional[str] = None
+    transformers_version_reason: str | None = None
     """
     The reason for the minimum/maximum version requirement.
     """
@@ -82,19 +82,19 @@ class _HfExamplesInfo:
     hf_overrides: dict[str, Any] = field(default_factory=dict)
     """The ``hf_overrides`` required to load the model."""
 
-    max_model_len: Optional[int] = None
+    max_model_len: int | None = None
     """
     The maximum model length to use for this model. Some models default to a
     length that is too large to fit into memory in CI.
     """
 
-    revision: Optional[str] = None
+    revision: str | None = None
     """
     The specific revision (commit hash, tag, or branch) to use for the model.
     If not specified, the default revision will be used.
     """
 
-    max_num_seqs: Optional[int] = None
+    max_num_seqs: int | None = None
     """Maximum number of sequences to be processed in a single iteration."""
 
     use_original_num_layers: bool = False
@@ -109,7 +109,7 @@ class _HfExamplesInfo:
         on_fail: Literal["error", "skip", "return"],
         check_min_version: bool = True,
         check_max_version: bool = True,
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         If the installed transformers version does not meet the requirements,
         perform the given action.

@@ -3,7 +3,7 @@
 import hashlib
 import os
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import safetensors
 import torch
@@ -249,7 +249,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[Optional[int], bool]:
+    ) -> tuple[int | None, bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.

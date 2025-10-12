@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import pytest
 import torch
@@ -62,9 +62,9 @@ def make_request(
     prompt_token_ids: list[int],
     block_size: int = 3,
     hash_fn: Callable = hash,
-    mm_positions: Optional[list[PlaceholderRange]] = None,
-    mm_hashes: Optional[list[str]] = None,
-    cache_salt: Optional[str] = None,
+    mm_positions: list[PlaceholderRange] | None = None,
+    mm_hashes: list[str] | None = None,
+    cache_salt: str | None = None,
 ):
     mm_features = []
     if mm_positions is not None:

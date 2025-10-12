@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
@@ -27,7 +26,7 @@ class PagedAttentionMetadata:
 
     # (batch_size,). The length of sequences (entire tokens seen so far) per
     # sequence.
-    seq_lens_tensor: Optional[torch.Tensor]
+    seq_lens_tensor: torch.Tensor | None
     # Maximum sequence length in the batch. 0 if it is prefill-only batch.
     max_decode_seq_len: int
     # (batch_size, max_blocks_per_seq).
@@ -36,7 +35,7 @@ class PagedAttentionMetadata:
     # in the kv cache. Each block can contain up to block_size tokens.
     # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
     # captured.
-    block_tables: Optional[torch.Tensor]
+    block_tables: torch.Tensor | None
 
 
 class PagedAttention:
@@ -102,7 +101,7 @@ class PagedAttention:
         kv_cache_dtype: str,
         num_kv_heads: int,
         scale: float,
-        alibi_slopes: Optional[torch.Tensor],
+        alibi_slopes: torch.Tensor | None,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
         tp_rank: int = 0,
@@ -211,8 +210,8 @@ class PagedAttention:
         query_start_loc: torch.Tensor,
         seq_lens_tensor: torch.Tensor,
         max_query_len: int,
-        alibi_slopes: Optional[torch.Tensor],
-        sliding_window: Optional[int],
+        alibi_slopes: torch.Tensor | None,
+        sliding_window: int | None,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
     ) -> torch.Tensor:

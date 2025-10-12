@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 import numpy as np
 import torch
@@ -147,7 +147,7 @@ class Phi4MMImageEmbedding(nn.Module):
     def get_img_features(
         self,
         img_embeds: torch.FloatTensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> torch.FloatTensor:
         img_feature = self.img_processor(
             img_embeds, patch_attention_mask=attention_mask
@@ -172,8 +172,8 @@ class Phi4MMImageEmbedding(nn.Module):
     def forward(
         self,
         image_pixel_values: torch.FloatTensor,
-        image_sizes: Optional[torch.Tensor] = None,
-        image_attention_mask: Optional[torch.Tensor] = None,
+        image_sizes: torch.Tensor | None = None,
+        image_attention_mask: torch.Tensor | None = None,
     ) -> torch.FloatTensor:
         image_pixel_values = image_pixel_values.to(
             self.img_processor.embeddings.patch_embedding.weight.dtype
@@ -278,7 +278,7 @@ class Phi4MultimodalAudioMLP(nn.Module):
     def __init__(
         self,
         config: Phi4MultimodalAudioConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -311,7 +311,7 @@ class Phi4MultimodalAudioAttention(nn.Module):
     def __init__(
         self,
         config: Phi4MultimodalAudioConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -522,7 +522,7 @@ class Phi4MultimodalAudioModel(nn.Module):
         pad_mask = pad_mask & enc_streaming_mask
         return pad_mask
 
-    def forward(self, hidden_states: torch.Tensor, mask: Optional[torch.Tensor] = None):
+    def forward(self, hidden_states: torch.Tensor, mask: torch.Tensor | None = None):
         hidden_states = self.encoder_embedding(hidden_states)
         hidden_states, hs_mask, mask = self.forward_embeddings(hidden_states, mask)
 
@@ -673,7 +673,7 @@ class Phi4MMImagePixelInputs(TensorSchema):
     type: Literal["pixel_values"]
 
     data: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape(
             "bn", "p", 3, "h", "w", dynamic_dims={"p"}
         ),  # may be different per batch and image
@@ -706,7 +706,7 @@ class Phi4MMImageEmbeddingInputs(TensorSchema):
     type: Literal["image_embeds"]
 
     data: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "f", "h"),
     ]
 
@@ -722,7 +722,7 @@ class Phi4MMAudioFeatureInputs(TensorSchema):
     type: Literal["audio_features"]
 
     data: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "t", 80, dynamic_dims={"t"}),
     ]
 
@@ -744,8 +744,8 @@ class Phi4MMAudioEmbeddingInputs(TensorSchema):
     ]
 
 
-Phi4MMImageInput = Union[Phi4MMImagePixelInputs, Phi4MMImageEmbeddingInputs]
-Phi4MMAudioInputs = Union[Phi4MMAudioFeatureInputs, Phi4MMAudioEmbeddingInputs]
+Phi4MMImageInput: TypeAlias = Phi4MMImagePixelInputs | Phi4MMImageEmbeddingInputs
+Phi4MMAudioInputs: TypeAlias = Phi4MMAudioFeatureInputs | Phi4MMAudioEmbeddingInputs
 
 
 def cat_with_pad(tensors, dim, padding_value=0):
@@ -786,7 +786,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
 
     def get_image_processor(
         self,
-        processor: Optional[Phi4MMProcessor] = None,
+        processor: Phi4MMProcessor | None = None,
     ) -> Phi4MultimodalImageProcessorFast:
         if processor is None:
             processor = self.get_hf_processor()
@@ -794,11 +794,11 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
 
     def get_dynamic_hd(
         self,
-        processor: Optional[Phi4MMProcessor] = None,
+        processor: Phi4MMProcessor | None = None,
     ) -> int:
         return self.get_image_processor(processor).dynamic_hd
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None}
 
     def _find_target_aspect_ratio(
@@ -936,7 +936,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[Phi4MMProcessor] = None,
+        processor: Phi4MMProcessor | None = None,
     ) -> int:
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
@@ -959,7 +959,7 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(
         self,
-        processor: Optional[Phi4MMProcessor] = None,
+        processor: Phi4MMProcessor | None = None,
     ) -> ImageSize:
         vit_image_size = self.get_hf_config().vision_config.image_size
 
@@ -1038,7 +1038,7 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         num_images = mm_counts.get("image", 0)
@@ -1216,7 +1216,7 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|image|>"
         if modality.startswith("audio"):
@@ -1253,7 +1253,7 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
-    ) -> Optional[Phi4MMAudioInputs]:
+    ) -> Phi4MMAudioInputs | None:
         """
         Parse and validate the audio input to the model.  This handles both
         audio features and audio embeddings, but only the former is used for
@@ -1314,7 +1314,7 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[Phi4MMImagePixelInputs]:
+    ) -> Phi4MMImagePixelInputs | None:
         image_pixel_values: NestedTensors = kwargs.get("image_pixel_values")
         if image_pixel_values is None:
             return None
@@ -1445,8 +1445,8 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         if intermediate_tensors is not None:
@@ -1464,7 +1464,7 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

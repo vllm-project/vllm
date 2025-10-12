@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -45,7 +44,7 @@ def apply_fp8_marlin_linear(
     workspace: torch.Tensor,
     size_n: int,
     size_k: int,
-    bias: Optional[torch.Tensor],
+    bias: torch.Tensor | None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
 ) -> torch.Tensor:
     # For GPUs that lack FP8 hardware support, we can leverage the

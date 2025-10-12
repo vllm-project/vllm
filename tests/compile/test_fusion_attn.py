@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from typing import Optional
 
 import pytest
 import torch._dynamo
@@ -41,8 +40,8 @@ FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
 # globals needed for string-import custom Dynamo backend field
-backend: Optional[TestBackend] = None
-backend_unfused: Optional[TestBackend] = None
+backend: TestBackend | None = None
+backend_unfused: TestBackend | None = None
 
 
 class AttentionQuantPatternModel(torch.nn.Module):
