@@ -30,7 +30,7 @@ EPS = 1e-6
 ## Helpers
 
 
-def as_float32_tensor(x: float | torch.tensor) -> torch.tensor:
+def as_float32_tensor(x: float | torch.Tensor) -> torch.Tensor:
     return torch.as_tensor(x, dtype=torch.float32, device="cuda")
 
 
