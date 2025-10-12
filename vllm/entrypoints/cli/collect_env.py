@@ -9,6 +9,8 @@ from vllm.entrypoints.cli.types import CLISubcommand
 
 if typing.TYPE_CHECKING:
     from vllm.utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = argparse.ArgumentParser
 
 
 class CollectEnvSubcommand(CLISubcommand):

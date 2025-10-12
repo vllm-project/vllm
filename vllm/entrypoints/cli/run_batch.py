@@ -12,6 +12,8 @@ from vllm.logger import init_logger
 
 if typing.TYPE_CHECKING:
     from vllm.utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = argparse.ArgumentParser
 
 logger = init_logger(__name__)
 
