@@ -92,7 +92,7 @@ MESSAGES_MULTIPLE_CALLS = [
     },
     {
         "role": "user",
-        "content": "What is 7 * 8? And what time is it in New York?",
+        "content": "First, calculate 7 * 8 using the calculator. Then, use get_time to tell me the current time in New York.",
     },
 ]
 
