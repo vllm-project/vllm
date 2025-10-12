@@ -101,6 +101,12 @@ run_tests_for_model() {
   for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     # Calculate GPU ID - we'll distribute across available GPUs
     GPU_ID=$((i % $(get_num_gpus)))
+    NEXT_GPU=${GPU_ID}
+    # If PREFILLER_TP_SIZE is more than 1
+    for (( j=1; j < PREFILLER_TP_SIZE; j++ )); do
+      NEXT_GPU=$(((GPU_ID + j) % $(get_num_gpus)))
+      GPU_ID="${GPU_ID},${NEXT_GPU}"
+    done
 
     # Calculate port number (base port + instance number)
     PORT=$((8100 + i))
@@ -136,7 +142,12 @@ run_tests_for_model() {
   # Start decode instances
   for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     # Calculate GPU ID - we'll distribute across available GPUs, starting from after prefill GPUs
-    GPU_ID=$(((i + NUM_PREFILL_INSTANCES) % $(get_num_gpus)))
+    GPU_ID=$(((i + NEXT_GPU + 1) % $(get_num_gpus)))
+    # If DECODER_TP_SIZE is more than 1
+    for (( j=1; j < DECODER_TP_SIZE; j++ )); do
+      NEXT_GPU=$(((GPU_ID + j) % $(get_num_gpus)))
+      GPU_ID="${GPU_ID},${NEXT_GPU}"
+    done
     # Calculate port number (base port + instance number)
     PORT=$((8200 + i))
     # Calculate side channel port
