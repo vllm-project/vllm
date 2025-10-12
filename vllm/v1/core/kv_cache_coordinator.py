@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from typing import Optional
 
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
@@ -320,8 +319,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         one of them is full attention. Then, split the kv cache groups into full
         attention groups and other groups.
         """
-        full_attention_spec: Optional[FullAttentionSpec] = None
-        other_spec: Optional[KVCacheSpec] = None
+        full_attention_spec: FullAttentionSpec | None = None
+        other_spec: KVCacheSpec | None = None
         self.full_attention_group_ids: list[int] = []
         self.other_group_ids: list[int] = []
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):

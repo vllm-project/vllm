@@ -15,7 +15,7 @@ import uuid
 from collections import deque
 from collections.abc import Sequence
 from datetime import timedelta
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch.distributed import ProcessGroup, TCPStore
@@ -150,7 +150,7 @@ class StatelessProcessGroup:
     store: torch._C._distributed_c10d.Store
 
     # stores a reference to the socket so that the file descriptor stays alive
-    socket: Optional[socket.socket]
+    socket: socket.socket | None
 
     data_expiration_seconds: int = 3600  # 1 hour
 
@@ -197,7 +197,7 @@ class StatelessProcessGroup:
         self.recv_src_counter[src] += 1
         return obj
 
-    def broadcast_obj(self, obj: Optional[Any], src: int) -> Any:
+    def broadcast_obj(self, obj: Any | None, src: int) -> Any:
         """Broadcast an object from a source rank to all other ranks.
         It does not clean up after all ranks have received the object.
         Use it for limited times, e.g., for initialization.

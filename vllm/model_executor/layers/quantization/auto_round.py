@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from fractions import Fraction
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -46,8 +46,8 @@ class AutoRoundConfig(QuantizationConfig):
         group_size: int,
         sym: bool = True,
         packing_format: str = "auto_round:auto_gptq",
-        block_name_to_quantize: Optional[Union[str, list[str]]] = None,
-        extra_config: Optional[dict[str, Any]] = None,
+        block_name_to_quantize: str | list[str] | None = None,
+        extra_config: dict[str, Any] | None = None,
         data_type: str = "int",
         backend: str = "auto",
     ) -> None:

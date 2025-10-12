@@ -39,7 +39,7 @@ Output:    ' in the hands of the people.\n\nThe future of AI is in the'
 ------------------------------------------------------------
 """
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -82,7 +82,7 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
     def new_req_logits_processor(
         self,
         params: SamplingParams,
-    ) -> Optional[RequestLogitsProcessor]:
+    ) -> RequestLogitsProcessor | None:
         """This method returns a new request-level logits processor, customized
         to the `target_token` value associated with a particular request.
 
@@ -96,7 +96,7 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
         Returns:
           `Callable` request logits processor, or None
         """
-        target_token: Optional[Any] = params.extra_args and params.extra_args.get(
+        target_token: Any | None = params.extra_args and params.extra_args.get(
             "target_token"
         )
         if target_token is None:

@@ -4,9 +4,9 @@
 import os
 import sys
 from abc import abstractmethod
+from collections.abc import Callable
 from contextlib import contextmanager
 from types import CodeType
-from typing import Callable, Optional
 
 import torch
 
@@ -31,7 +31,7 @@ class TorchCompileWrapperWithCustomDispatcher:
     """
 
     def __init__(
-        self, compiled_callable: Optional[Callable] = None, compilation_level: int = 0
+        self, compiled_callable: Callable | None = None, compilation_level: int = 0
     ):
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config

@@ -11,7 +11,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import json
 import os
 from dataclasses import dataclass
-from typing import Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple
 
 import pytest
 
@@ -36,7 +36,7 @@ class ParallelSetup(NamedTuple):
 
 class CPTestOptions(NamedTuple):
     multi_node_only: bool
-    load_format: Optional[str] = None
+    load_format: str | None = None
 
 
 @dataclass
@@ -54,7 +54,7 @@ class CPTestSettings:
         dcp_base: int = 1,
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
-        load_format: Optional[str] = None,
+        load_format: str | None = None,
     ):
         parallel_setups = []
         for eager_mode_val in [False]:

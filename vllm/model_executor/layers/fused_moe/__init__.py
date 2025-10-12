@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import Any
 
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
 from vllm.triton_utils import HAS_TRITON
 
-_config: Optional[dict[str, Any]] = None
+_config: dict[str, Any] | None = None
 
 
 @contextmanager
@@ -31,7 +31,7 @@ def override_config(config):
     _config = old_config
 
 
-def get_config() -> Optional[dict[str, Any]]:
+def get_config() -> dict[str, Any] | None:
     return _config
 
 

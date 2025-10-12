@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from concurrent.futures import Future
-from typing import Optional, Union
 
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.executor.ray_distributed_executor import (  # noqa
@@ -26,7 +25,7 @@ class FutureWrapper(Future):
     the result() call. If not only the first worker's output is returned.
     """
 
-    def __init__(self, refs, aggregator: Optional[KVOutputAggregator] = None):
+    def __init__(self, refs, aggregator: KVOutputAggregator | None = None):
         super().__init__()
         self.refs = refs
         self.aggregator = aggregator
@@ -66,7 +65,7 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
         self,
         scheduler_output: SchedulerOutput,
         non_block: bool = False,
-    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
+    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         """Execute the model on the Ray workers.
 
         Args:

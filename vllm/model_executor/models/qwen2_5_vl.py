@@ -26,9 +26,9 @@
 # limitations under the License.
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache, partial
-from typing import Annotated, Any, Callable, Literal, Optional, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -161,9 +161,9 @@ class Qwen2_5_VLImageEmbeddingInputs(TensorSchema):
     ]
 
 
-Qwen2_5_VLImageInputs = Union[
-    Qwen2_5_VLImagePixelInputs, Qwen2_5_VLImageEmbeddingInputs
-]
+Qwen2_5_VLImageInputs: TypeAlias = (
+    Qwen2_5_VLImagePixelInputs | Qwen2_5_VLImageEmbeddingInputs
+)
 
 
 class Qwen2_5_VLVideoPixelInputs(TensorSchema):
@@ -197,7 +197,7 @@ class Qwen2_5_VLVideoPixelInputs(TensorSchema):
     ]
 
     second_per_grid_ts: Annotated[
-        Optional[torch.Tensor],
+        torch.Tensor | None,
         TensorShape("nv"),
     ]
 
@@ -231,9 +231,9 @@ class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
     ]
 
 
-Qwen2_5_VLVideoInputs = Union[
-    Qwen2_5_VLVideoPixelInputs, Qwen2_5_VLVideoEmbeddingInputs
-]
+Qwen2_5_VLVideoInputs: TypeAlias = (
+    Qwen2_5_VLVideoPixelInputs | Qwen2_5_VLVideoEmbeddingInputs
+)
 
 # === Vision Encoder === #
 
@@ -245,7 +245,7 @@ class Qwen2_5_VisionMLP(nn.Module):
         hidden_features: int,
         bias: bool = False,
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -301,7 +301,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         projection_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
         attn_backend: _Backend = _Backend.TORCH_SDPA,
@@ -386,8 +386,8 @@ class Qwen2_5_VisionAttention(nn.Module):
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
-        max_seqlen: Optional[int] = None,  # Only used for Flash Attention
-        seqlens: Optional[list[int]] = None,  # Only used for xFormers
+        max_seqlen: int | None = None,  # Only used for Flash Attention
+        seqlens: list[int] | None = None,  # Only used for xFormers
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -466,8 +466,8 @@ class Qwen2_5_VisionBlock(nn.Module):
         num_heads: int,
         mlp_hidden_dim: int,
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
-        norm_layer: Optional[Callable[[int], nn.Module]] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        norm_layer: Callable[[int], nn.Module] | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
         attn_backend: _Backend = _Backend.TORCH_SDPA,
@@ -503,8 +503,8 @@ class Qwen2_5_VisionBlock(nn.Module):
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
-        max_seqlen: Optional[int] = None,  # Only used for Flash Attention
-        seqlens: Optional[list[int]] = None,  # Only used for xFormers
+        max_seqlen: int | None = None,  # Only used for Flash Attention
+        seqlens: list[int] | None = None,  # Only used for xFormers
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
@@ -552,9 +552,9 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
         self,
         d_model: int,
         context_dim: int,
-        norm_layer: Optional[Callable[[int], nn.Module]] = None,
+        norm_layer: Callable[[int], nn.Module] | None = None,
         spatial_merge_size: int = 2,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -634,7 +634,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self,
         vision_config: Qwen2_5_VLVisionConfig,
         norm_eps: float = 1e-6,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -815,7 +815,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
     def compute_attn_mask_seqlen(
         self,
         cu_seqlens: torch.Tensor,
-    ) -> tuple[Optional[int], Optional[list[int]]]:
+    ) -> tuple[int | None, list[int] | None]:
         max_seqlen, seqlens = None, None
         if (
             self.attn_backend == _Backend.FLASH_ATTN
@@ -1080,12 +1080,12 @@ class Qwen2_5_VLForConditionalGeneration(
         cls,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
-        image_grid_thw: Union[list[list[int]], torch.Tensor],
-        video_grid_thw: Union[list[list[int]], torch.Tensor],
+        image_grid_thw: list[list[int]] | torch.Tensor,
+        video_grid_thw: list[list[int]] | torch.Tensor,
         second_per_grid_ts: list[float],
         context_len: int = 0,
-        seq_len: Optional[int] = None,
-        audio_feature_lengths: Optional[torch.Tensor] = None,
+        seq_len: int | None = None,
+        audio_feature_lengths: torch.Tensor | None = None,
         use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
         """Get mrope input positions and delta value."""
@@ -1202,7 +1202,7 @@ class Qwen2_5_VLForConditionalGeneration(
         return llm_positions, mrope_position_delta
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|vision_start|><|image_pad|><|vision_end|>"
         if modality.startswith("video"):
@@ -1273,7 +1273,7 @@ class Qwen2_5_VLForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[Qwen2_5_VLImageInputs]:
+    ) -> Qwen2_5_VLImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
         image_grid_thw = kwargs.pop("image_grid_thw", None)
@@ -1311,7 +1311,7 @@ class Qwen2_5_VLForConditionalGeneration(
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
-    ) -> Optional[Qwen2_5_VLVideoInputs]:
+    ) -> Qwen2_5_VLVideoInputs | None:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         video_embeds = kwargs.pop("video_embeds", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
@@ -1605,10 +1605,10 @@ class Qwen2_5_VLForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for Qwen2.5-VL.
 
         Args:
@@ -1634,7 +1634,7 @@ class Qwen2_5_VLForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

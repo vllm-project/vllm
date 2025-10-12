@@ -3,7 +3,7 @@
 import bisect
 import gc
 import time
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -140,7 +140,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        original_parallel_config: Optional[ParallelConfig] = None,
+        original_parallel_config: ParallelConfig | None = None,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -1050,7 +1050,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_model_inputs(
         self,
         input_ids: torch.Tensor,
-        mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]],
+        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
     ):
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
@@ -1076,7 +1076,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput:
         # Update cached state
         self._update_states(scheduler_output)
@@ -1220,7 +1220,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ), "req_ids contains None"
         req_ids = cast(list[str], self.input_batch.req_ids[:num_reqs])
 
-        prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
+        prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
@@ -2127,8 +2127,8 @@ def replace_set_lora(model):
         index: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
+        embeddings_tensor: torch.Tensor | None,
+        bias: torch.Tensor | None = None,
     ):
         # TODO: The integer index leads to a recompilation, but converting it
         # to a tensor doesn't seem to work anymore. This might be fixed with a

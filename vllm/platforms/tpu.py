@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-from typing import TYPE_CHECKING, Optional, Union, cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 from tpu_info import device
@@ -57,7 +57,7 @@ class TpuPlatform(Platform):
         selected_backend: "_Backend",
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
+        kv_cache_dtype: str | None,
         block_size: int,
         use_v1: bool,
         use_mla: bool,
@@ -211,7 +211,7 @@ class TpuPlatform(Platform):
     def validate_request(
         cls,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams | PoolingParams,
         processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""

@@ -9,7 +9,6 @@ from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,  # noqa: UP035
-    Optional,
 )
 
 from vllm.config import VllmConfig
@@ -65,7 +64,7 @@ class KVConnectorModelRunnerMixin:
     @staticmethod
     def get_finished_kv_transfers(
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[set[str] | None, set[str] | None]:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_finished(
                 scheduler_output.finished_req_ids
@@ -95,7 +94,7 @@ class KVConnectorModelRunnerMixin:
     @staticmethod
     def maybe_get_kv_connector_output(
         scheduler_output: "SchedulerOutput",
-    ) -> AbstractContextManager[Optional[KVConnectorOutput]]:
+    ) -> AbstractContextManager[KVConnectorOutput | None]:
         return (
             KVConnectorModelRunnerMixin._get_kv_connector_output(scheduler_output)
             if has_kv_transfer_group()
@@ -139,7 +138,7 @@ class KVConnectorModelRunnerMixin:
             kv_connector.clear_connector_metadata()
 
     @staticmethod
-    def get_kv_connector_stats() -> Optional[KVConnectorStats]:
+    def get_kv_connector_stats() -> KVConnectorStats | None:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_kv_connector_stats()
         return None

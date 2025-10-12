@@ -3,7 +3,7 @@
 
 import time
 from collections import Counter as CollectionsCounter
-from typing import Optional, Union, cast
+from typing import cast
 
 import numpy as np
 import prometheus_client
@@ -304,7 +304,7 @@ class _RayGaugeWrapper:
         self,
         name: str,
         documentation: str = "",
-        labelnames: Optional[list[str]] = None,
+        labelnames: list[str] | None = None,
         multiprocess_mode: str = "",
     ):
         del multiprocess_mode
@@ -317,7 +317,7 @@ class _RayGaugeWrapper:
         self._gauge.set_default_tags(labels)
         return self
 
-    def set(self, value: Union[int, float]):
+    def set(self, value: int | float):
         return self._gauge.set(value)
 
     def set_to_current_time(self):
@@ -330,7 +330,7 @@ class _RayCounterWrapper:
     prometheus_client.Counter"""
 
     def __init__(
-        self, name: str, documentation: str = "", labelnames: Optional[list[str]] = None
+        self, name: str, documentation: str = "", labelnames: list[str] | None = None
     ):
         labelnames_tuple = tuple(labelnames) if labelnames else None
         self._counter = ray_metrics.Counter(
@@ -341,7 +341,7 @@ class _RayCounterWrapper:
         self._counter.set_default_tags(labels)
         return self
 
-    def inc(self, value: Union[int, float] = 1.0):
+    def inc(self, value: int | float = 1.0):
         if value == 0:
             return
         return self._counter.inc(value)
@@ -355,8 +355,8 @@ class _RayHistogramWrapper:
         self,
         name: str,
         documentation: str = "",
-        labelnames: Optional[list[str]] = None,
-        buckets: Optional[list[float]] = None,
+        labelnames: list[str] | None = None,
+        buckets: list[float] | None = None,
     ):
         labelnames_tuple = tuple(labelnames) if labelnames else None
         boundaries = buckets if buckets else []
@@ -371,7 +371,7 @@ class _RayHistogramWrapper:
         self._histogram.set_default_tags(labels)
         return self
 
-    def observe(self, value: Union[int, float]):
+    def observe(self, value: int | float):
         return self._histogram.observe(value)
 
 
@@ -451,8 +451,8 @@ class LoggingStatLogger(StatLoggerBase):
 
     def __init__(self, local_interval: float, vllm_config: VllmConfig) -> None:
         super().__init__(local_interval, vllm_config)
-        self.last_prompt_throughput: Optional[float] = None
-        self.last_generation_throughput: Optional[float] = None
+        self.last_prompt_throughput: float | None = None
+        self.last_generation_throughput: float | None = None
 
     def log(self, stats: Stats) -> None:
         """Called by LLMEngine.
@@ -539,11 +539,11 @@ class PrometheusStatLogger(StatLoggerBase):
             labelnames=list(labels.keys()), vllm_config=vllm_config
         )
 
-    def _log_gauge(self, gauge, data: Union[int, float]) -> None:
+    def _log_gauge(self, gauge, data: int | float) -> None:
         # Convenience function for logging to gauge.
         gauge.labels(**self.labels).set(data)
 
-    def _log_counter(self, counter, data: Union[int, float]) -> None:
+    def _log_counter(self, counter, data: int | float) -> None:
         # Convenience function for logging to counter.
         # Prevent ValueError from negative increment
         if data < 0:
@@ -558,7 +558,7 @@ class PrometheusStatLogger(StatLoggerBase):
         for label, count in data.items():
             counter.labels(**{**self.labels, label_key: label}).inc(count)
 
-    def _log_histogram(self, histogram, data: Union[list[int], list[float]]) -> None:
+    def _log_histogram(self, histogram, data: list[int] | list[float]) -> None:
         # Convenience function for logging list to histogram.
         for datum in data:
             histogram.labels(**self.labels).observe(datum)

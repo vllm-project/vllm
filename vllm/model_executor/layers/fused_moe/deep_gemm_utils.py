@@ -6,7 +6,6 @@ and updated to fit vllm needs and terminology.
 """
 
 import functools
-from typing import Optional
 
 import torch
 
@@ -39,7 +38,7 @@ def compute_aligned_M(
     num_topk: int,
     local_num_experts: int,
     alignment: int,
-    expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+    expert_tokens_meta: mk.ExpertTokensMetadata | None,
 ):
     if (expert_tokens_meta is not None) and (
         expert_tokens_meta.expert_num_tokens_cpu is not None
@@ -175,7 +174,7 @@ def ep_scatter(
     recv_x_scale: torch.Tensor,
     recv_topk: torch.Tensor,
     num_recv_tokens_per_expert: torch.Tensor,
-    expert_map: Optional[torch.Tensor],
+    expert_map: torch.Tensor | None,
     expert_start_loc: torch.Tensor,
     output_tensor: torch.Tensor,
     output_tensor_scale: torch.Tensor,
@@ -305,7 +304,7 @@ def ep_gather(
     recv_topk_ids: torch.Tensor,
     recv_topk_weight: torch.Tensor,
     input_index: torch.Tensor,
-    expert_map: Optional[torch.Tensor],
+    expert_map: torch.Tensor | None,
     output_tensor: torch.Tensor,
 ):
     num_warps = 2
@@ -346,9 +345,9 @@ def deepgemm_moe_permute(
     aq_scale: torch.Tensor,
     topk_ids: torch.Tensor,
     local_num_experts: int,
-    expert_map: Optional[torch.Tensor],
-    expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    aq_out: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None,
+    expert_tokens_meta: mk.ExpertTokensMetadata | None,
+    aq_out: torch.Tensor | None = None,
 ):
     assert aq.ndim == 2
     assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
@@ -415,7 +414,7 @@ def deepgemm_unpermute_and_reduce(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     inv_perm: torch.Tensor,
-    expert_map: Optional[torch.Tensor],
+    expert_map: torch.Tensor | None,
     output: torch.Tensor,
 ):
     return ep_gather(

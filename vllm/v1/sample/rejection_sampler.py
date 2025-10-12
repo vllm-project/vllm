@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -49,7 +48,7 @@ class RejectionSampler(nn.Module):
         self,
         metadata: SpecDecodeMetadata,
         # [num_tokens, vocab_size]
-        draft_probs: Optional[torch.Tensor],
+        draft_probs: torch.Tensor | None,
         # [num_tokens, vocab_size]
         target_logits: torch.Tensor,
         # [batch_size, 1]
@@ -216,7 +215,7 @@ class RejectionSampler(nn.Module):
     @staticmethod
     def _combine_outputs_with_spec_tokens(
         output_token_ids: list[list[int]],
-        spec_token_ids: Optional[list[list[int]]] = None,
+        spec_token_ids: list[list[int]] | None = None,
     ) -> list[list[int]]:
         if spec_token_ids is None:
             return output_token_ids
@@ -240,7 +239,7 @@ def rejection_sample(
     # [batch_size]
     cu_num_draft_tokens: torch.Tensor,
     # [num_tokens, vocab_size]
-    draft_probs: Optional[torch.Tensor],
+    draft_probs: torch.Tensor | None,
     # [num_tokens, vocab_size]
     target_probs: torch.Tensor,
     # [batch_size, 1]
@@ -493,7 +492,7 @@ def sample_recovered_tokens(
     # [num_tokens]
     draft_token_ids: torch.Tensor,
     # [num_tokens, vocab_size]
-    draft_probs: Optional[torch.Tensor],
+    draft_probs: torch.Tensor | None,
     # [num_tokens, vocab_size]
     target_probs: torch.Tensor,
     sampling_metadata: SamplingMetadata,

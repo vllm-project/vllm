@@ -3,7 +3,6 @@
 
 import json
 from collections.abc import Sequence
-from typing import Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -59,7 +58,7 @@ class Internlm2ToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         if "<|action_start|>" not in current_text:
             self.position = len(current_text)
             return DeltaMessage(content=delta_text)

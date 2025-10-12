@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from typing import Optional
 from unittest.mock import Mock
 
 import pytest
@@ -78,9 +77,7 @@ def test_get_num_unfinished_requests():
         (True, 5),
     ],
 )
-def test_schedule(
-    enable_prefix_caching: Optional[bool], prompt_logprobs: Optional[int]
-):
+def test_schedule(enable_prefix_caching: bool | None, prompt_logprobs: int | None):
     """Test scheduling.
     Two cases: default APC/no prompt logprobs; APC=True + prompt logprobs
     """
@@ -595,7 +592,7 @@ def test_check_stop_min_tokens():
     ],
 )
 def test_schedule_concurrent_batches(
-    enable_prefix_caching: Optional[bool], prompt_logprobs: Optional[int]
+    enable_prefix_caching: bool | None, prompt_logprobs: int | None
 ):
     scheduler = create_scheduler(
         max_num_batched_tokens=1024,
@@ -1323,14 +1320,14 @@ def create_scheduler_with_priority(
     model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 8192,
-    enable_prefix_caching: Optional[bool] = None,
+    enable_prefix_caching: bool | None = None,
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
     use_kv_connector: bool = False,
     num_blocks: int = 10000,
     block_size: int = 16,
-    max_model_len: Optional[int] = None,
-    num_speculative_tokens: Optional[int] = None,
+    max_model_len: int | None = None,
+    num_speculative_tokens: int | None = None,
 ) -> Scheduler:
     """Create scheduler with priority policy enabled.
 
@@ -1385,7 +1382,7 @@ def create_scheduler_with_priority(
         else None
     )
 
-    speculative_config: Optional[SpeculativeConfig] = None
+    speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
         speculative_config = SpeculativeConfig(
             model="ngram", num_speculative_tokens=num_speculative_tokens
@@ -1420,12 +1417,12 @@ def create_scheduler_with_priority(
 def create_requests_with_priority(
     num_requests: int,
     priorities: list[int],
-    arrival_times: Optional[list[float]] = None,
+    arrival_times: list[float] | None = None,
     num_tokens: int = 10,
-    mm_positions: Optional[list[list[PlaceholderRange]]] = None,
+    mm_positions: list[list[PlaceholderRange]] | None = None,
     max_tokens: int = 16,
-    stop_token_ids: Optional[list[int]] = None,
-    prompt_logprobs: Optional[int] = None,
+    stop_token_ids: list[int] | None = None,
+    prompt_logprobs: int | None = None,
     starting_idx: int = 0,
 ):
     """Create requests with specified priorities and arrival times."""

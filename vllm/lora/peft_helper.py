@@ -7,7 +7,7 @@ import json
 import math
 import os
 from dataclasses import MISSING, dataclass, field, fields
-from typing import Literal, Optional, Union
+from typing import Literal
 
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
@@ -27,17 +27,17 @@ class PEFTHelper:
     # Required fields
     r: int
     lora_alpha: int
-    target_modules: Union[list[str], str]
+    target_modules: list[str] | str
 
     bias: Literal["none"] = field(default="none")
-    modules_to_save: Optional[list[str]] = field(default=None)
+    modules_to_save: list[str] | None = field(default=None)
     # True to use Rank-Stabilized LoRA (rsLoRA, see: https://arxiv.org/abs/2312.03732)
     use_rslora: bool = field(default=False)
     # True to use Weight-Decomposed Low-Rank Adaptation (DoRA, see: https://arxiv.org/abs/2402.09353)
     use_dora: bool = field(default=False)
     # Extra vllm field, start with 'vllm_' to avoid conflict
     vllm_lora_scaling_factor: float = field(default=1.0)
-    vllm_max_position_embeddings: Optional[int] = field(default=False)
+    vllm_max_position_embeddings: int | None = field(default=False)
 
     def _validate_features(self) -> list[str]:
         """
@@ -81,8 +81,8 @@ class PEFTHelper:
     def from_local_dir(
         cls,
         lora_path: str,
-        max_position_embeddings: Optional[int],
-        tensorizer_config_dict: Optional[dict] = None,
+        max_position_embeddings: int | None,
+        tensorizer_config_dict: dict | None = None,
     ) -> "PEFTHelper":
         lora_config_path = os.path.join(lora_path, "adapter_config.json")
 

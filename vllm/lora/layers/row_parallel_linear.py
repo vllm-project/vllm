@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -41,7 +40,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def forward(
         self, input_: torch.Tensor
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
         """Forward of RowParallelLinear
 
         Args:
@@ -93,7 +92,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None,
     ) -> bool:
         return type(source_layer) is RowParallelLinear
 
@@ -120,9 +119,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         lora_b = lora_b[start_idx:end_idx, :]
         return lora_b
 
-    def apply(
-        self, x: torch.Tensor, bias: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x)
 
         x = x.view(-1, x.shape[-1])
@@ -133,7 +130,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             device=x.device,
         )
 
-        shrunk_buffer: Optional[torch.Tensor] = self.punica_wrapper.add_shrink(
+        shrunk_buffer: torch.Tensor | None = self.punica_wrapper.add_shrink(
             buffer, x, self.lora_a_stacked, 1.0
         )
         if not current_platform.can_update_inplace():
@@ -150,7 +147,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         # NOTE offset are based on the rank.
         shard_size = self.lora_b_stacked[0].shape[2]
         offset_start = self.tp_rank * shard_size
-        lora_output: Optional[torch.Tensor] = self.punica_wrapper.add_expand(
+        lora_output: torch.Tensor | None = self.punica_wrapper.add_expand(
             output,
             buffer,
             self.lora_b_stacked,
@@ -172,7 +169,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(

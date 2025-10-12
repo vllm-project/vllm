@@ -27,7 +27,7 @@
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 from torch import nn
@@ -106,7 +106,7 @@ class DeepseekV2MLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         is_sequence_parallel=False,
         prefix: str = "",
@@ -150,9 +150,9 @@ class DeepseekV2MLP(nn.Module):
 class DeepseekV2MoE(nn.Module):
     def __init__(
         self,
-        config: Union[DeepseekV2Config, DeepseekV3Config],
+        config: DeepseekV2Config | DeepseekV3Config,
         parallel_config: ParallelConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -301,7 +301,7 @@ class DeepseekV2Attention(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config: Union[DeepseekV2Config, DeepseekV3Config],
+        config: DeepseekV2Config | DeepseekV3Config,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -310,11 +310,11 @@ class DeepseekV2Attention(nn.Module):
         q_lora_rank: int,
         kv_lora_rank: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
+        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        topk_indices_buffer: Optional[torch.Tensor] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        topk_indices_buffer: torch.Tensor | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -554,12 +554,12 @@ def sparse_attn_indexer(
     k: torch.Tensor,
     weights: torch.Tensor,
     quant_block_size: int,
-    scale_fmt: Optional[str],
+    scale_fmt: str | None,
     topk_tokens: int,
     head_dim: int,
     max_model_len: int,
     total_seq_lens: int,
-    topk_indices_buffer: Optional[torch.Tensor],
+    topk_indices_buffer: torch.Tensor | None,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -727,12 +727,12 @@ def sparse_attn_indexer_fake(
     k: torch.Tensor,
     weights: torch.Tensor,
     quant_block_size: int,
-    scale_fmt: Optional[str],
+    scale_fmt: str | None,
     topk_tokens: int,
     head_dim: int,
     max_model_len: int,
     total_seq_lens: int,
-    topk_indices_buffer: Optional[torch.Tensor],
+    topk_indices_buffer: torch.Tensor | None,
 ) -> torch.Tensor:
     # profile run
     # NOTE(Chen): create the max possible flattened_kv. So that
@@ -758,12 +758,12 @@ class Indexer(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config: Union[DeepseekV2Config, DeepseekV3Config],
+        config: DeepseekV2Config | DeepseekV3Config,
         hidden_size: int,
         q_lora_rank: int,
-        quant_config: Optional[QuantizationConfig],
-        cache_config: Optional[CacheConfig],
-        topk_indices_buffer: Optional[torch.Tensor],
+        quant_config: QuantizationConfig | None,
+        cache_config: CacheConfig | None,
+        topk_indices_buffer: torch.Tensor | None,
         prefix: str = "",
     ):
         super().__init__()
@@ -880,21 +880,21 @@ class DeepseekV2MLAAttention(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config: Union[DeepseekV2Config, DeepseekV3Config],
+        config: DeepseekV2Config | DeepseekV3Config,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         v_head_dim: int,
-        q_lora_rank: Optional[int],
+        q_lora_rank: int | None,
         kv_lora_rank: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
+        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        topk_indices_buffer: Optional[torch.Tensor] = None,
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -1045,8 +1045,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str,
-        config: Optional[DeepseekV2Config] = None,
-        topk_indices_buffer: Optional[torch.Tensor] = None,
+        config: DeepseekV2Config | None = None,
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
 
@@ -1117,7 +1117,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -1212,9 +1212,9 @@ class DeepseekV2Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1347,9 +1347,9 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -1358,7 +1358,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -1497,8 +1497,8 @@ class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
 # Compatibility with
 # https://huggingface.co/deepseek-ai/DeepSeek-V3-Base/blob/main/configuration_deepseek.py
 def get_spec_layer_idx_from_weight_name(
-    config: Union[DeepseekV2Config, DeepseekV3Config], weight_name: str
-) -> Optional[int]:
+    config: DeepseekV2Config | DeepseekV3Config, weight_name: str
+) -> int | None:
     if (
         hasattr(config, "num_nextn_predict_layers")
         and config.num_nextn_predict_layers > 0

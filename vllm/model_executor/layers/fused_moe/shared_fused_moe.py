@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
@@ -18,7 +17,7 @@ class SharedFusedMoE(FusedMoE):
 
     def __init__(
         self,
-        shared_experts: Optional[torch.nn.Module],
+        shared_experts: torch.nn.Module | None,
         use_overlapped: bool = True,
         **kwargs,
     ):
@@ -35,7 +34,7 @@ class SharedFusedMoE(FusedMoE):
         )
 
     @property
-    def shared_experts(self) -> Optional[torch.nn.Module]:
+    def shared_experts(self) -> torch.nn.Module | None:
         return self._shared_experts if self.use_overlapped else None
 
     def forward(

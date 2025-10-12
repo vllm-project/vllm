@@ -5,7 +5,7 @@ import asyncio
 import base64
 import time
 from collections.abc import AsyncGenerator
-from typing import Final, Literal, Optional, Union, cast
+from typing import Final, Literal, cast
 
 import jinja2
 import numpy as np
@@ -41,7 +41,7 @@ logger = init_logger(__name__)
 def _get_data(
     output: PoolingOutput,
     encoding_format: Literal["float", "base64"],
-) -> Union[list[float], str]:
+) -> list[float] | str:
     if encoding_format == "float":
         return output.data.tolist()
     elif encoding_format == "base64":
@@ -60,8 +60,8 @@ class OpenAIServingPooling(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
-        chat_template: Optional[str],
+        request_logger: RequestLogger | None,
+        chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         trust_request_chat_template: bool = False,
         log_error_stack: bool = False,
@@ -80,8 +80,8 @@ class OpenAIServingPooling(OpenAIServing):
     async def create_pooling(
         self,
         request: PoolingRequest,
-        raw_request: Optional[Request] = None,
-    ) -> Union[PoolingResponse, IOProcessorResponse, ErrorResponse]:
+        raw_request: Request | None = None,
+    ) -> PoolingResponse | IOProcessorResponse | ErrorResponse:
         """
         See https://platform.openai.com/docs/api-reference/embeddings/create
         for the API specification. This API mimics the OpenAI Embedding API.
@@ -219,7 +219,7 @@ class OpenAIServingPooling(OpenAIServing):
         num_prompts = len(engine_prompts)
 
         # Non-streaming response
-        final_res_batch: list[Optional[PoolingRequestOutput]]
+        final_res_batch: list[PoolingRequestOutput | None]
         final_res_batch = [None] * num_prompts
         try:
             async for i, res in result_generator:

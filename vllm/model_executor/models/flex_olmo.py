@@ -14,8 +14,6 @@
 # limitations under the License.
 """Inference-only FlexOlmo model compatible with HuggingFace weights."""
 
-from typing import Optional
-
 import torch
 from torch import nn
 
@@ -128,8 +126,8 @@ class FlexOlmoDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # Attention block.
         residual = hidden_states
         hidden_states = self.self_attn(positions, hidden_states)

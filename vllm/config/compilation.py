@@ -4,9 +4,10 @@
 import enum
 import hashlib
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
@@ -168,7 +169,7 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    level: Optional[int] = None
+    level: int | None = None
     """The level of compilation:
 
     - None: If None, we will select the default compilation level.
@@ -177,7 +178,7 @@ class CompilationConfig:
     - 1: dynamo as is.
     - 2: dynamo once.
     - 3: piecewise compilation."""
-    debug_dump_path: Optional[Path] = None
+    debug_dump_path: Path | None = None
     """The path to dump the debug information."""
     cache_dir: str = ""
     """The directory to store the compiled graph, to accelerate Inductor
@@ -208,7 +209,7 @@ class CompilationConfig:
     By default, all custom ops are enabled when running without Inductor and
     disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
-    splitting_ops: Optional[list[str]] = None
+    splitting_ops: list[str] | None = None
     """A list of ops to exclude from cudagraphs, used in piecewise compilation.
 
     The behavior depends on use_inductor_graph_partition:
@@ -238,7 +239,7 @@ class CompilationConfig:
         are compiled using configurations in inductor_compile_config.
 
     This setting is ignored if level<PIECEWISE."""
-    compile_sizes: Optional[list[Union[int, str]]] = None
+    compile_sizes: list[int | str] | None = None
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
@@ -253,7 +254,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: Optional[CUDAGraphMode] = None
+    cudagraph_mode: CUDAGraphMode | None = None
     """
     The mode of the cudagraph:
 
@@ -308,7 +309,7 @@ class CompilationConfig:
     It means the first several runs will be treated as warmup runs.
     Only after that, the execution will be recorded, and the recorded
     cudagraph will be used for subsequent runs."""
-    cudagraph_capture_sizes: Optional[list[int]] = None
+    cudagraph_capture_sizes: list[int] | None = None
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
@@ -320,7 +321,7 @@ class CompilationConfig:
     internally managed buffer. Default is False. 
     Note that this flag is only effective when cudagraph_mode is PIECEWISE.
     """
-    full_cuda_graph: Optional[bool] = False
+    full_cuda_graph: bool | None = False
     """whether to use a full cuda graph for the entire forward pass rather than
     splitting certain operations such as attention into subgraphs. Thus this
     flag cannot be used together with splitting_ops. This may provide
@@ -544,7 +545,7 @@ class CompilationConfig:
                     "(where 'op' is the registered op name)"
                 )
 
-    def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
+    def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -70,7 +70,7 @@ class Blip2ImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor, TensorShape("bn", "f", "h")]
 
 
-Blip2ImageInputs = Union[Blip2ImagePixelInputs, Blip2ImageEmbeddingInputs]
+Blip2ImageInputs: TypeAlias = Blip2ImagePixelInputs | Blip2ImageEmbeddingInputs
 
 
 class Blip2QFormerMultiHeadAttention(nn.Module):
@@ -78,8 +78,8 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: Optional[QuantizationConfig],
-        cache_config: Optional[CacheConfig],
+        quant_config: QuantizationConfig | None,
+        cache_config: CacheConfig | None,
         is_cross_attention: bool = False,
         prefix: str = "",
     ) -> None:
@@ -123,7 +123,7 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_hidden_states: torch.FloatTensor | None = None,
     ):
         is_cross_attention = encoder_hidden_states is not None
 
@@ -179,8 +179,8 @@ class Blip2QFormerAttention(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: Optional[QuantizationConfig],
-        cache_config: Optional[CacheConfig],
+        quant_config: QuantizationConfig | None,
+        cache_config: CacheConfig | None,
         is_cross_attention: bool = False,
         prefix: str = "",
     ) -> None:
@@ -199,7 +199,7 @@ class Blip2QFormerAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
+        encoder_hidden_states: torch.FloatTensor | None = None,
     ) -> tuple[torch.Tensor]:
         self_output = self.attention(
             hidden_states,
@@ -247,8 +247,8 @@ class Blip2QFormerLayer(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: Optional[QuantizationConfig],
-        cache_config: Optional[CacheConfig],
+        quant_config: QuantizationConfig | None,
+        cache_config: CacheConfig | None,
         layer_idx: int,
         prefix: str = "",
     ) -> None:
@@ -340,8 +340,8 @@ class Blip2QFormerEncoder(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: Optional[QuantizationConfig],
-        cache_config: Optional[CacheConfig],
+        quant_config: QuantizationConfig | None,
+        cache_config: CacheConfig | None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -385,8 +385,8 @@ class Blip2QFormerModel(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: Optional[QuantizationConfig],
-        cache_config: Optional[CacheConfig],
+        quant_config: QuantizationConfig | None,
+        cache_config: CacheConfig | None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -426,7 +426,7 @@ class Blip2ProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Blip2Config)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
     def get_num_image_tokens(self) -> int:
@@ -442,7 +442,7 @@ class Blip2DummyInputsBuilder(BaseDummyInputsBuilder[Blip2ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
@@ -526,7 +526,7 @@ class Blip2ForConditionalGeneration(
     merge_by_field_config = True
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return None
 
@@ -573,7 +573,7 @@ class Blip2ForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[Blip2ImageInputs]:
+    ) -> Blip2ImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -641,8 +641,8 @@ class Blip2ForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> IntermediateTensors:
         """Run forward pass for BLIP-2.
@@ -687,7 +687,7 @@ class Blip2ForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

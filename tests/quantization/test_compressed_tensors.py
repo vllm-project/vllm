@@ -5,8 +5,6 @@
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
-from typing import Optional
-
 import pytest
 import torch
 from compressed_tensors.quantization import QuantizationType
@@ -104,7 +102,7 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
             down_proj = layer.mlp.down_proj
 
             # assert zp for symmetric and asymmetric cases
-            def zp_valid(zp: Optional[torch.Tensor]):
+            def zp_valid(zp: torch.Tensor | None):
                 if is_symmetric:
                     return zp is None
 

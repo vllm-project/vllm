@@ -6,27 +6,28 @@ import json
 import os
 import sys
 import tempfile
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Union
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
-    VLLM_PORT: Optional[int] = None
+    VLLM_PORT: int | None = None
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
-    VLLM_NCCL_SO_PATH: Optional[str] = None
-    LD_LIBRARY_PATH: Optional[str] = None
+    VLLM_NCCL_SO_PATH: str | None = None
+    LD_LIBRARY_PATH: str | None = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
-    VLLM_FLASH_ATTN_VERSION: Optional[int] = None
+    VLLM_FLASH_ATTN_VERSION: int | None = None
     LOCAL_RANK: int = 0
-    CUDA_VISIBLE_DEVICES: Optional[str] = None
+    CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
-    VLLM_API_KEY: Optional[str] = None
-    S3_ACCESS_KEY_ID: Optional[str] = None
-    S3_SECRET_ACCESS_KEY: Optional[str] = None
-    S3_ENDPOINT_URL: Optional[str] = None
-    VLLM_MODEL_REDIRECT_PATH: Optional[str] = None
+    VLLM_API_KEY: str | None = None
+    S3_ACCESS_KEY_ID: str | None = None
+    S3_SECRET_ACCESS_KEY: str | None = None
+    S3_ENDPOINT_URL: str | None = None
+    VLLM_MODEL_REDIRECT_PATH: str | None = None
     VLLM_CACHE_ROOT: str = os.path.expanduser("~/.cache/vllm")
     VLLM_CONFIG_ROOT: str = os.path.expanduser("~/.config/vllm")
     VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
@@ -38,16 +39,16 @@ if TYPE_CHECKING:
     VLLM_LOGGING_LEVEL: str = "INFO"
     VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_STREAM: str = "ext://sys.stdout"
-    VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
-    VLLM_LOGITS_PROCESSOR_THREADS: Optional[int] = None
+    VLLM_LOGGING_CONFIG_PATH: str | None = None
+    VLLM_LOGITS_PROCESSOR_THREADS: int | None = None
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
-    VLLM_ATTENTION_BACKEND: Optional[str] = None
-    VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
-    VLLM_PP_LAYER_PARTITION: Optional[str] = None
-    VLLM_CPU_KVCACHE_SPACE: Optional[int] = 0
+    VLLM_ATTENTION_BACKEND: str | None = None
+    VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
+    VLLM_PP_LAYER_PARTITION: str | None = None
+    VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
-    VLLM_CPU_NUM_OF_RESERVED_CPU: Optional[int] = None
+    VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
     VLLM_CPU_MOE_PREPACK: bool = True
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
@@ -73,20 +74,20 @@ if TYPE_CHECKING:
     VLLM_MM_INPUT_CACHE_GIB: int = 4
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "12.8"
-    MAX_JOBS: Optional[str] = None
-    NVCC_THREADS: Optional[str] = None
+    MAX_JOBS: str | None = None
+    NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
     VLLM_DOCKER_BUILD_CONTEXT: bool = False
     VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
-    CMAKE_BUILD_TYPE: Optional[Literal["Debug", "Release", "RelWithDebInfo"]] = None
+    CMAKE_BUILD_TYPE: Literal["Debug", "Release", "RelWithDebInfo"] | None = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
-    VLLM_PLUGINS: Optional[list[str]] = None
-    VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
-    VLLM_TORCH_PROFILER_DIR: Optional[str] = None
+    VLLM_PLUGINS: list[str] | None = None
+    VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
+    VLLM_TORCH_PROFILER_DIR: str | None = None
     VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
     VLLM_USE_AOT_COMPILE: bool = False
@@ -126,7 +127,7 @@ if TYPE_CHECKING:
     VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH: int = 32
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
-    VLLM_CUDART_SO_PATH: Optional[str] = None
+    VLLM_CUDART_SO_PATH: str | None = None
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
@@ -137,11 +138,11 @@ if TYPE_CHECKING:
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: str = "strict"
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
-    VLLM_MXFP4_USE_MARLIN: Optional[bool] = None
+    VLLM_MXFP4_USE_MARLIN: bool | None = None
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
-    VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
+    VLLM_TPU_MOST_MODEL_LEN: int | None = None
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
@@ -169,21 +170,21 @@ if TYPE_CHECKING:
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
-    VLLM_KV_CACHE_LAYOUT: Optional[Literal["NHD", "HND"]] = None
+    VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
     VLLM_USE_NVFP4_CT_EMULATIONS: bool = False
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal[
         "FP", "INT8", "INT6", "INT4", "NONE"
     ] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
-    VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
+    VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
-    VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
+    VLLM_USE_TRTLLM_ATTENTION: str | None = None
     VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION: bool = False
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
@@ -191,7 +192,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
-    VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
+    VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
@@ -201,12 +202,12 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
     VLLM_DBO_COMM_SMS: int = 20
     GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
-    VLLM_PATTERN_MATCH_DEBUG: Optional[str] = None
-    VLLM_DEBUG_DUMP_PATH: Optional[str] = None
+    VLLM_PATTERN_MATCH_DEBUG: str | None = None
+    VLLM_DEBUG_DUMP_PATH: str | None = None
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
     VLLM_USE_NCCL_SYMM_MEM: bool = False
-    VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
+    VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
 
@@ -225,13 +226,13 @@ def get_default_config_root():
     )
 
 
-def maybe_convert_int(value: Optional[str]) -> Optional[int]:
+def maybe_convert_int(value: str | None) -> int | None:
     if value is None:
         return None
     return int(value)
 
 
-def maybe_convert_bool(value: Optional[str]) -> Optional[bool]:
+def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None
     return bool(int(value))
@@ -246,10 +247,10 @@ def use_aot_compile() -> bool:
 
 def env_with_choices(
     env_name: str,
-    default: Optional[str],
-    choices: Union[list[str], Callable[[], list[str]]],
+    default: str | None,
+    choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
-) -> Callable[[], Optional[str]]:
+) -> Callable[[], str | None]:
     """
     Create a lambda that validates environment variable against allowed choices
 
@@ -263,7 +264,7 @@ def env_with_choices(
         Lambda function for environment_variables dict
     """
 
-    def _get_validated_env() -> Optional[str]:
+    def _get_validated_env() -> str | None:
         value = os.getenv(env_name)
         if value is None:
             return default
@@ -292,7 +293,7 @@ def env_with_choices(
 def env_list_with_choices(
     env_name: str,
     default: list[str],
-    choices: Union[list[str], Callable[[], list[str]]],
+    choices: list[str] | Callable[[], list[str]],
     case_sensitive: bool = True,
 ) -> Callable[[], list[str]]:
     """
@@ -344,7 +345,7 @@ def env_list_with_choices(
     return _get_validated_env_list
 
 
-def get_vllm_port() -> Optional[int]:
+def get_vllm_port() -> int | None:
     """Get the port from VLLM_PORT environment variable.
 
     Returns:

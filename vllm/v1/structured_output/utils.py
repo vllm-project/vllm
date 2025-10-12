@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from __future__ import annotations
-
 import hashlib
 import importlib.metadata
 import os
@@ -36,6 +33,10 @@ else:
         globals(),
         "transformers.models.gpt2.tokenization_gpt2",
     )
+
+    AnyTokenizer = object
+    SchedulerOutput = object
+    InputBatch = object
 
 logger = init_logger(__name__)
 

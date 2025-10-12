@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
 
 # ===================== import region =====================
 import torch
@@ -59,9 +58,9 @@ def register_nccl_symmetric_ops(pynccl_comm):
 class PyNcclCommunicator:
     def __init__(
         self,
-        group: Union[ProcessGroup, StatelessProcessGroup],
-        device: Union[int, str, torch.device],
-        library_path: Optional[str] = None,
+        group: ProcessGroup | StatelessProcessGroup,
+        device: int | str | torch.device,
+        library_path: str | None = None,
     ):
         """
         Args:

@@ -3,7 +3,6 @@
 # ruff: noqa: SIM117
 import copy
 from collections.abc import Generator
-from typing import Union
 
 import torch
 from torch import nn
@@ -140,7 +139,7 @@ class TensorizerLoader(BaseModelLoader):
     @staticmethod
     def save_model(
         model: torch.nn.Module,
-        tensorizer_config: Union[TensorizerConfig, dict],
+        tensorizer_config: TensorizerConfig | dict,
         model_config: ModelConfig,
     ) -> None:
         if isinstance(tensorizer_config, dict):

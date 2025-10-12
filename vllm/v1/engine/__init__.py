@@ -4,7 +4,7 @@
 import enum
 import time
 from collections.abc import Mapping
-from typing import Any, Optional, Union
+from typing import Any
 
 import msgspec
 import torch
@@ -48,16 +48,16 @@ class EngineCoreRequest(
     gc=False,
 ):  # type: ignore[call-arg]
     request_id: str
-    prompt_token_ids: Optional[list[int]]
-    mm_features: Optional[list[MultiModalFeatureSpec]]
-    sampling_params: Optional[SamplingParams]
-    pooling_params: Optional[PoolingParams]
-    eos_token_id: Optional[int]
+    prompt_token_ids: list[int] | None
+    mm_features: list[MultiModalFeatureSpec] | None
+    sampling_params: SamplingParams | None
+    pooling_params: PoolingParams | None
+    eos_token_id: int | None
     arrival_time: float
-    lora_request: Optional[LoRARequest]
-    cache_salt: Optional[str]
-    data_parallel_rank: Optional[int]
-    prompt_embeds: Optional[torch.Tensor] = None
+    lora_request: LoRARequest | None
+    cache_salt: str | None
+    data_parallel_rank: int | None
+    prompt_embeds: torch.Tensor | None = None
 
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
@@ -69,7 +69,7 @@ class EngineCoreRequest(
     current_wave: int = 0
     priority: int = 0
 
-    trace_headers: Optional[Mapping[str, str]] = None
+    trace_headers: Mapping[str, str] | None = None
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -93,7 +93,7 @@ class EngineCoreEvent(msgspec.Struct):
 
     @classmethod
     def new_event(
-        cls, event_type: EngineCoreEventType, timestamp: Optional[float] = None
+        cls, event_type: EngineCoreEventType, timestamp: float | None = None
     ) -> "EngineCoreEvent":
         timestamp = time.monotonic() if timestamp is None else timestamp
         return cls(event_type, timestamp)
@@ -108,17 +108,17 @@ class EngineCoreOutput(
     request_id: str
     new_token_ids: list[int]
 
-    new_logprobs: Optional[LogprobsLists] = None
-    new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
+    new_logprobs: LogprobsLists | None = None
+    new_prompt_logprobs_tensors: LogprobsTensors | None = None
 
-    pooling_output: Optional[torch.Tensor] = None
+    pooling_output: torch.Tensor | None = None
 
-    finish_reason: Optional[FinishReason] = None
-    stop_reason: Union[int, str, None] = None
-    events: Optional[list[EngineCoreEvent]] = None
-    kv_transfer_params: Optional[dict[str, Any]] = None
+    finish_reason: FinishReason | None = None
+    stop_reason: int | str | None = None
+    events: list[EngineCoreEvent] | None = None
+    kv_transfer_params: dict[str, Any] | None = None
 
-    trace_headers: Optional[Mapping[str, str]] = None
+    trace_headers: Mapping[str, str] | None = None
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
 
@@ -142,8 +142,8 @@ class UtilityOutput(
     call_id: int
 
     # Non-None implies the call failed, result should be None.
-    failure_message: Optional[str] = None
-    result: Optional[UtilityResult] = None
+    failure_message: str | None = None
+    result: UtilityResult | None = None
 
 
 class EngineCoreOutputs(
@@ -159,18 +159,18 @@ class EngineCoreOutputs(
 
     # [num_reqs]
     outputs: list[EngineCoreOutput] = []
-    scheduler_stats: Optional[SchedulerStats] = None
+    scheduler_stats: SchedulerStats | None = None
     timestamp: float = 0.0
 
-    utility_output: Optional[UtilityOutput] = None
-    finished_requests: Optional[set[str]] = None
+    utility_output: UtilityOutput | None = None
+    finished_requests: set[str] | None = None
 
     # In DP case, used to signal that the current wave of requests
     # has finished and the engines are paused.
-    wave_complete: Optional[int] = None
+    wave_complete: int | None = None
     # In DP case, used to signal that a request was received for an
     # "old" wave, so the next wave needs to be started in other engines.
-    start_wave: Optional[int] = None
+    start_wave: int | None = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:

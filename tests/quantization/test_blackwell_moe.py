@@ -3,7 +3,6 @@
 
 import json
 import os
-from typing import Optional
 
 import pytest
 
@@ -30,7 +29,7 @@ def set_test_environment():
 dummy_hf_overrides = {"num_layers": 4, "num_hidden_layers": 4}
 
 
-def can_initialize(model: str, extra_args: Optional[list[str]] = None):
+def can_initialize(model: str, extra_args: list[str] | None = None):
     # Server arguments
     extra_args = extra_args if extra_args is not None else []
     server_args = [

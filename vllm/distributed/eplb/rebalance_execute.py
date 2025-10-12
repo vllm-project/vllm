@@ -8,7 +8,6 @@ This involves the exchange of expert weights between GPUs.
 
 from collections.abc import Iterable, MutableSequence, Sequence
 from functools import partial
-from typing import Optional
 
 import torch
 from torch.distributed import (
@@ -253,7 +252,7 @@ def rearrange_expert_weights_inplace(
     expert_weights: Sequence[Iterable[torch.Tensor]],
     ep_group: ProcessGroup,
     is_profile: bool = False,
-    rank_mapping: Optional[dict[int, int]] = None,
+    rank_mapping: dict[int, int] | None = None,
 ) -> None:
     """
     Rearranges the expert weights in place according to the new expert indices.

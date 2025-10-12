@@ -4,7 +4,7 @@
 
 import json
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any
 
 import regex as re
 
@@ -73,7 +73,7 @@ class HunyuanA13BToolParser(ToolParser):
 
     def preprocess_model_output(
         self, model_output: str
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         # find the location tool call
         for match in self.answer_tool_calls_pattern.finditer(model_output):
             start, end = match.span()
@@ -176,7 +176,7 @@ class HunyuanA13BToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """
         Extract tool calls for streaming mode.
         """

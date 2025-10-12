@@ -6,7 +6,7 @@ Run `pytest tests/kernels/test_moe.py`.
 """
 
 import functools
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 
 import pytest
 import torch
@@ -80,7 +80,7 @@ vllm_config.scheduler_config.max_model_len = 8192
 
 
 def run_moe_test(
-    baseline: Union[Callable, torch.Tensor],
+    baseline: Callable | torch.Tensor,
     moe_fn: Callable,
     a: torch.Tensor,
     w1: torch.Tensor,
@@ -88,7 +88,7 @@ def run_moe_test(
     score: torch.Tensor,
     topk: int,
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
     padding: bool = False,
     use_compile: bool = False,
     use_cudagraph: bool = False,
@@ -212,7 +212,7 @@ def test_fused_moe(
         score: torch.Tensor,
         topk: int,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
+        expert_map: torch.Tensor | None = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
         return m_fused_moe_fn(

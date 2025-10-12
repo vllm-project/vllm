@@ -23,7 +23,7 @@ import logging
 import os
 import sys
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import aiohttp
 import requests
@@ -49,12 +49,9 @@ class Proxy:
         decode_instances: list[str],
         model: str,
         scheduling_policy: SchedulingPolicy,
-        custom_create_completion: Optional[
-            Callable[[Request], StreamingResponse]
-        ] = None,
-        custom_create_chat_completion: Optional[
-            Callable[[Request], StreamingResponse]
-        ] = None,
+        custom_create_completion: Callable[[Request], StreamingResponse] | None = None,
+        custom_create_chat_completion: Callable[[Request], StreamingResponse]
+        | None = None,
     ):
         self.prefill_instances = prefill_instances
         self.decode_instances = decode_instances
@@ -348,9 +345,9 @@ class ProxyServer:
     def __init__(
         self,
         args: argparse.Namespace,
-        scheduling_policy: Optional[SchedulingPolicy] = None,
-        create_completion: Optional[Callable[[Request], StreamingResponse]] = None,
-        create_chat_completion: Optional[Callable[[Request], StreamingResponse]] = None,
+        scheduling_policy: SchedulingPolicy | None = None,
+        create_completion: Callable[[Request], StreamingResponse] | None = None,
+        create_chat_completion: Callable[[Request], StreamingResponse] | None = None,
     ):
         self.validate_parsed_serve_args(args)
         self.port = args.port

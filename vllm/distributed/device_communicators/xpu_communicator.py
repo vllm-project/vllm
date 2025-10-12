@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -19,8 +18,8 @@ class XpuCommunicator(DeviceCommunicatorBase):
     def __init__(
         self,
         cpu_group: ProcessGroup,
-        device: Optional[torch.device] = None,
-        device_group: Optional[ProcessGroup] = None,
+        device: torch.device | None = None,
+        device_group: ProcessGroup | None = None,
         unique_name: str = "",
     ):
         super().__init__(cpu_group, device, device_group, unique_name)
@@ -45,7 +44,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
 
     def gather(
         self, input_: torch.Tensor, dst: int = 0, dim: int = -1
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         assert -input_.dim() <= dim < input_.dim(), (
             f"Invalid dim ({dim}) for input tensor with shape {input_.size()}"
         )

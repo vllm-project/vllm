@@ -6,7 +6,7 @@ import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed
@@ -132,7 +132,7 @@ class Worker(WorkerBase):
             used_bytes / GiB_bytes,
         )
 
-    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+    def wake_up(self, tags: list[str] | None = None) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
         allocator = CuMemAllocator.get_instance()
@@ -456,7 +456,7 @@ class Worker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -504,7 +504,7 @@ class Worker(WorkerBase):
         output.kv_connector_output = kv_connector_output
         return output
 
-    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
     def profile(self, is_start: bool = True):
@@ -565,7 +565,7 @@ class Worker(WorkerBase):
         self,
         old_ep_size: int,
         new_ep_size: int,
-        global_expert_load: Optional[torch.Tensor],
+        global_expert_load: torch.Tensor | None,
     ) -> None:
         from vllm.distributed.parallel_state import get_ep_group
 
@@ -611,7 +611,7 @@ class Worker(WorkerBase):
 
     def _reconfigure_moe(
         self, old_ep_size: int, new_ep_size: int
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         """
         Reconfigure MoE modules with provided reconfig_request
 
@@ -730,8 +730,8 @@ class Worker(WorkerBase):
     def save_sharded_state(
         self,
         path: str,
-        pattern: Optional[str] = None,
-        max_size: Optional[int] = None,
+        pattern: str | None = None,
+        max_size: int | None = None,
     ) -> None:
         from vllm.model_executor.model_loader import ShardedStateLoader
 
@@ -758,7 +758,7 @@ class Worker(WorkerBase):
 def init_worker_distributed_environment(
     vllm_config: VllmConfig,
     rank: int,
-    distributed_init_method: Optional[str] = None,
+    distributed_init_method: str | None = None,
     local_rank: int = -1,
     backend: str = "nccl",
 ) -> None:

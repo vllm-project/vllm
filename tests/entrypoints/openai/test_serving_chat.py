@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from __future__ import annotations
-
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
+from openai import OpenAI
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
@@ -20,9 +18,6 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from ...utils import RemoteOpenAIServer
-
-if TYPE_CHECKING:
-    from openai import OpenAI
 
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 

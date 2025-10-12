@@ -3,7 +3,7 @@
 
 import time
 from collections.abc import Mapping
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 
 from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
@@ -38,7 +38,7 @@ class Processor:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tokenizer: Optional[AnyTokenizer],
+        tokenizer: AnyTokenizer | None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         self.vllm_config = vllm_config
@@ -60,11 +60,11 @@ class Processor:
         )
 
     @property
-    def tokenizer(self) -> Optional[AnyTokenizer]:
+    def tokenizer(self) -> AnyTokenizer | None:
         return self.input_preprocessor.tokenizer
 
     @tokenizer.setter
-    def tokenizer(self, tokenizer: Optional[AnyTokenizer]) -> None:
+    def tokenizer(self, tokenizer: AnyTokenizer | None) -> None:
         self.input_preprocessor.tokenizer = tokenizer
 
     def _validate_logprobs(
@@ -152,7 +152,7 @@ class Processor:
 
     def _validate_params(
         self,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams | PoolingParams,
     ):
         """
         Validate supported SamplingParam.
@@ -174,7 +174,7 @@ class Processor:
         auto-hashed downstream.
         """
 
-        def _validate_single_prompt(single_prompt: Union[dict, str]) -> None:
+        def _validate_single_prompt(single_prompt: dict | str) -> None:
             if not isinstance(single_prompt, dict):
                 return
             mm_data = single_prompt.get("multi_modal_data")
@@ -214,7 +214,7 @@ class Processor:
         else:
             _validate_single_prompt(prompt)  # type: ignore[arg-type]
 
-    def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
+    def _validate_lora(self, lora_request: LoRARequest | None) -> None:
         if lora_request is None:
             return
 
@@ -309,7 +309,7 @@ class Processor:
         self,
         request_id: str,
         prompt: PromptType,
-    ) -> Optional[MultiModalUUIDDict]:
+    ) -> MultiModalUUIDDict | None:
         """Build per-item multimodal hash overrides when enabled. In this case,
         multimodal data items are identified by their request id, modality and
         index rather than their content.
@@ -342,13 +342,13 @@ class Processor:
         self,
         request_id: str,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: Optional[float] = None,
-        lora_request: Optional[LoRARequest] = None,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
+        params: SamplingParams | PoolingParams,
+        arrival_time: float | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        data_parallel_rank: Optional[int] = None,
+        data_parallel_rank: int | None = None,
     ) -> EngineCoreRequest:
         self._validate_lora(lora_request)
         self._validate_params(params)
@@ -445,7 +445,7 @@ class Processor:
             pooling_params = params.clone()
 
         # Multimodal related.
-        mm_features: Optional[list[MultiModalFeatureSpec]] = None
+        mm_features: list[MultiModalFeatureSpec] | None = None
 
         if decoder_inputs["type"] == "multimodal":
             decoder_mm_inputs = decoder_inputs["mm_kwargs"]
@@ -485,7 +485,7 @@ class Processor:
         )
 
     def _validate_model_inputs(
-        self, encoder_inputs: Optional[SingletonInputs], decoder_inputs: SingletonInputs
+        self, encoder_inputs: SingletonInputs | None, decoder_inputs: SingletonInputs
     ):
         if encoder_inputs is not None:
             self._validate_model_input(encoder_inputs, prompt_type="encoder")
@@ -574,7 +574,7 @@ class Processor:
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
 
-    def stat_mm_cache(self) -> Optional[MultiModalCacheStats]:
+    def stat_mm_cache(self) -> MultiModalCacheStats | None:
         return self.input_preprocessor.stat_mm_cache()
 
     def clear_mm_cache(self) -> None:

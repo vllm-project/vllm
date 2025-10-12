@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from typing import Optional
 
 import torch
 
@@ -37,7 +36,7 @@ def forward_attention(
     slot_mapping: torch.Tensor,
     seqlen_k: int,
     backend: _Backend,
-    spec_token_tree: Optional[str] = None,
+    spec_token_tree: str | None = None,
     num_spec_tokens: int = 0,
 ) -> torch.Tensor:
     batch_size, q_len, num_heads, dim_per_head = q.shape

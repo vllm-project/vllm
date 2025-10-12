@@ -34,7 +34,7 @@ def _filter_ignore(paths: list[str], patterns: list[str]) -> list[str]:
 def glob(
     s3: Optional["BaseClient"] = None,
     path: str = "",
-    allow_pattern: Optional[list[str]] = None,
+    allow_pattern: list[str] | None = None,
 ) -> list[str]:
     """
     List full file names from S3 path and filter by allow pattern.
@@ -58,8 +58,8 @@ def glob(
 def list_files(
     s3: "BaseClient",
     path: str,
-    allow_pattern: Optional[list[str]] = None,
-    ignore_pattern: Optional[list[str]] = None,
+    allow_pattern: list[str] | None = None,
+    ignore_pattern: list[str] | None = None,
 ) -> tuple[str, str, list[str]]:
     """
     List files from S3 path and filter by pattern.

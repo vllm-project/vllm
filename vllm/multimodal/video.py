@@ -6,7 +6,7 @@ from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Union
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -192,7 +192,7 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
 
         # Refer to:
         # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
-        frame_indices: Union[range, list[int]]
+        frame_indices: range | list[int]
         if duration <= max_duration:
             n = int(math.floor(duration * fps))
             frame_indices = sorted(

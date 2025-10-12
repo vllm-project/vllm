@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Optional
 
 import torch
 from torch.distributed import ProcessGroup
@@ -39,8 +38,8 @@ class TpuCommunicator(DeviceCommunicatorBase):
     def __init__(
         self,
         cpu_group: ProcessGroup,
-        device: Optional[torch.device] = None,
-        device_group: Optional[ProcessGroup] = None,
+        device: torch.device | None = None,
+        device_group: ProcessGroup | None = None,
         unique_name: str = "",
     ):
         super().__init__(cpu_group, device, device_group, unique_name)

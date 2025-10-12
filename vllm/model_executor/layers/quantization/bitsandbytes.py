@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional, Union
+from collections.abc import Callable
+from typing import Any, Union
 
 import torch
 from packaging import version
@@ -41,7 +42,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         bnb_4bit_use_double_quant: bool = False,
         llm_int8_enable_fp32_cpu_offload: bool = False,
         llm_int8_has_fp16_weight: bool = False,
-        llm_int8_skip_modules: Optional[list[str]] = None,
+        llm_int8_skip_modules: list[str] | None = None,
         llm_int8_threshold: float = 6.0,
     ) -> None:
         super().__init__()
@@ -138,7 +139,7 @@ class BitsAndBytesConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional[Union["LinearMethodBase", "BitsAndBytesMoEMethod"]]:
+    ) -> Union["LinearMethodBase", "BitsAndBytesMoEMethod"] | None:
         if isinstance(layer, LinearBase):
             if is_layer_skipped_bnb(prefix, self.llm_int8_skip_modules):
                 return UnquantizedLinearMethod()
@@ -268,7 +269,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.quant_config.load_in_8bit:
             return self._apply_8bit_weight(layer, x, bias)
@@ -279,7 +280,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # only load the bitsandbytes module when needed
         from bitsandbytes import MatmulLtState, matmul
@@ -359,7 +360,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         original_type = x.dtype
         original_shape = x.shape
@@ -489,7 +490,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> Optional[FusedMoEQuantConfig]:
+    ) -> FusedMoEQuantConfig | None:
         return None
 
     def apply(
@@ -500,21 +501,21 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         assert self.fused_experts is None

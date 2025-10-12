@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import Optional
 
 import torch
 
@@ -101,10 +100,10 @@ def apply_flashinfer_per_tensor_scale_fp8(
     layer: torch.nn.Module,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
-    routing_bias: Optional[torch.Tensor],
+    routing_bias: torch.Tensor | None,
     top_k: int,
-    num_expert_group: Optional[int],
-    topk_group: Optional[int],
+    num_expert_group: int | None,
+    topk_group: int | None,
     global_num_experts: int,
     apply_router_weight_on_input: bool,
 ) -> torch.Tensor:
@@ -186,7 +185,7 @@ def register_moe_scaling_factors(layer: torch.nn.Module) -> None:
 
 
 def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-    moe: Optional[FusedMoEConfig],
+    moe: FusedMoEConfig | None,
 ) -> mk.FusedMoEPrepareAndFinalize:
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
     use_dp = moe.moe_parallel_config.dp_size > 1 if moe is not None else False
@@ -194,9 +193,9 @@ def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
 
 
 def select_cutlass_fp8_gemm_impl(
-    moe: Optional[FusedMoEConfig],
+    moe: FusedMoEConfig | None,
     quant_config: FusedMoEQuantConfig,
-    out_dtype: Optional[torch.dtype] = None,
+    out_dtype: torch.dtype | None = None,
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
     """Return a GEMM *experts* implementation for fused-MoE layers"""
 
@@ -225,7 +224,7 @@ def flashinfer_cutlass_moe_fp8(
     inplace: bool = False,
     activation: str = "silu",
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
 ) -> torch.Tensor:
     quant_config = layer.quant_method.get_fused_moe_quant_config(layer)

@@ -16,7 +16,7 @@ Declare supported languages and capabilities:
 
 ??? code "supported_languages and supports_transcription_only"
     ```python
-    from typing import ClassVar, Mapping, Optional, Literal
+    from typing import ClassVar, Mapping, Literal
     import numpy as np
     import torch
     from torch import nn
@@ -81,10 +81,10 @@ Return a dict containing `multi_modal_data` with the audio, and either a `prompt
             audio: np.ndarray,
             stt_config: SpeechToTextConfig,
             model_config: ModelConfig,
-            language: Optional[str],
+            language: str | None,
             task_type: Literal["transcribe", "translate"],
             request_prompt: str,
-            to_language: Optional[str],
+            to_language: str | None,
         ) -> PromptType:
             # Example with a free-form instruction prompt
             task_word = "Transcribe" if task_type == "transcribe" else "Translate"
@@ -117,10 +117,10 @@ Return a dict with separate `encoder_prompt` and `decoder_prompt` entries:
             audio: np.ndarray,
             stt_config: SpeechToTextConfig,
             model_config: ModelConfig,
-            language: Optional[str],
+            language: str | None,
             task_type: Literal["transcribe", "translate"],
             request_prompt: str,
-            to_language: Optional[str],
+            to_language: str | None,
         ) -> PromptType:
             if language is None:
                 raise ValueError("Language must be specified")
@@ -150,7 +150,7 @@ If your model requires a language and you want a default, override this method (
 ??? code "validate_language()"
     ```python
     @classmethod
-    def validate_language(cls, language: Optional[str]) -> Optional[str]:
+    def validate_language(cls, language: str | None) -> str | None:
         if language is None:
             logger.warning(
                 "Defaulting to language='en'. If you wish to transcribe audio in a different language, pass the `language` field.")
@@ -175,7 +175,7 @@ Provide a fast duration→token estimate to improve streaming usage statistics:
             audio_duration_s: float,
             stt_config: SpeechToTextConfig,
             model_config: ModelConfig,
-        ) -> Optional[int]:
+        ) -> int | None:
             # Return None if unknown; otherwise return an estimate.
             return int(audio_duration_s * stt_config.sample_rate // 320)  # example
     ```

@@ -5,7 +5,7 @@ import json
 import time
 from collections import Counter
 from contextlib import suppress
-from typing import Any, Optional
+from typing import Any
 
 from vllm.envs import VLLM_GC_DEBUG
 from vllm.logger import init_logger
@@ -21,7 +21,7 @@ class GCDebugConfig:
     - '{"top_objects":5}': enable GC debugger with top 5 collected objects
     """
 
-    def __init__(self, gc_debug_conf: Optional[str] = None) -> None:
+    def __init__(self, gc_debug_conf: str | None = None) -> None:
         self.enabled: bool = False
         self.top_objects: int = -1
 
