@@ -13,6 +13,7 @@ export VLLM_TORCH_PROFILER_DIR="deepseek_in3k_out1k"
 export VLLM_TORCH_PROFILER_WITH_STACK=1
 export VLLM_TORCH_PROFILER_RECORD_SHAPES=1
 
+# original weight  https://huggingface.co/EmbeddedLLM/deepseek-r1-FP8-Dynamic
 model_path="/mnt/raid0/zhangguopeng/deepseek-r1-FP8-Dynamic/"
 
 vllm serve $model_path \
