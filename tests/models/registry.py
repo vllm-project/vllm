@@ -486,6 +486,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2"),
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1"),
     "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small"),
+    "BertSpladeSparseEmbeddingModel": _HfExamplesInfo(
+        "naver/splade-v3", is_available_online=False
+    ),
     # [Multimodal]
     "CLIPModel": _HfExamplesInfo("openai/clip-vit-base-patch32"),
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
