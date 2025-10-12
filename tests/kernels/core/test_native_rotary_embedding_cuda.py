@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import pytest
 import torch
 
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.platforms import current_platform
-
 
 DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 
@@ -49,9 +51,7 @@ def test_rotary_embedding_forward_cuda_matches_native(
         size=(num_tokens,),
         device=device,
     )
-    query = torch.randn(
-        num_tokens, num_heads, head_size, device=device, dtype=dtype
-    )
+    query = torch.randn(num_tokens, num_heads, head_size, device=device, dtype=dtype)
     key = torch.randn_like(query) if with_key else None
 
     native_out = op.forward_native(positions, query, key)
@@ -87,4 +87,3 @@ def test_rotary_embedding_forward_cuda_matches_native(
             rtol=rtol,
             atol=atol,
         )
-
