@@ -1415,23 +1415,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         Call the HF processor on the prompt text and
         associated multi-modal data.
-        Supports splitting static (cache-affecting) vs
-        dynamic (per-request) kwargs.
         """
-        static_mm_processor_kwargs, dynamic_mm_processor_kwargs = (
-            self._split_static_dynamic_mm_kwargs(mm_kwargs)
-        )
-        # use static kwargs to get (and possibly cache) the processor
-        hf_processor = self.info.get_hf_processor(**static_mm_processor_kwargs)
-        # merge static and dynamic kwargs(such as fps) for actual call
-        merge_mm_kwargs = {**static_mm_processor_kwargs, **tok_kwargs}
-        if dynamic_mm_processor_kwargs:
-            merge_mm_kwargs.update(dynamic_mm_processor_kwargs)
-
         return self.info.ctx.call_hf_processor(
-            hf_processor,
+            self.info.get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),
-            dict(**merge_mm_kwargs),
+            dict(**mm_kwargs, **tok_kwargs),
         )
 
     def _hf_processor_applies_updates(
@@ -2097,17 +2085,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_placeholders=mm_placeholder_ranges,
         )
 
-    @staticmethod
-    def _split_static_dynamic_mm_kwargs(
-        mm_kwargs: Mapping[str, object],
-    ) -> tuple[dict[str, object], dict[str, object]]:
-        static, dynamic = {}, {}
-        for k, v in mm_kwargs.items():
-            if k in DYNAMIC_KEYS:
-                dynamic[k] = v
-            else:
-                static[k] = v
-        return static, dynamic
 
 
 class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
