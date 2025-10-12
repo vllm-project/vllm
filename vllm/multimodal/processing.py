@@ -64,7 +64,6 @@ else:
     ModelConfig = object
 
     BaseMultiModalProcessorCache = object
-    BaseDummyInputsBuilder = Any
 
 logger = init_logger(__name__)
 
@@ -1226,7 +1225,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def __init__(
         self,
         info: _I,
-        dummy_inputs: BaseDummyInputsBuilder[_I],
+        dummy_inputs: "BaseDummyInputsBuilder[_I]",
         *,
         cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
