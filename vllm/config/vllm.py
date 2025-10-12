@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import time
 from contextlib import contextmanager
 from dataclasses import field, replace
 from functools import lru_cache
@@ -270,6 +271,9 @@ class VllmConfig:
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
+        # To give each torch profile run a unique instance name.
+        self.instance_id = f"{time.time_ns()}"
+
         self.try_verify_and_update_config()
 
         if self.model_config is not None:
@@ -345,6 +349,15 @@ class VllmConfig:
                         self.model_config.pooler_config is not None
                         or self.model_config.is_encoder_decoder
                     ):
+                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
+                    # decode context parallel do not support full cudagraphs now.
+                    if self.parallel_config.decode_context_parallel_size > 1:
+                        logger.warning(
+                            "Decode context parallel (DCP) is enabled, which is "
+                            "incompatible with full CUDA graphs. Set "
+                            "cudagraph_mode to PIECEWISE."
+                        )
                         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
                 else:
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
