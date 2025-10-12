@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, TypeVar, Union
+from typing import Any, TypeAlias, TypeVar
 
 import msgspec.msgpack
 import zmq
@@ -51,7 +51,7 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
 logger = init_logger(__name__)
 
-AnyFuture = Union[asyncio.Future[Any], Future[Any]]
+AnyFuture: TypeAlias = asyncio.Future[Any] | Future[Any]
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 

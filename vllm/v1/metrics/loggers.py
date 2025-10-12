@@ -5,9 +5,9 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Union
+from typing import TypeAlias
 
-import prometheus_client
+from prometheus_client import Counter, Gauge, Histogram
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorLogging
@@ -179,9 +179,9 @@ class LoggingStatLogger(StatLoggerBase):
 
 
 class PrometheusStatLogger(StatLoggerBase):
-    _gauge_cls = prometheus_client.Gauge
-    _counter_cls = prometheus_client.Counter
-    _histogram_cls = prometheus_client.Histogram
+    _gauge_cls = Gauge
+    _counter_cls = Counter
+    _histogram_cls = Histogram
     _spec_decoding_cls = SpecDecodingProm
 
     def __init__(
@@ -369,9 +369,7 @@ class PrometheusStatLogger(StatLoggerBase):
             counter_generation_tokens, engine_indexes, model_name
         )
 
-        self.counter_request_success: dict[
-            FinishReason, dict[int, prometheus_client.Counter]
-        ] = {}
+        self.counter_request_success: dict[FinishReason, dict[int, Counter]] = {}
         counter_request_success_base = self._counter_cls(
             name="vllm:request_success",
             documentation="Count of successfully processed requests.",
@@ -661,7 +659,7 @@ class PrometheusStatLogger(StatLoggerBase):
 
         # TODO: This metric might be incorrect in case of using multiple
         # api_server counts which uses prometheus mp.
-        self.gauge_lora_info: prometheus_client.Gauge | None = None
+        self.gauge_lora_info: Gauge | None = None
         if vllm_config.lora_config is not None:
             if len(self.engine_indexes) > 1:
                 raise NotImplementedError("LoRA in DP mode is not supported yet.")
@@ -827,11 +825,7 @@ class PrometheusStatLogger(StatLoggerBase):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
 
-PromMetric = Union[
-    prometheus_client.Gauge,
-    prometheus_client.Counter,
-    prometheus_client.Histogram,
-]
+PromMetric: TypeAlias = Gauge | Counter | Histogram
 
 
 def make_per_engine(
