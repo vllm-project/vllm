@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any, Union
+from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -1168,7 +1166,7 @@ class Scheduler(SchedulerInterface):
 
     def finish_requests(
         self,
-        request_ids: Union[str, Iterable[str]],
+        request_ids: str | Iterable[str],
         finished_status: RequestStatus,
     ) -> None:
         """Handles the finish signal from outside the scheduler.
