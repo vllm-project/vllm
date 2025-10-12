@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -368,7 +368,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         return handle
 
     # DeepEP LL uses RDMA so no SMs are used for communication
-    def max_sms_used(self) -> Optional[int]:
+    def max_sms_used(self) -> int | None:
         return 0
 
 
