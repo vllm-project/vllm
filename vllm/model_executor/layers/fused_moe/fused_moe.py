@@ -4,9 +4,6 @@
 import functools
 import json
 import os
-# torch.compile needs typing.List. It will fail torch.library.infer_schema
-# otherwise
-from typing import List  # noqa: UP035
 from typing import Any, Callable, Optional, Union
 
 import torch
@@ -1229,7 +1226,7 @@ def inplace_fused_experts(
     w2_zp: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[List[int]] = None,  #noqa: UP006
+    block_shape: Optional[list[int]] = None,
     w1_bias: Optional[torch.Tensor] = None,
     w2_bias: Optional[torch.Tensor] = None,
 ) -> None:
@@ -1263,7 +1260,7 @@ def inplace_fused_experts_fake(
     w2_zp: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[List[int]] = None,  #noqa: UP006
+    block_shape: Optional[list[int]] = None,
     w1_bias: Optional[torch.Tensor] = None,
     w2_bias: Optional[torch.Tensor] = None,
 ) -> None:
@@ -1302,7 +1299,7 @@ def outplace_fused_experts(
     w2_zp: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
-    block_shape: Optional[List[int]] = None,  #noqa: UP006
+    block_shape: Optional[list[int]] = None,
     w1_bias: Optional[torch.Tensor] = None,
     w2_bias: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -1783,7 +1780,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             torch.float32, torch.float16, torch.bfloat16, torch.float8_e4m3fn
         ]
 
-        E, num_tokens, N, K, top_k_num = mk._moe_problem_size(
+        E, num_tokens, N, K, top_k_num = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids)
 
         if global_num_experts == -1:

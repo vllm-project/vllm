@@ -16,9 +16,10 @@ from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .data import (DecoderOnlyInputs, EmbedsInputs, EmbedsPrompt,
-                   EncoderDecoderInputs, ProcessorInputs, PromptType,
-                   SingletonInputs, SingletonPrompt, TextPrompt, TokenInputs,
-                   TokensPrompt, embeds_inputs, token_inputs)
+                   EncoderDecoderInputs, ExplicitEncoderDecoderPrompt,
+                   ProcessorInputs, PromptType, SingletonInputs,
+                   SingletonPrompt, TextPrompt, TokenInputs, TokensPrompt,
+                   embeds_inputs, token_inputs)
 from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
 
 logger = init_logger(__name__)
@@ -313,16 +314,20 @@ class InputPreprocessor:
             parsed_content["prompt_token_ids"], tokenization_kwargs)
 
         inputs: Union[TokenInputs, MultiModalInputs]
-        if multi_modal_data := parsed_content.get("multi_modal_data"):
+        if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_token_ids,
-                multi_modal_data,
+                parsed_content.get("multi_modal_data", {}),
                 parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
         else:
-            inputs = token_inputs(prompt_token_ids=prompt_token_ids)
+            if parsed_content.get("multi_modal_data"):
+                raise ValueError(
+                    "This model does not support multimodal inputs")
+
+            inputs = token_inputs(prompt_token_ids)
 
         if cache_salt := parsed_content.get("cache_salt"):
             inputs["cache_salt"] = cache_salt
@@ -339,23 +344,24 @@ class InputPreprocessor:
         prompt_text = parsed_content["prompt"]
 
         inputs: Union[TokenInputs, MultiModalInputs]
-        if multi_modal_data := parsed_content.get("multi_modal_data"):
+        if self.model_config.is_multimodal_model:
             inputs = self._process_multimodal(
                 prompt_text,
-                multi_modal_data,
+                parsed_content.get("multi_modal_data", {}),
                 parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
         else:
+            if parsed_content.get("multi_modal_data"):
+                raise ValueError(
+                    "This model does not support multimodal inputs")
+
             prompt_token_ids = self._tokenize_prompt(
                 prompt_text,
                 tokenization_kwargs=tokenization_kwargs,
             )
-            inputs = token_inputs(
-                prompt=prompt_text,
-                prompt_token_ids=prompt_token_ids,
-            )
+            inputs = token_inputs(prompt_token_ids)
 
         if cache_salt := parsed_content.get("cache_salt"):
             inputs["cache_salt"] = cache_salt
@@ -473,22 +479,17 @@ class InputPreprocessor:
         decoder_inputs: SingletonInputs
 
         if inputs["type"] == "multimodal":  # Multimodal data inputs
-            if not ("encoder_prompt" in inputs
-                    and "encoder_prompt_token_ids" in inputs):
+            if "encoder_prompt_token_ids" not in inputs:
                 raise RuntimeError("You should register an encoder-decoder "
                                    "multi-modal processor for encoder-decoder "
                                    "models.")
             inputs = cast(MultiModalEncDecInputs, inputs)
 
-            encoder_inputs = token_inputs(
-                prompt=inputs["encoder_prompt"],
-                prompt_token_ids=inputs["encoder_prompt_token_ids"],
-            )
+            encoder_inputs = token_inputs(inputs["encoder_prompt_token_ids"])
 
             decoder_prompt_inputs = decoder_inputs_to_override or inputs
             decoder_inputs = MultiModalInputs(
                 type="multimodal",
-                prompt=decoder_prompt_inputs.get("prompt", ""),
                 prompt_token_ids=decoder_prompt_inputs["prompt_token_ids"],
                 mm_kwargs=inputs["mm_kwargs"],
                 mm_hashes=inputs["mm_hashes"],
@@ -498,7 +499,7 @@ class InputPreprocessor:
                 decoder_inputs["cache_salt"] = cache_salt
 
         elif inputs["type"] == "token":  # Text-only inputs
-            encoder_inputs = token_inputs(prompt="", prompt_token_ids=[])
+            encoder_inputs = token_inputs(prompt_token_ids=[])
             decoder_inputs = decoder_inputs_to_override or inputs
         else:
             assert_never(inputs)  # type: ignore[arg-type]
@@ -549,12 +550,14 @@ class InputPreprocessor:
         decoder_inputs: Optional[SingletonInputs]
 
         if is_explicit_encoder_decoder_prompt(prompt):
+            # `cast` is needed for mypy, but not pyright
+            prompt_ = cast(ExplicitEncoderDecoderPrompt, prompt)
             encoder_inputs = self._prompt_to_llm_inputs(
-                prompt["encoder_prompt"],
+                prompt_["encoder_prompt"],
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
-            if (decoder_input := prompt["decoder_prompt"]) is None:
+            if (decoder_input := prompt_["decoder_prompt"]) is None:
                 decoder_inputs = None
             else:
                 decoder_inputs = self._prompt_to_llm_inputs(decoder_input)
@@ -565,8 +568,9 @@ class InputPreprocessor:
                     self._split_enc_dec_mm_inputs(encoder_inputs,
                                                   decoder_inputs))
         else:
+            # `cast` is needed for mypy, but not pyright
             inputs = self._prompt_to_llm_inputs(
-                prompt,
+                cast(SingletonPrompt, prompt),
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
@@ -641,8 +645,9 @@ class InputPreprocessor:
                              "to decoder-only models")
 
         # Decoder-only operation
+        # `cast` is needed for mypy, but not pyright
         return self._process_decoder_only_prompt(
-            prompt,
+            cast(SingletonPrompt, prompt),
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
         )

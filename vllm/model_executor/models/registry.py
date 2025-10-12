@@ -187,6 +187,7 @@ _EMBEDDING_MODELS = {
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
     # [Multimodal]
+    "CLIPModel": ("clip", "CLIPEmbeddingModel"),
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
@@ -307,10 +308,14 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
-    "TransformersEmbeddingModel": ("transformers_pooling", "TransformersEmbeddingModel"),  # noqa: E501
-    "TransformersForSequenceClassification": ("transformers_pooling", "TransformersForSequenceClassification"),  # noqa: E501
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
     "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
+    "TransformersMoEForCausalLM": ("transformers_moe", "TransformersMoEForCausalLM"),  # noqa: E501
+    "TransformersMoEForMultimodalLM": ("transformers_moe", "TransformersMoEForMultimodalLM"),  # noqa: E501
+    "TransformersEmbeddingModel": ("transformers_pooling", "TransformersEmbeddingModel"),  # noqa: E501
+    "TransformersForSequenceClassification": ("transformers_pooling", "TransformersForSequenceClassification"),  # noqa: E501
+    "TransformersMoEForSequenceClassification": ("transformers_pooling", "TransformersMoEForSequenceClassification"),  # noqa: E501
+    "TransformersMoEEmbeddingModel": ("transformers_pooling", "TransformersMoEEmbeddingModel"),  # noqa: E501
 }
 # yapf: enable
 

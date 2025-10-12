@@ -376,7 +376,7 @@ class EngineArgs:
     quantization: Optional[QuantizationMethods] = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    limit_mm_per_prompt: dict[str, int] = \
+    limit_mm_per_prompt: dict[str, Union[int, dict[str, int]]] = \
         get_field(MultiModalConfig, "limit_per_prompt")
     interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
     media_io_kwargs: dict[str, dict[str,
@@ -1136,6 +1136,10 @@ class EngineArgs:
         device_config = DeviceConfig(
             device=cast(Device, current_platform.device_type))
 
+        model_config = self.create_model_config()
+        self.model = model_config.model
+        self.tokenizer = model_config.tokenizer
+
         (self.model, self.tokenizer,
          self.speculative_config) = maybe_override_with_speculators(
              model=self.model,
@@ -1144,7 +1148,6 @@ class EngineArgs:
              trust_remote_code=self.trust_remote_code,
              vllm_speculative_config=self.speculative_config,
          )
-        model_config = self.create_model_config()
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
         #   and fall back to V0 for experimental or unsupported features.
@@ -1566,7 +1569,12 @@ class EngineArgs:
                 self.enable_prefix_caching = False
 
             if self.enable_prefix_caching is None:
-                self.enable_prefix_caching = True
+                # Disable prefix caching default for hybrid models
+                # since the feature is still experimental.
+                if model_config.is_hybrid:
+                    self.enable_prefix_caching = False
+                else:
+                    self.enable_prefix_caching = True
         else:
 
             pooling_type = model_config.pooler_config.pooling_type
