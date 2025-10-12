@@ -215,8 +215,7 @@ async def test_invalid_tool_call(client: openai.AsyncOpenAI):
     message = response.choices[0].message
     assert message is not None, "Expected message in response"
     assert hasattr(message, "content"), "Expected content field in message"
-    assert not getattr(message, "tool_calls", None), \
-        "Model unexpectedly attempted a tool call on invalid input"
+    assert not getattr(message, "tool_calls", []) or len(message.tool_calls) == 0, f"Model unexpectedly attempted a tool call on invalid input: {message.tool_calls}"
 
 
 @pytest.mark.asyncio
