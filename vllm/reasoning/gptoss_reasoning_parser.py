@@ -7,7 +7,11 @@ from typing import Optional, Union
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.harmony_utils import parse_chat_output
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    DeltaMessage,
+    ResponsesRequest,
+)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
@@ -53,6 +57,7 @@ class GptOssReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: Union[ChatCompletionRequest, ResponsesRequest],
     ) -> Union[DeltaMessage, None]:
         prev_reasoning, prev_content, _ = parse_chat_output(list(previous_token_ids))
         cur_reasoning, cur_content, _ = parse_chat_output(list(current_token_ids))
@@ -77,7 +82,7 @@ class GptOssReasoningParser(ReasoningParser):
     def extract_reasoning_content(
         self,
         model_output: str,
-        request: ChatCompletionRequest,
+        request: Union[ChatCompletionRequest, ResponsesRequest],
     ) -> tuple[Optional[str], Optional[str]]:
         raise NotImplementedError(
             "gpt-oss has a special branch for parsing reasoning in non-streaming mode. This method shouldn't be used."  # noqa: E501
