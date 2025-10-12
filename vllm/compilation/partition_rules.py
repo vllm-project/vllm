@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def resolve_defined_ops(op_names: list[str]) -> list[torch._ops.OpOverload]:
+def resolve_defined_ops(op_names: list[str]) -> list["torch._ops.OpOverload"]:
     """Resolve operator names to OpOverload objects.
 
     Skips operators that fail to resolve (e.g., operators not registered or
@@ -47,7 +47,7 @@ def resolve_defined_ops(op_names: list[str]) -> list[torch._ops.OpOverload]:
 
 
 @contextlib.contextmanager
-def inductor_partition_rule_context(overloads: list[torch._ops.OpOverload]):
+def inductor_partition_rule_context(overloads: list["torch._ops.OpOverload"]):
     """Context manager to temporarily register Inductor partition rules.
 
     Registers custom partition rules for specified operators, forcing the
