@@ -496,7 +496,7 @@ def maybe_override_with_speculators(
     revision: Optional[str] = None,
     vllm_speculative_config: Optional[dict[str, Any]] = None,
     **kwargs,
-) -> tuple[str, str, Optional[dict[str, Any]]]:
+) -> tuple[str, str, Optional[dict[str, Any]], str]:
     """
     Resolve model configuration when speculators are detected.
 
@@ -511,8 +511,9 @@ def maybe_override_with_speculators(
         vllm_speculative_config: Existing vLLM speculative config
 
     Returns:
-        Tuple of (resolved_model, resolved_tokenizer, speculative_config)
+        Tuple of (resolved_model, resolved_tokenizer, speculative_config, load_format)
     """
+    load_format = kwargs.get("load_format", "auto")
     is_gguf = check_gguf_file(model)
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
@@ -531,7 +532,7 @@ def maybe_override_with_speculators(
 
     if speculators_config is None:
         # No speculators config found, return original values
-        return model, tokenizer, vllm_speculative_config
+        return model, tokenizer, vllm_speculative_config, load_format
 
     # Speculators format detected - process overrides
     from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
@@ -547,7 +548,7 @@ def maybe_override_with_speculators(
     verifier_model = speculators_config["verifier"]["name_or_path"]
     model = tokenizer = verifier_model
 
-    return model, tokenizer, speculative_config
+    return model, tokenizer, speculative_config, load_format
 
 
 def get_config(

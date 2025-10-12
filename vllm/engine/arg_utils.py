@@ -79,7 +79,7 @@ from vllm.transformers_utils.config import (
     is_interleaved,
     maybe_override_with_speculators,
 )
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.utils import check_gguf_file, is_oci_model_with_tag
 from vllm.utils import FlexibleArgumentParser, GiB_bytes, get_ip, is_in_ray_actor
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
@@ -676,7 +676,7 @@ class EngineArgs:
             **structured_outputs_kwargs["reasoning_parser"],
         )
         # Deprecated guided decoding arguments
-        for arg, type in [
+        for arg, arg_type in [
             ("--guided-decoding-backend", str),
             ("--guided-decoding-disable-fallback", bool),
             ("--guided-decoding-disable-any-whitespace", bool),
@@ -684,7 +684,7 @@ class EngineArgs:
         ]:
             structured_outputs_group.add_argument(
                 arg,
-                type=type,
+                type=arg_type,
                 help=(f"[DEPRECATED] {arg} will be removed in v0.12.0."),
                 deprecated=True,
             )
@@ -1156,6 +1156,34 @@ class EngineArgs:
                 )
 
     def create_load_config(self) -> LoadConfig:
+        # Auto-detect OCI format when model name has explicit tag/digest
+        if self.load_format == "auto" and is_oci_model_with_tag(self.model):
+            logger.info(
+                "Auto-detected OCI format for model with explicit tag/digest: %s",
+                self.model,
+            )
+            self.load_format = "oci"
+
+        # Handle OCI models - download first before config loading
+        if self.load_format == "oci":
+            from vllm.model_executor.model_loader.oci_loader import OciModelLoader
+
+            # Create a temporary LoadConfig for downloading
+            temp_load_config = LoadConfig(
+                load_format="oci", download_dir=self.download_dir
+            )
+            loader = OciModelLoader(temp_load_config)
+
+            # Download the model using simplified method (no ModelConfig needed)
+            original_model = self.model
+            config_dir = loader.download_oci_model_simple(self.model)
+
+            # Use extracted config directory for config loading
+            logger.info("Using OCI config from %s", config_dir)
+            self.model = config_dir
+            if not self.tokenizer or self.tokenizer == original_model:
+                self.tokenizer = config_dir
+
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
 
@@ -1234,19 +1262,23 @@ class EngineArgs:
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 
-        model_config = self.create_model_config()
-        self.model = model_config.model
-        self.tokenizer = model_config.tokenizer
+        # Create LoadConfig early to handle OCI model downloads
+        # This ensures OCI models are downloaded and self.model is updated
+        # before calling maybe_override_with_speculators
+        load_config = self.create_load_config()
 
-        (self.model, self.tokenizer, self.speculative_config) = (
+        (self.model, self.tokenizer, self.speculative_config, self.load_format) = (
             maybe_override_with_speculators(
                 model=self.model,
                 tokenizer=self.tokenizer,
                 revision=self.revision,
                 trust_remote_code=self.trust_remote_code,
                 vllm_speculative_config=self.speculative_config,
+                load_format=self.load_format,
+                download_dir=self.download_dir,
             )
         )
+        model_config = self.create_model_config()
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
         #   and fall back to V0 for experimental or unsupported features.
@@ -1530,8 +1562,8 @@ class EngineArgs:
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":
             self.quantization = self.load_format = "bitsandbytes"
-
-        load_config = self.create_load_config()
+            # Recreate load_config if quantization changed
+            load_config = self.create_load_config()
 
         # Pass reasoning_parser into StructuredOutputsConfig
         if self.reasoning_parser:

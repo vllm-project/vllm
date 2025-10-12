@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import os
 import struct
 from functools import cache
 from os import PathLike
@@ -109,3 +110,62 @@ def parse_safetensors_file_metadata(path: Union[str, PathLike]) -> dict[str, Any
         length_of_metadata = struct.unpack("<Q", f.read(8))[0]
         metadata = json.loads(f.read(length_of_metadata).decode("utf-8"))
         return metadata
+
+
+def is_oci_model_with_tag(model: str) -> bool:
+    """
+    Detect if model name is an OCI reference with explicit tag or digest.
+
+    Returns True for OCI references with explicit tag/digest:
+    - username/model:tag
+    - username/model:v1.0
+    - registry.io/username/model:tag
+    - registry.io/username/model@sha256:digest
+
+    Returns False for:
+    - username/model (ambiguous - could be HuggingFace or OCI with implicit tag)
+    - local/path/to/model (local filesystem paths)
+    - model (single name without repository)
+
+    This allows automatic detection of OCI format when the reference is
+    unambiguous (has explicit tag/digest), while requiring explicit
+    load_format="oci" for ambiguous cases.
+
+    Args:
+        model: Model name or path to check
+
+    Returns:
+        True if the model name matches OCI reference pattern with tag/digest
+    """
+    import regex as re
+
+    # Return False for local paths that exist on filesystem
+    if os.path.exists(model):
+        return False
+
+    # Pattern explanation:
+    # ^                                    - Start of string
+    # (?:(?:[^/]+\.[^/]+|[^/]+:[0-9]+)/)? - Optional registry:
+    #                                        - either with domain (contains dot)
+    #                                        - or with port (hostname:port)
+    # [^/]+/                               - Repository owner/namespace (required slash)
+    # [^/:@]+                              - Repository name (no slashes, colons, or @)
+    # [:@]                                 - Tag separator (: or @)
+    # .+                                   - Tag or digest content
+    # $                                    - End of string
+    #
+    # This matches:
+    # - username/repo:tag
+    # - username/repo@sha256:abc
+    # - registry.io/username/repo:tag
+    # - registry.io:5000/username/repo:tag (registry with port)
+    # - localhost:8080/username/repo:tag (hostname with port)
+    #
+    # Does NOT match:
+    # - username/repo (no tag)
+    # - /path/to/model:tag (starts with /)
+    # - ./relative/path (starts with .)
+    # - model (no slash)
+    pattern = r"^(?:(?:[^/]+\.[^/]+|[^/]+:[0-9]+)/)?[^/]+/[^/:@]+[:@].+$"
+
+    return bool(re.match(pattern, model))
