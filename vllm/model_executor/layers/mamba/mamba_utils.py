@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Union
 
 import torch
 
@@ -14,7 +13,7 @@ class MambaStateDtypeCalculator:
     @classmethod
     def linear_attention_state_dtype(
         cls,
-        model_dtype: Union[ModelDType, torch.dtype],
+        model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
         # TODO (tdoublep) requires testing
@@ -26,7 +25,7 @@ class MambaStateDtypeCalculator:
     @classmethod
     def mamba1_state_dtype(
         cls,
-        model_dtype: Union[ModelDType, torch.dtype],
+        model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
@@ -37,7 +36,7 @@ class MambaStateDtypeCalculator:
     @classmethod
     def mamba2_state_dtype(
         cls,
-        model_dtype: Union[ModelDType, torch.dtype],
+        model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
@@ -48,7 +47,7 @@ class MambaStateDtypeCalculator:
     @classmethod
     def _mamba_state_dtype(
         cls,
-        model_dtype: Union[ModelDType, torch.dtype],
+        model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
@@ -63,7 +62,7 @@ class MambaStateDtypeCalculator:
     @classmethod
     def short_conv_state_dtype(
         cls,
-        model_dtype: Union[ModelDType, torch.dtype],
+        model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
         conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
@@ -72,7 +71,7 @@ class MambaStateDtypeCalculator:
     @classmethod
     def gated_delta_net_state_dtype(
         cls,
-        model_dtype: Union[ModelDType, torch.dtype],
+        model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, torch.dtype]:
         state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
