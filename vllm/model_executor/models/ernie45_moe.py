@@ -670,7 +670,7 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExpe
         self.num_moe_layers = len(moe_layers_indices)
         self.num_expert_groups = 1
 
-        self.moe_layers: list[FusedMoE] = []
+        self.moe_layers: list[SharedFusedMoE] = []
         example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
