@@ -49,7 +49,6 @@ from openai.types.responses.response_reasoning_item import (
 from openai_harmony import Message as OpenAIHarmonyMessage
 
 from vllm import envs
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -97,7 +96,6 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
@@ -109,7 +107,6 @@ class OpenAIServingResponses(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -127,7 +124,6 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> None:
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
@@ -139,18 +135,9 @@ class OpenAIServingResponses(OpenAIServing):
         self.chat_template_content_format: Final = chat_template_content_format
         self.enable_log_outputs = enable_log_outputs
 
-        self.reasoning_parser: Optional[Callable[[AnyTokenizer], ReasoningParser]] = (
-            None
+        self.reasoning_parser = self._get_reasoning_parser(
+            reasoning_parser_name=reasoning_parser
         )
-        if reasoning_parser:
-            try:
-                self.reasoning_parser = ReasoningParserManager.get_reasoning_parser(
-                    reasoning_parser
-                )
-                assert self.reasoning_parser is not None
-            except Exception as e:
-                raise TypeError(f"{reasoning_parser=} has not been registered") from e
-
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
@@ -176,7 +163,7 @@ class OpenAIServingResponses(OpenAIServing):
                 "the store."
             )
 
-        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
+        self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             logger.warning(
                 "For gpt-oss, we ignore --enable-auto-tool-choice "
@@ -1876,6 +1863,6 @@ class OpenAIServingResponses(OpenAIServing):
                 ResponseCompletedEvent(
                     type="response.completed",
                     sequence_number=-1,
-                    response=final_response.model_dump(),
+                    response=final_response,
                 )
             )

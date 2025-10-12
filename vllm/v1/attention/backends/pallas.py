@@ -35,7 +35,7 @@ TPU_STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 try:
-    import tpu_commons  # noqa: F401
+    import tpu_inference  # noqa: F401
 except ImportError:
     # Lazy import torch_xla
     import torch_xla.core.xla_builder as xb
