@@ -2,11 +2,13 @@
 
 from abc import abstractmethod
 from enum import Enum
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
+import json
+from pathlib import Path
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
@@ -33,6 +35,17 @@ if current_platform.is_tpu():
 else:
     fused_moe_pallas = None  # type: ignore
 logger = init_logger(__name__)
+
+
+class RoeGateDebugLogger:
+
+    def __init__(self, path: Union[str, Path]):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def log(self, record: Dict[str, Any]) -> None:
+        with self.path.open('a', encoding='utf-8') as f:
+            f.write(json.dumps(record, ensure_ascii=False) + '\n')
 
 
 class FusedMoeWeightScaleSupported(Enum):
@@ -202,6 +215,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
+        if getattr(layer, 'roe_debug_enabled', False) and getattr(layer, '_roe_debug_context', None):
+            layer._log_roe_debug(topk_ids)
 
         return fused_experts(
             hidden_states=x,
@@ -435,6 +450,18 @@ class FusedMoE(torch.nn.Module):
         use_ep = (vllm_config.parallel_config.enable_expert_parallel
                   and self.tp_size * self.dp_size > 1)
 
+        self.roe_config = getattr(vllm_config, "roe_config", None)
+        if self.roe_config and self.roe_config.enabled:
+            layer_key = prefix if prefix else f"moe_{self.roe_config.total_layers}"
+            self.roe_layer_idx = self.roe_config.register_layer(layer_key)
+        else:
+            self.roe_layer_idx = None
+        self.roe_enabled = self.roe_layer_idx is not None
+        self.roe_debug_enabled = bool(self.roe_enabled and self.roe_config and self.roe_config.debug)
+        self.roe_debug_logger = (RoeGateDebugLogger(self.roe_config.debug_path)
+                                 if self.roe_debug_enabled else None)
+        self._roe_debug_context: Optional[Dict[str, Any]] = None
+
         # For smuggling this layer into the fused moe custom op
         self.use_direct_call = self.dp_size == 1
         if not self.use_direct_call:
@@ -515,6 +542,117 @@ class FusedMoE(torch.nn.Module):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
+
+    def _apply_roe_noise(self, router_logits: torch.Tensor) -> torch.Tensor:
+        if not getattr(self, 'roe_enabled', False) or self.roe_layer_idx is None:
+            self._roe_debug_context = None
+            return router_logits
+        assert self.roe_config is not None
+        layer_tau = self.roe_config.tau_for_layer(self.roe_layer_idx)
+        if layer_tau <= 0:
+            self._roe_debug_context = None
+            return router_logits
+        try:
+            context = get_forward_context()
+        except AssertionError:
+            self._roe_debug_context = None
+            return router_logits
+        roe_meta = getattr(context, 'roe_metadata', None)
+        if roe_meta is None or roe_meta.sample_indices is None:
+            self._roe_debug_context = None
+            return router_logits
+        sample_indices = roe_meta.sample_indices
+        if sample_indices is None or sample_indices.numel() == 0:
+            self._roe_debug_context = None
+            return router_logits
+        if sample_indices.dtype != torch.int32 and sample_indices.dtype != torch.int64:
+            sample_indices = sample_indices.to(torch.int32)
+        sample_indices = sample_indices.to(router_logits.device, non_blocking=True)
+        if sample_indices.shape[0] != router_logits.shape[0]:
+            sample_indices = sample_indices[:router_logits.shape[0]]
+        active_mask = sample_indices != 0
+        if not torch.any(active_mask):
+            self._roe_debug_context = None
+            return router_logits
+
+        debug_ctx = None
+        if self.roe_debug_enabled and self.roe_debug_logger is not None:
+            debug_ctx = self._prepare_roe_debug(router_logits, sample_indices, layer_tau, roe_meta)
+
+        tau_vector = active_mask.to(router_logits.dtype) * layer_tau
+        eps = 1e-9
+        noise = -torch.log(-torch.log(torch.rand_like(router_logits, dtype=torch.float32) + eps) + eps)
+        noise = noise.to(router_logits.dtype)
+        router_logits = router_logits + tau_vector.unsqueeze(-1) * noise
+
+        if debug_ctx is not None:
+            debug_ctx['std_after'] = self._compute_roe_std(router_logits, debug_ctx['sample_indices'], debug_ctx['num_samples'])
+            self._roe_debug_context = debug_ctx
+        else:
+            self._roe_debug_context = None
+        return router_logits
+
+    def _compute_roe_std(self, logits: torch.Tensor, sample_indices: torch.Tensor, num_samples: int) -> Dict[str, float]:
+        stats: Dict[str, float] = {}
+        if num_samples <= 0:
+            return stats
+        sample_indices_cpu = sample_indices.detach().cpu()
+        logits_cpu = logits.detach().to('cpu')
+        for sample_id in range(num_samples):
+            mask = sample_indices_cpu == sample_id
+            if mask.any():
+                stats[str(sample_id)] = float(logits_cpu[mask].std().item())
+        return stats
+
+    def _prepare_roe_debug(self, router_logits: torch.Tensor, sample_indices: torch.Tensor, layer_tau: float, roe_meta) -> Optional[Dict[str, Any]]:
+        num_samples = int(getattr(roe_meta, 'num_samples', 0) or 0)
+        if num_samples <= 1:
+            return None
+        sample_indices_cpu = sample_indices.detach().cpu()
+        debug_ctx: Dict[str, Any] = {
+            'layer': self.roe_layer_idx,
+            'step': getattr(roe_meta, 'step', None),
+            'tau': float(layer_tau),
+            'num_samples': num_samples,
+            'std_before': self._compute_roe_std(router_logits, sample_indices_cpu, num_samples),
+            'sample_indices': sample_indices_cpu,
+        }
+        return debug_ctx
+
+    def _log_roe_debug(self, topk_ids: torch.Tensor) -> None:
+        if not self.roe_debug_enabled or self.roe_debug_logger is None:
+            return
+        ctx = getattr(self, '_roe_debug_context', None)
+        if not ctx:
+            return
+        sample_indices = ctx.get('sample_indices')
+        if sample_indices is None:
+            self._roe_debug_context = None
+            return
+        num_samples = ctx.get('num_samples', 0) or 0
+        topk_cpu = topk_ids.detach().cpu()
+        union: Dict[str, List[int]] = {}
+        for sample_id in range(num_samples):
+            mask = sample_indices == sample_id
+            if mask.any():
+                expert_set = set()
+                for ids in topk_cpu[mask]:
+                    expert_set.update(ids.tolist())
+                union[str(sample_id)] = sorted(expert_set)
+        clean = set(union.get('0', []))
+        overlap: Dict[str, float] = {}
+        for key, experts in union.items():
+            if key == '0':
+                continue
+            other = set(experts)
+            union_all = clean | other
+            score = len(clean & other) / len(union_all) if union_all else 0.0
+            overlap[key] = score
+        ctx['selected'] = union
+        ctx['overlap'] = overlap
+        ctx.pop('sample_indices', None)
+        self.roe_debug_logger.log(ctx)
+        self._roe_debug_context = None
 
     def _load_per_tensor_weight_scale(self, shard_id: str,
                                       param: torch.nn.Parameter,
@@ -852,6 +990,8 @@ class FusedMoE(torch.nn.Module):
                                                  cu_tokens_across_dp_cpu)
             router_logits = self.naive_multicast(router_logits,
                                                  cu_tokens_across_dp_cpu)
+
+        router_logits = self._apply_roe_noise(router_logits)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(

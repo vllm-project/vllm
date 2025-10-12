@@ -136,6 +136,7 @@ class SamplingMetadata:
         num_prompts: int,
         skip_sampler_cpu_output: bool = False,
         reuse_sampling_tensors: bool = False,
+        skip_logits_processors: bool = False,
     ) -> None:
         self.seq_groups = seq_groups
         self.selected_token_indices = selected_token_indices
@@ -143,6 +144,8 @@ class SamplingMetadata:
         self.num_prompts = num_prompts
         self.skip_sampler_cpu_output = skip_sampler_cpu_output
         self.reuse_sampling_tensors = reuse_sampling_tensors
+        # When True, defer logits processors to a later fusion step (e.g., RoE).
+        self.skip_logits_processors = skip_logits_processors
 
     @staticmethod
     def prepare(

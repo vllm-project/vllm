@@ -139,6 +139,8 @@ class MixtralAttention(nn.Module):
         # MixtralConfig has an optional head_dim argument
         self.head_dim = getattr(config, "head_dim",
                                 self.hidden_size // self.total_num_heads)
+        if self.head_dim is None:
+            self.head_dim = self.hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5

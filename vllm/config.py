@@ -3187,6 +3187,93 @@ class DecodingConfig:
                              f" must be one of {valid_guided_backends}")
 
 
+@config
+@dataclass
+class RoeConfig:
+    """Configuration for Roster of Experts (RoE) inference."""
+
+    enabled: bool = False
+    """Enable RoE hyper-parallel inference for mixture-of-experts layers."""
+    num_samples: int = 1
+    """Total number of routing samples (including the clean path)."""
+    taus: tuple[float, ...] = (1.0,)
+    """Base Gumbel temperatures applied to stochastic replicas per MoE layer."""
+    skip_front: int = 0
+    """Number of earliest MoE layers that remain deterministic."""
+    skip_back: int = 0
+    """Number of latest MoE layers that remain deterministic."""
+
+    debug: bool = False
+    """Enable verbose RoE debugging (adds logging and instrumentation)."""
+    debug_path: str = "logs/roe_gate_debug.jsonl"
+    """Path to write RoE gate debugging JSONL records."""
+    _layer_counter: int = field(init=False, default=0, repr=False)
+    """Runtime counter used to assign sequential indices to MoE layers."""
+    _total_layers: int = field(init=False, default=0, repr=False)
+    """Total number of MoE layers registered during model initialisation."""
+    _layer_prefix_to_index: dict[str, int] = field(init=False, default_factory=dict, repr=False)
+    """Maps layer identifier strings to their sequential RoE indices."""
+
+    def compute_hash(self) -> str:
+        factors: list[Any] = [
+            self.enabled,
+            self.num_samples,
+            self.taus,
+            self.skip_front,
+            self.skip_back,
+            self.debug,
+            self.debug_path,
+        ]
+        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        return hash_str
+
+    def __post_init__(self):
+        if self.num_samples < 1:
+            raise ValueError("RoE num_samples must be >= 1.")
+        if self.skip_front < 0 or self.skip_back < 0:
+            raise ValueError("RoE skip_front/back must be non-negative.")
+        if len(self.taus) == 0:
+            raise ValueError("RoE taus must contain at least one value.")
+        if any(tau < 0.0 for tau in self.taus):
+            raise ValueError("RoE taus must be non-negative.")
+        if not isinstance(self.debug_path, str):
+            raise ValueError("RoE debug_path must be a string.")
+
+    def reset_runtime_state(self) -> None:
+        self._layer_counter = 0
+        self._total_layers = 0
+        self._layer_prefix_to_index.clear()
+
+    def register_layer(self, prefix: str) -> int:
+        idx = self._layer_counter
+        key = prefix if prefix else f"layer_{idx}"
+        if key in self._layer_prefix_to_index:
+            key = f"{key}#{idx}"
+        self._layer_prefix_to_index[key] = idx
+        self._layer_counter += 1
+        self._total_layers = max(self._total_layers, self._layer_counter)
+        return idx
+
+    def get_layer_index(self, prefix: str) -> int:
+        return self._layer_prefix_to_index[prefix]
+
+    @property
+    def total_layers(self) -> int:
+        return self._total_layers
+
+    def tau_for_layer(self, layer_idx: int) -> float:
+        if not self.enabled:
+            return 0.0
+        if layer_idx < self.skip_front:
+            return 0.0
+        if self.skip_back > 0 and self.total_layers > 0:
+            if layer_idx >= max(0, self.total_layers - self.skip_back):
+                return 0.0
+        effective_idx = max(0, layer_idx - self.skip_front)
+        schedule_idx = min(effective_idx, len(self.taus) - 1)
+        return self.taus[schedule_idx]
+
+
 @dataclass
 class ObservabilityConfig:
     """Configuration for observability - metrics and tracing."""
@@ -3678,6 +3765,7 @@ class VllmConfig:
     speculative_config: SpeculativeConfig = field(default=None,
                                                   init=True)  # type: ignore
     decoding_config: Optional[DecodingConfig] = None
+    roe_config: RoeConfig = field(default_factory=RoeConfig, init=True)
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
     quant_config: Optional[QuantizationConfig] = None
@@ -3708,7 +3796,7 @@ class VllmConfig:
 
         # summarize vllm config
         vllm_factors: list[Any] = []
-        from vllm import __version__
+        from vllm._version import __version__
         vllm_factors.append(__version__)
         vllm_factors.append(envs.VLLM_USE_V1)
         if self.model_config:
@@ -3750,6 +3838,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.decoding_config:
             vllm_factors.append(self.decoding_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.roe_config:
+            vllm_factors.append(self.roe_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.observability_config:
@@ -3865,6 +3957,9 @@ class VllmConfig:
             self.model_config is not None and self.load_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
+
+        if self.roe_config:
+            self.roe_config.reset_runtime_state()
 
         from vllm.platforms import current_platform
         if self.scheduler_config is not None and \
@@ -4103,6 +4198,8 @@ def set_current_vllm_config(vllm_config: VllmConfig, check_compile=False):
     num_models_seen = compilation_counter.num_models_seen
     try:
         _current_vllm_config = vllm_config
+        if vllm_config.roe_config:
+            vllm_config.roe_config.reset_runtime_state()
         yield
     except Exception:
         raise

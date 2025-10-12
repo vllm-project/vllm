@@ -21,7 +21,7 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          GuidedDecodingBackendV1, HfOverrides,
                          KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
                          ModelConfig, ModelImpl, MultiModalConfig,
-                         ObservabilityConfig, ParallelConfig, PoolerConfig,
+                         ObservabilityConfig, RoeConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
                          TaskOption, TokenizerPoolConfig, VllmConfig,
@@ -308,6 +308,14 @@ class EngineArgs:
         bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
+    # RoE inference fields
+    enable_roe: bool = False
+    roe_num_samples: int = 1
+    roe_tau: Optional[List[float]] = None
+    roe_skip_front: int = 0
+    roe_skip_back: int = 0
+    roe_debug: bool = False
+
     guided_decoding_backend: str = DecodingConfig.guided_decoding_backend
     logits_processor_pattern: Optional[str] = None
 
@@ -344,6 +352,26 @@ class EngineArgs:
     def __post_init__(self):
         if not self.tokenizer:
             self.tokenizer = self.model
+
+        if self.roe_tau is not None:
+            if isinstance(self.roe_tau, (int, float)):
+                self.roe_tau = [float(self.roe_tau)]
+            else:
+                self.roe_tau = [float(tau) for tau in self.roe_tau]
+            if len(self.roe_tau) == 0:
+                raise ValueError('roe_tau must include at least one value when specified.')
+        if self.roe_num_samples < 1:
+            raise ValueError('roe_num_samples must be >= 1.')
+        if self.roe_skip_front < 0 or self.roe_skip_back < 0:
+            raise ValueError('roe_skip_front and roe_skip_back must be non-negative.')
+        self.roe_debug = bool(self.roe_debug)
+
+        if self.enable_roe:
+            if self.enforce_eager is False:
+                logger.warning(
+                    "RoE requires eager execution; overriding enforce_eager=True.")
+            if self.enforce_eager is None or self.enforce_eager is False:
+                self.enforce_eager = True
 
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -482,6 +510,38 @@ class EngineArgs:
                             'Examples:\n'
                             '- 1k → 1000\n'
                             '- 1K → 1024\n')
+
+        parser.add_argument(
+            '--enable-roe',
+            action=argparse.BooleanOptionalAction,
+            default=EngineArgs.enable_roe,
+            help='Enable Roster of Experts hyper-parallel MoE inference.')
+        parser.add_argument(
+            '--roe-num-samples',
+            type=int,
+            default=EngineArgs.roe_num_samples,
+            help='Number of routing samples evaluated per token when using RoE (includes the clean path).')
+        parser.add_argument(
+            '--roe-tau',
+            type=float,
+            nargs='+',
+            default=EngineArgs.roe_tau,
+            help='Gumbel temperature(s) for RoE routing noise; provide one value or one per MoE layer.')
+        parser.add_argument(
+            '--roe-skip-front',
+            type=int,
+            default=EngineArgs.roe_skip_front,
+            help='Number of leading MoE layers to keep deterministic when RoE is enabled.')
+        parser.add_argument(
+            '--roe-skip-back',
+            type=int,
+            default=EngineArgs.roe_skip_back,
+            help='Number of trailing MoE layers to keep deterministic when RoE is enabled.')
+        parser.add_argument(
+            '--roe-debug',
+            action=argparse.BooleanOptionalAction,
+            default=EngineArgs.roe_debug,
+            help='Enable verbose RoE debugging (logs per-layer gate statistics).')
 
         # Guided decoding arguments
         guided_decoding_kwargs = get_kwargs(DecodingConfig)
@@ -1248,6 +1308,16 @@ class EngineArgs:
             if self.enable_reasoning else None,
         )
 
+        roe_tau = tuple(self.roe_tau) if self.roe_tau else (1.0,)
+        roe_config = RoeConfig(
+            enabled=self.enable_roe,
+            num_samples=self.roe_num_samples if self.enable_roe else 1,
+            taus=roe_tau,
+            skip_front=self.roe_skip_front,
+            skip_back=self.roe_skip_back,
+            debug=self.roe_debug,
+        )
+
         show_hidden_metrics = False
         if self.show_hidden_metrics_for_version is not None:
             show_hidden_metrics = version._prev_minor_version_was(
@@ -1280,6 +1350,7 @@ class EngineArgs:
             speculative_config=speculative_config,
             load_config=load_config,
             decoding_config=decoding_config,
+            roe_config=roe_config,
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,

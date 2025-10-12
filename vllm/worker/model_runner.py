@@ -1,9 +1,11 @@
+
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
 import gc
 import inspect
 import itertools
+import math
 import time
 import weakref
 from contextlib import contextmanager
@@ -20,14 +22,15 @@ from tqdm.auto import tqdm
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
-from vllm.attention.backends.utils import CommonAttentionState
+from vllm.attention.backends.utils import CommonAttentionState, PAD_SLOT_ID
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
                                              graph_capture)
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import (RoeForwardMetadata, get_forward_context,
+                                  set_forward_context)
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -36,6 +39,8 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
+from vllm.model_executor.layers.logits_processor import (
+    _apply_logits_processors)
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -140,6 +145,14 @@ class ModelInputForGPU(ModelRunnerInputBase):
     def __setstate__(self, state):
         self.__dict__.update(state)
         self.__dict__.update({'async_callback': None})
+
+
+@dataclass
+class RoeBatchInfo:
+    clean_num_decode_tokens: int
+    num_samples: int
+    selected_token_indices_clean: Optional[torch.Tensor]
+    sampling_metadata_clean: Optional["SamplingMetadata"]
 
 
 @dataclass(frozen=True)
@@ -1229,6 +1242,288 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         finally:
             self.in_profile_run = False
 
+    def _maybe_apply_roe_batching(
+        self, model_input: ModelInputForGPUWithSamplingMetadata
+    ) -> ModelInputForGPUWithSamplingMetadata:
+        roe_config = getattr(self.vllm_config, "roe_config", None)
+        attn_metadata = model_input.attn_metadata
+        if (roe_config is None or not roe_config.enabled
+                or roe_config.num_samples <= 1 or attn_metadata is None):
+            if attn_metadata is not None:
+                attn_metadata.roe_num_samples = 1
+                attn_metadata.roe_clean_decode_tokens = getattr(
+                    attn_metadata, "num_decode_tokens", 0)
+            return model_input
+
+        if attn_metadata.num_prefill_tokens > 0:
+            logger.debug("RoE: skipping replication when prefill tokens are present.")
+            attn_metadata.roe_num_samples = 1
+            attn_metadata.roe_clean_decode_tokens = attn_metadata.num_decode_tokens
+            return model_input
+
+        if getattr(attn_metadata, "use_cuda_graph", False):
+            logger.debug("RoE: skipping replication under CUDA graph capture.")
+            attn_metadata.roe_num_samples = 1
+            attn_metadata.roe_clean_decode_tokens = attn_metadata.num_decode_tokens
+            return model_input
+
+        num_samples = roe_config.num_samples
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        if num_decode_tokens == 0:
+            attn_metadata.roe_num_samples = 1
+            attn_metadata.roe_clean_decode_tokens = 0
+            return model_input
+
+        input_tokens = model_input.input_tokens
+        input_positions = model_input.input_positions
+        if input_tokens is None or input_positions is None:
+            attn_metadata.roe_num_samples = 1
+            attn_metadata.roe_clean_decode_tokens = num_decode_tokens
+            return model_input
+
+        device = input_tokens.device
+        decode_start = attn_metadata.num_prefill_tokens
+        decode_end = decode_start + num_decode_tokens
+        decode_tokens_tensor = input_tokens[decode_start:decode_end]
+        decode_positions_tensor = input_positions[decode_start:decode_end]
+        if decode_tokens_tensor.numel() == 0:
+            attn_metadata.roe_num_samples = 1
+            attn_metadata.roe_clean_decode_tokens = num_decode_tokens
+            return model_input
+
+        extra = num_samples - 1
+        expanded_tokens = torch.cat(
+            [input_tokens, decode_tokens_tensor.repeat(extra)], dim=0)
+        expanded_positions = torch.cat(
+            [input_positions, decode_positions_tensor.repeat(extra)], dim=0)
+
+        expanded_token_types = None
+        if model_input.token_types is not None:
+            decode_token_types = model_input.token_types[decode_start:decode_end]
+            expanded_token_types = torch.cat([
+                model_input.token_types,
+                decode_token_types.repeat(extra)
+            ], dim=0)
+
+        slot_mapping = attn_metadata.slot_mapping
+        if slot_mapping is not None and slot_mapping.numel() > 0:
+            extra_slots = slot_mapping.new_full(
+                (num_decode_tokens * extra, ), PAD_SLOT_ID)
+            expanded_slot_mapping = torch.cat([slot_mapping, extra_slots], dim=0)
+        else:
+            expanded_slot_mapping = slot_mapping
+
+        num_prefill_seqs = attn_metadata.num_prefills
+        seq_lens_tensor = attn_metadata.seq_lens_tensor
+        context_lens_tensor = attn_metadata.context_lens_tensor
+        block_tables = attn_metadata.block_tables
+
+        expanded_seq_lens_tensor = seq_lens_tensor
+        expanded_context_lens_tensor = context_lens_tensor
+        expanded_block_tables = block_tables
+        decode_seq_slice = slice(num_prefill_seqs, None)
+        if seq_lens_tensor is not None and seq_lens_tensor.numel() > 0:
+            decode_tensor = seq_lens_tensor[decode_seq_slice]
+            expanded_seq_lens_tensor = torch.cat(
+                [seq_lens_tensor, decode_tensor.repeat(extra)], dim=0)
+        if context_lens_tensor is not None and context_lens_tensor.numel() > 0:
+            decode_tensor = context_lens_tensor[decode_seq_slice]
+            expanded_context_lens_tensor = torch.cat(
+                [context_lens_tensor, decode_tensor.repeat(extra)], dim=0)
+        if block_tables is not None and block_tables.numel() > 0:
+            decode_blocks = block_tables[decode_seq_slice]
+            expanded_block_tables = torch.cat(
+                [block_tables, decode_blocks.repeat((extra, 1))], dim=0)
+
+        seq_lens_list = model_input.seq_lens
+        expanded_seq_lens_list = seq_lens_list
+        if seq_lens_list is not None:
+            decode_list = seq_lens_list[num_prefill_seqs:]
+            expanded_seq_lens_list = (seq_lens_list[:num_prefill_seqs] +
+                                      decode_list * num_samples)
+
+        query_lens_list = model_input.query_lens
+        expanded_query_lens_list = query_lens_list
+        if query_lens_list is not None:
+            decode_query = query_lens_list[num_prefill_seqs:]
+            expanded_query_lens_list = (query_lens_list[:num_prefill_seqs] +
+                                        decode_query * num_samples)
+
+        query_start_loc = attn_metadata.query_start_loc
+        if query_start_loc is not None:
+            diffs = query_start_loc[1:] - query_start_loc[:-1]
+            decode_diffs = diffs[num_prefill_seqs:]
+            expanded_diffs = torch.cat([diffs, decode_diffs.repeat(extra)],
+                                       dim=0)
+            new_query_start = torch.cumsum(
+                torch.cat([
+                    query_start_loc.new_zeros((1, )),
+                    expanded_diffs.to(query_start_loc.dtype)
+                ], dim=0),
+                dim=0)
+            attn_metadata.query_start_loc = new_query_start
+
+        seq_start_loc = attn_metadata.seq_start_loc
+        if seq_start_loc is not None and expanded_seq_lens_tensor is not None:
+            new_seq_start = torch.cumsum(
+                torch.cat([
+                    seq_start_loc.new_zeros((1, )),
+                    expanded_seq_lens_tensor.to(seq_start_loc.dtype)
+                ], dim=0),
+                dim=0)
+            attn_metadata.seq_start_loc = new_seq_start
+
+        attn_metadata.slot_mapping = expanded_slot_mapping
+        attn_metadata.seq_lens_tensor = expanded_seq_lens_tensor
+        attn_metadata.context_lens_tensor = expanded_context_lens_tensor
+        attn_metadata.block_tables = expanded_block_tables
+        if attn_metadata.seq_lens is not None:
+            decode_seq_lens = attn_metadata.seq_lens[num_prefill_seqs:]
+            attn_metadata.seq_lens = (attn_metadata.seq_lens[:num_prefill_seqs]
+                                      + decode_seq_lens * num_samples)
+
+        attn_metadata.num_decode_tokens = num_decode_tokens * num_samples
+        attn_metadata.roe_num_samples = num_samples
+        attn_metadata.roe_clean_decode_tokens = num_decode_tokens
+        attn_metadata.roe_pad_tokens = 0
+        attn_metadata._cached_decode_metadata = None
+        if hasattr(attn_metadata, '_cached_prefill_metadata'):
+            attn_metadata._cached_prefill_metadata = None
+
+        clean_sampling_metadata = model_input.sampling_metadata
+        expanded_sampling_metadata = clean_sampling_metadata
+        clean_selected_indices = None
+        if (clean_sampling_metadata is not None and
+                clean_sampling_metadata.selected_token_indices is not None):
+            base_indices = clean_sampling_metadata.selected_token_indices
+            offsets = torch.arange(num_samples,
+                                   device=base_indices.device,
+                                   dtype=base_indices.dtype) * num_decode_tokens
+            expanded_indices = (base_indices.unsqueeze(0) +
+                                offsets.unsqueeze(1)).reshape(-1)
+            expanded_sampling_metadata = SamplingMetadata(
+                seq_groups=clean_sampling_metadata.seq_groups,
+                selected_token_indices=expanded_indices,
+                categorized_sample_indices=(
+                    clean_sampling_metadata.categorized_sample_indices),
+                num_prompts=clean_sampling_metadata.num_prompts,
+                skip_sampler_cpu_output=
+                clean_sampling_metadata.skip_sampler_cpu_output,
+                reuse_sampling_tensors=
+                clean_sampling_metadata.reuse_sampling_tensors,
+            )
+            clean_selected_indices = base_indices.clone()
+
+        sample_indices = torch.zeros(expanded_tokens.shape[0],
+                                     dtype=torch.int32,
+                                     device=device)
+        if extra > 0:
+            replicate_assignments = torch.arange(
+                1, num_samples, device=device, dtype=torch.int32
+            ).repeat_interleave(num_decode_tokens)
+            sample_indices[input_tokens.shape[0]:] = replicate_assignments
+        attn_metadata.roe_sample_indices = sample_indices
+
+        attn_metadata.roe_info = RoeBatchInfo(
+            clean_num_decode_tokens=num_decode_tokens,
+            num_samples=num_samples,
+            selected_token_indices_clean=clean_selected_indices,
+            sampling_metadata_clean=clean_sampling_metadata,
+        )
+
+        if (expanded_sampling_metadata is not None
+                and expanded_sampling_metadata is not clean_sampling_metadata):
+            setattr(expanded_sampling_metadata, 'skip_logits_processors', True)
+        if clean_sampling_metadata is not None:
+            setattr(clean_sampling_metadata, 'skip_logits_processors', False)
+
+        return dataclasses.replace(
+            model_input,
+            input_tokens=expanded_tokens,
+            input_positions=expanded_positions,
+            token_types=expanded_token_types,
+            seq_lens=expanded_seq_lens_list,
+            query_lens=expanded_query_lens_list,
+            sampling_metadata=expanded_sampling_metadata,
+        )
+
+    def _aggregate_roe_logits(
+        self,
+        logits: Optional[torch.Tensor],
+        sampling_metadata: Optional[SamplingMetadata],
+        roe_info: Optional[RoeBatchInfo],
+    ) -> Tuple[Optional[torch.Tensor], Optional[SamplingMetadata]]:
+        debug_enabled = getattr(self, "_roe_debug", False)
+        self._roe_last_shapes = (False, None, None)
+        need_postprocess = bool(
+            sampling_metadata is not None
+            and getattr(sampling_metadata, "skip_logits_processors", False))
+        input_shape: Optional[Tuple[int, int, int]] = None
+        output_shape: Optional[Tuple[int, ...]] = None
+        if logits is not None:
+            output_shape = tuple(logits.shape)
+
+        def finalize(
+            result_logits: Optional[torch.Tensor],
+            result_metadata: Optional[SamplingMetadata],
+            aggregated_flag: bool,
+        ) -> Tuple[Optional[torch.Tensor], Optional[SamplingMetadata]]:
+            nonlocal output_shape
+            if sampling_metadata is not None:
+                setattr(sampling_metadata, "skip_logits_processors", False)
+            metadata = result_metadata
+            local_logits = result_logits
+            if metadata is not None:
+                setattr(metadata, "skip_logits_processors", False)
+            if need_postprocess and local_logits is not None and metadata is not None:
+                local_logits = _apply_logits_processors(local_logits, metadata)
+            if local_logits is not None:
+                output_shape = tuple(local_logits.shape)
+            self._roe_last_shapes = (aggregated_flag, input_shape, output_shape)
+            return local_logits, metadata
+
+        if logits is None or sampling_metadata is None:
+            if debug_enabled:
+                logger.debug("RoE aggregate skipped: missing logits or sampling metadata.")
+            return finalize(logits, sampling_metadata, False)
+        if roe_info is None:
+            if debug_enabled:
+                logger.debug("RoE aggregate skipped: no RoeBatchInfo available.")
+            return finalize(logits, sampling_metadata, False)
+        if roe_info.num_samples <= 1 or roe_info.sampling_metadata_clean is None:
+            if debug_enabled:
+                logger.debug("RoE aggregate skipped: num_samples=%s", roe_info.num_samples)
+            return finalize(logits, sampling_metadata, False)
+
+        clean_tokens = roe_info.clean_num_decode_tokens
+        if clean_tokens <= 0:
+            if debug_enabled:
+                logger.debug("RoE aggregate skipped: clean token count is zero.")
+            return finalize(logits, roe_info.sampling_metadata_clean, False)
+
+        expected = clean_tokens * roe_info.num_samples
+        input_shape = (clean_tokens, roe_info.num_samples, logits.shape[-1])
+        if logits.shape[0] != expected:
+            if debug_enabled:
+                logger.warning("RoE aggregate shape mismatch: expected %s tokens, got %s.",
+                               expected, logits.shape[0])
+            return finalize(logits, sampling_metadata, False)
+
+        try:
+            reshaped = logits.view(roe_info.num_samples, clean_tokens, -1)
+            reshaped = reshaped.permute(1, 0, 2).contiguous()
+            logits_avg = torch.logsumexp(reshaped.float(), dim=1)
+            logits_avg -= math.log(roe_info.num_samples)
+            aggregated_tensor = logits_avg.to(logits.dtype)
+            del reshaped, logits_avg
+            if debug_enabled:
+                logger.debug("RoE aggregate step %d: %s -> %s", self._roe_decode_step,
+                             input_shape, tuple(aggregated_tensor.shape))
+            return finalize(aggregated_tensor, roe_info.sampling_metadata_clean, True)
+        except Exception:
+            logger.exception("RoE aggregation failed; falling back to clean logits.")
+            return finalize(logits, sampling_metadata, False)
+
     @torch.inference_mode()
     def profile_run(self) -> None:
         max_num_batched_tokens = \
@@ -1621,9 +1916,36 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     """
     GPU model runner with sampling step.
     """
-    _model_input_cls: Type[ModelInputForGPUWithSamplingMetadata] = (
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_dtype: Optional[str] = "auto",
+        is_driver_worker: bool = False,
+        return_hidden_states: bool = False,
+        input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+    ) -> None:
+        super().__init__(vllm_config=vllm_config,
+                         kv_cache_dtype=kv_cache_dtype,
+                         is_driver_worker=is_driver_worker,
+                         return_hidden_states=return_hidden_states,
+                         input_registry=input_registry,
+                         mm_registry=mm_registry)
+        self._roe_decode_step = 0
+        self._roe_last_shapes = None
+        self._roe_debug = bool(getattr(self.vllm_config.roe_config, 'debug', False)
+                               if getattr(self.vllm_config, 'roe_config', None) else False)
+        self._roe_enabled = bool(getattr(self.vllm_config.roe_config, 'enabled', False)
+                                 if getattr(self.vllm_config, 'roe_config', None) else False)
+
+    def make_model_input_from_broadcasted_tensor_dict(
+        self,
+        tensor_dict: Dict[str, Any],
+    ) -> ModelInputForGPUWithSamplingMetadata:
+        _model_input_cls: Type[ModelInputForGPUWithSamplingMetadata] = (
         ModelInputForGPUWithSamplingMetadata)
-    _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
+        _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
@@ -1668,10 +1990,12 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             sampling_metadata = None
         is_prompt = (seq_group_metadata_list[0].is_prompt
                      if seq_group_metadata_list else None)
-        return dataclasses.replace(model_input,
-                                   sampling_metadata=sampling_metadata,
-                                   is_prompt=is_prompt,
-                                   virtual_engine=virtual_engine)
+        model_input = dataclasses.replace(
+            model_input,
+            sampling_metadata=sampling_metadata,
+            is_prompt=is_prompt,
+            virtual_engine=virtual_engine)
+        return self._maybe_apply_roe_batching(model_input)
 
     @torch.inference_mode()
     def execute_model(
@@ -1759,8 +2083,20 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_start.record()
 
         if not bypass_model_exec:
+            roe_sample_indices = getattr(model_input.attn_metadata,
+                                         "roe_sample_indices", None)
+            roe_num_samples = getattr(model_input.attn_metadata,
+                                      "roe_num_samples", 1)
+            roe_forward_meta = None
+            if roe_sample_indices is not None:
+                step = self._roe_decode_step if self._roe_enabled else None
+                roe_forward_meta = RoeForwardMetadata(
+                    sample_indices=roe_sample_indices,
+                    num_samples=roe_num_samples,
+                    step=step)
             with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config, virtual_engine):
+                                     self.vllm_config, virtual_engine,
+                                     roe_metadata=roe_forward_meta):
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
@@ -1813,13 +2149,30 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if not self.is_driver_worker:
             return []
 
+        roe_info: Optional[RoeBatchInfo] = getattr(model_input.attn_metadata,
+                                                   "roe_info", None)
+        logits_for_sampler, sampling_for_sampler = self._aggregate_roe_logits(
+            logits, model_input.sampling_metadata, roe_info)
+        aggregated = bool(
+            roe_info
+            and getattr(roe_info, 'num_samples', 1) > 1
+            and getattr(roe_info, 'clean_num_decode_tokens', 0) > 0
+            and sampling_for_sampler is getattr(roe_info, 'sampling_metadata_clean', None)
+        )
+        if self._roe_debug and self._roe_last_shapes is not None:
+            aggregated_flag, input_shape, output_shape = self._roe_last_shapes
+            logger.debug(
+                'RoE step %d aggregated=%s input_shape=%s output_shape=%s',
+                self._roe_decode_step, aggregated_flag, input_shape,
+                output_shape)
+
         if model_input.async_callback is not None:
             model_input.async_callback()
 
         # Sample the next token.
         output: SamplerOutput = self.sampler(
-            logits=logits,
-            sampling_metadata=model_input.sampling_metadata,
+            logits=logits_for_sampler,
+            sampling_metadata=sampling_for_sampler,
         )
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time
@@ -1852,6 +2205,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 hidden_states = hidden_or_intermediate_states
 
             output.hidden_states = hidden_states
+
+        if aggregated:
+            self._roe_decode_step += 1
 
         return [output]
 

@@ -874,6 +874,8 @@ def get_logprobs(
             if sampling_params.logprobs is not None:
                 largest_num_logprobs = max(largest_num_logprobs,
                                            sampling_params.logprobs)
+            else:
+                largest_num_logprobs = max(largest_num_logprobs, 0)
 
         assert len(next_token_ids) == len(query_indices)
 
@@ -1020,45 +1022,38 @@ def _get_sampled_logprob_if_needed(
 
     if seq_group.do_sample:
         assert len(next_token_ids) > 0
-        if num_logprobs is None:
-            for next_token_id in next_token_ids:
-                # Use a dummy logprob
-                sampled_logprobs.append({next_token_id: Logprob(inf)})
-        else:
-            # Pre-select items from tensor. tolist() is faster than repetitive
-            # `.item()` calls.
-            selected_logprob_items = selected_logprobs[
-                selected_logprobs_idx:selected_logprobs_idx +
-                len(next_token_ids)].tolist()
-            rank_items = ranks[selected_logprobs_idx:selected_logprobs_idx +
-                               len(next_token_ids)].tolist()
-            for idx, (next_token_id, parent_id) in enumerate(
-                    zip(next_token_ids, parent_seq_ids)):
-                # Get the logprob of a sampled token.
-                sampled_logprobs_dict = {
-                    next_token_id:
-                    (selected_logprob_items[idx], rank_items[idx])
-                }
-                if num_logprobs is not None and num_logprobs > 0:
-                    # Get top K logprobs.
-                    top_ids = top_token_ids[top_logprob_idx +
-                                            parent_id, :num_logprobs].tolist()
-                    top_probs = top_logprobs[
-                        top_logprob_idx + parent_id, :num_logprobs].tolist()
-                    # Top K is already sorted by rank, so we can use 1 ~
-                    # num_logprobs + 1 for rank.
-                    top_ranks = range(1, num_logprobs + 1)
-                    sampled_logprobs_dict.update({
-                        top_id: (top_prob, rank)
-                        for top_id, top_prob, rank in zip(
-                            top_ids, top_probs, top_ranks)
-                    })
-
-                sampled_logprobs.append({
-                    token_id: Logprob(*logprob_and_rank)
-                    for token_id, logprob_and_rank in
-                    sampled_logprobs_dict.items()
+        selected_logprob_items = selected_logprobs[
+            selected_logprobs_idx:selected_logprobs_idx +
+            len(next_token_ids)].tolist()
+        rank_items = ranks[selected_logprobs_idx:selected_logprobs_idx +
+                           len(next_token_ids)].tolist()
+        for idx, (next_token_id, parent_id) in enumerate(
+                zip(next_token_ids, parent_seq_ids)):
+            # Get the logprob of a sampled token.
+            sampled_logprobs_dict = {
+                next_token_id:
+                (selected_logprob_items[idx], rank_items[idx])
+            }
+            if num_logprobs is not None and num_logprobs > 0:
+                # Get top K logprobs.
+                top_ids = top_token_ids[top_logprob_idx +
+                                        parent_id, :num_logprobs].tolist()
+                top_probs = top_logprobs[
+                    top_logprob_idx + parent_id, :num_logprobs].tolist()
+                # Top K is already sorted by rank, so we can use 1 ~
+                # num_logprobs + 1 for rank.
+                top_ranks = range(1, num_logprobs + 1)
+                sampled_logprobs_dict.update({
+                    top_id: (top_prob, rank)
+                    for top_id, top_prob, rank in zip(
+                        top_ids, top_probs, top_ranks)
                 })
+
+            sampled_logprobs.append({
+                token_id: Logprob(*logprob_and_rank)
+                for token_id, logprob_and_rank in
+                sampled_logprobs_dict.items()
+            })
 
         # NOTE: This part of code is not intuitive. `selected_logprobs` include
         # logprobs for the current step, which has len(next_token_ids) tokens

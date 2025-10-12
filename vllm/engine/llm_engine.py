@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import json
+import math
 import time
+from pathlib import Path
 from collections import Counter as collectionsCounter
 from collections import deque
 from contextlib import contextmanager
@@ -48,7 +51,7 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
                            SequenceGroupBase, SequenceGroupMetadata,
-                           SequenceGroupOutput, SequenceStatus)
+                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -60,6 +63,19 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
 from vllm.utils import (Counter, Device, deprecate_kwargs,
                         resolve_obj_by_qualname, weak_bind)
 from vllm.version import __version__ as VLLM_VERSION
+
+class TokenConfidenceLogger:
+    """Utility to persist per-token confidence information to JSONL."""
+
+    def __init__(self, output_path: Union[str, Path]):
+        self.path = Path(output_path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def log(self, record: Dict[str, Any]) -> None:
+        with self.path.open('a', encoding='utf-8') as f:
+            f.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+
 from vllm.worker.model_runner_base import InputProcessingError
 
 logger = init_logger(__name__)
@@ -247,6 +263,10 @@ class LLMEngine:
 
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
+
+        self.token_conf_logger = TokenConfidenceLogger(
+            Path('logs/token_confidence.jsonl'))
+        self._token_conf_stats: Dict[str, Dict[str, float]] = {}
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
@@ -794,6 +814,43 @@ class LLMEngine:
                 raise ValueError(
                     "Token id {} is out of vocabulary".format(max_input_id))
 
+    def _log_token_confidence(self, seq_group: SequenceGroup, seq: Sequence, sample: SequenceOutput) -> None:
+        if self.token_conf_logger is None:
+            return
+        logprob_entry = sample.logprobs.get(sample.output_token) if sample.logprobs else None
+        if logprob_entry is None:
+            logger.debug('Token confidence unavailable for request %s at step %d', seq_group.request_id, seq.get_output_len())
+            return
+        confidence = float(math.exp(logprob_entry.logprob))
+        if not math.isfinite(confidence):
+            logger.debug('Token confidence not finite for request %s at step %d', seq_group.request_id, seq.get_output_len())
+            return
+        confidence = max(0.0, min(1.0, confidence))
+        if self.detokenizer is not None:
+            try:
+                token_str = self.detokenizer.decode([sample.output_token])
+            except Exception:
+                token_str = ''
+        else:
+            token_str = ''
+        step_index = seq.get_output_len() - 1
+        record = {
+            'request_id': seq_group.request_id,
+            'step': step_index,
+            'token_id': sample.output_token,
+            'token_str': token_str,
+            'confidence': confidence,
+        }
+        self.token_conf_logger.log(record)
+        stats = self._token_conf_stats.setdefault(seq_group.request_id, {
+            'num_tokens': 0.0,
+            'sum_conf': 0.0,
+            'sum_logprob': 0.0,
+        })
+        stats['num_tokens'] += 1.0
+        stats['sum_conf'] += confidence
+        stats['sum_logprob'] += float(logprob_entry.logprob)
+
     def _create_sequence_group_with_sampling(
         self,
         request_id: str,
@@ -1140,6 +1197,25 @@ class LLMEngine:
                 use_cache=self.use_cached_outputs)
             if request_output:
                 ctx.request_outputs.append(request_output)
+            stats = self._token_conf_stats.pop(seq_group.request_id, None)
+            if stats and self.token_conf_logger is not None:
+                num_tokens = int(stats.get('num_tokens', 0))
+                if num_tokens > 0:
+                    mean_conf = stats['sum_conf'] / num_tokens
+                    mean_logprob = stats['sum_logprob'] / num_tokens
+                    summary_record = {
+                        'summary': {
+                            'request_id': seq_group.request_id,
+                            'num_tokens': num_tokens,
+                            'mean_confidence': mean_conf,
+                            'mean_logprob': mean_logprob,
+                        }
+                    }
+                    self.token_conf_logger.log(summary_record)
+                else:
+                    logger.debug('No generated tokens for request %s; skipping confidence summary.', seq_group.request_id)
+            elif stats is None:
+                logger.debug('No confidence stats collected for request %s.', seq_group.request_id)
 
         # When we process a single request, we skip it for the next time,
         # and invoke the request output callback (if there was final output)
@@ -1262,13 +1338,14 @@ class LLMEngine:
                 seq = seq_group.seqs[0]
 
                 if self.scheduler_config.is_multi_step:
-                    is_prefill_append = seq.data.get_num_uncomputed_tokens(
-                    ) == 0
+                    is_prefill_append = seq.data.get_num_uncomputed_tokens() == 0
                     seq.append_token_id(sample.output_token, sample.logprobs)
                     if not is_prefill_append:
+                        self._log_token_confidence(seq_group, seq, sample)
                         seq_group.update_num_computed_tokens(1)
                 else:
                     seq.append_token_id(sample.output_token, sample.logprobs)
+                    self._log_token_confidence(seq_group, seq, sample)
 
     def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
