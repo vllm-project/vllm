@@ -114,8 +114,8 @@ class KVCacheBlock:
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
-    prev_free_block: "KVCacheBlock" | None = None
-    next_free_block: "KVCacheBlock" | None = None
+    prev_free_block: "KVCacheBlock | None" = None
+    next_free_block: "KVCacheBlock | None" = None
 
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
