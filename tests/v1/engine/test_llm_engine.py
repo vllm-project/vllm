@@ -11,6 +11,8 @@ from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 if TYPE_CHECKING:
     from tests.conftest import VllmRunner
+else:
+    VllmRunner = object
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"

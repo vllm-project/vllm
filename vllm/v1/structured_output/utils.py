@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import hashlib
 import importlib.metadata
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import regex as re
@@ -35,7 +34,7 @@ else:
         "transformers.models.gpt2.tokenization_gpt2",
     )
 
-    AnyTokenizer = Any
+    AnyTokenizer = object
     SchedulerOutput = object
     InputBatch = object
 

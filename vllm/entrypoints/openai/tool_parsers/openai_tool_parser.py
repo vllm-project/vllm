@@ -20,6 +20,8 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer import AnyTokenizer
+else:
+    AnyTokenizer = object
 
 logger = init_logger(__name__)
 

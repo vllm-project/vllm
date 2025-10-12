@@ -28,6 +28,8 @@ from vllm.sampling_params import (
 
 if TYPE_CHECKING:
     from vllm.config.model import TokenizerMode
+else:
+    TokenizerMode = str
 
 NGRAM_SPEC_CONFIG = {
     "model": "[ngram]",

@@ -18,6 +18,8 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 
 if TYPE_CHECKING:
     from tests.conftest import VllmRunner
+else:
+    VllmRunner = object
 
 
 @dataclass

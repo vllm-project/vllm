@@ -14,6 +14,8 @@ from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from tests.conftest import VllmRunner
+else:
+    VllmRunner = object
 
 MODELS = [
     "Qwen/Qwen2.5-1.5B-Instruct",
