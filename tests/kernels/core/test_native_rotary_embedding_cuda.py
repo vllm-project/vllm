@@ -17,6 +17,7 @@ DTYPES = (torch.float16, torch.bfloat16, torch.float32)
         (257, 4, 128, 64),
     ),
 )
+@pytest.mark.parametrize("is_neox_style", (False, True))
 @pytest.mark.parametrize("with_key", (False, True))
 @torch.inference_mode()
 def test_rotary_embedding_forward_cuda_matches_native(
@@ -26,6 +27,7 @@ def test_rotary_embedding_forward_cuda_matches_native(
     head_size: int,
     rotary_dim: int,
     with_key: bool,
+    is_neox_style: bool,
 ) -> None:
     """Validate that CUDA and native rotary embeddings match numerically."""
     torch.manual_seed(0)
@@ -37,7 +39,7 @@ def test_rotary_embedding_forward_cuda_matches_native(
         rotary_dim=rotary_dim,
         max_position_embeddings=max(1024, num_tokens + 5),
         base=10000.0,
-        is_neox_style=True,
+        is_neox_style=is_neox_style,
         dtype=dtype,
     ).to(device)
 
@@ -52,11 +54,7 @@ def test_rotary_embedding_forward_cuda_matches_native(
     )
     key = torch.randn_like(query) if with_key else None
 
-    native_out = op.forward_native(
-        positions,
-        query.clone(),
-        key.clone() if key is not None else None,
-    )
+    native_out = op.forward_native(positions, query, key)
     cuda_out = op.forward_cuda(
         positions,
         query.clone(),
