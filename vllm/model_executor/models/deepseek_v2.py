@@ -158,6 +158,7 @@ class DeepseekV2MoE(nn.Module):
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        layer_idx: int = 0,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -254,8 +255,21 @@ class DeepseekV2MoE(nn.Module):
             else None,
         )
 
+        self.layer_idx = layer_idx
+
+        if layer_idx == 1:
+            print(f"MODEL PCONF = {parallel_config}")
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
+
+        torch.set_printoptions(profile="full")
+
+        if self.layer_idx == 1:
+            print(f"HIDDEN_STATES {hidden_states.shape}")
+            print(f"W1 {self.experts.w13_weight.shape}")
+            print(f"W2 {self.experts.w2_weight.shape}")
+
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # Chunk the hidden states so they aren't replicated across TP ranks.
@@ -273,6 +287,10 @@ class DeepseekV2MoE(nn.Module):
         else:
             # router_logits: (num_tokens, n_experts)
             router_logits, _ = self.gate(hidden_states)
+
+            if self.layer_idx == 1:
+                print(f"ROUTER_LOGITS {router_logits.shape}")
+
             fused_moe_out = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
             )
@@ -1032,6 +1050,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                layer_idx=self.layer_idx,
             )
         else:
             self.mlp = DeepseekV2MLP(

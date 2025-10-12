@@ -542,6 +542,12 @@ def fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
+def pp(msg, t):
+    #print(f"{msg} {t.shape}")
+    #print(f"{msg} {t.shape} {t}")
+    pass
+
+
 def invoke_fused_moe_kernel(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -568,6 +574,9 @@ def invoke_fused_moe_kernel(
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
+
+    pp("A = ", A)
+    pp("B = ", B)
 
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
@@ -733,6 +742,8 @@ def invoke_fused_moe_kernel(
             BLOCK_SIZE_K=BLOCK_SIZE_K,
             **config,
         )
+
+    pp("C = ", C)
 
 
 @triton.jit
