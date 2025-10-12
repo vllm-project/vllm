@@ -190,7 +190,7 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import Generic, Optional, TypeVar, Union
+from typing import ClassVar, Generic, Optional, TypeVar, Union
 
 import torch
 from tqdm import tqdm
@@ -255,8 +255,8 @@ def is_rocm_aiter_fp8bmm_enabled() -> bool:
 
 
 if is_rocm_aiter_fp8bmm_enabled():
-    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501 # isort: skip
-        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm,
+    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501
+        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm,  # noqa: E501
     )
 
     def dynamic_per_batched_tensor_quant(
@@ -370,6 +370,7 @@ class CudnnPrefillMetadata(MLACommonPrefillMetadata):
 class MLACommonDecodeMetadata:
     block_table: torch.Tensor
     seq_lens: torch.Tensor
+    dcp_tot_seq_lens: Optional[torch.Tensor]
 
 
 D = TypeVar("D", bound=MLACommonDecodeMetadata)
@@ -454,6 +455,20 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     understand this class
     """
 
+    # Whether the backend supports reordering the batch such that
+    # short sequences (i.e. verification for speculative decoding) are
+    # classified as decode requests.
+    # If True, this will increase `reorder_batch_threshold` (below) when
+    # speculative decoding is enabled, and set `require_uniform=True` when
+    # when reordering the batch. Non-uniform decode requests will
+    # fall back to prefill in this case.
+    supports_uniform_spec_as_decode: ClassVar[bool] = False
+
+    # The threshold for reordering the batch into decode and prefill requests.
+    # If > 1, the batch will be reordered such that requests with
+    # query length <= threshold are classified as decode requests.
+    # Use `supports_uniform_spec_as_decode` (above) to set this automatically
+    # when speculative decoding is enabled.
     reorder_batch_threshold: int = 1
 
     @staticmethod
@@ -503,6 +518,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         self.compilation_config = vllm_config.compilation_config
+        self.vllm_config = vllm_config
         self.device = device
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
@@ -577,6 +593,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 dtype=torch.int8,
                 device=device,
             )
+
+        supports_spec_as_decode = self.supports_uniform_spec_as_decode
+        self._init_reorder_batch_threshold(
+            self.reorder_batch_threshold, supports_spec_as_decode
+        )
 
     def _build_fi_prefill_wrappers(self, prefill: FlashInferPrefillMetadata):
         qo_indptr = prefill.query_start_loc
@@ -662,10 +683,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        dcp_tot_seq_lens_device: Optional[torch.Tensor],
     ) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
+            dcp_tot_seq_lens=dcp_tot_seq_lens_device,
         )
 
     def build_for_cudagraph_capture(
@@ -707,6 +730,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -714,13 +738,18 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold,
+                require_uniform=self.supports_uniform_spec_as_decode,
             )
         )
 
         # Note(hc): update seq_lens of decode reqs under DCP.
         if self.dcp_world_size > 1:
-            seq_lens[:num_decodes] = seq_lens[:num_decodes] // self.dcp_world_size + (
+            assert dcp_local_seq_lens is not None
+            dcp_local_seq_lens[:num_decodes] = seq_lens[
+                :num_decodes
+            ] // self.dcp_world_size + (
                 self.dcp_rank <= (seq_lens[:num_decodes] - 1) % self.dcp_world_size
             )
 
@@ -877,10 +906,15 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
                 seq_lens_cpu=seq_lens_cpu[:num_decodes],
-                seq_lens_device=seq_lens[:num_decodes],
+                seq_lens_device=dcp_local_seq_lens[:num_decodes]
+                if self.dcp_world_size > 1 and dcp_local_seq_lens is not None
+                else seq_lens[:num_decodes],
                 query_start_loc_cpu=query_start_loc_cpu[: num_decodes + 1],
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
+                dcp_tot_seq_lens_device=seq_lens[:num_decodes]
+                if self.dcp_world_size > 1
+                else None,
             )
 
         attn_metadata = self.metadata_cls(
@@ -1284,8 +1318,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             actual_seq_lens_q=prefill.query_seq_lens.view(-1, 1, 1, 1),
             actual_seq_lens_kv=prefill.query_seq_lens.view(-1, 1, 1, 1),
             causal=True,
-            return_lse=True,  # do not support False for now
-            is_cuda_graph_compatible=True,  # Indicates actual_seq_lens are on GPU or CPU.
+            # Do not support False for now
+            return_lse=True,
+            # Indicates actual_seq_lens are on GPU or CPU.
+            is_cuda_graph_compatible=True,
         )
         if return_softmax_lse:
             return output, lse
@@ -1342,7 +1378,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             ),
             causal=False,
             return_lse=True,
-            is_cuda_graph_compatible=True,  # Indicates actual_seq_lens are on GPU or CPU.
+            # Indicates actual_seq_lens are on GPU or CPU.
+            is_cuda_graph_compatible=True,
         )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):

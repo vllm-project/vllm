@@ -10,6 +10,7 @@ from typing import Callable, Optional
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import CompilationLevel, CUDAGraphMode, get_current_vllm_config
 from vllm.logger import init_logger
 
@@ -44,6 +45,19 @@ class TorchCompileWrapperWithCustomDispatcher:
                 options = (
                     get_current_vllm_config().compilation_config.inductor_compile_config
                 )
+            if envs.VLLM_USE_AOT_COMPILE:
+                options = options or {}
+                # This effectively drop all the guards.
+                # We need this because bytecode hook is not used any more to
+                # drop guards in the AOT compile mode.
+                options["guard_filter_fn"] = lambda guards: [False for _ in guards]
+                if hasattr(torch._dynamo.config, "enable_aot_compile"):
+                    torch._dynamo.config.enable_aot_compile = True
+                else:
+                    msg = "torch._dynamo.config.enable_aot_compile is not "
+                    msg += "available. AOT compile is disabled and please "
+                    msg += "upgrade PyTorch version to use AOT compile."
+                    logger.warning(msg)
 
             compiled_callable = torch.compile(
                 self.forward, fullgraph=True, backend=backend, options=options
@@ -60,6 +74,15 @@ class TorchCompileWrapperWithCustomDispatcher:
         self.use_custom_dispatcher: bool = (
             compilation_level >= CompilationLevel.DYNAMO_ONCE
         )
+
+    def aot_compile(self, *args, **kwargs):
+        if not hasattr(self.compiled_callable, "aot_compile"):
+            raise RuntimeError(
+                "aot_compile is not supported by the current configuration. "
+                + "Please make sure torch.compile is enabled with the latest "
+                + f"version of PyTorch (current using torch: {torch.__version__})"
+            )
+        return self.compiled_callable.aot_compile((args, kwargs))
 
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.
@@ -119,9 +142,12 @@ class TorchCompileWrapperWithCustomDispatcher:
 
             src = depyf.decompile(new_code)
             msg = (
-                "Assigning / modifying buffers of nn.Module during forward pass is not allowed when using cudagraph inside the compiler because it will cause silent errors. Please use eager mode or fix the code. The following code contains clues about which buffer is being modified (please search for the usage of the function `update`):\n"
-                + src
-            )  # noqa
+                "Assigning / modifying buffers of nn.Module during forward pass is not "
+                "allowed when using cudagraph inside the compiler because it will "
+                "cause silent errors. Please use eager mode or fix the code. The "
+                "following code contains clues about which buffer is being modified "
+                f"(please search for the usage of the function `update`):\n{src}"
+            )
             raise RuntimeError(msg)
 
     @contextmanager
@@ -132,8 +158,9 @@ class TorchCompileWrapperWithCustomDispatcher:
         variables as the original code. Therefore we can directly switch
         the code object in the function and call it.
 
-        See https://dev-discuss.pytorch.org/t/what-is-the-relationship-requirement-among-original-bytecode-transformed-bytecode-and-bytecode-returned-by-hooks-in-dynamo/1693/7 for more details.
-        """  # noqa
+        See https://dev-discuss.pytorch.org/t/what-is-the-relationship-requirement-among-original-bytecode-transformed-bytecode-and-bytecode-returned-by-hooks-in-dynamo/1693/7
+        for more details.
+        """
         self.__class__.forward.__code__ = self.compiled_codes[index]
         yield
         self.__class__.forward.__code__ = self.original_code_object

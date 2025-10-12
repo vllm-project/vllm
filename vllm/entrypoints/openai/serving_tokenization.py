@@ -6,13 +6,9 @@ from typing import Any, Final, Optional, Union
 import jinja2
 from fastapi import Request
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.entrypoints.openai.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
@@ -22,8 +18,6 @@ from vllm.entrypoints.openai.protocol import (
     TokenizeResponse,
     TokenizerInfoResponse,
 )
-
-# yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
@@ -37,7 +31,6 @@ class OpenAIServingTokenization(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -48,7 +41,6 @@ class OpenAIServingTokenization(OpenAIServing):
     ) -> None:
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             log_error_stack=log_error_stack,

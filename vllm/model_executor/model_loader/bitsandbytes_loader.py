@@ -22,8 +22,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-
-# yapf: enable
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
@@ -50,8 +48,6 @@ from vllm.model_executor.utils import (
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
-
-# yapf conflicts with isort for this block
 
 logger = init_logger(__name__)
 
@@ -395,7 +391,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     total_shard_sizes = next(
                         (
                             sizes
-                            for module, sizes in self.maybe_fused_weights_modules.items()
+                            for module, sizes in self.maybe_fused_weights_modules.items()  # noqa: E501
                             if check_match(mapped_weight_name, module)
                         )
                     )
@@ -546,8 +542,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             )
 
         quant_config = getattr(model_config.hf_config, "quantization_config", None)
-        if quant_config is not None:
-            quant_method = quant_config.get("quant_method")
+        if quant_config and (quant_method := quant_config.get("quant_method")):
             if quant_method == "bitsandbytes":
                 self.pre_quant = True
             else:
@@ -562,7 +557,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 "Prequant BitsAndBytes models with tensor parallelism is not "
                 "supported. Please try with pipeline parallelism."
             )
-        if self.pre_quant:
+        if quant_config and self.pre_quant:
             self.load_8bit = quant_config.get("load_in_8bit", False)
 
     def _initialize_loader_state(

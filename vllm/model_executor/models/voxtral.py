@@ -12,12 +12,8 @@ import regex as re
 import torch
 import torch.nn as nn
 from mistral_common.audio import mel_filter_bank
-from mistral_common.protocol.instruct.messages import (
-    AudioChunk,
-    RawAudio,
-    TextChunk,
-    UserMessage,
-)
+from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChunk
+from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.protocol.transcription.request import TranscriptionRequest
 from mistral_common.tokens.tokenizers.audio import Audio, AudioEncoder
@@ -32,11 +28,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import SupportsPP
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-
-# yapf: disable
 from vllm.model_executor.models.whisper import WhisperEncoder
-
-# yapf: enable
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -65,7 +57,7 @@ from vllm.transformers_utils.tokenizer import (
 )
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsTranscription
-from .utils import flatten_bn, init_vllm_registered_model, maybe_prefix
+from .utils import init_vllm_registered_model, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -341,6 +333,8 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
 class VoxtralForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsTranscription
 ):
+    merge_by_field_config = True
+
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     packed_modules_mapping = {
@@ -449,7 +443,6 @@ class VoxtralForConditionalGeneration(
                 f"Incorrect type of audio_arrays. Got type: {type(audio_arrays)}"
             )
 
-        audio_arrays = flatten_bn(audio_arrays)
         if isinstance(audio_arrays, torch.Tensor):
             audio_arrays = list(audio_arrays.unbind(0))
         return audio_arrays
@@ -520,14 +513,18 @@ class VoxtralForConditionalGeneration(
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # fmt: off
         remapping_rules = [
             (r"mm_whisper_embeddings\.(.*)", r"\1"),
             (r"audio_language_projection\.(.*)", r"audio_language_adapter.\1"),
-            (r"audio_language_adapter\.0\.weight", r"audio_language_adapter.w_in.weight"),  # noqa: E501
-            (r"audio_language_adapter\.2\.weight", r"audio_language_adapter.w_out.weight"),  # noqa: E501
+            (
+                r"audio_language_adapter\.0\.weight",
+                r"audio_language_adapter.w_in.weight",
+            ),
+            (
+                r"audio_language_adapter\.2\.weight",
+                r"audio_language_adapter.w_out.weight",
+            ),
         ]
-        # fmt: on
 
         audio_params = dict(
             nn.ModuleDict(
@@ -682,19 +679,44 @@ class AudioLanguageAdapter(nn.Module):
 class VoxtralEncoderModel(nn.Module):
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
-    # fmt: off
     mistral_remapping = [
-        (r"whisper_encoder\.conv_layers\.0\.(weight|bias)", r"whisper_encoder.conv1.\1"), # noqa: E501
-        (r"whisper_encoder\.conv_layers\.1\.(weight|bias)", r"whisper_encoder.conv2.\1"), # noqa: E501
-        (r"whisper_encoder\.transformer\.layers\.(\d+)\.attention\.w([qkv])\.(weight|bias)", r"whisper_encoder.layers.\1.self_attn.\2_proj.\3"), # noqa: E501
-        (r"whisper_encoder\.transformer\.layers\.(\d+)\.attention\.wo\.(weight|bias)", r"whisper_encoder.layers.\1.self_attn.out_proj.\2"), # noqa: E501
-        (r"whisper_encoder\.transformer\.layers\.(\d+)\.attention_norm\.(weight|bias)", r"whisper_encoder.layers.\1.self_attn_layer_norm.\2"), # noqa: E501
-        (r"whisper_encoder\.transformer\.layers\.(\d+)\.feed_forward\.w1\.(weight|bias)", r"whisper_encoder.layers.\1.mlp.fc1.\2"), # noqa: E501
-        (r"whisper_encoder\.transformer\.layers\.(\d+)\.feed_forward\.w2\.(weight|bias)", r"whisper_encoder.layers.\1.mlp.fc2.\2"), # noqa: E501
-        (r"whisper_encoder\.transformer\.layers\.(\d+)\.ffn_norm\.(weight|bias)", r"whisper_encoder.layers.\1.final_layer_norm.\2"), # noqa: E501
-        (r"whisper_encoder\.transformer\.norm\.(weight|bias)", r"whisper_encoder.layer_norm.\1"), # noqa: E501
+        (
+            r"whisper_encoder\.conv_layers\.0\.(weight|bias)",
+            r"whisper_encoder.conv1.\1",
+        ),
+        (
+            r"whisper_encoder\.conv_layers\.1\.(weight|bias)",
+            r"whisper_encoder.conv2.\1",
+        ),
+        (
+            r"whisper_encoder\.transformer\.layers\.(\d+)\.attention\.w([qkv])\.(weight|bias)",  # noqa: E501
+            r"whisper_encoder.layers.\1.self_attn.\2_proj.\3",
+        ),
+        (
+            r"whisper_encoder\.transformer\.layers\.(\d+)\.attention\.wo\.(weight|bias)",  # noqa: E501
+            r"whisper_encoder.layers.\1.self_attn.out_proj.\2",
+        ),
+        (
+            r"whisper_encoder\.transformer\.layers\.(\d+)\.attention_norm\.(weight|bias)",  # noqa: E501
+            r"whisper_encoder.layers.\1.self_attn_layer_norm.\2",
+        ),
+        (
+            r"whisper_encoder\.transformer\.layers\.(\d+)\.feed_forward\.w1\.(weight|bias)",  # noqa: E501
+            r"whisper_encoder.layers.\1.mlp.fc1.\2",
+        ),
+        (
+            r"whisper_encoder\.transformer\.layers\.(\d+)\.feed_forward\.w2\.(weight|bias)",  # noqa: E501
+            r"whisper_encoder.layers.\1.mlp.fc2.\2",
+        ),
+        (
+            r"whisper_encoder\.transformer\.layers\.(\d+)\.ffn_norm\.(weight|bias)",
+            r"whisper_encoder.layers.\1.final_layer_norm.\2",
+        ),
+        (
+            r"whisper_encoder\.transformer\.norm\.(weight|bias)",
+            r"whisper_encoder.layer_norm.\1",
+        ),
     ]
-    # fmt: on
 
     def __init__(
         self,

@@ -11,9 +11,6 @@ from vllm.attention.backends.abstract import AttentionLayer
 from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
 from vllm.config import VllmConfig
 from vllm.utils import cdiv
-
-# yapf conflicts with isort for this docstring
-# yapf: disable
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -23,8 +20,6 @@ from vllm.v1.attention.backends.mla.common import (
 )
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
-
-# yapf: enable
 
 
 def is_aiter_mla_enabled() -> bool:
@@ -121,6 +116,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        dcp_tot_seq_lens_device: Optional[torch.Tensor],
     ) -> AiterMLADecodeMetadata:
         page_size = self.kv_cache_spec.block_size
         block_table_bounds = (seq_lens_device + page_size - 1) // page_size
@@ -179,6 +175,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len=paged_kv_last_page_len,
             qo_indptr=qo_indptr,
+            dcp_tot_seq_lens=dcp_tot_seq_lens_device,
         )
 
         return attn_metadata

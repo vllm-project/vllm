@@ -14,12 +14,9 @@ import torch
 from prometheus_client import start_http_server
 from tqdm import tqdm
 
-from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-
-# yapf: disable
 from vllm.entrypoints.openai.protocol import (
     BatchRequestInput,
     BatchRequestOutput,
@@ -30,8 +27,6 @@ from vllm.entrypoints.openai.protocol import (
     RerankResponse,
     ScoreResponse,
 )
-
-# yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
@@ -332,7 +327,6 @@ async def run_request(
 
 async def run_batch(
     engine_client: EngineClient,
-    vllm_config: VllmConfig,
     args: Namespace,
 ) -> None:
     if args.served_model_name is not None:
@@ -349,22 +343,19 @@ async def run_batch(
         BaseModelPath(name=name, model_path=args.model) for name in served_model_names
     ]
 
-    model_config = vllm_config.model_config
-
+    model_config = engine_client.model_config
     supported_tasks = await engine_client.get_supported_tasks()
-    logger.info("Supported_tasks: %s", supported_tasks)
+    logger.info("Supported tasks: %s", supported_tasks)
 
     # Create the openai serving objects.
     openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
-        model_config=model_config,
         base_model_paths=base_model_paths,
         lora_modules=None,
     )
     openai_serving_chat = (
         OpenAIServingChat(
             engine_client,
-            model_config,
             openai_serving_models,
             args.response_role,
             request_logger=request_logger,
@@ -378,7 +369,6 @@ async def run_batch(
     openai_serving_embedding = (
         OpenAIServingEmbedding(
             engine_client,
-            model_config,
             openai_serving_models,
             request_logger=request_logger,
             chat_template=None,
@@ -396,7 +386,6 @@ async def run_batch(
     openai_serving_scores = (
         ServingScores(
             engine_client,
-            model_config,
             openai_serving_models,
             request_logger=request_logger,
         )
@@ -513,9 +502,7 @@ async def main(args: Namespace):
         usage_context=UsageContext.OPENAI_BATCH_RUNNER,
         disable_frontend_multiprocessing=False,
     ) as engine_client:
-        vllm_config = await engine_client.get_vllm_config()
-
-        await run_batch(engine_client, vllm_config, args)
+        await run_batch(engine_client, args)
 
 
 if __name__ == "__main__":

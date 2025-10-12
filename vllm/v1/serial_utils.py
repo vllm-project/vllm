@@ -18,8 +18,6 @@ from msgspec import msgpack
 
 from vllm import envs
 from vllm.logger import init_logger
-
-# yapf: disable
 from vllm.multimodal.inputs import (
     BaseMultiModalField,
     MultiModalBatchedField,
@@ -32,8 +30,6 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
-
-# yapf: enable
 from vllm.v1.engine import UtilityResult
 
 logger = init_logger(__name__)
@@ -294,9 +290,7 @@ class MsgpackDecoder:
             _log_insecure_serialization_warning()
 
     def decode(self, bufs: Union[bytestr, Sequence[bytestr]]) -> Any:
-        if isinstance(bufs, (bytes, bytearray, memoryview, zmq.Frame)):
-            # TODO - This check can become `isinstance(bufs, bytestr)`
-            # as of Python 3.10.
+        if isinstance(bufs, bytestr):  # type: ignore
             return self.decoder.decode(bufs)
 
         self.aux_buffers = bufs

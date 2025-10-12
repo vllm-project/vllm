@@ -31,7 +31,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         if self.base_layer.num_added_embeddings_per_partition > 0:
             # We can start adding lora weights
             self.embeddings_weights = self.base_layer.weight.data[
-                self.base_layer.num_org_embeddings_per_partition : self.base_layer.num_org_embeddings_per_partition
+                self.base_layer.num_org_embeddings_per_partition : self.base_layer.num_org_embeddings_per_partition  # noqa: E501
                 + self.base_layer.num_added_embeddings_per_partition
             ]
             self.embeddings_slice = (
@@ -91,7 +91,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
         embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
     ):
         self.reset_lora(index)
         # NOTE self.lora_a_stacked is row-major, and lora_a is col-major,

@@ -10,13 +10,9 @@ import torch
 from fastapi import Request
 from typing_extensions import assert_never, override
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-
-# yapf conflicts with isort for this docstring
-# yapf: disable
 from vllm.entrypoints.openai.protocol import (
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
@@ -32,8 +28,6 @@ from vllm.entrypoints.openai.serving_engine import (
     ServeContext,
     TextTokensPrompt,
 )
-
-# yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
@@ -602,7 +596,6 @@ class OpenAIServingEmbedding(EmbeddingMixin):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -613,7 +606,6 @@ class OpenAIServingEmbedding(EmbeddingMixin):
     ) -> None:
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             log_error_stack=log_error_stack,

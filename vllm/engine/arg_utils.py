@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# yapf: disable
 import argparse
 import copy
 import dataclasses
@@ -15,11 +14,8 @@ from typing import (
     Annotated,
     Any,
     Callable,
-    Dict,
-    List,
     Literal,
     Optional,
-    Type,
     TypeVar,
     Union,
     cast,
@@ -31,48 +27,47 @@ import huggingface_hub
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
+from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm.config import (
-    BlockSize,
     CacheConfig,
-    CacheDType,
     CompilationConfig,
     ConfigType,
-    ConvertOption,
-    DetailedTraceModules,
-    Device,
     DeviceConfig,
-    DistributedExecutorBackend,
     EPLBConfig,
-    HfOverrides,
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
-    LogprobsMode,
     LoRAConfig,
-    MambaDType,
-    MMEncoderTPMode,
     ModelConfig,
-    ModelDType,
+    MultiModalConfig,
     ObservabilityConfig,
     ParallelConfig,
     PoolerConfig,
-    PrefixCachingHashAlgo,
     ReasoningConfig,
-    RunnerOption,
     SchedulerConfig,
-    SchedulerPolicy,
     SpeculativeConfig,
     StructuredOutputsConfig,
-    TaskOption,
-    TokenizerMode,
     VllmConfig,
     get_attr_docs,
 )
-from vllm.config.multimodal import MMCacheType, MultiModalConfig
-from vllm.config.parallel import ExpertPlacementStrategy
+from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
+from vllm.config.device import Device
+from vllm.config.model import (
+    ConvertOption,
+    HfOverrides,
+    LogprobsMode,
+    ModelDType,
+    RunnerOption,
+    TaskOption,
+    TokenizerMode,
+)
+from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
+from vllm.config.observability import DetailedTraceModules
+from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
+from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -88,8 +83,6 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import FlexibleArgumentParser, GiB_bytes, get_ip, is_in_ray_actor
 from vllm.v1.sample.logits_processor import LogitsProcessor
-
-# yapf: enable
 
 if TYPE_CHECKING:
     from vllm.executor.executor_base import ExecutorBase
@@ -218,6 +211,13 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         # Get the default value of the field
         if field.default is not MISSING:
             default = field.default
+            # Handle pydantic.Field defaults
+            if isinstance(default, FieldInfo):
+                default = (
+                    default.default
+                    if default.default_factory is None
+                    else default.default_factory()
+                )
         elif field.default_factory is not MISSING:
             default = field.default_factory()
 
@@ -329,7 +329,7 @@ class EngineArgs:
     """Arguments for vLLM engine."""
 
     model: str = ModelConfig.model
-    served_model_name: Optional[Union[str, List[str]]] = ModelConfig.served_model_name
+    served_model_name: Optional[Union[str, list[str]]] = ModelConfig.served_model_name
     tokenizer: Optional[str] = ModelConfig.tokenizer
     hf_config_path: Optional[str] = ModelConfig.hf_config_path
     runner: RunnerOption = ModelConfig.runner
@@ -354,7 +354,7 @@ class EngineArgs:
     # is intended for expert use only. The API may change without
     # notice.
     distributed_executor_backend: Optional[
-        Union[str, DistributedExecutorBackend, Type[ExecutorBase]]
+        Union[str, DistributedExecutorBackend, type[ExecutorBase]]
     ] = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
@@ -372,6 +372,9 @@ class EngineArgs:
     enable_dbo: bool = ParallelConfig.enable_dbo
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
+    disable_nccl_for_dp_synchronization: bool = (
+        ParallelConfig.disable_nccl_for_dp_synchronization
+    )
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
     expert_placement_strategy: ExpertPlacementStrategy = (
@@ -422,7 +425,7 @@ class EngineArgs:
     media_io_kwargs: dict[str, dict[str, Any]] = get_field(
         MultiModalConfig, "media_io_kwargs"
     )
-    mm_processor_kwargs: Optional[Dict[str, Any]] = MultiModalConfig.mm_processor_kwargs
+    mm_processor_kwargs: Optional[dict[str, Any]] = MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
     mm_processor_cache_type: Optional[MMCacheType] = (
@@ -437,10 +440,9 @@ class EngineArgs:
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
     enable_lora: bool = False
-    enable_lora_bias: bool = LoRAConfig.bias_enabled
     max_loras: int = LoRAConfig.max_loras
     max_lora_rank: int = LoRAConfig.max_lora_rank
-    default_mm_loras: Optional[Dict[str, str]] = LoRAConfig.default_mm_loras
+    default_mm_loras: Optional[dict[str, str]] = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
@@ -450,7 +452,7 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[int] = CacheConfig.num_gpu_blocks_override
     num_lookahead_slots: int = SchedulerConfig.num_lookahead_slots
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
-    ignore_patterns: Optional[Union[str, List[str]]] = LoadConfig.ignore_patterns
+    ignore_patterns: Union[str, list[str]] = get_field(LoadConfig, "ignore_patterns")
 
     enable_chunked_prefill: Optional[bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
@@ -471,7 +473,7 @@ class EngineArgs:
 
     logits_processor_pattern: Optional[str] = ModelConfig.logits_processor_pattern
 
-    speculative_config: Optional[Dict[str, Any]] = None
+    speculative_config: Optional[dict[str, Any]] = None
 
     show_hidden_metrics_for_version: Optional[str] = (
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -481,7 +483,7 @@ class EngineArgs:
         ObservabilityConfig.collect_detailed_traces
     )
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
-    scheduler_cls: Union[str, Type[object]] = SchedulerConfig.scheduler_cls
+    scheduler_cls: Union[str, type[object]] = SchedulerConfig.scheduler_cls
 
     pooler_config: Optional[PoolerConfig] = ModelConfig.pooler_config
     override_pooler_config: Optional[Union[dict, PoolerConfig]] = (
@@ -769,6 +771,10 @@ class EngineArgs:
             "--dbo-prefill-token-threshold",
             **parallel_kwargs["dbo_prefill_token_threshold"],
         )
+        parallel_group.add_argument(
+            "--disable-nccl-for-dp-synchronization",
+            **parallel_kwargs["disable_nccl_for_dp_synchronization"],
+        )
         parallel_group.add_argument("--enable-eplb", **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--eplb-config", **parallel_kwargs["eplb_config"])
         parallel_group.add_argument(
@@ -912,7 +918,6 @@ class EngineArgs:
             action=argparse.BooleanOptionalAction,
             help="If True, enable handling of LoRA adapters.",
         )
-        lora_group.add_argument("--enable-lora-bias", **lora_kwargs["bias_enabled"])
         lora_group.add_argument("--max-loras", **lora_kwargs["max_loras"])
         lora_group.add_argument("--max-lora-rank", **lora_kwargs["max_lora_rank"])
         lora_group.add_argument(
@@ -1324,7 +1329,13 @@ class EngineArgs:
             import ray
 
             ray_runtime_env = ray.get_runtime_context().runtime_env
-            logger.info("Using ray runtime env: %s", ray_runtime_env)
+            # Avoid logging sensitive environment variables
+            sanitized_env = ray_runtime_env.to_dict() if ray_runtime_env else {}
+            if "env_vars" in sanitized_env:
+                sanitized_env["env_vars"] = {
+                    k: "***" for k in sanitized_env["env_vars"]
+                }
+            logger.info("Using ray runtime env (env vars redacted): %s", sanitized_env)
 
         # Get the current placement group if Ray is initialized and
         # we are in a Ray actor. If so, then the placement group will be
@@ -1447,6 +1458,7 @@ class EngineArgs:
             enable_dbo=self.enable_dbo,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
+            disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
             expert_placement_strategy=self.expert_placement_strategy,
@@ -1505,7 +1517,6 @@ class EngineArgs:
 
         lora_config = (
             LoRAConfig(
-                bias_enabled=self.enable_lora_bias,
                 max_lora_rank=self.max_lora_rank,
                 max_loras=self.max_loras,
                 default_mm_loras=self.default_mm_loras,
@@ -1634,6 +1645,7 @@ class EngineArgs:
             "TREE_ATTN",
             "XFORMERS",
             "ROCM_ATTN",
+            "ROCM_AITER_UNIFIED_ATTN",
         ]
         if (
             envs.is_set("VLLM_ATTENTION_BACKEND")

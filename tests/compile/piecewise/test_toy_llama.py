@@ -268,7 +268,7 @@ def run_model(
             cudagraph_capture_sizes=[1, 2],
         )
         if split_attn:
-            compilation_config.splitting_ops = ["silly.attention"]
+            compilation_config.splitting_ops = ["silly::attention"]
         cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
     else:
         compilation_config = CompilationConfig(
@@ -367,11 +367,14 @@ def test_toy_llama(use_inductor: bool):
         kwargs = {"num_eager_compiles": 1, "num_inductor_compiles": 0}
 
     with compilation_counter.expect(
-        num_graphs_seen=1,  # one graph for the model
+        # One graph for the model
+        num_graphs_seen=1,
         num_piecewise_graphs_seen=1,
         num_piecewise_capturable_graphs_seen=1,
-        num_backend_compilations=1,  # num_piecewise_capturable_graphs_seen
-        num_cudagraph_captured=2,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        # num_piecewise_capturable_graphs_seen
+        num_backend_compilations=1,
+        # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        num_cudagraph_captured=2,
         **kwargs,
     ):
         outputs.append(
@@ -435,7 +438,7 @@ def benchmark():
             compilation_config = CompilationConfig(
                 level=CompilationLevel.PIECEWISE,
                 use_cudagraph=True,
-                splitting_ops=["silly.attention"],
+                splitting_ops=["silly::attention"],
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
         else:
@@ -478,9 +481,10 @@ def benchmark():
                 # it is fine here, because we only use the lambda function once.
                 runtime = do_bench(
                     lambda: graphs[b][0](  # noqa
-                        input_ids[:b], positions[:b]
+                        input_ids[:b],  # noqa
+                        positions[:b],  # noqa
                     )
-                )  # noqa
+                )
                 piecewise_cudagraph_time[b] = runtime
             else:
                 runtime = do_bench(lambda: graphs[b][0].replay())  # noqa

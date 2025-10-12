@@ -6,7 +6,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable
 from functools import cached_property
-from typing import Any, Callable, List, Optional, Set, Union
+from typing import Any, Callable, Optional, Union
 
 from typing_extensions import TypeVar
 
@@ -143,7 +143,7 @@ class ExecutorBase(ABC):
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
-    ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
+    ) -> Optional[list[Union[SamplerOutput, PoolerOutput]]]:
         output = self.collective_rpc("execute_model", args=(execute_model_req,))
         return output[0]
 
@@ -163,11 +163,15 @@ class ExecutorBase(ABC):
         assert lora_id > 0, "lora_id must be greater than 0."
         return all(self.collective_rpc("pin_lora", args=(lora_id,)))
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         sets = self.collective_rpc("list_loras")
         for s in sets:
             assert s == sets[0], "All workers should have the same LORAs."
         return sets[0]
+
+    def reset_mm_cache(self) -> None:
+        """Reset the multi-modal cache in each worker."""
+        self.collective_rpc("reset_mm_cache")
 
     def start_profile(self) -> None:
         self.collective_rpc("start_profile")
@@ -238,7 +242,7 @@ class ExecutorBase(ABC):
 
     async def execute_model_async(
         self, execute_model_req: ExecuteModelRequest
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         """Executes one model step on the given sequences."""
         output = await make_async(self.execute_model)(execute_model_req)
         return output
@@ -272,7 +276,7 @@ class DistributedExecutorBase(ExecutorBase):
     def execute_model(
         self,
         execute_model_req: ExecuteModelRequest,
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         # TODO: unify into collective_rpc
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
@@ -299,7 +303,7 @@ class DistributedExecutorBase(ExecutorBase):
     @abstractmethod
     def _driver_execute_model(
         self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution loop
@@ -346,7 +350,7 @@ class DistributedExecutorBase(ExecutorBase):
 
     async def execute_model_async(
         self, execute_model_req: ExecuteModelRequest
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         if self.parallel_worker_tasks is None:
             # Start model execution loop running in the parallel workers
             self.parallel_worker_tasks = asyncio.create_task(
@@ -371,7 +375,7 @@ class DistributedExecutorBase(ExecutorBase):
     async def _driver_execute_model_async(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> List[SamplerOutput]:
+    ) -> list[SamplerOutput]:
         """Execute the model asynchronously in the driver worker.
 
         Passing None will cause the driver to stop the model execution

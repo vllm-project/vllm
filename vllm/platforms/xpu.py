@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import os
 from typing import TYPE_CHECKING, Optional
 
@@ -35,8 +36,10 @@ class XPUPlatform(Platform):
     device_control_env_var: str = "ZE_AFFINITY_MASK"
 
     @classmethod
-    def import_core_kernels(cls) -> None:
-        pass
+    def import_kernels(cls) -> None:
+        # Do not import vllm._C
+        with contextlib.suppress(ImportError):
+            import vllm._moe_C  # noqa: F401
 
     @classmethod
     def get_attn_backend_cls(
@@ -51,6 +54,14 @@ class XPUPlatform(Platform):
         has_sink: bool,
         use_sparse,
     ) -> str:
+        from vllm.v1.attention.backends.utils import set_kv_cache_layout
+
+        set_kv_cache_layout("NHD")
+        logger.info(
+            "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
+            "only NHD layout is supported by XPU attention kernels."
+        )
+
         from vllm.attention.backends.registry import _Backend
 
         if use_sparse:
@@ -187,13 +198,6 @@ class XPUPlatform(Platform):
                 vllm_config.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
-        from vllm.v1.attention.backends.utils import set_kv_cache_layout
-
-        set_kv_cache_layout("NHD")
-        logger.info(
-            "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
-            "only NHD layout is supported by XPU attention kernels."
-        )
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:

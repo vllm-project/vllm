@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Literal, Optional, Union
 
 import torch
 
@@ -12,8 +12,7 @@ from vllm.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
-current_platform.import_core_kernels()
-supports_moe_ops = current_platform.try_import_moe_kernels()
+current_platform.import_kernels()
 
 if TYPE_CHECKING:
 
@@ -1385,7 +1384,7 @@ def scaled_fp4_quant(
     rounded_m = round_up(m, 128)
     scale_n = n // block_size
     rounded_n = round_up(scale_n, 4)
-    output_scale = torch.empty(
+    output_scale = torch.zeros(
         (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
     )
 
@@ -1921,7 +1920,7 @@ def moe_wna16_marlin_gemm(
     )
 
 
-if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
+if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
 
     @register_fake("_moe_C::marlin_gemm_moe")
     def marlin_gemm_moe_fake(
@@ -2105,6 +2104,18 @@ def indexer_k_quant_and_cache(
 ) -> None:
     torch.ops._C_cache_ops.indexer_k_quant_and_cache(
         k, kv_cache, slot_mapping, quant_block_size, kv_cache_dtype
+    )
+
+
+def cp_gather_indexer_k_quant_cache(
+    kv_cache: torch.Tensor,
+    dst_k: torch.Tensor,
+    dst_scale: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+) -> None:
+    torch.ops._C_cache_ops.cp_gather_indexer_k_quant_cache(
+        kv_cache, dst_k, dst_scale, block_table, cu_seq_lens
     )
 
 
@@ -2370,10 +2381,7 @@ class CPUDNNLGEMMHandler:
             torch.ops._C.release_dnnl_matmul_handler(self.handler)
 
 
-if hasattr(torch.ops._C, "create_onednn_mm_handler"):
-    _supports_onednn = True
-else:
-    _supports_onednn = False
+_supports_onednn = bool(hasattr(torch.ops._C, "create_onednn_mm_handler"))
 
 
 def is_onednn_acl_supported():
@@ -2473,6 +2481,144 @@ def onednn_scaled_mm(
     )
 
     return output
+
+
+if hasattr(torch.ops._qutlass_C, "matmul_mxf4_bf16_tn"):
+
+    @register_fake("_qutlass_C::matmul_mxf4_bf16_tn")
+    def _fake_matmul_mxf4_bf16_tn(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        a_sf: torch.Tensor,
+        b_sf: torch.Tensor,
+        alpha: torch.Tensor,
+    ):
+        return a.new_empty(*a.shape[:-1], b.shape[0], dtype=torch.bfloat16)
+
+
+def matmul_mxf4_bf16_tn(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_sf: torch.Tensor,
+    b_sf: torch.Tensor,
+    alpha: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._qutlass_C.matmul_mxf4_bf16_tn(a, b, a_sf, b_sf, alpha)
+
+
+if hasattr(torch.ops._qutlass_C, "matmul_ada_mxf4_bf16_tn"):
+
+    @register_fake("_qutlass_C::matmul_ada_mxf4_bf16_tn")
+    def _fake_matmul_ada_mxf4_bf16_tn(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        a_sf: torch.Tensor,
+        b_sf: torch.Tensor,
+        alpha: torch.Tensor,
+    ):
+        return a.new_empty(*a.shape[:-1], b.shape[0], dtype=torch.bfloat16)
+
+
+def matmul_ada_mxf4_bf16_tn(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_sf: torch.Tensor,
+    b_sf: torch.Tensor,
+    alpha: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._qutlass_C.matmul_ada_mxf4_bf16_tn(a, b, a_sf, b_sf, alpha)
+
+
+def ceil_div(a, b):
+    return (a + b - 1) // b
+
+
+if hasattr(torch.ops._qutlass_C, "fusedQuantizeMxQuest"):
+
+    @register_fake("_qutlass_C::fusedQuantizeMxQuest")
+    def _fake_fused_quantize_mx_quest(
+        a: torch.Tensor, b: torch.Tensor, xh_e2m1: torch.Tensor, xh_e8m0: torch.Tensor
+    ):
+        return xh_e2m1, xh_e8m0
+
+
+if hasattr(torch.ops._qutlass_C, "fusedQuantizeMxAbsMax"):
+
+    @register_fake("_qutlass_C::fusedQuantizeMxAbsMax")
+    def _fake_fused_quantize_mx_absmax(
+        a: torch.Tensor, b: torch.Tensor, xh_e2m1: torch.Tensor, xh_e8m0: torch.Tensor
+    ):
+        return xh_e2m1, xh_e8m0
+
+
+def fusedQuantizeMx(
+    a: torch.Tensor, b: torch.Tensor, *, method: Literal["quest", "abs_max"] = "quest"
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if a.dim() == 0:
+        raise ValueError("`a` must have at least 1 dimension.")
+    if a.size(-1) % 32 != 0:
+        raise ValueError(f"last dim of `a` must be divisible by 32, got {a.size(-1)}.")
+    if b.device != a.device:
+        raise ValueError("`a` and `b` must be on the same device.")
+
+    xh_e2m1 = torch.empty(
+        *a.shape[:-1], a.size(-1) // 2, dtype=torch.uint8, device=a.device
+    )
+
+    rows, cols = a.numel() // a.size(-1), a.size(-1) // 32
+    n_row_blocks = ceil_div(rows, 128)
+    n_col_blocks = ceil_div(cols, 4)
+    padded_rows = n_row_blocks * 128
+    padded_cols = n_col_blocks * 4
+
+    xh_e8m0 = torch.empty(
+        padded_rows, padded_cols, dtype=torch.float8_e8m0fnu, device=a.device
+    )
+
+    if not hasattr(torch.ops, "_qutlass_C"):
+        raise RuntimeError(
+            "The `_qutlass_C` extension is not loaded. "
+            "Make sure your custom op library is imported before calling fusedQuantizeMx."
+        )
+
+    if method == "quest":
+        return torch.ops._qutlass_C.fusedQuantizeMxQuest(a, b, xh_e2m1, xh_e8m0)
+    elif method == "abs_max":
+        return torch.ops._qutlass_C.fusedQuantizeMxAbsMax(a, b, xh_e2m1, xh_e8m0)
+    else:
+        raise ValueError(f"invalid method {method!r}, must be 'quest' or 'abs_max'")
+
+
+if hasattr(torch.ops._qutlass_C, "fusedQuantizeNv"):
+
+    @register_fake("_qutlass_C::fusedQuantizeNv")
+    def _fake_fused_quantize_nv(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        xh_e2m1: torch.Tensor,
+        xh_e4m3: torch.Tensor,
+        global_scale: torch.Tensor,
+    ):
+        return xh_e2m1, xh_e4m3
+
+
+def fusedQuantizeNv(
+    a: torch.Tensor, b: torch.Tensor, global_scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    xh_e2m1 = torch.empty(
+        *a.shape[:-1], a.size(-1) // 2, dtype=torch.uint8, device=a.device
+    )
+
+    rows, cols = a.numel() // a.size(-1), a.size(-1) // 16
+    n_row_blocks = ceil_div(rows, 128)
+    n_col_blocks = ceil_div(cols, 4)
+    padded_rows = n_row_blocks * 128
+    padded_cols = n_col_blocks * 4
+    xh_e4m3 = torch.empty(
+        padded_rows, padded_cols, dtype=torch.float8_e4m3fn, device=a.device
+    )
+
+    return torch.ops._qutlass_C.fusedQuantizeNv(a, b, xh_e2m1, xh_e4m3, global_scale)
 
 
 def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:

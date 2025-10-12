@@ -7,7 +7,6 @@ from typing import Any, Optional, Union
 
 from fastapi import Request
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
@@ -24,9 +23,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.entrypoints.score_utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
@@ -35,8 +31,6 @@ from vllm.entrypoints.score_utils import (
     compress_token_type_ids,
     get_score_prompt,
 )
-
-# yapf: enable
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
@@ -52,7 +46,6 @@ class ServingScores(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
@@ -60,7 +53,6 @@ class ServingScores(OpenAIServing):
     ) -> None:
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             log_error_stack=log_error_stack,
