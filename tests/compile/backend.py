@@ -54,7 +54,8 @@ class TestBackend:
         self.custom_passes = list(passes)
         vllm_config = get_current_vllm_config()
         compile_config = vllm_config.compilation_config
-        self.inductor_config = compile_config.inductor_compile_config
+        # Deepcopy to allow multiple TestBackend instances to use the same VllmConfig
+        self.inductor_config = deepcopy(compile_config.inductor_compile_config)
         self.inductor_config["force_disable_caches"] = True
         self.inductor_config["post_grad_custom_post_pass"] = self.post_pass
 

@@ -11,7 +11,13 @@ from vllm.compilation.fusion import RMSNormQuantFusionPass
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
-from vllm.config import CompilationConfig, PassConfig, VllmConfig
+from vllm.config import (
+    CompilationConfig,
+    ModelConfig,
+    PassConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
@@ -217,42 +223,48 @@ MODELS = [
 def test_fix_functionalization(model_class: torch.nn.Module, do_fusion: bool):
     torch.set_default_device("cuda")
 
-    vllm_config = VllmConfig()
-    vllm_config.compilation_config = CompilationConfig(
-        pass_config=PassConfig(enable_fusion=do_fusion, enable_noop=True)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=torch.bfloat16),
+        compilation_config=CompilationConfig(
+            custom_ops=["all"],
+            pass_config=PassConfig(enable_fusion=do_fusion, enable_noop=True),
+        ),
     )
-    noop_pass = NoOpEliminationPass(vllm_config)
-    fusion_pass = RMSNormQuantFusionPass(vllm_config)
-    cleanup_pass = PostCleanupPass(vllm_config)
-    act_quant_fusion_pass = ActivationQuantFusionPass(vllm_config)
 
-    passes = (
-        [noop_pass, fusion_pass, act_quant_fusion_pass, cleanup_pass]
-        if do_fusion
-        else [noop_pass, cleanup_pass]
-    )
-    func_pass = FixFunctionalizationPass(vllm_config)
+    with set_current_vllm_config(vllm_config):
+        assert RMSNorm.enabled()
+        noop_pass = NoOpEliminationPass(vllm_config)
+        fusion_pass = RMSNormQuantFusionPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+        act_quant_fusion_pass = ActivationQuantFusionPass(vllm_config)
 
-    backend_func = TestBackend(*passes, func_pass)
-    backend_no_func = TestBackend(*passes)
+        passes = (
+            [noop_pass, fusion_pass, act_quant_fusion_pass, cleanup_pass]
+            if do_fusion
+            else [noop_pass, cleanup_pass]
+        )
+        func_pass = FixFunctionalizationPass(vllm_config)
 
-    model = model_class()
-    torch.compile(model, backend=backend_func)(*model.example_inputs())
-    torch.compile(model, backend=backend_no_func)(*model.example_inputs())
+        backend_func = TestBackend(*passes, func_pass)
+        backend_no_func = TestBackend(*passes)
 
-    # check if the functionalization pass is applied
-    for op in model.ops_in_model(do_fusion):
-        find_auto_fn(backend_no_func.graph_post_pass.nodes, op)
-        assert find_auto_fn_maybe(backend_func.graph_post_pass.nodes, op) is None
+        model = model_class()
+        torch.compile(model, backend=backend_func)(*model.example_inputs())
+        torch.compile(model, backend=backend_no_func)(*model.example_inputs())
 
-    # make sure the ops were all de-functionalized
-    found = dict()
-    for node in backend_func.graph_post_pass.nodes:
+        # check if the functionalization pass is applied
         for op in model.ops_in_model(do_fusion):
-            if is_func(node, op):
-                found[op] = True
-        for op in model.ops_not_in_model():
-            if is_func(node, op):
-                found[op] = True
-    assert all(found[op] for op in model.ops_in_model(do_fusion))
-    assert all(not found.get(op) for op in model.ops_not_in_model())
+            find_auto_fn(backend_no_func.graph_post_pass.nodes, op)
+            assert find_auto_fn_maybe(backend_func.graph_post_pass.nodes, op) is None
+
+        # make sure the ops were all de-functionalized
+        found = dict()
+        for node in backend_func.graph_post_pass.nodes:
+            for op in model.ops_in_model(do_fusion):
+                if is_func(node, op):
+                    found[op] = True
+            for op in model.ops_not_in_model():
+                if is_func(node, op):
+                    found[op] = True
+        assert all(found[op] for op in model.ops_in_model(do_fusion))
+        assert all(not found.get(op) for op in model.ops_not_in_model())
