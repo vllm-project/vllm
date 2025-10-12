@@ -59,40 +59,37 @@ and keeps the Windows-mounted repository free of unexpected modifications.
 - All `extras/secrets/*.env` files are ignored by Git; only the example templates belong in the
   repository. Verify with `git status` before committing changes.
 
-## 6. GPU passthrough on Windows + WSL2 Podman
+## 6. GPU passthrough on Windows + WSL2 (Rocky Linux 10)
 
-1. Make sure your Windows host has the latest NVIDIA driver with WSL2 support and that `wsl --update`
-   has run recently.
-1. If you prefer to prepare the machine manually, download the
-  [Rocky Linux 10 WSL Base image](https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-WSL-Base.latest.x86_64.wsl)
-  and run `podman machine init --image <local-file>`. The helper downloads and caches this archive automatically,
-  so you can skip this step unless you want to supply a different build or an offline mirror.
-    > **Heads-up:** Podman on Windows currently rejects `template://` URIs, so always point it at an actual
-    > local file or an HTTP(S) download.
-1. From the repository root, run the helper script:
+Prefer the official Rocky method: import a container rootfs into WSL2, then install Podman and NVIDIA runtime bits inside the distro.
 
-  ```powershell
-  pwsh extras/tools/enable-podman-wsl-gpu.ps1
-  ```
+1. Ensure prerequisites on Windows:
+   - Latest NVIDIA driver with WSL2 support
+   - `wsl --update` run recently (WSL2 backend)
+2. Provision the distro via the helper (uses Rocky UBI by default):
 
-   Add `-MachineName <name>` if you use a non-default Podman machine or `-SkipReboot` when you prefer
-  to restart it manually later. Use `-ImagePath <file-or-url>` to override the default image; HTTP(S) URLs are
-  downloaded into `%LOCALAPPDATA%\vllm-podman-images` on first use. Pass `-Rootful` to enable rootful
-  mode automatically. Add `-Reset` to wipe and reinitialize the Podman machine (the helper removes the
-  existing VM and re-runs `podman machine init`) when you want to start from a clean slate. If WSL stops
-  the import with "Sparse VHD support is currently disabled", rerun the helper with `-AllowSparseUnsafe` to
-  let it attempt the `wsl.exe --manage <machine> --set-sparse --allow-unsafe` toggle that Microsoft suggests.
-  On hosts where `--allow-unsafe` is unavailable, the helper automatically extracts the Rocky `.wsl` archive and
-  converts its VHDX to fixed size (requires the Hyper-V PowerShell module). If Hyper-V tooling is missing, update
-  WSL (`wsl.exe --update --pre-release`) or convert the archive manually before re-running the helper with
-  `-ImagePath <converted.vhdx>`.
+   ```powershell
+   pwsh extras/tools/enable-podman-wsl-gpu.ps1 -MachineName podman-machine-default -CacheRoot C:\vllm-cache
+   ```
 
-1. After the script restarts the machine, launch `extras/podman/run.ps1 -GPUCheck` (or `run.sh --gpu-check`)
-   to confirm that `/dev/dxg` and the CUDA libraries are visible from inside the dev container. If the helper
-   reports `Image missing. Use --build.`, rebuild the development container first via `extras/podman/run.ps1 --build`.
+   Options: `-ImagePath <file-or-url>` (.tar.xz supported by recent WSL), `-SkipReboot`, `-Reset`.
 
-If the helper still reports missing `/dev/dxg`, open Podman Desktop, ensure GPU sharing is enabled for
-the selected machine, and rerun the script (include `-Rootful` if you skipped it the first time, since
-rootless containers cannot mount GPU device nodes). When running on other distributions, replicate the
-script’s steps manually: install `nvidia-container-toolkit`, and generate a CDI spec via
-`nvidia-ctk cdi generate --mode wsl`.
+3. (Optional) Create a Windows podman context that talks to the WSL rootless socket via SSH:
+
+   ```powershell
+   pwsh extras/tools/enable-podman-wsl-gpu.ps1 -MachineName podman-machine-default -CreatePodmanContext -PodmanContextName wsl-podman-default -SkipReboot
+   podman context use wsl-podman-default
+   podman info
+   ```
+
+4. Validate GPU visibility inside the distro:
+
+   ```powershell
+   wsl -d podman-machine-default -- bash -lc "ls -l /dev/dxg; nvidia-smi || true"
+   ```
+
+See the operator quickstart in `extras/.ai/AGENT.MD` for troubleshooting and common flags.
+
+### Legacy approach (Podman Machine)
+
+Older revisions used `podman machine init` with Rocky `.wsl` archives and sparse VHD toggles. This flow is deprecated here in favor of `wsl --import` using the Rocky container rootfs (simpler and more robust). If you must use the legacy approach, consult a previous commit of this document.

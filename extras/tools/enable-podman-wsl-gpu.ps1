@@ -1,28 +1,32 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    Configures a Podman machine running under WSL2 (Rocky Linux 10 default) for NVIDIA GPU passthrough.
+    Provisions a Rocky Linux 10 WSL2 distribution and configures Podman with NVIDIA GPU passthrough.
 
 .DESCRIPTION
-    Installs the NVIDIA Container Toolkit inside the Podman machine, generates a CDI spec for
-    WSL2 GPUs, and verifies device/node availability. This script is idempotent and safe to run
-    multiple times. A machine reboot is recommended after toolkit installation.
+        Installs and configures inside the imported WSL distro:
+            - systemd (via /etc/wsl.conf)
+            - OpenSSH server (for optional podman-remote over SSH)
+            - Podman (+ rootless user socket)
+            - NVIDIA Container Toolkit and CDI spec for WSL2 GPUs
+        Then verifies device/node availability. This script is idempotent and safe to run multiple times.
 
 .PARAMETER MachineName
-    Name of the Podman machine to configure. Defaults to "podman-machine-default".
+    Name of the WSL distribution to create/import. Defaults to "podman-machine-default" for continuity.
 
 .PARAMETER SkipReboot
     Prevents the script from automatically restarting the Podman machine after configuration.
 
 .PARAMETER ImagePath
-    Optional override for the Podman guest image. Defaults to the Rocky Linux 10 WSL Base archive.
+    Optional override for the Rocky Linux 10 container rootfs. Defaults to the Rocky UBI x86_64 image.
 
 .EXAMPLE
     pwsh extras/tools/enable-podman-wsl-gpu.ps1
 
 .NOTES
-    Requires Podman 4.6+ with `podman machine` support and an NVIDIA driver on Windows that
-    exposes the CUDA WSL integration. Run from an elevated PowerShell session for best results.
+    Requires WSL2 and an NVIDIA driver on Windows that exposes the CUDA WSL integration.
+    Podman for Windows is optional; if present, a podman-remote context can be created to use
+    the WSL instance via SSH.
 #>
 
 [CmdletBinding()]
@@ -34,6 +38,12 @@ param(
     [switch]$ConvertImage,
     [string]$CacheRoot,
 
+    # Optional: create a Podman remote context on Windows via SSH to the WSL distro
+    [switch]$CreatePodmanContext,
+    [string]$PodmanSshUser = "podman",
+    [string]$PodmanContextName,
+
+    # Deprecated/ignored (kept for compatibility)
     [switch]$Rootful,
     [switch]$AllowSparseUnsafe
 )
@@ -83,6 +93,14 @@ function Invoke-Podman {
     return $result
 }
 
+function Invoke-WSL {
+    param(
+        [Parameter(Mandatory=$true)][string]$Distro,
+        [Parameter(Mandatory=$true)][string]$Command
+    )
+    & wsl.exe -d $Distro -- bash -lc $Command
+}
+
 function Test-PodmanMachine {
     try {
         $name = Invoke-Podman @('machine','inspect',$MachineName,'--format','{{.Name}}') | Select-Object -First 1
@@ -96,7 +114,109 @@ function Test-PodmanMachine {
 
 function Confirm-PodmanCli {
     if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {
-        throw "Podman CLI not found. Install Podman Desktop or Podman for Windows first."
+        Write-Warning "Podman CLI not found. Skipping Windows context configuration."
+    }
+}
+
+function Test-WslDistroExists {
+    param([string]$Name)
+    $distros = & wsl.exe -l -q 2>$null | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    return $distros -contains $Name
+}
+
+function Import-RockyDistro {
+    if (Test-WslDistroExists -Name $MachineName) {
+        Write-Host "ℹ️  WSL distro '$MachineName' already exists." -ForegroundColor DarkGray
+        return
+    }
+
+    $resolvedImage = Resolve-ImagePath -ImageSpec $ImagePath
+    if ($resolvedImage.EndsWith('.tar.xz',[StringComparison]::OrdinalIgnoreCase)) {
+        # Use as-is; newer WSL can import .tar.xz directly
+        $importImage = $resolvedImage
+    } else {
+        $importImage = $resolvedImage
+    }
+
+    if (-not $script:PodmanImageCacheRoot) {
+        $script:PodmanImageCacheRoot = Get-PodmanImageCacheRoot -OverrideRoot $CacheRoot
+    }
+    $distroDataRoot = Join-Path $script:PodmanImageCacheRoot "wsl\$MachineName"
+    if (-not (Test-Path $distroDataRoot)) { New-Item -ItemType Directory -Path $distroDataRoot -Force | Out-Null }
+
+    Write-Host "🆕 Importing Rocky Linux 10 into WSL2 as '$MachineName'..." -ForegroundColor Cyan
+    $wslArgs = @('--import', $MachineName, $distroDataRoot, $importImage, '--version', '2')
+    $out = & wsl.exe @wslArgs 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "WSL import failed: $($out | Out-String)"
+    }
+
+    # Bootstrap systemd and default user
+    Write-Host "🧩 Configuring /etc/wsl.conf (systemd=true)" -ForegroundColor Cyan
+    Invoke-WSL -Distro $MachineName -Command "sudo bash -lc 'cat >/etc/wsl.conf <<\"EOF\"\n[boot]\nsystemd=true\n[network]\nhostname=$MachineName\nEOF'" | Out-Null
+
+    # Ensure PATH and basic tools
+    Invoke-WSL -Distro $MachineName -Command "sudo dnf -y makecache --refresh || true" | Out-Null
+}
+
+function Install-BasePackages {
+    Write-Host "📦 Installing base packages (openssh-server, podman, overlayfs, slirp4netns)..." -ForegroundColor Cyan
+    $installCmd = @(
+        'set -euo pipefail',
+        'sudo dnf -y install openssh-server podman fuse-overlayfs slirp4netns iptables xz tar procps-ng',
+        # Create default user for rootless podman if missing
+        "id -u $PodmanSshUser >/dev/null 2>&1 || sudo useradd -m -G wheel $PodmanSshUser",
+        # Enable systemd services
+        'sudo systemctl enable --now sshd || true'
+    ) -join '; '
+    Invoke-WSL -Distro $MachineName -Command $installCmd | Out-Null
+
+    # Enable lingering so user services can run without login
+    Invoke-WSL -Distro $MachineName -Command "sudo loginctl enable-linger $PodmanSshUser || true" | Out-Null
+
+    # Enable user socket for podman
+    $userSockCmd = @(
+        "sudo -u $PodmanSshUser bash -lc 'systemctl --user enable --now podman.socket || true'"
+    ) -join '; '
+    Invoke-WSL -Distro $MachineName -Command $userSockCmd | Out-Null
+}
+
+function Initialize-SSHKeyAndContext {
+    if (-not (Get-Command podman -ErrorAction SilentlyContinue)) { return }
+    # Generate a dedicated SSH key for this context
+    $sshDir = Join-Path $HOME ".ssh"
+    if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Path $sshDir -Force | Out-Null }
+    $keyPath = Join-Path $sshDir ("id_ed25519_podman_" + $MachineName)
+    if (-not (Test-Path $keyPath)) {
+        & ssh-keygen -t ed25519 -N "" -f $keyPath -C "podman-wsl-$MachineName" | Out-Null
+    }
+    $pub = Get-Content ($keyPath + ".pub") -Raw
+    # Install the public key into the WSL user's authorized_keys
+    $installKeyCmd = @(
+        "set -euo pipefail",
+        "sudo -u $PodmanSshUser mkdir -p /home/$PodmanSshUser/.ssh",
+        "echo '$($pub.Replace("'","'\''"))' | sudo tee -a /home/$PodmanSshUser/.ssh/authorized_keys >/dev/null",
+    "sudo chown -R ${PodmanSshUser}:${PodmanSshUser} /home/${PodmanSshUser}/.ssh",
+        "sudo chmod 700 /home/$PodmanSshUser/.ssh",
+        "sudo chmod 600 /home/$PodmanSshUser/.ssh/authorized_keys"
+    ) -join '; '
+    Invoke-WSL -Distro $MachineName -Command $installKeyCmd | Out-Null
+
+    # Get UID to compose the podman socket path
+    $uid = (& wsl.exe -d $MachineName -- bash -lc "id -u $PodmanSshUser" | Select-Object -First 1).Trim()
+    if (-not $uid) { $uid = '1000' }
+    $socketPath = "/run/user/$uid/podman/podman.sock"
+
+    $ctxName = if ($PodmanContextName) { $PodmanContextName } else { "wsl-$MachineName" }
+    $uri = "ssh://$PodmanSshUser@localhost$socketPath"
+
+    # Add podman remote connection
+    & podman system connection remove $ctxName -f 2>$null | Out-Null
+    $addOut = & podman system connection add $ctxName $uri --identity $keyPath --default 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning ("Failed to create podman connection: {0}" -f ($addOut | Out-String))
+    } else {
+        Write-Host "🔗 Configured podman remote context '$ctxName' -> $uri" -ForegroundColor Green
     }
 }
 
@@ -232,81 +352,7 @@ function Resolve-ImagePath {
     return $resolved
 }
 
-function Initialize-PodmanMachine {
-    if (Test-PodmanMachine) {
-        return
-    }
-    Write-Host "🆕 Creating Podman machine '$MachineName'..." -ForegroundColor Cyan
-    $resolvedImage = Resolve-ImagePath -ImageSpec $ImagePath
-    $initArgs = @('machine','init')
-    if ($resolvedImage) {
-        Write-Host "📦 Using machine image '$resolvedImage'." -ForegroundColor DarkGray
-        $initArgs += @('--image',$resolvedImage)
-    }
-    $initArgs += $MachineName
-    $output = & podman @initArgs 2>&1
-    $exitCode = $LASTEXITCODE
-    $sparseMessage = ($output | Out-String)
-    $convertedImage = $null
-    $attemptedConversion = $false
-
-    if ($exitCode -ne 0 -and $sparseMessage -match 'Sparse VHD support is currently disabled') {
-    Write-Host "⚠️  Podman init blocked by WSL sparse-vhd gate; preparing a reusable archive..." -ForegroundColor Yellow
-        try {
-            $convertedImage = Convert-RockyImage -ImageSpec $ImagePath
-        } catch {
-            if ($_.Exception.Message -match 'Convert-VHD requires elevation') {
-                Write-Warning $_.Exception.Message
-                $convertedImage = $null
-            } else {
-                throw
-            }
-        }
-        $attemptedConversion = $true
-        if ($convertedImage) {
-            $resolvedImage = $convertedImage
-            $initArgs = @('machine','init','--image',$resolvedImage,$MachineName)
-            $output = & podman @initArgs 2>&1
-            $exitCode = $LASTEXITCODE
-        } elseif ($AllowSparseUnsafe.IsPresent) {
-            Write-Host "ℹ️  Conversion failed; attempting to enable sparse support explicitly." -ForegroundColor DarkGray
-            try {
-                Enable-SparseVhdSupport -Distribution $MachineName
-                $output = & podman @initArgs 2>&1
-                $exitCode = $LASTEXITCODE
-            } catch {
-                throw
-            }
-        }
-    } elseif ($exitCode -ne 0 -and $AllowSparseUnsafe.IsPresent -and $sparseMessage -match 'allow-unsafe') {
-    Write-Host "⚠️  WSL rejected '--allow-unsafe'; preparing a reusable archive instead." -ForegroundColor Yellow
-        $convertedImage = $null
-        try {
-        $convertedImage = Convert-RockyImage -ImageSpec $ImagePath
-        } catch {
-            if ($_.Exception.Message -match 'Convert-VHD requires elevation') {
-                Write-Warning $_.Exception.Message
-            } else {
-                throw
-            }
-        }
-        $attemptedConversion = $true
-        if ($convertedImage) {
-            $resolvedImage = $convertedImage
-            $initArgs = @('machine','init','--image',$resolvedImage,$MachineName)
-            $output = & podman @initArgs 2>&1
-            $exitCode = $LASTEXITCODE
-        }
-    }
-    if ($exitCode -ne 0) {
-        $message = ($output | Out-String).Trim()
-        if (-not $message) { $message = "podman machine init exited with code $exitCode" }
-        if ($attemptedConversion -and -not $convertedImage) {
-            $message += "`nArchive preparation failed; run 'extras/tools/enable-podman-wsl-gpu.ps1 -ConvertImage' from elevated PowerShell first."
-        }
-        throw "Failed to initialize Podman machine '$MachineName': $message"
-    }
-}
+function Initialize-PodmanMachine { Import-RockyDistro }
 
 function Enable-SparseVhdSupport {
     param([string]$Distribution)
@@ -347,32 +393,18 @@ function Enable-SparseVhdSupport {
     throw "Failed to enable sparse VHD support for '$Distribution':`n$joined"
 }
 
-function Start-MachineIfNeeded {
-    $state = $null
-    try {
-        $state = Invoke-Podman @('machine','inspect',$MachineName,'--format','{{.State}}') | Select-Object -First 1
-    } catch {}
-    if (-not $state) {
-        throw "Machine '$MachineName' could not be inspected. Ensure it exists or rerun with -Reset."
-    }
-    if ($state.Trim() -ne 'Running') {
-        Write-Host "🟢 Starting Podman machine '$MachineName'..." -ForegroundColor Green
-        Invoke-Podman @('machine','start',$MachineName) | Out-Null
-    }
-}
+function Start-MachineIfNeeded { return }
 
 function Reset-PodmanMachine {
     if (-not $Reset.IsPresent) {
         return
     }
-    Write-Host "♻️ Resetting Podman machine '$MachineName'..." -ForegroundColor Yellow
-    if (Test-PodmanMachine) {
-        try {
-            Invoke-Podman @('machine','stop',$MachineName) | Out-Null
-        } catch {}
-        Invoke-Podman @('machine','rm','-f',$MachineName) | Out-Null
+    Write-Host "♻️ Resetting WSL distro '$MachineName'..." -ForegroundColor Yellow
+    if (Test-WslDistroExists -Name $MachineName) {
+        & wsl.exe --terminate $MachineName 2>$null | Out-Null
+        & wsl.exe --unregister $MachineName 2>$null | Out-Null
     } else {
-        Write-Host "ℹ️  Machine '$MachineName' already absent." -ForegroundColor DarkGray
+        Write-Host "ℹ️  Distro '$MachineName' already absent." -ForegroundColor DarkGray
     }
 }
 
@@ -395,7 +427,7 @@ function Set-PodmanRootfulMode {
 }
 
 function Get-OsRelease {
-    $osRelease = Invoke-Podman @('machine','ssh',$MachineName,'--','cat','/etc/os-release')
+    $osRelease = Invoke-WSL -Distro $MachineName -Command 'cat /etc/os-release'
     $map = @{}
     foreach ($line in $osRelease) {
         if ($line -match '^(?<key>[A-Z0-9_]+)=("?)(?<value>.*)\2$') {
@@ -484,14 +516,13 @@ exit 0
 
     $remoteScriptLf = $remoteScript -replace "`r", ""
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remoteScriptLf))
-    $sshArgs = @('machine','ssh',$MachineName,'--','bash','-lc',"set -euo pipefail; echo $encoded | base64 -d >/tmp/configure-gpu.sh; chmod +x /tmp/configure-gpu.sh; sudo /tmp/configure-gpu.sh")
-    Invoke-Podman $sshArgs | Out-Null
+    Invoke-WSL -Distro $MachineName -Command "bash -lc 'set -euo pipefail; echo $encoded | base64 -d >/tmp/configure-gpu.sh; chmod +x /tmp/configure-gpu.sh; sudo /tmp/configure-gpu.sh'" | Out-Null
 }
 
 function Test-PodmanGpu {
     Write-Host "🔍 Checking GPU devices inside the machine..." -ForegroundColor Yellow
-    $cmd = 'bash -lc "ls -l /dev/dxg 2>/dev/null; ls -l /dev/nvidia* 2>/dev/null; nvidia-smi || true"'
-    Invoke-Podman @('machine','ssh',$MachineName,'--',$cmd)
+    $cmd = 'ls -l /dev/dxg 2>/dev/null; ls -l /dev/nvidia* 2>/dev/null; nvidia-smi || true'
+    Invoke-WSL -Distro $MachineName -Command $cmd
 }
 
 $script:PodmanImageCacheRoot = Get-PodmanImageCacheRoot -OverrideRoot $CacheRoot
@@ -509,8 +540,14 @@ if ($ConvertImage) {
 
 Reset-PodmanMachine
 Initialize-PodmanMachine
-Set-PodmanRootfulMode
-Start-MachineIfNeeded
+Install-BasePackages
+
+# Bounce the distro to apply wsl.conf (systemd)
+if (-not $SkipReboot.IsPresent) {
+    Write-Host "🔄 Restarting WSL distro to finalize systemd setup..." -ForegroundColor Cyan
+    & wsl.exe --terminate $MachineName 2>$null | Out-Null
+    Start-Sleep -Seconds 1
+}
 $osInfo = Get-OsRelease
 $machineId = if ($osInfo.ContainsKey('ID') -and $osInfo['ID']) { $osInfo['ID'] } elseif ($osInfo.ContainsKey('ID_LIKE') -and $osInfo['ID_LIKE']) { $osInfo['ID_LIKE'] } elseif ($osInfo.ContainsKey('PRETTY_NAME') -and $osInfo['PRETTY_NAME']) { $osInfo['PRETTY_NAME'] } else { 'unknown' }
 if ($machineId -notlike 'rocky*') {
@@ -521,9 +558,13 @@ Write-Host "⚙️  Installing NVIDIA container runtime bits inside '$MachineNam
 Install-NvidiaToolkit
 
 if (-not $SkipReboot.IsPresent) {
-    Write-Host "🔄 Restarting machine to finalize toolkit installation..." -ForegroundColor Cyan
-    Invoke-Podman @('machine','stop',$MachineName) | Out-Null
-    Invoke-Podman @('machine','start',$MachineName) | Out-Null
+    Write-Host "🔄 Restarting WSL distro to finalize toolkit installation..." -ForegroundColor Cyan
+    & wsl.exe --terminate $MachineName 2>$null | Out-Null
+    Start-Sleep -Seconds 1
+}
+
+if ($CreatePodmanContext.IsPresent) {
+    Initialize-SSHKeyAndContext
 }
 
 Test-PodmanGpu
