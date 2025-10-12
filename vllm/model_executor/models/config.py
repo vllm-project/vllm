@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
+from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
@@ -59,16 +61,27 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
 class JinaRobertaModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        config = model_config.hf_config
 
         if config.position_embedding_type == "rotary":
             assert config.__class__.__name__ == "XLMRobertaFlashConfig"
 
             head_dim = config.hidden_size // config.num_attention_heads
+            max_position = config.max_position_embeddings
+            # Jina-embeddings-v3 has max_position_embeddings=8194, which will cause
+            # out-of-bound index issue at RoPE for long prompts with torch.compile,
+            # because it can't be divided by triton num_warps(default=4).
+            # To deal with this, we increase max_position to multiple of n_warps,
+            # so that triton kernel won't hit out-of-bound index in RoPE cache.
+            if current_platform.is_cuda_alike() and not model_config.enforce_eager:
+                n_warps = getattr(triton.Config, "num_warps", 4)
+                max_position = cdiv(max_position, n_warps) * n_warps
+
             config.rotary_kwargs = {
                 "head_size": head_dim,
                 "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
-                "max_position": config.max_position_embeddings,
+                "max_position": max_position,
                 "base": getattr(config, "rope_theta", config.rotary_emb_base),
                 "rope_scaling": getattr(config, "rope_scaling", None),
             }
