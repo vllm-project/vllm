@@ -81,7 +81,19 @@ MESSAGES_CALC = [
 ]
 
 MESSAGES_MULTIPLE_CALLS = [
-    {"role": "user", "content": "What is 7 * 8? And what time is it in New York?"}
+    {
+        "role": "system",
+        "content": (
+            "You can call multiple tools. "
+            "When using more than one, return a single JSON object with a 'tool_calls' array "
+            "containing each tool call with its function name and arguments. "
+            "Do not output multiple JSON objects separately."
+        ),
+    },
+    {
+        "role": "user",
+        "content": "What is 7 * 8? And what time is it in New York?",
+    },
 ]
 
 MESSAGES_INVALID_CALL = [
@@ -103,7 +115,7 @@ FUNC_ARGS_TIME = '{"city": "New York"}'
 def extract_reasoning_and_calls(chunks: list):
     """Extract accumulated reasoning text and tool call arguments from streaming chunks."""
     reasoning_content = ""
-    tool_calls = {} 
+    tool_calls = {}
 
     for chunk in chunks:
         choice = getattr(chunk.choices[0], "delta", None)
@@ -142,13 +154,15 @@ async def test_single_tool_call(client: openai.AsyncOpenAI):
         messages=MESSAGES_CALC,
         tools=TOOLS,
         temperature=0.0,
-        stream=True
+        stream=True,
     )
     chunks = [chunk async for chunk in stream]
     reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
 
     assert FUNC_CALC in function_names, "Calculator function not called"
-    assert any(FUNC_ARGS_CALC in arg or "123 + 456" in arg for arg in arguments), f"Expected calculator arguments {FUNC_ARGS_CALC} not found in {arguments}"
+    assert any(FUNC_ARGS_CALC in arg or "123 + 456" in arg for arg in arguments), (
+        f"Expected calculator arguments {FUNC_ARGS_CALC} not found in {arguments}"
+    )
     assert len(reasoning) > 0, "Expected reasoning content missing"
 
 
@@ -164,23 +178,16 @@ async def test_multiple_tool_calls(client: openai.AsyncOpenAI):
     )
 
     calls = response.choices[0].message.tool_calls
+    reasoning = response.choices[0].message.reasoning_content or ""
 
-    try:
-        assert any(c.function.name == FUNC_CALC for c in calls), "Calculator tool missing"
-    except AssertionError as e:
-        print(f"Assertion failed: {e}")
+    # Log for debugging if one call is missing
+    print("DEBUG: tool_calls =", calls)
+    print("DEBUG: reasoning =", reasoning)
 
-    try:
-        assert any(c.function.name == FUNC_TIME for c in calls), "Time tool missing"
-    except AssertionError as e:
-        print(f"Assertion failed: {e}")
-
-    try:
-        reasoning = response.choices[0].message.reasoning_content
-        assert reasoning and len(reasoning) > 0, "Reasoning content is empty"
-    except AssertionError as e:
-        print(f"Assertion failed: {e}")
-
+    assert any(c.function.name == FUNC_CALC for c in calls), "Calculator tool missing"
+    assert any(c.function.name == FUNC_TIME for c in calls), "Time tool missing"
+    assert len(reasoning) > 0, "Reasoning content is empty"
+    
 
 @pytest.mark.asyncio
 async def test_invalid_tool_call(client: openai.AsyncOpenAI):
@@ -190,13 +197,14 @@ async def test_invalid_tool_call(client: openai.AsyncOpenAI):
         messages=MESSAGES_INVALID_CALL,
         tools=TOOLS,
         temperature=0.0,
+        stream=False,
     )
 
-    assert response is not None
-    assert hasattr(response.choices[0].message, "content")
-    assert not getattr(response.choices[0].message, "tool_calls", None), \
+    message = response.choices[0].message
+    assert message is not None, "Expected message in response"
+    assert hasattr(message, "content"), "Expected content field in message"
+    assert not getattr(message, "tool_calls", None), \
         "Model unexpectedly attempted a tool call on invalid input"
-
 
 
 @pytest.mark.asyncio
@@ -209,30 +217,18 @@ async def test_streaming_multiple_tools(client: openai.AsyncOpenAI):
         temperature=0.0,
         stream=True,
     )
+
     chunks = [chunk async for chunk in stream]
     reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
-    
-    try:
-        assert FUNC_CALC in function_names, "Calculator tool missing"
-    except AssertionError as e:
-        print(e)
 
-    try:
-        assert FUNC_TIME in function_names, "Time tool missing"
-    except AssertionError as e:
-        print(e)
-
-    try:
-        assert len(reasoning) > 0, "Reasoning content is empty"
-    except AssertionError as e:
-        print(e)
-
-    
+    assert FUNC_CALC in function_names, f"Calculator tool missing — found {function_names}"
+    assert FUNC_TIME in function_names, f"Time tool missing — found {function_names}"
+    assert len(reasoning) > 0, "Expected reasoning content in streamed response"
 
 
 @pytest.mark.asyncio
 async def test_tool_call_with_temperature(client: openai.AsyncOpenAI):
-    """Verify model produces valid output (tool or text) under non-deterministic sampling."""
+    """Verify model produces valid tool or text output under non-deterministic sampling."""
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES_CALC,
@@ -242,16 +238,15 @@ async def test_tool_call_with_temperature(client: openai.AsyncOpenAI):
     )
 
     message = response.choices[0].message
-    assert message is not None
+    assert message is not None, "Expected non-empty message in response"
     assert (
         message.tool_calls or message.content
     ), "Response missing both text and tool calls"
 
-    print(f"Tool calls: {message.tool_calls}")
+    print(f"\nTool calls: {message.tool_calls}")
     print(f"Text: {message.content}")
-    
-    
-    
+
+
 # ==========================================================
 # Accuracy & Consistency Tests
 # ==========================================================
