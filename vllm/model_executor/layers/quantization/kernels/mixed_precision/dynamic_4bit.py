@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -20,7 +19,7 @@ class Dynamic4bitLinearKernel(MPLinearKernel):
         return 1
 
     @classmethod
-    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_cpu():
             return False, "Only CPU is supported"
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
@@ -95,7 +94,7 @@ class Dynamic4bitLinearKernel(MPLinearKernel):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         c = self.config
         x_2d = x.reshape(-1, x.shape[-1])

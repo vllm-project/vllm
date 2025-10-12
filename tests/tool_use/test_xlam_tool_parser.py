@@ -3,7 +3,6 @@
 
 import json
 from collections.abc import Generator
-from typing import Optional
 
 import pytest
 
@@ -52,7 +51,7 @@ def stream_delta_message_generator(
     xlam_tool_parser: xLAMToolParser,
     xlam_tokenizer: AnyTokenizer,
     model_output: str,
-    request: Optional[ChatCompletionRequest] = None,
+    request: ChatCompletionRequest | None = None,
 ) -> Generator[DeltaMessage, None, None]:
     all_token_ids = xlam_tokenizer.encode(model_output, add_special_tokens=False)
 

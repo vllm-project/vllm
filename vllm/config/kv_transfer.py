@@ -4,7 +4,7 @@
 import hashlib
 import uuid
 from dataclasses import field
-from typing import Any, Literal, Optional, get_args
+from typing import Any, Literal, get_args
 
 from pydantic.dataclasses import dataclass
 
@@ -20,14 +20,14 @@ KVRole = Literal[KVProducer, KVConsumer]
 class KVTransferConfig:
     """Configuration for distributed KV cache transfer."""
 
-    kv_connector: Optional[str] = None
+    kv_connector: str | None = None
     """The KV connector for vLLM to transmit KV caches between vLLM instances.
     """
 
-    engine_id: Optional[str] = None
+    engine_id: str | None = None
     """The engine id for KV transfers."""
 
-    kv_buffer_device: Optional[str] = "cuda"
+    kv_buffer_device: str | None = "cuda"
     """The device used by kv connector to buffer the KV cache. Choices are 
     'cuda' and 'cpu'."""
 
@@ -35,11 +35,11 @@ class KVTransferConfig:
     """The buffer size for TorchDistributedConnector. Measured in number of
     bytes. Recommended value: 1e9 (about 1GB)."""
 
-    kv_role: Optional[KVRole] = None
+    kv_role: KVRole | None = None
     """Whether this vLLM instance produces, consumes KV cache, or both. Choices
     are 'kv_producer', 'kv_consumer', and 'kv_both'."""
 
-    kv_rank: Optional[int] = None
+    kv_rank: int | None = None
     """The rank of this vLLM instance in the KV cache transfer. Typical value:
     0 for prefill instance, 1 for decode instance.
     Currently only 1P1D is supported."""
@@ -57,7 +57,7 @@ class KVTransferConfig:
     kv_connector_extra_config: dict[str, Any] = field(default_factory=dict)
     """any extra config that the connector may need."""
 
-    kv_connector_module_path: Optional[str] = None
+    kv_connector_module_path: str | None = None
     """The Python module path to dynamically load the KV connector from.
     Only supported in V1."""
 
