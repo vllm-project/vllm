@@ -369,6 +369,7 @@ class ModelInfo:
     name: str
     architecture: str = ""
     dtype: str = "auto"
+    max_model_len: Optional[int] = None
     hf_dtype: str = "float32"
     hf_overrides: Optional[dict[str, Any]] = None
     default_pooling_type: str = ""
