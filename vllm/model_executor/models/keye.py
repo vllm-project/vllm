@@ -4,7 +4,7 @@ import math
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Any, Literal, TypeVar, Union
+from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
 import numpy as np
 import torch
@@ -153,7 +153,7 @@ class KeyeImageEmbeddingInputs(TensorSchema):
     image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
-KeyeImageInputs = Union[KeyeImagePixelInputs, KeyeImageEmbeddingInputs]
+KeyeImageInputs: TypeAlias = KeyeImagePixelInputs | KeyeImageEmbeddingInputs
 
 
 class KeyeVideoPixelInputs(TensorSchema):
@@ -188,7 +188,7 @@ class KeyeVideoEmbeddingInputs(TensorSchema):
     video_grid_thw: Annotated[torch.Tensor, TensorShape("nv", 3)]
 
 
-KeyeVideoInputs = Union[KeyeVideoPixelInputs, KeyeVideoEmbeddingInputs]
+KeyeVideoInputs: TypeAlias = KeyeVideoPixelInputs | KeyeVideoEmbeddingInputs
 
 
 class KeyeVisionEmbeddings(nn.Module):

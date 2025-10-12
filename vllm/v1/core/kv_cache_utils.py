@@ -7,7 +7,7 @@ import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, NewType, Optional, Union
+from typing import Any, NewType, TypeAlias
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -38,7 +38,7 @@ BlockHashWithGroupId = NewType("BlockHashWithGroupId", bytes)
 # ExternalBlockHash is used for reproducible prefix-cache block hashing.
 # It's a union of ``bytes`` and ``int`` to keep backward compatibility
 # after we default block hashing to use sha256 bytes.
-ExternalBlockHash = Union[bytes, int]
+ExternalBlockHash: TypeAlias = bytes | int
 
 
 def make_block_hash_with_group_id(
@@ -114,8 +114,8 @@ class KVCacheBlock:
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
-    prev_free_block: Optional["KVCacheBlock"] = None
-    next_free_block: Optional["KVCacheBlock"] = None
+    prev_free_block: "KVCacheBlock" | None = None
+    next_free_block: "KVCacheBlock" | None = None
 
     # Whether the block is a null block that should never be cached.
     is_null: bool = False

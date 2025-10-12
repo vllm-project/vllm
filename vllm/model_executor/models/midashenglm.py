@@ -26,7 +26,7 @@
 import collections
 import collections.abc
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any, TypedDict, Union, cast
+from typing import Any, TypeAlias, TypedDict, cast
 
 import numpy as np
 import torch
@@ -66,7 +66,7 @@ from vllm.transformers_utils.configs.midashenglm import DashengConfig
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
-_Tuple2 = Union[int, tuple[int, int], Sequence[int]]
+_Tuple2: TypeAlias = int | tuple[int, int] | Sequence[int]
 
 
 def _resolve_tuple2(x: _Tuple2) -> tuple[int, int]:

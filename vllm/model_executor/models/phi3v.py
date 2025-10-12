@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 import regex as re
 import torch
@@ -158,7 +158,7 @@ class Phi3VImageEmbeddingInputs(TensorSchema):
     ]
 
 
-Phi3VImageInputs = Union[Phi3VImagePixelInputs, Phi3VImageEmbeddingInputs]
+Phi3VImageInputs: TypeAlias = Phi3VImagePixelInputs | Phi3VImageEmbeddingInputs
 
 
 class Phi3ImageEmbeddingBase(nn.Module):

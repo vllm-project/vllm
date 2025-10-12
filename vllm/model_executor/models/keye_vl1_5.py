@@ -3,7 +3,7 @@
 import itertools
 from collections.abc import Mapping, Sequence
 from functools import partial
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 import numpy as np
 import torch
@@ -153,7 +153,9 @@ class KeyeVL1_5ImageEmbeddingInputs(TensorSchema):
     image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
-KeyeVL1_5ImageInputs = Union[KeyeVL1_5ImagePixelInputs, KeyeVL1_5ImageEmbeddingInputs]
+KeyeVL1_5ImageInputs: TypeAlias = (
+    KeyeVL1_5ImagePixelInputs | KeyeVL1_5ImageEmbeddingInputs
+)
 
 
 class KeyeVL1_5VideoPixelInputs(TensorSchema):
@@ -191,7 +193,9 @@ class KeyeVL1_5VideoEmbeddingInputs(TensorSchema):
     num_frames: torch.Tensor
 
 
-KeyeVL1_5VideoInputs = Union[KeyeVL1_5VideoPixelInputs, KeyeVL1_5VideoEmbeddingInputs]
+KeyeVL1_5VideoInputs: TypeAlias = (
+    KeyeVL1_5VideoPixelInputs | KeyeVL1_5VideoEmbeddingInputs
+)
 
 
 class KeyeVL1_5Projector(nn.Module):

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 from pathlib import Path
-from typing import Union
+from typing import TypeAlias
 
 from vllm.logger import init_logger
 
@@ -10,7 +10,7 @@ logger = init_logger(__file__)
 
 CHAT_TEMPLATES_DIR = Path(__file__).parent
 
-ChatTemplatePath = Union[Path, Callable[[str], Path | None]]
+ChatTemplatePath: TypeAlias = Path | Callable[[str], Path | None]
 
 
 def _get_qwen_chat_template_fallback(tokenizer_name_or_path: str) -> Path | None:

@@ -27,7 +27,7 @@
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -167,7 +167,7 @@ class Qwen2VLImageEmbeddingInputs(TensorSchema):
     ]
 
 
-Qwen2VLImageInputs = Union[Qwen2VLImagePixelInputs, Qwen2VLImageEmbeddingInputs]
+Qwen2VLImageInputs: TypeAlias = Qwen2VLImagePixelInputs | Qwen2VLImageEmbeddingInputs
 
 
 class Qwen2VLVideoPixelInputs(TensorSchema):
@@ -228,7 +228,7 @@ class Qwen2VLVideoEmbeddingInputs(TensorSchema):
     ]
 
 
-Qwen2VLVideoInputs = Union[Qwen2VLVideoPixelInputs, Qwen2VLVideoEmbeddingInputs]
+Qwen2VLVideoInputs: TypeAlias = Qwen2VLVideoPixelInputs | Qwen2VLVideoEmbeddingInputs
 
 # === Vision Encoder === #
 

@@ -5,7 +5,7 @@
 """PyTorch Ultravox model."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 from torch import nn
@@ -96,7 +96,9 @@ class UltravoxAudioEmbeddingInputs(TensorSchema):
     ]
 
 
-UltravoxAudioInputs = Union[UltravoxAudioFeatureInputs, UltravoxAudioEmbeddingInputs]
+UltravoxAudioInputs: TypeAlias = (
+    UltravoxAudioFeatureInputs | UltravoxAudioEmbeddingInputs
+)
 
 
 class UltravoxProcessingInfo(BaseProcessingInfo):

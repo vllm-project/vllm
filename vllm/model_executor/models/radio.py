@@ -11,7 +11,7 @@
 import math
 from collections.abc import Iterable
 from itertools import repeat
-from typing import Union
+from typing import TypeAlias
 
 import torch
 import torch.nn as nn
@@ -23,8 +23,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.intern_vit import InternVisionEncoder
 
-input_dim_t = Union[int, tuple[int, int]]
-norm_t = Union[tuple[float, float, float], torch.Tensor]
+input_dim_t: TypeAlias = int | tuple[int, int]
+norm_t: TypeAlias = tuple[float, float, float] | torch.Tensor
 
 
 def _ntuple(n):

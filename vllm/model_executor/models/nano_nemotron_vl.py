@@ -11,7 +11,7 @@ import copy
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, TypedDict, TypeVar, Union
+from typing import Annotated, Any, Literal, TypeAlias, TypedDict, TypeVar
 
 import numpy.typing as npt
 import torch
@@ -119,9 +119,9 @@ class NanoNemotronVLImageEmbeddinInputs(TypedDict):
     """
 
 
-NanoNemotronVLImageInputs = Union[
-    NanoNemotronVLImagePixelInputs, NanoNemotronVLImageEmbeddinInputs
-]
+NanoNemotronVLImageInputs: TypeAlias = (
+    NanoNemotronVLImagePixelInputs | NanoNemotronVLImageEmbeddinInputs
+)
 
 
 class NanoNemotronVLVideoPixelInputs(TensorSchema):
@@ -151,9 +151,9 @@ class NanoNemotronVLVideoEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor | list[torch.Tensor], TensorShape("n", "f", "h")]
 
 
-NanoNemotronVLVideoInputs = Union[
-    NanoNemotronVLVideoPixelInputs, NanoNemotronVLVideoEmbeddingInputs
-]
+NanoNemotronVLVideoInputs: TypeAlias = (
+    NanoNemotronVLVideoPixelInputs | NanoNemotronVLVideoEmbeddingInputs
+)
 
 
 def dynamic_preprocess(

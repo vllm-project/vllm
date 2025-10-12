@@ -29,7 +29,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from itertools import chain
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 import numpy as np
 import torch
@@ -145,7 +145,7 @@ class MiniCPMVImageEmbeddingInputs(TensorSchema):
     ]
 
 
-MiniCPMVImageInputs = Union[MiniCPMVImagePixelInputs, MiniCPMVImageEmbeddingInputs]
+MiniCPMVImageInputs: TypeAlias = MiniCPMVImagePixelInputs | MiniCPMVImageEmbeddingInputs
 
 DEFAULT_LN = partial(nn.LayerNorm, eps=1e-6)
 

@@ -5,7 +5,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from multiprocessing.synchronize import Lock as LockType
-from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar, Union, cast
+from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar, cast
 
 import torch
 from typing_extensions import override
@@ -85,14 +85,14 @@ class MultiModalProcessorCacheItemMetadata:
         self.prompt_updates = prompt_updates
 
 
-MultiModalCacheValue = Union[
-    MultiModalProcessorCacheItem,
-    MultiModalProcessorCacheItemMetadata,
-    MultiModalKwargsItems,
-    MultiModalKwargsItem,
-    MultiModalKwargs,
-    Mapping[str, NestedTensors],
-]
+MultiModalCacheValue: TypeAlias = (
+    MultiModalProcessorCacheItem
+    | MultiModalProcessorCacheItemMetadata
+    | MultiModalKwargsItems
+    | MultiModalKwargsItem
+    | MultiModalKwargs
+    | Mapping[str, NestedTensors]
+)
 
 _V = TypeVar("_V", bound=MultiModalCacheValue)
 

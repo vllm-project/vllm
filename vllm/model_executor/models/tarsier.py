@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Final, Literal, Protocol, TypeVar, Union
+from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
@@ -81,7 +81,7 @@ class TarsierImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor, TensorShape("bn", "ifs", "hs")]
 
 
-TarsierImageInputs = Union[TarsierImagePixelInputs, TarsierImageEmbeddingInputs]
+TarsierImageInputs: TypeAlias = TarsierImagePixelInputs | TarsierImageEmbeddingInputs
 
 
 class TarsierHfConfig(Protocol):  # Based on the Tarsier's LlavaConfig

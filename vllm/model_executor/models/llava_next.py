@@ -3,7 +3,7 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping
-from typing import Annotated, Final, Literal, Protocol, TypeVar, Union
+from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
@@ -75,7 +75,9 @@ class LlavaNextImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor, TensorShape("bn", "ifs", "hs")]
 
 
-LlavaNextImageInputs = Union[LlavaNextImagePixelInputs, LlavaNextImageEmbeddingInputs]
+LlavaNextImageInputs: TypeAlias = (
+    LlavaNextImagePixelInputs | LlavaNextImageEmbeddingInputs
+)
 
 
 class LlavaNextLikeConfig(LlavaLikeConfig, Protocol):

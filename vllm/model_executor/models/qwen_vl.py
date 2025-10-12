@@ -11,7 +11,7 @@ import math
 import unicodedata
 from collections.abc import Callable, Collection, Mapping, Sequence, Set
 from functools import lru_cache, partial
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, TypeAlias
 
 import regex as re
 import torch
@@ -93,7 +93,7 @@ class QwenImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor, TensorShape("bn", 256, "hs")]
 
 
-QwenImageInputs = Union[QwenImagePixelInputs, QwenImageEmbeddingInputs]
+QwenImageInputs: TypeAlias = QwenImagePixelInputs | QwenImageEmbeddingInputs
 
 
 class VisualAttention(nn.Module):

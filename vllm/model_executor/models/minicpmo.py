@@ -25,7 +25,7 @@
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 from torch import nn
@@ -126,7 +126,9 @@ class MiniCPMOAudioEmbeddingInputs(TensorSchema):
     ]
 
 
-MiniCPMOAudioInputs = Union[MiniCPMOAudioFeatureInputs, MiniCPMOAudioEmbeddingInputs]
+MiniCPMOAudioInputs: TypeAlias = (
+    MiniCPMOAudioFeatureInputs | MiniCPMOAudioEmbeddingInputs
+)
 
 
 def _minicpmo_field_config(hf_inputs: Mapping[str, torch.Tensor]):

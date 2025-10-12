@@ -96,6 +96,12 @@ if TYPE_CHECKING:
 
     from vllm.config import ModelConfig, VllmConfig
     from vllm.sequence import IntermediateTensors
+else:
+    Namespace = object
+
+    ModelConfig = object
+    VllmConfig = object
+    IntermediateTensors = object
 
 logger = init_logger(__name__)
 

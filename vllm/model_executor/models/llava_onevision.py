@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Final, Literal, Protocol, Union
+from typing import Annotated, Final, Literal, Protocol, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -113,13 +113,13 @@ class LlavaOnevisionImageEmbeddingInputs(TensorSchema):
     ]
 
 
-LlavaOnevisionImageInputs = Union[
-    LlavaOnevisionImagePixelInputs, LlavaOnevisionImageEmbeddingInputs
-]
+LlavaOnevisionImageInputs: TypeAlias = (
+    LlavaOnevisionImagePixelInputs | LlavaOnevisionImageEmbeddingInputs
+)
 
-LlavaOnevisionMultiInputs = Union[
-    LlavaOnevisionImageInputs, LlavaOnevisionVideoPixelInputs
-]
+LlavaOnevisionMultiInputs: TypeAlias = (
+    LlavaOnevisionImageInputs | LlavaOnevisionVideoPixelInputs
+)
 
 
 class LlavaOnevisionLikeConfig(LlavaNextLikeConfig, Protocol):

@@ -4,7 +4,7 @@
 
 from collections.abc import Callable, Iterable
 from functools import reduce
-from typing import TYPE_CHECKING, TypeVar, Union, cast, overload
+from typing import TYPE_CHECKING, TypeAlias, TypeVar, cast, overload
 
 if TYPE_CHECKING:
     import torch
@@ -14,23 +14,20 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 _U = TypeVar("_U")
 
-JSONTree = Union[
-    dict[str, "JSONTree[_T]"],
-    list["JSONTree[_T]"],
-    tuple["JSONTree[_T]", ...],
-    _T,
-]
+JSONTree: TypeAlias = (
+    dict[str, "JSONTree[_T]"] | list["JSONTree[_T]"] | tuple["JSONTree[_T]", ...] | _T
+)
 """A nested JSON structure where the leaves need not be JSON-serializable."""
 
-_JSONTree = Union[
-    dict[str, "JSONTree[_T]"],
-    list["JSONTree[_T]"],
-    tuple["JSONTree[_T]", ...],
-    dict[str, _T],
-    list[_T],
-    tuple[_T, ...],
-    _T,
-]
+_JSONTree: TypeAlias = (
+    dict[str, "JSONTree[_T]"]
+    | list["JSONTree[_T]"]
+    | tuple["JSONTree[_T]", ...]
+    | dict[str, _T]
+    | list[_T]
+    | tuple[_T, ...]
+    | _T
+)
 """
 Same as `JSONTree` but with additional `Union` members to satisfy overloads.
 """
@@ -85,8 +82,8 @@ def json_map_leaves(
 
 def json_map_leaves(
     func: Callable[[_T], _U],
-    value: Union["BatchedTensorInputs", _JSONTree[_T]],
-) -> Union["BatchedTensorInputs", _JSONTree[_U]]:
+    value: "BatchedTensorInputs" | _JSONTree[_T],
+) -> "BatchedTensorInputs" | _JSONTree[_U]:
     """Apply a function to each leaf in a nested JSON structure."""
     if isinstance(value, dict):
         return {

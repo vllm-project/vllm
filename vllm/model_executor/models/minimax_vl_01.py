@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -72,9 +72,9 @@ class MiniMaxVL01ImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor, TensorShape("bn", "ifs", "hs")]
 
 
-MiniMaxVL01ImageInputs = Union[
-    MiniMaxVL01ImagePixelInputs, MiniMaxVL01ImageEmbeddingInputs
-]
+MiniMaxVL01ImageInputs: TypeAlias = (
+    MiniMaxVL01ImagePixelInputs | MiniMaxVL01ImageEmbeddingInputs
+)
 
 
 class MiniMaxVL01MultiModalProjector(nn.Module):

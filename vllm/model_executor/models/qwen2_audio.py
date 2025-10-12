@@ -24,7 +24,7 @@
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -105,7 +105,7 @@ class Qwen2AudioEmbeddingInputs(TensorSchema):
     ]
 
 
-Qwen2AudioInputs = Union[Qwen2AudioFeatureInputs, Qwen2AudioEmbeddingInputs]
+Qwen2AudioInputs: TypeAlias = Qwen2AudioFeatureInputs | Qwen2AudioEmbeddingInputs
 
 # === Audio Encoder === #
 

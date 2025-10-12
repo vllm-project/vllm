@@ -13,7 +13,6 @@ from typing import (
     TypeAlias,
     TypeGuard,
     TypeVar,
-    Union,
 )
 
 import numpy as np
@@ -112,7 +111,7 @@ class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
 
 
 class EmbeddingItems(
-    ModalityDataItems[Union[torch.Tensor, list[torch.Tensor]], torch.Tensor]
+    ModalityDataItems[torch.Tensor | list[torch.Tensor], torch.Tensor]
 ):
     """
     Base class for data items that are expressed as a batched embedding tensor,

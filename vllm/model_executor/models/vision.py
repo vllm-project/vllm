@@ -5,7 +5,7 @@ import itertools
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Final, Generic, Literal, Protocol, TypeVar, Union
+from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 from transformers import PretrainedConfig
@@ -94,10 +94,9 @@ def get_vit_attn_backend(head_size: int, dtype: torch.dtype) -> _Backend:
 
 VisionFeatureSelectStrategyStr = Literal["class", "default", "full"]
 
-VisionFeatureSelectStrategy = Union[
-    VisionFeatureSelectStrategyStr,
-    Callable[[torch.Tensor], torch.Tensor],
-]
+VisionFeatureSelectStrategy: TypeAlias = (
+    VisionFeatureSelectStrategyStr | Callable[[torch.Tensor], torch.Tensor]
+)
 
 
 def _get_vision_feature_selector(

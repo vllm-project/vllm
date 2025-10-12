@@ -8,7 +8,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -101,9 +101,9 @@ class SkyworkR1VImageEmbeddingInputs(TensorSchema):
     ]
 
 
-SkyworkR1VImageInputs = Union[
-    SkyworkR1VImagePixelInputs, SkyworkR1VImageEmbeddingInputs
-]
+SkyworkR1VImageInputs: TypeAlias = (
+    SkyworkR1VImagePixelInputs | SkyworkR1VImageEmbeddingInputs
+)
 
 
 # adapted from https://huggingface.co/Skywork/Skywork-R1V-38B/

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, TypeAlias
 
 import torch
 from torch import nn
@@ -74,7 +74,9 @@ class PaliGemmaImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor, TensorShape("bn", "ifs", "hs")]
 
 
-PaliGemmaImageInputs = Union[PaliGemmaImagePixelInputs, PaliGemmaImageEmbeddingInputs]
+PaliGemmaImageInputs: TypeAlias = (
+    PaliGemmaImagePixelInputs | PaliGemmaImageEmbeddingInputs
+)
 
 
 class PaliGemmaMultiModalProjector(nn.Module):
