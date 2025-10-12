@@ -7,6 +7,7 @@ from typing import Any, Optional
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from vllm.config import VllmConfig
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.v1.engine import EngineCoreRequest
@@ -60,25 +61,28 @@ def _run_incremental_decode(
         skip_special_tokens=skip_special_tokens,
         spaces_between_special_tokens=spaces_between_special_tokens,
     )
-    request = EngineCoreRequest(
-        request_id="",
-        prompt_token_ids=prompt_token_ids,
-        mm_features=None,
-        sampling_params=params,
-        pooling_params=None,
-        eos_token_id=None,
-        arrival_time=0.0,
-        lora_request=None,
-        cache_salt=None,
-        data_parallel_rank=None,
-    )
-
+    request = EngineCoreRequest(request_id="",
+                                prompt_token_ids=prompt_token_ids,
+                                mm_features=None,
+                                sampling_params=params,
+                                pooling_params=None,
+                                eos_token_id=None,
+                                arrival_time=0.0,
+                                lora_request=None,
+                                cache_salt=None,
+                                data_parallel_rank=None)
+    vllm_config = VllmConfig()
     if fast is None:
-        detokenizer = IncrementalDetokenizer.from_new_request(tokenizer, request)
+        detokenizer = IncrementalDetokenizer.from_new_request(
+            vllm_config=vllm_config, tokenizer=tokenizer, request=request)
     elif fast:
-        detokenizer = FastIncrementalDetokenizer(tokenizer, request)
+        detokenizer = FastIncrementalDetokenizer(vllm_config=vllm_config,
+                                                 tokenizer=tokenizer,
+                                                 request=request)
     else:
-        detokenizer = SlowIncrementalDetokenizer(tokenizer, request)
+        detokenizer = SlowIncrementalDetokenizer(vllm_config=vllm_config,
+                                                 tokenizer=tokenizer,
+                                                 request=request)
 
     output_text = ""
     for i, token_id in enumerate(all_input_ids[starting_index:]):
