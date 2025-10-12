@@ -86,7 +86,6 @@ ignore = [
     "UP032",
     # Can remove once 3.10+ is the minimum Python version
     "UP007",
-    "UP045",
 ]
 
 [tool.ruff.format]

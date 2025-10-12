@@ -5,7 +5,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from multiprocessing.synchronize import Lock as LockType
-from typing import TYPE_CHECKING, Generic, Optional, TypeAlias, TypeVar, Union, cast
+from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar, Union, cast
 
 import torch
 from typing_extensions import override
@@ -602,7 +602,7 @@ def processor_only_cache_from_config(
 
 
 class BaseMultiModalReceiverCache(
-    BaseMultiModalCache[Optional[MultiModalKwargsItem], MultiModalKwargsItem]
+    BaseMultiModalCache[MultiModalKwargsItem | None, MultiModalKwargsItem]
 ):
     """The required interface for caches on P1."""
 

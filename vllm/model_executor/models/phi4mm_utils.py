@@ -6,7 +6,6 @@
 # but implemented by the Phi-Speech team
 #!/usr/bin/env python3
 import math
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -1718,7 +1717,7 @@ class MultiHeadedAttention(nn.Module):
         self.linear_v = nn.Linear(n_value, attention_inner_dim // group_size)
         self.linear_out = nn.Linear(attention_inner_dim // group_size, n_value)
 
-        self.attn = torch.jit.Attribute(None, Optional[Tensor])
+        self.attn = torch.jit.Attribute(None, Tensor | None)
         self.dropout = nn.Dropout(p=dropout_rate)
         self.dropout_rate = dropout_rate
         self.use_pt_scaled_dot_product_attention = use_pt_scaled_dot_product_attention

@@ -6,7 +6,7 @@ import os
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import cloudpickle
 import msgspec
@@ -115,7 +115,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
         self._init_workers_ray(placement_group)
 
         self.input_encoder = msgspec.msgpack.Encoder(enc_hook=encode_hook)
-        self.output_decoder = msgspec.msgpack.Decoder(Optional[list[SamplerOutput]])
+        self.output_decoder = msgspec.msgpack.Decoder(list[SamplerOutput] | None)
         self.use_v1 = envs.VLLM_USE_V1
 
         self.pp_locks: list[asyncio.Lock] | None = None

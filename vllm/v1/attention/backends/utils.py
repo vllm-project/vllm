@@ -11,7 +11,6 @@ from typing import (
     ClassVar,
     Generic,
     Literal,
-    Optional,
     Protocol,
     TypeVar,
     get_args,
@@ -872,7 +871,7 @@ def reshape_attn_output_for_spec_decode(attn_output: torch.Tensor) -> torch.Tens
 
 
 KV_SHARING_FAST_PREFILL_METADATA_FIELDS = [
-    ("logits_indices_padded", Optional[torch.Tensor], None),
+    ("logits_indices_padded", torch.Tensor | None, None),
     ("num_logits_indices", int, 0),
 ]
 
