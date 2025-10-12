@@ -4,13 +4,13 @@
 import json
 import os
 import platform
-import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Optional
 
+import regex as re
 import torch
 
 from vllm.logger import init_logger
