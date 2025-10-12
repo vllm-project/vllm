@@ -209,6 +209,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
+    VLLM_LITE_PROFILER_LOG_PATH: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -1391,6 +1392,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
+    # Log path for the lightweight timing profiler.
+    # If this path is set (not None), lightweight profiling will be enabled,
+    # providing detailed analysis of the execution time for each function call.
+    "VLLM_LITE_PROFILER_LOG_PATH": lambda: os.getenv(
+        "VLLM_LITE_PROFILER_LOG_PATH", None
+    ),
 }
 
 # --8<-- [end:env-vars-definition]

@@ -65,6 +65,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -317,14 +318,19 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        scheduler_output = self.scheduler.schedule()
-        model_output = self.execute_model_with_error_logging(
-            self.model_executor.execute_model,  # type: ignore
-            scheduler_output,
-        )
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
-        )
+        with record_function_or_nullcontext("Step:Schedule"):
+            scheduler_output = self.scheduler.schedule()
+
+        with record_function_or_nullcontext("Step:Model"):
+            model_output = self.execute_model_with_error_logging(
+                self.model_executor.execute_model,  # type: ignore
+                scheduler_output,
+            )
+
+        with record_function_or_nullcontext("Step:Output"):
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, model_output
+            )  # type: ignore
 
         return (engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0)
 
@@ -822,7 +828,8 @@ class EngineCoreProc(EngineCore):
                 logger.debug("EngineCore waiting for work.")
                 waited = True
             req = self.input_queue.get()
-            self._handle_client_request(*req)
+            with record_function_or_nullcontext("Input:Process"):
+                self._handle_client_request(*req)
 
         if waited:
             logger.debug("EngineCore loop active.")
@@ -830,7 +837,8 @@ class EngineCoreProc(EngineCore):
         # Handle any more client requests.
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
-            self._handle_client_request(*req)
+            with record_function_or_nullcontext("Input:Process"):
+                self._handle_client_request(*req)
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
