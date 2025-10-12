@@ -3832,7 +3832,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
             compilation_cases = tqdm(
-                compilation_cases,
+                list(compilation_cases),
                 disable=not self.load_config.use_tqdm_on_load,
                 desc="Capturing CUDA graphs ({}, {})".format(
                     "decode" if uniform_decode else "mixed prefill-decode",
