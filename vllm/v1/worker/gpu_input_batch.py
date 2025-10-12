@@ -62,10 +62,9 @@ class CachedRequestState:
                     "provided via prompt_embeds, and its ID is unknown."
                 )
             return self.prompt_token_ids[idx]
-        elif idx - self.num_prompt_tokens < len(self.output_token_ids):
+        if idx - self.num_prompt_tokens < len(self.output_token_ids):
             return self.output_token_ids[idx - self.num_prompt_tokens]
-        else:
-            return -1
+        return -1
 
 
 class InputBatch:
@@ -78,7 +77,9 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
+        kernel_block_sizes: list[int],
         logitsprocs: Optional[LogitsProcessors] = None,
+        logitsprocs_need_output_token_ids: bool = False,
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
         num_speculative_tokens: int = 0,
@@ -132,6 +133,7 @@ class InputBatch:
             pin_memory=pin_memory,
             device=device,
             block_sizes=block_sizes,
+            kernel_block_sizes=kernel_block_sizes,
             num_speculative_tokens=num_speculative_tokens,
         )
 
@@ -239,6 +241,7 @@ class InputBatch:
         # Store provided logitsprocs. If none are provided, initialize empty
         # data structure
         self.logitsprocs = logitsprocs or LogitsProcessors()
+        self.logitsprocs_need_output_token_ids = logitsprocs_need_output_token_ids
 
         # Store last speculative tokens for sampler.
         self.spec_token_ids: list[Optional[list[int]]] = []
@@ -250,8 +253,12 @@ class InputBatch:
 
         # Cached reference to the GPU tensor of previously sampled tokens
         self.prev_sampled_token_ids: Optional[torch.Tensor] = None
-        self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
         self.prev_req_id_to_index: Optional[dict[str, int]] = None
+        # These are used to update output_token_ids with real sampled
+        # ids from prior step, if required by current sampling params
+        # (e.g. penalties).
+        self.sampled_token_ids_cpu: Optional[torch.Tensor] = None
+        self.async_copy_ready_event: Optional[torch.cuda.Event] = None
 
     @property
     def req_ids(self) -> list[str]:
@@ -768,14 +775,26 @@ class InputBatch:
             not self.no_penalties
             or self.logits_processing_needs_token_ids[:num_reqs].any()
         )
-        if needs_prompt_token_ids:
-            # The prompt tokens are used only for applying penalties or
-            # step pooling during the sampling/pooling process.
-            # Hence copy these tensors only when there are requests which
-            # need penalties/step_pooler to be applied.
-            prompt_token_ids = self._make_prompt_token_ids_tensor()
-        else:
-            prompt_token_ids = None
+        # The prompt tokens are used only for applying penalties or
+        # step pooling during the sampling/pooling process.
+        # Hence copy these tensors only when there are requests which
+        # need penalties/step_pooler to be applied.
+        prompt_token_ids = (
+            self._make_prompt_token_ids_tensor() if needs_prompt_token_ids else None
+        )
+
+        # Only set output_token_ids if required by the current requests'
+        # sampling parameters.
+        needs_output_token_ids = (
+            not self.no_penalties
+            or bool(self.bad_words_token_ids)
+            or self.logitsprocs_need_output_token_ids
+        )
+        output_token_ids = (
+            cast(list[list[int]], self.req_output_token_ids)
+            if needs_output_token_ids
+            else []
+        )
 
         allowed_token_ids_mask: Optional[torch.Tensor] = None
         if not self.no_allowed_token_ids:
@@ -799,7 +818,7 @@ class InputBatch:
             frequency_penalties=self.frequency_penalties[:num_reqs],
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
-            output_token_ids=cast(list[list[int]], self.req_output_token_ids),
+            output_token_ids=output_token_ids,
             spec_token_ids=cast(list[list[int]], self.spec_token_ids),
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
@@ -859,6 +878,52 @@ class InputBatch:
         )
 
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+
+    def set_async_sampled_token_ids(
+        self,
+        sampled_token_ids_cpu: torch.Tensor,
+        async_copy_ready_event: torch.cuda.Event,
+    ) -> None:
+        """
+        In async scheduling case, store ref to sampled_token_ids_cpu
+        tensor and corresponding copy-ready event. Used to repair
+        output_token_ids prior to sampling, if needed by logits processors.
+        """
+        if self.sampling_metadata.output_token_ids:
+            self.sampled_token_ids_cpu = sampled_token_ids_cpu
+            self.async_copy_ready_event = async_copy_ready_event
+        else:
+            self.sampled_token_ids_cpu = None
+            self.async_copy_ready_event = None
+
+    def update_async_output_token_ids(self) -> None:
+        """
+        In async scheduling case, update output_token_ids in sampling metadata
+        from prior steps sampled token ids once they've finished copying to CPU.
+        This is called right before they are needed by the logits processors.
+        """
+        output_token_ids = self.sampling_metadata.output_token_ids
+        if self.sampled_token_ids_cpu is None or not output_token_ids:
+            # Output token ids not needed or not async scheduling.
+            return
+
+        assert self.prev_req_id_to_index is not None
+        sampled_token_ids = None
+        for index, req_id in enumerate(self.req_ids):
+            prev_index = self.prev_req_id_to_index.get(req_id)
+            if prev_index is None:
+                continue
+            req_output_token_ids = output_token_ids[index]
+            if not req_output_token_ids or req_output_token_ids[-1] != -1:
+                # Final output id is not a placeholder, some tokens must have
+                # been discarded after a kv-load failure.
+                continue
+            if sampled_token_ids is None:
+                assert self.async_copy_ready_event is not None
+                self.async_copy_ready_event.synchronize()
+                sampled_token_ids = self.sampled_token_ids_cpu.squeeze(-1).tolist()
+            # Replace placeholder token id with actual sampled id.
+            req_output_token_ids[-1] = sampled_token_ids[prev_index]
 
     @property
     def num_reqs(self) -> int:
