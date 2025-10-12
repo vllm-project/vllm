@@ -22,7 +22,10 @@ def server():
     args = ["--enforce-eager", "--tool-server", "demo"]
     env_dict = dict(
         VLLM_ENABLE_RESPONSES_API_STORE="1",
+        # Use system instructions to ensure model follows directions
+        VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS="1",
         PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
+        GPT_OSS_SYSTEM_TOOL_MCP_LABELS="code_interpreter",
     )
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
@@ -437,26 +440,41 @@ async def test_web_search(client: OpenAI, model_name: str):
 async def test_code_interpreter(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        # TODO: Ideally should be able to set max tool calls
-        # to prevent multi-turn, but it is not currently supported
-        # would speed up the test
-        input=(
-            "What's the first 4 digits after the decimal point of "
-            "cube root of `19910212 * 20250910`? "
-            "Show only the digits. The python interpreter is not stateful "
-            "and you must print to see the output."
+        instructions=(
+            "You must use the Python tool to execute code. Never simulate execution."
         ),
+        input="import random; print(random.randint(1, 1000000))",
         tools=[{"type": "code_interpreter", "container": {"type": "auto"}}],
         temperature=0.0,  # More deterministic output in response
+        extra_body={"enable_response_messages": True},
     )
     assert response is not None
     assert response.status == "completed"
     assert response.usage.output_tokens_details.tool_output_tokens > 0
-    for item in response.output:
-        if item.type == "message":
-            output_string = item.content[0].text
-            print("output_string: ", output_string, flush=True)
-            assert "5846" in output_string
+
+    # Verify output messages: Tool calls and responses on analysis channel
+    tool_call_found = False
+    tool_response_found = False
+    for message in response.output_messages:
+        recipient = message.get("recipient")
+        if recipient and recipient.startswith("python"):
+            tool_call_found = True
+            assert message.get("channel") == "analysis", (
+                "Tool call should be on analysis channel"
+            )
+        author = message.get("author", {})
+        if (
+            author.get("role") == "tool"
+            and author.get("name")
+            and author.get("name").startswith("python")
+        ):
+            tool_response_found = True
+            assert message.get("channel") == "analysis", (
+                "Tool response should be on analysis channel"
+            )
+
+    assert tool_call_found, "Should have found at least one Python tool call"
+    assert tool_response_found, "Should have found at least one Python tool response"
 
 
 def get_weather(latitude, longitude):
@@ -668,22 +686,6 @@ async def test_function_calling_required(client: OpenAI, model_name: str):
             tools=tools,
             tool_choice="required",
         )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_system_message_with_tools(client: OpenAI, model_name: str):
-    from vllm.entrypoints.harmony_utils import get_system_message
-
-    # Test with custom tools enabled - commentary channel should be available
-    sys_msg = get_system_message(with_custom_tools=True)
-    valid_channels = sys_msg.content[0].channel_config.valid_channels
-    assert "commentary" in valid_channels
-
-    # Test with custom tools disabled - commentary channel should be removed
-    sys_msg = get_system_message(with_custom_tools=False)
-    valid_channels = sys_msg.content[0].channel_config.valid_channels
-    assert "commentary" not in valid_channels
 
 
 @pytest.mark.asyncio

@@ -1359,12 +1359,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The number of SMs to allocate for communication kernels when running DBO
     # the rest of the SMs on the device will be allocated to compute
     "VLLM_DBO_COMM_SMS": lambda: int(os.getenv("VLLM_DBO_COMM_SMS", "20")),
-    # Valid values are container,code_interpreter,web_search_preview
-    # ex GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
-    "GPT_OSS_SYSTEM_TOOL_MCP_LABELS": env_list_with_choices(
-        "GPT_OSS_SYSTEM_TOOL_MCP_LABELS",
-        [],
-        ["container", "code_interpreter", "web_search_preview"],
+    # Comma-separated list of MCP server labels to elevate to system prompt
+    # Default to maintain backwards compatibility as the code had special
+    # treatment for these three tools previously
+    "GPT_OSS_SYSTEM_TOOL_MCP_LABELS": lambda: (
+        ["web_search_preview", "container", "code_interpreter"]
+        if "GPT_OSS_SYSTEM_TOOL_MCP_LABELS" not in os.environ
+        else os.environ["GPT_OSS_SYSTEM_TOOL_MCP_LABELS"].split(",")
     ),
     # Enable max_autotune & coordinate_descent_tuning in inductor_config
     # to compile static shapes passed from compile_sizes in compilation_config

@@ -10,6 +10,7 @@ import json
 import os
 import random
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -88,6 +89,24 @@ else:
 
 VLLM_PATH = Path(__file__).parent.parent
 """Path to root of the vLLM repository."""
+
+
+def find_free_port() -> int:
+    """
+    Find and return a free port number.
+
+    This is useful for starting test servers on dynamic ports to avoid
+    conflicts when running tests in parallel or when a specific port is
+    already in use.
+
+    Returns:
+        int: A free port number
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+    return port
 
 
 class RemoteOpenAIServer:

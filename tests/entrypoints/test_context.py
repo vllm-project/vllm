@@ -81,7 +81,7 @@ def mock_parser():
 def test_single_turn_token_counting():
     """Test token counting behavior for a single turn."""
     # Create a context
-    context = HarmonyContext(messages=[], available_tools=[])
+    context = HarmonyContext(messages=[], enabled_tool_namespaces=[])
 
     # Create a mock RequestOutput with specific token counts
     mock_output = create_mock_request_output(
@@ -109,7 +109,7 @@ def test_single_turn_token_counting():
 async def test_multi_turn_token_counting():
     """Test token counting behavior across multiple turns with tool output."""
     # Create a context
-    context = HarmonyContext(messages=[], available_tools=["browser"])
+    context = HarmonyContext(messages=[], enabled_tool_namespaces=["browser"])
 
     # Simulate a conversation with 3 turns
     # Turn 1: prefill 5, decode 3, tool 7
@@ -159,7 +159,7 @@ async def test_multi_turn_token_counting():
 
 def test_empty_output_tokens():
     """Test behavior when RequestOutput has empty output tokens."""
-    context = HarmonyContext(messages=[], available_tools=[])
+    context = HarmonyContext(messages=[], enabled_tool_namespaces=[])
 
     # Create a RequestOutput with empty output tokens
     mock_output = create_mock_request_output(
@@ -179,7 +179,7 @@ def test_empty_output_tokens():
 
 def test_missing_prompt_token_ids():
     """Test behavior when RequestOutput has None prompt_token_ids."""
-    context = HarmonyContext(messages=[], available_tools=[])
+    context = HarmonyContext(messages=[], enabled_tool_namespaces=[])
 
     mock_output = create_mock_request_output(
         prompt_token_ids=None,  # No prompt token IDs
@@ -200,7 +200,7 @@ def test_missing_prompt_token_ids():
 
 def test_reasoning_tokens_counting(mock_parser):
     """Test that reasoning tokens are counted correctly."""
-    context = HarmonyContext(messages=[], available_tools=[])
+    context = HarmonyContext(messages=[], enabled_tool_namespaces=[])
 
     # Mock parser to simulate reasoning channel
     mock_parser.current_channel = "analysis"  # Reasoning channel
@@ -220,7 +220,7 @@ def test_reasoning_tokens_counting(mock_parser):
 
 def test_zero_tokens_edge_case():
     """Test behavior with all zero token counts."""
-    context = HarmonyContext(messages=[], available_tools=[])
+    context = HarmonyContext(messages=[], enabled_tool_namespaces=[])
 
     # Create a request with empty lists (not None) for both prompt and
     # output tokens
@@ -245,7 +245,7 @@ async def test_single_turn_no_tool_output():
     """Test that first turn never generates tool output tokens."""
     context = HarmonyContext(
         messages=[],
-        available_tools=["browser"],  # Tools available
+        enabled_tool_namespaces=["browser"],  # Tools available
     )
 
     # Even with large prompt in first turn, no tool tokens should be counted
@@ -268,7 +268,7 @@ async def test_negative_tool_tokens_edge_case():
     tokens. We should log an error and clamp the value to 0."""
     # Use patch to check if logger.error was called
     with patch("vllm.entrypoints.context.logger.error") as mock_log:
-        context = HarmonyContext(messages=[], available_tools=["browser"])
+        context = HarmonyContext(messages=[], enabled_tool_namespaces=["browser"])
 
         # First turn
         mock_output1 = create_mock_request_output(
@@ -312,7 +312,7 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
     message boundaries.
     """
     # Create a streaming context
-    context = StreamingHarmonyContext(messages=[], available_tools=["browser"])
+    context = StreamingHarmonyContext(messages=[], enabled_tool_namespaces=["browser"])
 
     # Simulate three turns of conversation:
     # Turn 1: stream tokens one by one, then finish the message
@@ -465,7 +465,9 @@ async def test_streaming_message_synchronization(mock_parser):
             recipient=Role.ASSISTANT,
         )
     ]
-    context = StreamingHarmonyContext(messages=initial_messages, available_tools=[])
+    context = StreamingHarmonyContext(
+        messages=initial_messages, enabled_tool_namespaces=[]
+    )
 
     # Verify initial state
     assert len(context._messages) == 1

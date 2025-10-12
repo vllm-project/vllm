@@ -23,10 +23,9 @@ from vllm.entrypoints.chat_utils import (
     make_tool_call_id,
 )
 from vllm.entrypoints.harmony_utils import (
-    get_developer_message,
+    build_system_and_developer_messages,
     get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant,
-    get_system_message,
     parse_chat_input,
     parse_chat_output,
     render_for_completion,
@@ -1726,17 +1725,15 @@ class OpenAIServingChat(OpenAIServing):
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
-        sys_msg = get_system_message(
-            reasoning_effort=request.reasoning_effort,
-            browser_description=None,
-            python_description=None,
-            with_custom_tools=request.tools is not None,
-        )
-        messages.append(sys_msg)
 
-        # Add developer message.
-        dev_msg = get_developer_message(tools=request.tools)
-        messages.append(dev_msg)
+        # Use unified helper to build system and developer messages
+        sys_dev_messages = build_system_and_developer_messages(
+            request_tools=request.tools if request.tools else [],
+            tool_server=None,  # Chat API doesn't use tool server
+            instructions=None,
+            reasoning_effort=request.reasoning_effort,
+        )
+        messages.extend(sys_dev_messages)
 
         # Add user message.
         for chat_msg in request.messages:

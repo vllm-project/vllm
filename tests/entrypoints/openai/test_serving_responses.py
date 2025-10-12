@@ -28,7 +28,7 @@ class MockConversationContext(ConversationContext):
     async def call_tool(self):
         return []
 
-    def need_builtin_tool_call(self) -> bool:
+    def need_server_side_tool_call(self) -> bool:
         return False
 
     def render_for_completion(self):

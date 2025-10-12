@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import TYPE_CHECKING, Any, Optional
 
+from mcp import ClientSession
+from mcp.client.sse import sse_client
 from openai_harmony import ToolDescription, ToolNamespaceConfig
 
 from vllm.entrypoints.tool import HarmonyBrowserTool, HarmonyPythonTool, Tool
@@ -16,9 +18,6 @@ if TYPE_CHECKING:
 
 
 async def list_server_and_tools(server_url: str):
-    from mcp import ClientSession
-    from mcp.client.sse import sse_client
-
     async with (
         sse_client(url=server_url) as streams,
         ClientSession(*streams) as session,
@@ -28,6 +27,7 @@ async def list_server_and_tools(server_url: str):
         return initialize_response, list_tools_response
 
 
+# TODO: This is a harmony specific change, migrate to harmony_utils
 def trim_schema(schema: dict) -> dict:
     # Turn JSON Schema from MCP generated into Harmony's variant.
     if "title" in schema:
@@ -73,42 +73,41 @@ def post_process_tools_description(
 
 class ToolServer(ABC):
     @abstractmethod
-    def has_tool(self, tool_name: str) -> bool:
+    def has_namespace(self, namespace: str) -> bool:
         """
-        Return True if the tool is supported, False otherwise.
+        Return True if the namespace is supported, False otherwise.
         """
         pass
 
     @abstractmethod
-    def get_tool_description(self, tool_name: str) -> Optional[ToolNamespaceConfig]:
+    def get_tool_description(self, namespace: str) -> Optional[ToolNamespaceConfig]:
         """
-        Return the tool description for the given tool name.
-        If the tool is not supported, return None.
+        Return the tool description for the given namespace.
+        If the namespace is not supported, return None.
         """
         pass
 
     @abstractmethod
     def new_session(
-        self, tool_name: str, session_id: str, headers: Optional[dict[str, str]] = None
+        self, namespace: str, session_id: str, headers: Optional[dict[str, str]] = None
     ) -> AbstractAsyncContextManager[Any]:
         """
-        Create a session for the tool.
+        Create a session for the namespace.
         """
         ...
 
 
 class MCPToolServer(ToolServer):
     def __init__(self):
-        try:
-            import mcp  # noqa: F401
-        except ImportError:
-            raise ImportError(
-                "mcp is not installed. Please run `pip install mcp` to use "
-                "MCPToolServer."
-            ) from None
         self.harmony_tool_descriptions = {}
 
-    async def add_tool_server(self, server_url: str):
+    async def add_mcp_server(self, server_url: str):
+        """
+        Add an MCP server.
+
+        Args:
+            server_url: URL to connect to
+        """
         tool_urls = server_url.split(",")
         self.harmony_tool_descriptions = {}
         self.urls: dict[str, str] = {}
@@ -116,10 +115,12 @@ class MCPToolServer(ToolServer):
             url = f"http://{url}/sse"
             initialize_response, list_tools_response = await list_server_and_tools(url)
 
+            server_name = initialize_response.serverInfo.name
+
             list_tools_response = post_process_tools_description(list_tools_response)
 
             tool_from_mcp = ToolNamespaceConfig(
-                name=initialize_response.serverInfo.name,
+                name=server_name,  # This is the namespace (== server_label)
                 description=initialize_response.instructions,
                 tools=[
                     ToolDescription.new(
@@ -130,39 +131,43 @@ class MCPToolServer(ToolServer):
                     for tool in list_tools_response.tools
                 ],
             )
-            self.harmony_tool_descriptions[tool_from_mcp.name] = tool_from_mcp
-            if tool_from_mcp.name not in self.urls:
-                self.urls[tool_from_mcp.name] = url
-            else:
+
+            # Check for namespace collision (keep existing logic)
+            if tool_from_mcp.name in self.urls:
                 logger.warning(
-                    "Tool %s already exists. Ignoring duplicate tool server %s",
-                    tool_from_mcp.name,
+                    "MCP server at %s provides namespace '%s' which is already "
+                    "registered from %s. Ignoring duplicate registration.",
                     url,
+                    tool_from_mcp.name,
+                    self.urls[tool_from_mcp.name],
                 )
+                continue
+
+            # Add to registry
+            self.harmony_tool_descriptions[tool_from_mcp.name] = tool_from_mcp
+            self.urls[tool_from_mcp.name] = url
+
         logger.info(
             "MCPToolServer initialized with tools: %s",
             list(self.harmony_tool_descriptions.keys()),
         )
 
-    def has_tool(self, tool_name: str):
-        return tool_name in self.harmony_tool_descriptions
+    def has_namespace(self, namespace: str):
+        return namespace in self.harmony_tool_descriptions
 
-    def get_tool_description(self, tool_name: str):
-        return self.harmony_tool_descriptions.get(tool_name)
+    def get_tool_description(self, namespace: str):
+        return self.harmony_tool_descriptions.get(namespace)
 
     @asynccontextmanager
     async def new_session(
-        self, tool_name: str, session_id: str, headers: Optional[dict[str, str]] = None
+        self, namespace: str, session_id: str, headers: Optional[dict[str, str]] = None
     ):
-        from mcp import ClientSession
-        from mcp.client.sse import sse_client
-
-        url = self.urls.get(tool_name)
+        url = self.urls.get(namespace)
         request_headers = {"x-session-id": session_id}
         if headers is not None:
             request_headers.update(headers)
         if not url:
-            raise KeyError(f"Tool '{tool_name}' is not supported")
+            raise KeyError(f"Namespace '{namespace}' is not supported")
         async with (
             sse_client(url=url, headers=request_headers) as streams,
             ClientSession(*streams) as session,
@@ -171,6 +176,7 @@ class MCPToolServer(ToolServer):
             yield session
 
 
+# TODO: Move this as it is harmony specific, as the tools return harmony messages
 class DemoToolServer(ToolServer):
     def __init__(self):
         self.tools: dict[str, Tool] = {}
@@ -182,28 +188,28 @@ class DemoToolServer(ToolServer):
         if browser_tool.enabled:
             self.tools["browser"] = browser_tool
         if python_tool.enabled:
-            self.tools["python"] = python_tool
+            self.tools["code_interpreter"] = python_tool  # Use namespace, not "python"
         logger.info(
             "DemoToolServer initialized with tools: %s", list(self.tools.keys())
         )
 
-    def has_tool(self, tool_name: str) -> bool:
-        return tool_name in self.tools
+    def has_namespace(self, namespace: str) -> bool:
+        return namespace in self.tools
 
-    def get_tool_description(self, tool_name: str) -> Optional[ToolNamespaceConfig]:
-        if tool_name not in self.tools:
+    def get_tool_description(self, namespace: str) -> Optional[ToolNamespaceConfig]:
+        if namespace not in self.tools:
             return None
-        if tool_name == "browser":
+        if namespace == "browser":
             return ToolNamespaceConfig.browser()
-        elif tool_name == "python":
+        elif namespace == "code_interpreter":
             return ToolNamespaceConfig.python()
         else:
-            raise ValueError(f"Unknown tool {tool_name}")
+            raise ValueError(f"Unknown namespace {namespace}")
 
     @asynccontextmanager
     async def new_session(
-        self, tool_name: str, session_id: str, headers: Optional[dict[str, str]] = None
+        self, namespace: str, session_id: str, headers: Optional[dict[str, str]] = None
     ):
-        if tool_name not in self.tools:
-            raise KeyError(f"Tool '{tool_name}' is not supported")
-        yield self.tools[tool_name]
+        if namespace not in self.tools:
+            raise KeyError(f"Namespace '{namespace}' is not supported")
+        yield self.tools[namespace]
