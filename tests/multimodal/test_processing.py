@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import nullcontext
-from typing import Optional, cast
+from typing import cast
 
 import numpy as np
 import pytest
@@ -941,10 +941,7 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
 
     profiler = MultiModalProfiler(processor)
 
-    if is_valid:
-        exc_ctx = nullcontext()
-    else:
-        exc_ctx = pytest.raises(ValueError, match="At most")
+    exc_ctx = nullcontext() if is_valid else pytest.raises(ValueError, match="At most")
 
     with exc_ctx:
         profiler.get_decoder_dummy_data(
@@ -985,10 +982,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
     else:
         mm_data = {"image": [image] * num_images}
 
-    if is_valid:
-        exc_ctx = nullcontext()
-    else:
-        exc_ctx = pytest.raises(ValueError, match="At most")
+    exc_ctx = nullcontext() if is_valid else pytest.raises(ValueError, match="At most")
 
     with exc_ctx:
         processor.apply(
@@ -1009,7 +1003,7 @@ class DummyProcessor:
         self,
         a: int = 0,
         c: int = 0,
-        return_tensors: Optional[str] = None,
+        return_tensors: str | None = None,
     ) -> dict[str, int]:
         return dict(a=a, c=c)
 

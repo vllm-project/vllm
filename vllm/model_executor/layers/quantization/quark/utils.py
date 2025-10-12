@@ -3,7 +3,7 @@
 
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
-from typing import Any, Optional
+from typing import Any
 
 import regex as re
 
@@ -22,7 +22,7 @@ def deep_compare(dict1: Any, dict2: Any) -> bool:
 
 
 def should_ignore_layer(
-    layer_name: Optional[str],
+    layer_name: str | None,
     ignore: Iterable[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
 ) -> bool:
@@ -81,10 +81,7 @@ def check_equal_or_regex_match(layer_name: str, targets: Iterable[str]) -> bool:
     Checks whether a layer_name is exactly equal or a regex match for
     if target starts with 're:' to any target in list.
     """
-    for target in targets:
-        if _is_equal_or_regex_match(layer_name, target):
-            return True
-    return False
+    return any(_is_equal_or_regex_match(layer_name, target) for target in targets)
 
 
 def _is_equal_or_regex_match(

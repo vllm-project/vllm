@@ -9,7 +9,7 @@ using the chat template defined by the model.
 import os
 from argparse import Namespace
 from dataclasses import asdict
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 from huggingface_hub import snapshot_download
 from PIL.Image import Image
@@ -41,9 +41,9 @@ class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
     prompt: str
     image_data: list[Image]
-    stop_token_ids: Optional[list[int]] = None
-    chat_template: Optional[str] = None
-    lora_requests: Optional[list[LoRARequest]] = None
+    stop_token_ids: list[int] | None = None
+    chat_template: str | None = None
+    lora_requests: list[LoRARequest] | None = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -371,6 +371,115 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_keye_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "Kwai-Keye/Keye-VL-8B-Preview"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        },
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
+def load_keye_vl1_5(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "Kwai-Keye/Keye-VL-1_5-8B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=32768,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        },
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
+def load_kimi_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "moonshotai/Kimi-VL-A3B-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        max_num_seqs=4,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_llama4(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
 
@@ -505,115 +614,6 @@ def load_llava_onevision(question: str, image_urls: list[str]) -> ModelRequestDa
     )
 
 
-def load_keye_vl(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "Kwai-Keye/Keye-VL-8B-Preview"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=8192,
-        max_num_seqs=5,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = [{"type": "image", "image": url} for url in image_urls]
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        },
-    ]
-
-    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-
-    prompt = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    image_data = [fetch_image(url) for url in image_urls]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
-    )
-
-
-def load_keye_vl1_5(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "Kwai-Keye/Keye-VL-1_5-8B"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=32768,
-        max_num_seqs=5,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = [{"type": "image", "image": url} for url in image_urls]
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        },
-    ]
-
-    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-
-    prompt = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    image_data = [fetch_image(url) for url in image_urls]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=image_data,
-    )
-
-
-def load_kimi_vl(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "moonshotai/Kimi-VL-A3B-Instruct"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=4096,
-        max_num_seqs=4,
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-
-    placeholders = [{"type": "image", "image": url} for url in image_urls]
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *placeholders,
-                {"type": "text", "text": question},
-            ],
-        }
-    ]
-
-    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-
-    prompt = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
 def load_mistral3(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 
@@ -713,11 +713,9 @@ def load_ovis2_5(question: str, image_urls: list[str]) -> ModelRequestData:
     placeholders = "\n".join(
         f"Image-{i}: <image>\n" for i, _ in enumerate(image_urls, start=1)
     )
-    messages = [{"role": "user", "content": f"{placeholders}\n{question}"}]
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    prompt = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
+    prompt = (
+        f"<|im_start|>user\n\n{placeholders}\n{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
     )
 
     return ModelRequestData(
@@ -1253,7 +1251,7 @@ model_example_map = {
 }
 
 
-def run_generate(model, question: str, image_urls: list[str], seed: Optional[int]):
+def run_generate(model, question: str, image_urls: list[str], seed: int | None):
     req_data = model_example_map[model](question, image_urls)
 
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
@@ -1279,7 +1277,7 @@ def run_generate(model, question: str, image_urls: list[str], seed: Optional[int
         print("-" * 50)
 
 
-def run_chat(model: str, question: str, image_urls: list[str], seed: Optional[int]):
+def run_chat(model: str, question: str, image_urls: list[str], seed: int | None):
     req_data = model_example_map[model](question, image_urls)
 
     # Disable other modalities to save memory

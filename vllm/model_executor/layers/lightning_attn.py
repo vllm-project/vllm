@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 from einops import rearrange
@@ -207,10 +206,7 @@ def _fwd_kv_parallel(
     kv = tl.zeros([D_FBLOCK, E_FBLOCK], dtype=tl.float32)
 
     # Handle the last block which might be smaller than BLOCK
-    if off_block == NUM_BLOCK - 1:
-        split_n = n - (NUM_BLOCK - 1) * BLOCK
-    else:
-        split_n = BLOCK
+    split_n = n - (NUM_BLOCK - 1) * BLOCK if off_block == NUM_BLOCK - 1 else BLOCK
     left_shift = tl.cdiv(split_n, CBLOCK) * CBLOCK - split_n
     num_blocks = min(tl.cdiv(split_n, CBLOCK), NUM_CBLOCK)
     k_decay_ptr += (NUM_CBLOCK - num_blocks) * CBLOCK
@@ -532,7 +528,7 @@ def lightning_attention(
     v: torch.Tensor,
     ed: torch.Tensor,
     block_size: int = 256,
-    kv_history: Optional[torch.Tensor] = None,
+    kv_history: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply lightning attention algorithm

@@ -11,7 +11,7 @@ on HuggingFace model repository.
 from argparse import Namespace
 from dataclasses import asdict
 from pathlib import Path
-from typing import Literal, NamedTuple, Optional, TypedDict, Union, get_args
+from typing import Literal, NamedTuple, TypeAlias, TypedDict, get_args
 
 from PIL.Image import Image
 
@@ -47,15 +47,15 @@ class TextImagesQuery(TypedDict):
 
 
 QueryModality = Literal["text", "image", "text+image", "text+images"]
-Query = Union[TextQuery, ImageQuery, TextImageQuery, TextImagesQuery]
+Query: TypeAlias = TextQuery | ImageQuery | TextImageQuery | TextImagesQuery
 
 
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
-    prompt: Optional[str] = None
-    image: Optional[Image] = None
-    query: Optional[str] = None
-    documents: Optional[ScoreMultiModalParam] = None
+    prompt: str | None = None
+    image: Image | None = None
+    query: str | None = None
+    documents: ScoreMultiModalParam | None = None
 
 
 def run_clip(query: Query) -> ModelRequestData:
@@ -113,7 +113,7 @@ def run_e5_v(query: Query) -> ModelRequestData:
 def _get_vlm2vec_prompt_image(query: Query, image_token: str):
     if query["modality"] == "text":
         text = query["text"]
-        prompt = f"Find me an everyday image that matches the given caption: {text}"  # noqa: E501
+        prompt = f"Find me an everyday image that matches the given caption: {text}"
         image = None
     elif query["modality"] == "image":
         prompt = f"{image_token} Find a day-to-day image that looks similar to the provided image."  # noqa: E501
@@ -281,7 +281,7 @@ def get_query(modality: QueryModality):
     raise ValueError(msg)
 
 
-def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
+def run_encode(model: str, modality: QueryModality, seed: int | None):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 
@@ -311,7 +311,7 @@ def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
         print("-" * 50)
 
 
-def run_score(model: str, modality: QueryModality, seed: Optional[int]):
+def run_score(model: str, modality: QueryModality, seed: int | None):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 

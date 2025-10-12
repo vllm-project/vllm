@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import datetime
-from typing import Union
 
 import openai  # use the official client for correctness check
 import pytest
@@ -25,12 +24,14 @@ tools = [
                 "properties": {
                     "city": {
                         "type": "string",
-                        "description": "The city to find the weather for, e.g. 'Vienna'",
+                        "description": "The city to find the weather for, e.g. "
+                        "'Vienna'",
                         "default": "Vienna",
                     },
                     "country": {
                         "type": "string",
-                        "description": "The country that the city is in, e.g. 'Austria'",
+                        "description": "The country that the city is in, e.g. "
+                        "'Austria'",
                     },
                     "unit": {
                         "type": "string",
@@ -85,12 +86,14 @@ tools = [
                 "properties": {
                     "city": {
                         "type": "string",
-                        "description": "The city to get the forecast for, e.g. 'Vienna'",
+                        "description": "The city to get the forecast for, e.g. "
+                        "'Vienna'",
                         "default": "Vienna",
                     },
                     "country": {
                         "type": "string",
-                        "description": "The country that the city is in, e.g. 'Austria'",
+                        "description": "The country that the city is in, e.g. "
+                        "'Austria'",
                     },
                     "days": {
                         "type": "integer",
@@ -162,7 +165,7 @@ async def test_function_tool_use(
     client: openai.AsyncOpenAI,
     model_name: str,
     stream: bool,
-    tool_choice: Union[str, dict],
+    tool_choice: str | dict,
     enable_thinking: bool,
 ):
     if not stream:

@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Integration tests for FlexAttention backend vs default backend"""
 
-from typing import Optional
-
 import pytest
 import torch
 
@@ -38,8 +36,8 @@ def ref_int8_scaled_mm(
     b: torch.Tensor,
     scale_a: torch.Tensor,
     scale_b: torch.Tensor,
-    azp: Optional[torch.Tensor],
-    bias: Optional[torch.Tensor],
+    azp: torch.Tensor | None,
+    bias: torch.Tensor | None,
     output_type: torch.dtype,
 ):
     if azp is not None:
@@ -84,10 +82,7 @@ def onednn_int8_gemm_test_helper(
         azp = None
         azp_adj = None
 
-    if use_bias:
-        bias = torch.rand((n,), device=device, dtype=out_dtype) * 10
-    else:
-        bias = None
+    bias = torch.rand((n,), device=device, dtype=out_dtype) * 10 if use_bias else None
 
     handler = ops.create_onednn_scaled_mm(
         b,

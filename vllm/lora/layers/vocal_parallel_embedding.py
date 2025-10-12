@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -19,19 +18,19 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def __init__(self, base_layer: VocabParallelEmbedding) -> None:
         super().__init__()
         self.base_layer = base_layer
-        self.embeddings_slice: Optional[tuple[int, int]]
-        self.embeddings_weights: Optional[torch.Tensor]
+        self.embeddings_slice: tuple[int, int] | None
+        self.embeddings_weights: torch.Tensor | None
 
     def create_lora_weights(
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: Optional[PretrainedConfig] = None,
+        model_config: PretrainedConfig | None = None,
     ) -> None:
         if self.base_layer.num_added_embeddings_per_partition > 0:
             # We can start adding lora weights
             self.embeddings_weights = self.base_layer.weight.data[
-                self.base_layer.num_org_embeddings_per_partition : self.base_layer.num_org_embeddings_per_partition
+                self.base_layer.num_org_embeddings_per_partition : self.base_layer.num_org_embeddings_per_partition  # noqa: E501
                 + self.base_layer.num_added_embeddings_per_partition
             ]
             self.embeddings_slice = (
@@ -90,8 +89,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         index: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
+        embeddings_tensor: torch.Tensor | None,
     ):
         self.reset_lora(index)
         # NOTE self.lora_a_stacked is row-major, and lora_a is col-major,
@@ -144,7 +142,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 -1,
             )
 
-        lora_output: Optional[torch.Tensor] = self.punica_wrapper.add_lora_embedding(
+        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_embedding(
             full_output, full_lora_a_embeddings, self.lora_b_stacked, add_input=True
         )
 
@@ -159,7 +157,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None,
     ) -> bool:
         return type(source_layer) is VocabParallelEmbedding
 

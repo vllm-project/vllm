@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from importlib.util import find_spec
-from typing import Optional
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -169,15 +168,23 @@ class ScaledMMReduceScatterPattern(BasePattern):
             scale_a: torch.Tensor,
             scale_b: torch.Tensor,
         ) -> torch.Tensor:
-            gemm_rs = torch.ops.symm_mem.fused_scaled_matmul_reduce_scatter(
+            # Calculate output shape: input @ mat2 with scatter_dim reduced
+            output_shape = [*input.shape[:-1], mat2.shape[1]]
+            scatter_dim = 0
+            gemm_rs = torch.ops.vllm.patched_fused_scaled_matmul_reduce_scatter(
                 input,
                 mat2,
                 scale_a,
                 scale_b,
                 "avg",
-                scatter_dim=0,
-                out_dtype=self.dtype,
-                group_name=self.tp.device_group.group_name,
+                scatter_dim,  # orig_scatter_dim
+                scatter_dim,  # scatter_dim_after_maybe_reshape
+                self.tp.device_group.group_name,
+                output_shape,
+                None,  # bias
+                None,  # result_scale
+                self.dtype,  # out_dtype
+                False,  # use_fast_accum
             )
 
             return gemm_rs
@@ -296,15 +303,23 @@ class CutlassScaledMMReduceScatterPattern(BasePattern):
             scale_b: torch.Tensor,
             cutlass_mm_output: torch.Tensor,
         ) -> torch.Tensor:
-            gemm_rs = torch.ops.symm_mem.fused_scaled_matmul_reduce_scatter(
+            # Calculate output shape: input @ mat2 with scatter_dim reduced
+            output_shape = [*input.shape[:-1], mat2.shape[1]]
+            scatter_dim = 0
+            gemm_rs = torch.ops.vllm.patched_fused_scaled_matmul_reduce_scatter(
                 input,
                 mat2,
                 scale_a,
                 scale_b,
                 "avg",
-                scatter_dim=0,
-                out_dtype=self.dtype,
-                group_name=self.tp.device_group.group_name,
+                scatter_dim,  # orig_scatter_dim
+                scatter_dim,  # scatter_dim_after_maybe_reshape
+                self.tp.device_group.group_name,
+                output_shape,
+                None,  # bias
+                None,  # result_scale
+                self.dtype,  # out_dtype
+                False,  # use_fast_accum
             )
 
             return gemm_rs
@@ -416,7 +431,7 @@ class AsyncTPPass(VllmPatternMatcherPass):
 
         self.dump_patterns(config, self.patterns)
 
-    def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
+    def is_applicable_for_shape(self, shape: int | None) -> bool:
         # only do replace for specific shapes
         tp_size = get_tensor_model_parallel_world_size()
         return shape is not None and shape % tp_size == 0
@@ -469,10 +484,10 @@ if flashinfer_comm is not None:
         max_token_num: int,
         pattern_code: int,
         fuse_rms_quant: bool,
-        norm_out: Optional[torch.Tensor] = None,
-        quant_out: Optional[torch.Tensor] = None,
-        scale_out: Optional[torch.Tensor] = None,
-        scale_factor: Optional[torch.Tensor] = None,
+        norm_out: torch.Tensor | None = None,
+        quant_out: torch.Tensor | None = None,
+        scale_out: torch.Tensor | None = None,
+        scale_factor: torch.Tensor | None = None,
     ) -> None:
         num_tokens, hidden_size = allreduce_in.shape
         element_size = allreduce_in.element_size()
@@ -573,10 +588,10 @@ if flashinfer_comm is not None:
         max_token_num: int,
         pattern_code: int,
         fuse_rms_quant: bool,
-        norm_out: Optional[torch.Tensor] = None,
-        quant_out: Optional[torch.Tensor] = None,
-        scale_out: Optional[torch.Tensor] = None,
-        scale_factor: Optional[torch.Tensor] = None,
+        norm_out: torch.Tensor | None = None,
+        quant_out: torch.Tensor | None = None,
+        scale_out: torch.Tensor | None = None,
+        scale_factor: torch.Tensor | None = None,
     ) -> None:
         pass
 
@@ -834,7 +849,10 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
                 scale_out=None,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant,  # we don't use norm_out afterwards
+                # We don't use norm_out afterwards
+                pattern_code=(
+                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant
+                ),
                 scale_factor=scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
@@ -928,11 +946,14 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
                 scale_out=None,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant,  # we don't use norm_out afterwards
+                # We don't use norm_out afterwards
+                pattern_code=(
+                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant
+                ),
                 scale_factor=scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
-            # # quant_out, rms_norm_residual
+            # quant_out, rms_norm_residual
             return allreduce[4], allreduce[2]
 
         pm.register_replacement(
@@ -1028,7 +1049,10 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 scale_out=output_scale,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP4Quant,  # we don't use norm_out afterwards
+                # We don't use norm_out afterwards
+                pattern_code=(
+                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP4Quant
+                ),
                 scale_factor=input_global_scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
@@ -1130,7 +1154,10 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 scale_out=output_scale,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP4Quant,  # we don't use norm_out afterwards
+                # We don't use norm_out afterwards
+                pattern_code=(
+                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP4Quant
+                ),
                 scale_factor=input_global_scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )

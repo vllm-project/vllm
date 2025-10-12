@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 
@@ -35,7 +35,7 @@ from .mk_objects import (
 from .parallel_utils import ProcessGroupInfo
 
 
-def _describe_tensor(t: Optional[torch.Tensor], name: str) -> str:
+def _describe_tensor(t: torch.Tensor | None, name: str) -> str:
     if t is None:
         return f"{name} : None"
     else:
@@ -44,21 +44,21 @@ def _describe_tensor(t: Optional[torch.Tensor], name: str) -> str:
 
 @dataclass
 class Config:
-    Ms: Union[list[int], int]
+    Ms: list[int] | int
     K: int
     N: int
     E: int
-    topks: Union[list[int], int]
+    topks: list[int] | int
     dtype: torch.dtype
-    quant_config: Optional[TestMoEQuantConfig]
+    quant_config: TestMoEQuantConfig | None
 
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize
     fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute
 
-    fused_moe_chunk_size: Optional[int]
+    fused_moe_chunk_size: int | None
     world_size: int
 
-    torch_trace_dir_path: Optional[str] = None
+    torch_trace_dir_path: str | None = None
 
     def __post_init__(self):
         if self.quant_config is None:
@@ -93,7 +93,7 @@ class Config:
         return self.Ms
 
     @property
-    def quant_dtype(self) -> Union[torch.dtype, str, None]:
+    def quant_dtype(self) -> torch.dtype | str | None:
         assert self.quant_config is not None
         return self.quant_config.quant_dtype
 
@@ -112,7 +112,7 @@ class Config:
         return self.quant_config.per_out_ch_quant
 
     @property
-    def quant_block_shape(self) -> Optional[list[int]]:
+    def quant_block_shape(self) -> list[int] | None:
         assert self.quant_config is not None
         return self.quant_config.block_shape
 
@@ -209,18 +209,18 @@ class Config:
         info = prepare_finalize_info(self.prepare_finalize_type)
         return info.backend
 
-    def is_valid(self):
+    def is_valid(self) -> tuple[bool, str | None]:
         # Check prepare-finalize and fused-experts compatibility
         if self.is_batched_prepare_finalize():
             if not self.is_batched_fused_experts():
-                return False
+                return False, "Mismatched format."
         else:
             if not self.is_standard_fused_experts():
-                return False
+                return False, "Mismatched format."
 
         use_chunking = self.fused_moe_chunk_size is not None
         if use_chunking and not self.is_fe_supports_chunking():
-            return False
+            return False, "Chunking not supported."
 
         # Check quantization sanity
         if (
@@ -229,7 +229,7 @@ class Config:
             + int(self.quant_block_shape is not None)
         ) > 1:
             # invalid quant config
-            return False
+            return False, f"Bad quant_config {self.quant_config}."
 
         # check type support
         if self.quant_dtype is None:
@@ -237,44 +237,53 @@ class Config:
                 self.dtype not in self.pf_supported_types()
                 or self.dtype not in self.fe_supported_types()
             ):
-                return False
+                return False, (
+                    f"Unsupported type {self.dtype} not in "
+                    f"{self.pf_supported_types()} and "
+                    f"{self.fe_supported_types()}."
+                )
         else:
             if (
                 self.quant_dtype not in self.pf_supported_types()
                 or self.quant_dtype not in self.fe_supported_types()
             ):
-                return False
+                return False, (
+                    f"Unsupported quant type {self.quant_dtype} "
+                    f"not in {self.pf_supported_types()} and "
+                    f"{self.fe_supported_types()}."
+                )
 
         # Check block quanization support
         is_block_quatized = self.quant_block_shape is not None
         if is_block_quatized and self.quant_dtype is None:
-            return False
+            return False, "No block quantization support."
+
         if is_block_quatized and not self.is_block_quant_supported():
-            return False
+            return False, "Mismatched block quantization support."
 
         # deep_gemm only works with block-quantized
         if self.needs_deep_gemm() and not is_block_quatized:
-            return False
+            return False, "Needs DeepGEMM but not block quantized."
 
         # Check dependencies (turn into asserts?)
         if self.needs_deep_ep() and not has_deep_ep():
-            return False
+            return False, "Needs DeepEP, but DeepEP not available."
         if self.needs_deep_gemm() and not has_deep_gemm():
-            return False
+            return False, "Needs DeepGEMM, but DeepGEMM not available."
         if self.needs_pplx() and not has_pplx():  # noqa: SIM103
-            return False
+            return False, "Needs PPLX, but PPLX not available."
 
-        return True
+        return True, None
 
 
 @dataclass
 class WeightTensors:
     w1: torch.Tensor
     w2: torch.Tensor
-    w1_scale: Optional[torch.Tensor]
-    w2_scale: Optional[torch.Tensor]
-    w1_gs: Optional[torch.Tensor] = None
-    w2_gs: Optional[torch.Tensor] = None
+    w1_scale: torch.Tensor | None
+    w2_scale: torch.Tensor | None
+    w1_gs: torch.Tensor | None = None
+    w2_gs: torch.Tensor | None = None
 
     def describe(self):
         s = ""
@@ -331,7 +340,8 @@ class WeightTensors:
             in_dtype=config.dtype,
             quant_dtype=config.quant_dtype,
             block_shape=config.quant_block_shape,
-            per_out_ch_quant=config.is_per_act_token_quant,  # or config.is_per_out_ch_quant
+            # or config.is_per_out_ch_quant
+            per_out_ch_quant=config.is_per_act_token_quant,
         )
         return WeightTensors(
             w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale, w1_gs=w1_gs, w2_gs=w2_gs
@@ -341,11 +351,11 @@ class WeightTensors:
 @dataclass
 class RankTensors:
     hidden_states: torch.Tensor
-    hidden_states_scale: Optional[torch.Tensor]
+    hidden_states_scale: torch.Tensor | None
 
     topk_weights: torch.Tensor
     topk_ids: torch.Tensor
-    expert_map: Optional[torch.Tensor]
+    expert_map: torch.Tensor | None
 
     def describe(self):
         s = ""
@@ -360,7 +370,7 @@ class RankTensors:
     @staticmethod
     def make_hidden_states(
         config: Config,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         Return hidden_states
         """

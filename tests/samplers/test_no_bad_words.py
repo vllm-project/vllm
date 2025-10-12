@@ -6,18 +6,9 @@ Run `pytest tests/samplers/test_no_bad_words.py`.
 
 """
 
-from typing import Optional
-
-import pytest
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
-
-
-@pytest.fixture(autouse=True)
-def v1(monkeypatch):
-    """Only run on vLLM v1."""
-    monkeypatch.setenv("VLLM_USE_V1", "1")
 
 
 def _generate(
@@ -25,7 +16,7 @@ def _generate(
     prompt: str,
     num_prompt_tokens: int,
     temperature: float = 0,
-    bad_words: Optional[list[str]] = None,
+    bad_words: list[str] | None = None,
 ) -> list[int]:
     sampling_params = SamplingParams(
         temperature=temperature,
@@ -67,7 +58,7 @@ class TestOneTokenBadWord:
             output_token_ids = self._generate(llm, bad_words=[self.TARGET_TOKEN])
             assert self.target_token_id not in output_token_ids
 
-    def _generate(self, llm: LLM, bad_words: Optional[list[str]] = None) -> list[int]:
+    def _generate(self, llm: LLM, bad_words: list[str] | None = None) -> list[int]:
         return _generate(
             llm=llm,
             prompt=self.PROMPT,
@@ -162,7 +153,7 @@ class TestTwoTokenBadWord:
                 self.neighbour_token_id2 in output_token_ids
             )
 
-    def _generate(self, llm: LLM, bad_words: Optional[list[str]] = None) -> list[int]:
+    def _generate(self, llm: LLM, bad_words: list[str] | None = None) -> list[int]:
         return _generate(
             llm=llm,
             prompt=self.PROMPT,

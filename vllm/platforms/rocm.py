@@ -4,7 +4,7 @@
 import os
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 from torch.distributed import PrefixStore, ProcessGroup
@@ -140,8 +140,8 @@ def use_rocm_custom_paged_attention(
     max_seq_len: int,
     sliding_window: int,
     kv_cache_dtype: str,
-    alibi_slopes: Optional[torch.Tensor] = None,
-    sinks: Optional[torch.Tensor] = None,
+    alibi_slopes: torch.Tensor | None = None,
+    sinks: torch.Tensor | None = None,
 ) -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
@@ -276,25 +276,36 @@ class RocmPlatform(Platform):
             )
 
         if envs.VLLM_USE_V1:
-            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
-                logger.info("Using Flash Attention backend on V1 engine.")
+            if selected_backend == _Backend.FLEX_ATTENTION:
+                logger.info("Using FlexAttention backend on V1 engine.")
+                return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
+            if (
+                envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9()
+            ) or selected_backend == _Backend.ROCM_AITER_FA:
+                logger.info("Using Aiter Flash Attention backend on V1 engine.")
                 return (
                     "vllm.v1.attention.backends."
                     "rocm_aiter_fa.AiterFlashAttentionBackend"
                 )
-            elif (
-                (envs.VLLM_ROCM_USE_AITER and envs.VLLM_USE_AITER_UNIFIED_ATTENTION)
-                or envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
+            if (
+                envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
+            ) or selected_backend == _Backend.ROCM_AITER_UNIFIED_ATTN:
+                logger.info("Using Aiter Unified Attention backend on V1 engine.")
+                return (
+                    "vllm.v1.attention.backends."
+                    "rocm_aiter_unified_attn.RocmAiterUnifiedAttentionBackend"
+                )
+            if (
+                envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
                 or selected_backend == _Backend.ROCM_ATTN
             ):
                 # rocm specific backend, with aiter and/or
                 #   triton prefix-prefill
-                logger.info("Using Rocm/Aiter Attention backend on V1 engine.")
+                logger.info("Using Rocm Attention backend on V1 engine.")
                 return "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
-            else:
-                # default case, using triton unified attention
-                logger.info("Using Triton Attention backend on V1 engine.")
-                return "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+            # default case, using triton unified attention
+            logger.info("Using Triton Attention backend on V1 engine.")
+            return "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
         raise RuntimeError(
             "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
             "to select a supported backend."
@@ -309,7 +320,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     @lru_cache(maxsize=8)
-    def get_device_capability(cls, device_id: int = 0) -> Optional[DeviceCapability]:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
 
@@ -409,7 +420,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_current_memory_usage(
-        cls, device: Optional[torch.types.Device] = None
+        cls, device: torch.types.Device | None = None
     ) -> float:
         torch.cuda.reset_peak_memory_stats(device)
         return torch.cuda.mem_get_info(device)[1] - torch.cuda.mem_get_info(device)[0]
