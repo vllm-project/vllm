@@ -181,12 +181,24 @@ async def test_multiple_tool_calls(client: openai.AsyncOpenAI):
     reasoning = response.choices[0].message.reasoning_content or ""
 
     # Log for debugging if one call is missing
-    print("DEBUG: tool_calls =", calls)
-    print("DEBUG: reasoning =", reasoning)
+    print("DEBUG: tool_calls =")
+    pprint(calls)
 
-    assert any(c.function.name == FUNC_CALC for c in calls), "Calculator tool missing"
-    assert any(c.function.name == FUNC_TIME for c in calls), "Time tool missing"
-    assert len(reasoning) > 0, "Reasoning content is empty"
+    print("DEBUG: reasoning =")
+    pprint(reasoning)
+
+    try:
+        assert any(c.function.name == FUNC_CALC for c in calls), "Calculator tool missing"
+    except AssertionError as e:
+        print(f"ERROR: {e}")
+    try:
+        assert any(c.function.name == FUNC_TIME for c in calls), "Time tool missing"
+    except AssertionError as e:
+        print(f"ERROR: {e}")
+    try:
+        assert len(reasoning) > 0, "Reasoning content is empty"
+    except AssertionError as e:
+        print(f"ERROR: {e}")
     
 
 @pytest.mark.asyncio
@@ -220,10 +232,23 @@ async def test_streaming_multiple_tools(client: openai.AsyncOpenAI):
 
     chunks = [chunk async for chunk in stream]
     reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
+    
+    print("DEBUG: function_names =", function_names)
+    print("DEBUG: reasoning =")
+    pprint(reasoning)
 
-    assert FUNC_CALC in function_names, f"Calculator tool missing — found {function_names}"
-    assert FUNC_TIME in function_names, f"Time tool missing — found {function_names}"
-    assert len(reasoning) > 0, "Expected reasoning content in streamed response"
+    try:
+        assert FUNC_CALC in function_names, f"Calculator tool missing — found {function_names}"
+    except AssertionError as e:
+        print(f"ERROR: {e}")
+    try:
+        assert FUNC_TIME in function_names, f"Time tool missing — found {function_names}"
+    except AssertionError as e:
+        print(f"ERROR: {e}")
+    try:
+        assert len(reasoning) > 0, "Expected reasoning content in streamed response"
+    except AssertionError as e:
+        print(f"ERROR: {e}")
 
 
 @pytest.mark.asyncio
