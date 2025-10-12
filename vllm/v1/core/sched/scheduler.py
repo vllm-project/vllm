@@ -9,7 +9,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any, Union
 
-from vllm.config import VllmConfig
+from vllm.config import ConnectorVllmConfig, VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
@@ -88,22 +88,12 @@ class Scheduler(SchedulerInterface):
                 "Encoder-decoder models are not currently supported with KV connectors"
             )
 
-            from copy import deepcopy
-
-            connector_vllm_config = deepcopy(self.vllm_config)
-            connector_vllm_config.kv_cache_config = kv_cache_config
+            connector_vllm_config = ConnectorVllmConfig(
+                self.vllm_config, kv_cache_config
+            )
             self.connector = KVConnectorFactory.create_connector(
                 config=connector_vllm_config, role=KVConnectorRole.SCHEDULER
             )
-
-            # Make sure that the connector supports HMA if HMA is enabled.
-            num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
-            if not supports_hma(self.connector) and num_kv_cache_groups > 1:
-                raise NotImplementedError(
-                    f"Connector {self.connector.__class__.__name__} does not"
-                    f" support HMA but HMA is enabled. Please set "
-                    f"`--disable-hybrid-kv-cache-manager`."
-                )
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -1308,8 +1298,6 @@ class Scheduler(SchedulerInterface):
         """
         if self.connector is None:
             return False, None
-
-        num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
 
