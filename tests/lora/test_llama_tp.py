@@ -4,7 +4,10 @@ import subprocess
 import sys
 from typing import Union
 
+import pytest
+
 import vllm
+import vllm.config
 from vllm import LLM
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -103,7 +106,8 @@ def generate_and_test(
 
 
 @create_new_process_for_each_test()
-def test_llama_lora(sql_lora_files):
+@pytest.mark.parametrize("specialize_lora", [True, False])
+def test_llama_lora(sql_lora_files, specialize_lora: bool):
     llm = vllm.LLM(
         MODEL_PATH,
         tokenizer=sql_lora_files,
@@ -111,6 +115,9 @@ def test_llama_lora(sql_lora_files):
         # also test odd max_num_seqs
         max_num_seqs=13,
         max_loras=4,
+        compilation_config=vllm.config.CompilationConfig(
+            specialize_lora=specialize_lora
+        ),
     )
     generate_and_test(llm, sql_lora_files)
 
