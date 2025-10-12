@@ -5,7 +5,7 @@ import gc
 import itertools
 import time
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from itertools import product
@@ -3765,8 +3765,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
 
-                compilation_cases = list(
-                    product(reversed(self.cudagraph_batch_sizes), lora_cases)
+                compilation_cases = product(
+                    reversed(self.cudagraph_batch_sizes), lora_cases
                 )
                 self._capture_cudagraphs(
                     compilation_cases,
@@ -3788,8 +3788,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     for x in self.cudagraph_batch_sizes
                     if max_num_tokens >= x >= self.uniform_decode_query_len
                 ]
-                compilation_cases_decode = list(
-                    product(reversed(decode_cudagraph_batch_sizes), lora_cases)
+                compilation_cases_decode = product(
+                    reversed(decode_cudagraph_batch_sizes), lora_cases
                 )
                 self._capture_cudagraphs(
                     compilation_cases=compilation_cases_decode,
@@ -3820,7 +3820,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _capture_cudagraphs(
         self,
-        compilation_cases: list[tuple[int, bool]],
+        compilation_cases: Iterable[tuple[int, bool]],
         cudagraph_runtime_mode: CUDAGraphMode,
         uniform_decode: bool,
     ):
