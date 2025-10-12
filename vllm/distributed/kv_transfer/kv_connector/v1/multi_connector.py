@@ -3,7 +3,7 @@
 import copy
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -33,7 +33,7 @@ logger = init_logger(__name__)
 @dataclass
 class MultiKVConnectorMetadata(KVConnectorMetadata):
     metadata: tuple[KVConnectorMetadata, ...]
-    extra_async_saves: Optional[dict[str, int]] = None
+    extra_async_saves: dict[str, int] | None = None
 
 
 @dataclass
@@ -130,7 +130,7 @@ class MultiConnector(KVConnectorBase_V1):
             c.clear_connector_metadata()
 
     def shutdown(self):
-        exception: Optional[Exception] = None
+        exception: Exception | None = None
         for c in self._connectors:
             try:
                 c.shutdown()
@@ -169,7 +169,7 @@ class MultiConnector(KVConnectorBase_V1):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[set[str] | None, set[str] | None]:
         finished_sending: set[str] = set()
         finished_recving: set[str] = set()
         for c in self._connectors:
@@ -207,7 +207,7 @@ class MultiConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[Optional[int], bool]:
+    ) -> tuple[int | None, bool]:
         to_return = (0, False)
         for i, c in enumerate(self._connectors):
             toks, load_async = c.get_num_new_matched_tokens(
@@ -258,7 +258,7 @@ class MultiConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         blocks: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         async_saves = 0
         kv_txfer_params = None
         for c in self._connectors:
@@ -286,7 +286,7 @@ class MultiConnector(KVConnectorBase_V1):
             yield from c.take_events()
 
     @classmethod
-    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> Optional[str]:
+    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """
         Get the required KV cache layout for this connector.
         Args:
@@ -323,17 +323,17 @@ class MultiConnector(KVConnectorBase_V1):
 
     @classmethod
     def build_kv_connector_stats(
-        cls, data: Optional[dict[str, Any]] = None
-    ) -> Optional[KVConnectorStats]:
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
         return (
             MultiKVConnectorStats(data=data)
             if data is not None
             else MultiKVConnectorStats()
         )
 
-    def get_kv_connector_stats(self) -> Optional[MultiKVConnectorStats]:
+    def get_kv_connector_stats(self) -> MultiKVConnectorStats | None:
         # Group connector stats by connector type.
-        stats_by_connector: Optional[MultiKVConnectorStats] = None
+        stats_by_connector: MultiKVConnectorStats | None = None
         for c in self._connectors:
             stats = c.get_kv_connector_stats()
             if stats is None:

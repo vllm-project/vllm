@@ -3,7 +3,6 @@
 
 from collections.abc import Iterable
 from functools import lru_cache, partial
-from typing import Optional, Union
 
 import torch
 
@@ -16,8 +15,8 @@ class AllowedTokenIdsLogitsProcessor:
     specific set of token ids."""
 
     def __init__(self, allowed_ids: Iterable[int]):
-        self.allowed_ids: Optional[list[int]] = list(allowed_ids)
-        self.mask: Optional[torch.Tensor] = None
+        self.allowed_ids: list[int] | None = list(allowed_ids)
+        self.mask: torch.Tensor | None = None
 
     def __call__(self, token_ids: list[int], logits: torch.Tensor) -> torch.Tensor:
         if self.mask is None:
@@ -53,8 +52,8 @@ def logit_bias_logits_processor(
 
 
 def get_logits_processors(
-    logit_bias: Optional[Union[dict[int, float], dict[str, float]]],
-    allowed_token_ids: Optional[list[int]],
+    logit_bias: dict[int, float] | dict[str, float] | None,
+    allowed_token_ids: list[int] | None,
     tokenizer: AnyTokenizer,
 ) -> list[LogitsProcessor]:
     logits_processors: list[LogitsProcessor] = []

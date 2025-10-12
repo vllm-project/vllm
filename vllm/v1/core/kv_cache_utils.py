@@ -5,9 +5,9 @@
 import copy
 import os
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, NewType, Optional, Union
+from typing import Any, NewType, TypeAlias
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -38,7 +38,7 @@ BlockHashWithGroupId = NewType("BlockHashWithGroupId", bytes)
 # ExternalBlockHash is used for reproducible prefix-cache block hashing.
 # It's a union of ``bytes`` and ``int`` to keep backward compatibility
 # after we default block hashing to use sha256 bytes.
-ExternalBlockHash = Union[bytes, int]
+ExternalBlockHash: TypeAlias = bytes | int
 
 
 def make_block_hash_with_group_id(
@@ -110,12 +110,12 @@ class KVCacheBlock:
     ref_cnt: int = 0
     # The hash key (block hash + group id) of the block, only available
     # when the block is full and cached.
-    _block_hash: Optional[BlockHashWithGroupId] = None
+    _block_hash: BlockHashWithGroupId | None = None
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
-    prev_free_block: Optional["KVCacheBlock"] = None
-    next_free_block: Optional["KVCacheBlock"] = None
+    prev_free_block: "KVCacheBlock | None" = None
+    next_free_block: "KVCacheBlock | None" = None
 
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
@@ -124,7 +124,7 @@ class KVCacheBlock:
     allocation_time: float | None = None
 
     @property
-    def block_hash(self) -> Optional[BlockHashWithGroupId]:
+    def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash
 
     @block_hash.setter
@@ -464,7 +464,7 @@ def _gen_lora_extra_hash_keys(request: Request) -> list[int]:
 
 def generate_block_hash_extra_keys(
     request: Request, start_token_idx: int, end_token_idx: int, start_mm_idx: int
-) -> tuple[Optional[tuple[Any, ...]], int]:
+) -> tuple[tuple[Any, ...] | None, int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs and request specific metadata (e.g., LoRA ID).
 
@@ -496,9 +496,9 @@ def generate_block_hash_extra_keys(
 
 def hash_block_tokens(
     hash_function: Callable[[Any], bytes],
-    parent_block_hash: Optional[BlockHash],
+    parent_block_hash: BlockHash | None,
     curr_block_token_ids: Sequence[int],
-    extra_keys: Optional[tuple[Any, ...]] = None,
+    extra_keys: tuple[Any, ...] | None = None,
 ) -> BlockHash:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for

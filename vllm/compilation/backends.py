@@ -7,9 +7,9 @@ import hashlib
 import os
 import pprint
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
-from typing import Any, Callable, Optional
+from typing import Any
 
 import torch
 import torch.fx as fx
@@ -75,7 +75,7 @@ class CompilerManager:
     """
 
     def __init__(self, compilation_config: CompilationConfig):
-        self.cache: dict[tuple[Optional[int], int, str], Any] = dict()
+        self.cache: dict[tuple[int | None, int, str], Any] = dict()
         self.is_cache_updated = False
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
@@ -84,7 +84,7 @@ class CompilerManager:
         return self.compiler.compute_hash(vllm_config)
 
     @contextmanager
-    def compile_context(self, runtime_shape: Optional[int] = None):
+    def compile_context(self, runtime_shape: int | None = None):
         """Provide compilation context for the duration of compilation to set
         any torch global properties we want to scope to a single Inductor
         compilation (e.g. partition rules, pass context)."""
@@ -145,8 +145,8 @@ class CompilerManager:
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        runtime_shape: Optional[int] = None,
-    ) -> Optional[Callable]:
+        runtime_shape: int | None = None,
+    ) -> Callable | None:
         if (runtime_shape, graph_index, self.compiler.name) not in self.cache:
             return None
         handle = self.cache[(runtime_shape, graph_index, self.compiler.name)]
@@ -178,7 +178,7 @@ class CompilerManager:
         compilation_config: CompilationConfig,
         graph_index: int = 0,
         num_graphs: int = 1,
-        runtime_shape: Optional[int] = None,
+        runtime_shape: int | None = None,
     ) -> Any:
         if graph_index == 0:
             # before compiling the first graph, record the start time
@@ -656,7 +656,8 @@ class VllmBackend:
 
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")
         if not os.path.exists(graph_path):
-            # code adapted from https://github.com/thuml/depyf/blob/dab831108a752d1facc00acdd6d4243891845c37/depyf/explain/patched_lazy_format_graph_code.py#L30 # noqa
+            # code adapted from
+            # https://github.com/thuml/depyf/blob/dab831108a752d1facc00acdd6d4243891845c37/depyf/explain/patched_lazy_format_graph_code.py#L30
             # use `print_readable` because it can include submodules
             src = (
                 "from __future__ import annotations\nimport torch\n"

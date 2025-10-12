@@ -4,9 +4,10 @@
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import Callable, Optional, Union
+from collections.abc import Callable
+from typing import TypeAlias
 
-import prometheus_client
+from prometheus_client import Counter, Gauge, Histogram
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorLogging
@@ -40,9 +41,9 @@ class StatLoggerBase(ABC):
     @abstractmethod
     def record(
         self,
-        scheduler_stats: Optional[SchedulerStats],
-        iteration_stats: Optional[IterationStats],
-        mm_cache_stats: Optional[MultiModalCacheStats] = None,
+        scheduler_stats: SchedulerStats | None,
+        iteration_stats: IterationStats | None,
+        mm_cache_stats: MultiModalCacheStats | None = None,
         engine_idx: int = 0,
     ): ...
 
@@ -93,9 +94,9 @@ class LoggingStatLogger(StatLoggerBase):
 
     def record(
         self,
-        scheduler_stats: Optional[SchedulerStats],
-        iteration_stats: Optional[IterationStats],
-        mm_cache_stats: Optional[MultiModalCacheStats] = None,
+        scheduler_stats: SchedulerStats | None,
+        iteration_stats: IterationStats | None,
+        mm_cache_stats: MultiModalCacheStats | None = None,
         engine_idx: int = 0,
     ):
         """Log Stats to standard output."""
@@ -178,13 +179,13 @@ class LoggingStatLogger(StatLoggerBase):
 
 
 class PrometheusStatLogger(StatLoggerBase):
-    _gauge_cls = prometheus_client.Gauge
-    _counter_cls = prometheus_client.Counter
-    _histogram_cls = prometheus_client.Histogram
+    _gauge_cls = Gauge
+    _counter_cls = Counter
+    _histogram_cls = Histogram
     _spec_decoding_cls = SpecDecodingProm
 
     def __init__(
-        self, vllm_config: VllmConfig, engine_indexes: Optional[list[int]] = None
+        self, vllm_config: VllmConfig, engine_indexes: list[int] | None = None
     ):
         if engine_indexes is None:
             engine_indexes = [0]
@@ -380,9 +381,7 @@ class PrometheusStatLogger(StatLoggerBase):
             counter_generation_tokens, engine_indexes, model_name
         )
 
-        self.counter_request_success: dict[
-            FinishReason, dict[int, prometheus_client.Counter]
-        ] = {}
+        self.counter_request_success: dict[FinishReason, dict[int, Counter]] = {}
         counter_request_success_base = self._counter_cls(
             name="vllm:request_success",
             documentation="Count of successfully processed requests.",
@@ -672,7 +671,7 @@ class PrometheusStatLogger(StatLoggerBase):
 
         # TODO: This metric might be incorrect in case of using multiple
         # api_server counts which uses prometheus mp.
-        self.gauge_lora_info: Optional[prometheus_client.Gauge] = None
+        self.gauge_lora_info: Gauge | None = None
         if vllm_config.lora_config is not None:
             if len(self.engine_indexes) > 1:
                 raise NotImplementedError("LoRA in DP mode is not supported yet.")
@@ -717,9 +716,9 @@ class PrometheusStatLogger(StatLoggerBase):
 
     def record(
         self,
-        scheduler_stats: Optional[SchedulerStats],
-        iteration_stats: Optional[IterationStats],
-        mm_cache_stats: Optional[MultiModalCacheStats] = None,
+        scheduler_stats: SchedulerStats | None,
+        iteration_stats: IterationStats | None,
+        mm_cache_stats: MultiModalCacheStats | None = None,
         engine_idx: int = 0,
     ):
         """Log to prometheus."""
@@ -843,11 +842,7 @@ class PrometheusStatLogger(StatLoggerBase):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
 
-PromMetric = Union[
-    prometheus_client.Gauge,
-    prometheus_client.Counter,
-    prometheus_client.Histogram,
-]
+PromMetric: TypeAlias = Gauge | Counter | Histogram
 
 
 def make_per_engine(
@@ -899,8 +894,8 @@ class StatLoggerManager:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        engine_idxs: Optional[list[int]] = None,
-        custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
+        engine_idxs: list[int] | None = None,
+        custom_stat_loggers: list[StatLoggerFactory] | None = None,
         enable_default_loggers: bool = True,
         client_count: int = 1,
     ):
@@ -941,10 +936,10 @@ class StatLoggerManager:
 
     def record(
         self,
-        scheduler_stats: Optional[SchedulerStats],
-        iteration_stats: Optional[IterationStats],
-        mm_cache_stats: Optional[MultiModalCacheStats] = None,
-        engine_idx: Optional[int] = None,
+        scheduler_stats: SchedulerStats | None,
+        iteration_stats: IterationStats | None,
+        mm_cache_stats: MultiModalCacheStats | None = None,
+        engine_idx: int | None = None,
     ):
         if engine_idx is None:
             engine_idx = 0

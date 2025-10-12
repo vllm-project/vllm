@@ -4,7 +4,7 @@
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -175,11 +175,10 @@ class SchedulerStats:
     kv_cache_usage: float = 0.0
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
-
     kv_cache_lifetime_stats: KVCacheLifetimeStats = field(
-        default_factory=KVCacheLifetimeStats)
+        default_factory=KVCacheLifetimeStats
+    )
     kv_cache_block_lifetimes: list[float] = field(default_factory=list)
-
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
 
@@ -219,7 +218,7 @@ class FinishedRequestStats:
     e2e_latency: float = 0.0
     num_prompt_tokens: int = 0
     num_generation_tokens: int = 0
-    max_tokens_param: Optional[int] = None
+    max_tokens_param: int | None = None
     queued_time: float = 0.0
     prefill_time: float = 0.0
     inference_time: float = 0.0
@@ -258,7 +257,7 @@ class IterationStats:
         is_prefilling: bool,
         prompt_len: int,
         req_stats: RequestStateStats,
-        lora_stats: Optional[LoRAStats],
+        lora_stats: LoRAStats | None,
     ):
         num_new_generation_tokens = len(output.new_token_ids)
 
@@ -293,7 +292,7 @@ class IterationStats:
         events: list["EngineCoreEvent"],
         is_prefilling: bool,
         req_stats: RequestStateStats,
-        lora_stats: Optional[LoRAStats],
+        lora_stats: LoRAStats | None,
     ):
         # Avoid circular dependency
         from vllm.v1.engine import EngineCoreEventType
@@ -315,7 +314,7 @@ class IterationStats:
         self,
         finish_reason: "FinishReason",
         num_prompt_tokens: int,
-        max_tokens_param: Optional[int],
+        max_tokens_param: int | None,
         req_stats: RequestStateStats,
     ):
         e2e_latency = self._time_since(req_stats.arrival_time)
@@ -363,7 +362,7 @@ class LoRARequestStates:
     def __init__(self):
         self.lora_name_to_stats: dict[str, LoRAStats] = {}
 
-    def get_stats(self, req_state: "RequestState") -> Optional[LoRAStats]:
+    def get_stats(self, req_state: "RequestState") -> LoRAStats | None:
         if req_state.lora_name is None:
             return None
         if req_state.lora_name not in self.lora_name_to_stats:
@@ -390,20 +389,20 @@ class LoRARequestStates:
     # Break the pattern for this lifecycle methods so we can
     # call this from IterationStats.update_from_events()
     @staticmethod
-    def scheduled_request(lora_stats: Optional[LoRAStats], request_id: str):
+    def scheduled_request(lora_stats: LoRAStats | None, request_id: str):
         if lora_stats is None:
             return
         lora_stats.waiting_requests.remove(request_id)
         lora_stats.running_requests.add(request_id)
 
     @staticmethod
-    def preempted_request(lora_stats: Optional[LoRAStats], request_id: str):
+    def preempted_request(lora_stats: LoRAStats | None, request_id: str):
         if lora_stats is None:
             return
         lora_stats.running_requests.remove(request_id)
         lora_stats.waiting_requests.add(request_id)
 
-    def update_iteration_stats(self, iteration_stats: Optional[IterationStats]):
+    def update_iteration_stats(self, iteration_stats: IterationStats | None):
         if iteration_stats is None:
             return
         for lora_name, stats in self.lora_name_to_stats.items():

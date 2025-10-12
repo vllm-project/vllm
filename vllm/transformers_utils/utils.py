@@ -6,7 +6,7 @@ import struct
 from functools import cache
 from os import PathLike
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any
 
 from vllm.envs import VLLM_MODEL_REDIRECT_PATH
 from vllm.logger import init_logger
@@ -18,7 +18,7 @@ def is_s3(model_or_path: str) -> bool:
     return model_or_path.lower().startswith("s3://")
 
 
-def check_gguf_file(model: Union[str, PathLike]) -> bool:
+def check_gguf_file(model: str | PathLike) -> bool:
     """Check if the file is a GGUF model."""
     model = Path(model)
     if not model.is_file():
@@ -38,8 +38,8 @@ def check_gguf_file(model: Union[str, PathLike]) -> bool:
 
 def modelscope_list_repo_files(
     repo_id: str,
-    revision: Optional[str] = None,
-    token: Union[str, bool, None] = None,
+    revision: str | None = None,
+    token: str | bool | None = None,
 ) -> list[str]:
     """List files in a modelscope repo."""
     from modelscope.hub.api import HubApi
@@ -57,7 +57,7 @@ def modelscope_list_repo_files(
     return files
 
 
-def _maybe_json_dict(path: Union[str, PathLike]) -> dict[str, str]:
+def _maybe_json_dict(path: str | PathLike) -> dict[str, str]:
     with open(path) as f:
         try:
             return json.loads(f.read())
@@ -65,7 +65,7 @@ def _maybe_json_dict(path: Union[str, PathLike]) -> dict[str, str]:
             return dict[str, str]()
 
 
-def _maybe_space_split_dict(path: Union[str, PathLike]) -> dict[str, str]:
+def _maybe_space_split_dict(path: str | PathLike) -> dict[str, str]:
     parsed_dict = dict[str, str]()
     with open(path) as f:
         for line in f.readlines():
@@ -104,7 +104,7 @@ def maybe_model_redirect(model: str) -> str:
     return model
 
 
-def parse_safetensors_file_metadata(path: Union[str, PathLike]) -> dict[str, Any]:
+def parse_safetensors_file_metadata(path: str | PathLike) -> dict[str, Any]:
     with open(path, "rb") as f:
         length_of_metadata = struct.unpack("<Q", f.read(8))[0]
         metadata = json.loads(f.read(length_of_metadata).decode("utf-8"))

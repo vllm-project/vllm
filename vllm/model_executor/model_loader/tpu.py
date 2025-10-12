@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -30,7 +29,7 @@ class TPUModelLoader(DefaultModelLoader):
         self,
         vllm_config: VllmConfig,
         model_config: ModelConfig,
-        mesh: Optional[xs.Mesh] = None,
+        mesh: xs.Mesh | None = None,
     ) -> nn.Module:
         # Initialize model and load weights on CPU. Then, during SPMD partition,
         # weights are sharded and transferred to TPUs.
@@ -90,7 +89,7 @@ class TPUModelLoader(DefaultModelLoader):
             )
         return model
 
-    def _check_model_is_loaded(self, mesh: Optional[xs.Mesh], model: nn.Module) -> None:
+    def _check_model_is_loaded(self, mesh: xs.Mesh | None, model: nn.Module) -> None:
         """
         Ensure the model is properly loaded.
         1. All model parameters and buffers are on XLA device.

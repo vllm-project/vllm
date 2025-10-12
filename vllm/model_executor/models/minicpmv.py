@@ -26,10 +26,10 @@
 
 import math
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from itertools import chain
-from typing import Annotated, Any, Callable, Literal, Optional, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 import numpy as np
 import torch
@@ -140,12 +140,12 @@ class MiniCPMVImageEmbeddingInputs(TensorSchema):
 
     type: Literal["image_embeds"]
     image_embeds: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "ns", "hs"),
     ]
 
 
-MiniCPMVImageInputs = Union[MiniCPMVImagePixelInputs, MiniCPMVImageEmbeddingInputs]
+MiniCPMVImageInputs: TypeAlias = MiniCPMVImagePixelInputs | MiniCPMVImageEmbeddingInputs
 
 DEFAULT_LN = partial(nn.LayerNorm, eps=1e-6)
 
@@ -156,10 +156,10 @@ class Resampler2_5(BaseResampler):
         num_queries: int,
         embed_dim: int,
         num_heads: int,
-        kv_dim: Optional[int] = None,
+        kv_dim: int | None = None,
         norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
         max_size: tuple[int, int] = (70, 70),
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__(
@@ -251,11 +251,11 @@ class Resampler4_5(Resampler2_5):
         num_queries: int,
         embed_dim: int,
         num_heads: int,
-        kv_dim: Optional[int] = None,
+        kv_dim: int | None = None,
         norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
         max_size: tuple[int, int] = (70, 70),
         max_temporal_size: int = 36000,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__(
@@ -318,7 +318,7 @@ class Resampler4_5(Resampler2_5):
             self.max_temporal_size = max_temporal_size
             self._set_temporal_pos_cache(self.max_temporal_size, device)
 
-    def _init_weights(self, m: Union[nn.Linear, nn.LayerNorm]):
+    def _init_weights(self, m: nn.Linear | nn.LayerNorm):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
@@ -521,8 +521,8 @@ class MiniCPMVVideoEmbeddingItems(DictEmbeddingItems):
 class MiniCPMVMultiModalDataParser(MultiModalDataParser):
     def _parse_image_data(
         self,
-        data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
-    ) -> Optional[ModalityDataItems[Any, Any]]:
+        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return MiniCPMVImageEmbeddingItems(
                 data,
@@ -533,8 +533,8 @@ class MiniCPMVMultiModalDataParser(MultiModalDataParser):
 
     def _parse_video_data(
         self,
-        data: Union[dict[str, torch.Tensor], ModalityData[VideoItem]],
-    ) -> Optional[ModalityDataItems[Any, Any]]:
+        data: dict[str, torch.Tensor] | ModalityData[VideoItem],
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return MiniCPMVVideoEmbeddingItems(
                 data,
@@ -570,7 +570,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_model_version(self):
         return get_version_by_config(self.get_hf_config())
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         mm_limits = {"image": None}
         if self.get_model_version() in {(2, 6), (4, 0), (4, 5)}:
             mm_limits["video"] = None
@@ -582,7 +582,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         image_size: ImageSize,
         # For MiniCPM V/O 2.6
         image_idx: int = 0,
-        max_slice_nums: Optional[int] = None,
+        max_slice_nums: int | None = None,
         use_image_id: bool = True,
     ) -> str:
         image_processor = self.get_image_processor()
@@ -602,8 +602,8 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         self,
         image_size: ImageSize,
         # For MiniCPM V/O 2.6
-        max_slice_nums: Optional[int] = None,
-    ) -> Optional[tuple[int, int]]:
+        max_slice_nums: int | None = None,
+    ) -> tuple[int, int] | None:
         image_processor = self.get_image_processor()
         version = self.get_model_version()
 
@@ -621,7 +621,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_num_image_tokens(
         self,
         image_size: ImageSize,
-        max_slice_nums: Optional[int] = None,
+        max_slice_nums: int | None = None,
     ) -> int:
         image_processor = self.get_image_processor()
 
@@ -712,7 +712,7 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1024,7 +1024,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     supports_encoder_tp_data = True
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "(<image>./</image>)"
         if modality.startswith("video"):
@@ -1073,7 +1073,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         modality: str,
         **kwargs: object,
-    ) -> Optional[MiniCPMVImageInputs]:
+    ) -> MiniCPMVImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -1158,7 +1158,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     def _process_vision_input(
         self,
         image_input: MiniCPMVImageInputs,
-    ) -> Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor, ...]]:
+    ) -> torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["image_embeds"]
 
@@ -1200,8 +1200,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
         if intermediate_tensors is not None:
@@ -1218,7 +1218,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.llm.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1243,7 +1243,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     def init_vision_module(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
         raise NotImplementedError
@@ -1252,7 +1252,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         embed_dim: int,
         vision_dim: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         raise NotImplementedError
@@ -1278,7 +1278,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
     def init_vision_module(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
         # TODO: refactor vision model through timm wrapper from transformers
@@ -1313,7 +1313,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
         self,
         embed_dim: int,
         vision_dim: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         with set_default_torch_dtype(torch.float16):
@@ -1381,7 +1381,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
     def init_vision_module(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         prefix: str = "",
     ) -> nn.Module:
         model = Idefics2VisionTransformer(
@@ -1398,7 +1398,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
         self,
         embed_dim: int,
         vision_dim: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         with set_default_torch_dtype(torch.float16):
@@ -1474,7 +1474,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
     def init_vision_module(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         model = Idefics2VisionTransformer(
@@ -1491,7 +1491,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         self,
         embed_dim: int,
         vision_dim: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         with set_default_torch_dtype(torch.float16):
@@ -1577,7 +1577,7 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
     def init_vision_module(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         quant_config = self._maybe_ignore_quant_config(quant_config)
@@ -1595,7 +1595,7 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         self,
         embed_dim: int,
         vision_dim: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         quant_config = self._maybe_ignore_quant_config(quant_config)
@@ -1682,7 +1682,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
     def init_vision_module(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         quant_config = self._maybe_ignore_quant_config(quant_config)
@@ -1700,7 +1700,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         self,
         embed_dim: int,
         vision_dim: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         quant_config = self._maybe_ignore_quant_config(quant_config)

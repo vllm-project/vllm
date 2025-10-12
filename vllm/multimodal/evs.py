@@ -9,7 +9,6 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import typing
-from typing import Union
 
 import torch
 
@@ -38,7 +37,7 @@ def compute_retained_tokens_count(
 
 def compute_retention_mask(
     video_embeds: torch.Tensor,
-    video_size_thw: Union[torch.LongTensor, tuple[int, int, int]],
+    video_size_thw: torch.LongTensor | tuple[int, int, int],
     spatial_merge_size: int,
     q: float,
 ) -> torch.Tensor:

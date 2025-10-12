@@ -4,9 +4,9 @@
 import asyncio
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from functools import cached_property
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 from typing_extensions import TypeVar
 
@@ -63,10 +63,10 @@ class ExecutorBase(ABC):
     @abstractmethod
     def collective_rpc(
         self,
-        method: Union[str, Callable[[WorkerBase], _R]],
-        timeout: Optional[float] = None,
+        method: str | Callable[[WorkerBase], _R],
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict[str, Any]] = None,
+        kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         """
         Execute an RPC call on all workers.
@@ -143,7 +143,7 @@ class ExecutorBase(ABC):
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
-    ) -> Optional[list[Union[SamplerOutput, PoolerOutput]]]:
+    ) -> list[SamplerOutput | PoolerOutput] | None:
         output = self.collective_rpc("execute_model", args=(execute_model_req,))
         return output[0]
 
@@ -192,7 +192,7 @@ class ExecutorBase(ABC):
             "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep
         )
 
-    def wake_up(self, tags: Optional[list[str]] = None):
+    def wake_up(self, tags: list[str] | None = None):
         if not self.is_sleeping:
             logger.warning("Executor is not sleeping.")
             return
@@ -222,8 +222,8 @@ class ExecutorBase(ABC):
     def save_sharded_state(
         self,
         path: str,
-        pattern: Optional[str] = None,
-        max_size: Optional[int] = None,
+        pattern: str | None = None,
+        max_size: int | None = None,
     ) -> None:
         self.collective_rpc(
             "save_sharded_state",
@@ -256,7 +256,7 @@ class ExecutorBase(ABC):
         exception."""
         self.check_health()
 
-    def init_kv_output_aggregator(self, finished_count: Optional[int]) -> None:
+    def init_kv_output_aggregator(self, finished_count: int | None) -> None:
         """Init KVOutputAggregator"""
         self.kv_output_aggregator = KVOutputAggregator(
             finished_count or self.parallel_config.world_size
@@ -269,7 +269,7 @@ class DistributedExecutorBase(ExecutorBase):
     def __init__(self, *args, **kwargs):
         # This is non-None when the execute model loop is running
         # in the parallel workers. It's a coroutine in the AsyncLLMEngine case.
-        self.parallel_worker_tasks: Optional[Union[Any, Awaitable[Any]]] = None
+        self.parallel_worker_tasks: Any | Awaitable[Any] | None = None
 
         super().__init__(*args, **kwargs)
 
@@ -302,8 +302,8 @@ class DistributedExecutorBase(ExecutorBase):
 
     @abstractmethod
     def _driver_execute_model(
-        self, execute_model_req: Optional[ExecuteModelRequest]
-    ) -> Optional[list[SamplerOutput]]:
+        self, execute_model_req: ExecuteModelRequest | None
+    ) -> list[SamplerOutput] | None:
         """Run execute_model in the driver worker.
 
         Passing None will cause the driver to stop the model execution loop
@@ -314,20 +314,20 @@ class DistributedExecutorBase(ExecutorBase):
 
     def collective_rpc(
         self,
-        method: Union[str, Callable],
-        timeout: Optional[float] = None,
+        method: str | Callable,
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict[str, Any]] = None,
+        kwargs: dict[str, Any] | None = None,
     ) -> list[Any]:
         return self._run_workers(method, *args, **(kwargs or {}))
 
     @abstractmethod
     def _run_workers(
         self,
-        method: Union[str, Callable],
+        method: str | Callable,
         *args,
         async_run_tensor_parallel_workers_only: bool = False,
-        max_concurrent_workers: Optional[int] = None,
+        max_concurrent_workers: int | None = None,
         **kwargs,
     ) -> Any:
         """Runs the given method on all workers.
@@ -374,7 +374,7 @@ class DistributedExecutorBase(ExecutorBase):
     @abstractmethod
     async def _driver_execute_model_async(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None,
+        execute_model_req: ExecuteModelRequest | None = None,
     ) -> list[SamplerOutput]:
         """Execute the model asynchronously in the driver worker.
 

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test the functionality of the Transformers backend."""
 
-from typing import Any, Optional, Union
+from typing import Any
 
 import pytest
 
@@ -21,12 +21,12 @@ def get_model(arch: str) -> str:
 
 
 def check_implementation(
-    runner_ref: type[Union[HfRunner, VllmRunner]],
+    runner_ref: type[HfRunner | VllmRunner],
     runner_test: type[VllmRunner],
     example_prompts: list[str],
     model: str,
-    kwargs_ref: Optional[dict[str, Any]] = None,
-    kwargs_test: Optional[dict[str, Any]] = None,
+    kwargs_ref: dict[str, Any] | None = None,
+    kwargs_test: dict[str, Any] | None = None,
     **kwargs,
 ):
     if kwargs_ref is None:

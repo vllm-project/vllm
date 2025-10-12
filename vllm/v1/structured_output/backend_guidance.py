@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import copy
 import json
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -47,7 +45,7 @@ def _walk_json_for_additional_properties(data: object):
 
 
 def process_for_additional_properties(
-    guide_json: Union[str, dict[str, Any]],
+    guide_json: str | dict[str, Any],
 ) -> dict[str, Any]:
     if isinstance(guide_json, str):
         guide_json_obj = json.loads(guide_json)
@@ -184,12 +182,12 @@ class GuidanceGrammar(StructuredOutputGrammar):
 
 def serialize_guidance_grammar(
     request_type: StructuredOutputOptions,
-    grammar_spec: Union[str, dict[str, Any]],
+    grammar_spec: str | dict[str, Any],
     disable_any_whitespace: bool = False,
     disable_additional_properties: bool = False,
 ) -> str:
     def _process_schema(
-        grammar_spec: Union[str, dict[str, Any]],
+        grammar_spec: str | dict[str, Any],
     ) -> str:
         if disable_additional_properties:
             grammar_spec = process_for_additional_properties(grammar_spec)

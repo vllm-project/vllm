@@ -4,7 +4,7 @@
 import ast
 import inspect
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Optional, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import torch
 import torch.nn as nn
@@ -32,7 +32,7 @@ _GENERATE_SUFFIXES = [
 ]
 
 
-def _load_st_projector(model_config: "ModelConfig") -> Optional[nn.Module]:
+def _load_st_projector(model_config: "ModelConfig") -> nn.Module | None:
     """Load Sentence-Transformers Dense projection layers."""
 
     try:
@@ -357,8 +357,8 @@ def as_seq_cls_model(cls: _T) -> _T:
             self,
             input_ids: torch.Tensor,
             positions: torch.Tensor,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            inputs_embeds: Optional[torch.Tensor] = None,
+            intermediate_tensors: IntermediateTensors | None = None,
+            inputs_embeds: torch.Tensor | None = None,
         ) -> torch.Tensor:
             return super().forward(
                 input_ids, positions, intermediate_tensors, inputs_embeds
