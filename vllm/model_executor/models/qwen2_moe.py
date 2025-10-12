@@ -548,12 +548,7 @@ class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             getattr(config, "mlp_only_layers", [])
             or config.shared_expert_intermediate_size > 0
         ):
-            self.packed_modules_mapping["gate_up_proj"] = (
-                [
-                    "gate_proj",
-                    "up_proj",
-                ],
-            )
+            self.packed_modules_mapping["gate_up_proj"] = ["gate_proj", "up_proj"]
 
         self.model = Qwen2MoeModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
