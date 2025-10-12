@@ -10,22 +10,30 @@ from typing import Annotated, Literal, Optional, Union
 import pytest
 
 from vllm.config import CompilationConfig, config
-from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
-                                   get_type, get_type_hints, is_not_builtin,
-                                   is_type, literal_to_kwargs, optional_type,
-                                   parse_type)
+from vllm.engine.arg_utils import (
+    EngineArgs,
+    contains_type,
+    get_kwargs,
+    get_type,
+    get_type_hints,
+    is_not_builtin,
+    is_type,
+    literal_to_kwargs,
+    optional_type,
+    parse_type,
+)
 from vllm.utils import FlexibleArgumentParser
 
 
-@pytest.mark.parametrize(("type", "value", "expected"), [
-    (int, "42", 42),
-    (float, "3.14", 3.14),
-    (str, "Hello World!", "Hello World!"),
-    (json.loads, '{"foo":1,"bar":2}', {
-        "foo": 1,
-        "bar": 2
-    }),
-])
+@pytest.mark.parametrize(
+    ("type", "value", "expected"),
+    [
+        (int, "42", 42),
+        (float, "3.14", 3.14),
+        (str, "Hello World!", "Hello World!"),
+        (json.loads, '{"foo":1,"bar":2}', {"foo": 1, "bar": 2}),
+    ],
+)
 def test_parse_type(type, value, expected):
     parse_type_func = parse_type(type)
     assert parse_type_func(value) == expected
@@ -37,47 +45,56 @@ def test_optional_type():
     assert optional_type_func("42") == 42
 
 
-@pytest.mark.parametrize(("type_hint", "type", "expected"), [
-    (int, int, True),
-    (int, float, False),
-    (list[int], list, True),
-    (list[int], tuple, False),
-    (Literal[0, 1], Literal, True),
-])
+@pytest.mark.parametrize(
+    ("type_hint", "type", "expected"),
+    [
+        (int, int, True),
+        (int, float, False),
+        (list[int], list, True),
+        (list[int], tuple, False),
+        (Literal[0, 1], Literal, True),
+    ],
+)
 def test_is_type(type_hint, type, expected):
     assert is_type(type_hint, type) == expected
 
 
-@pytest.mark.parametrize(("type_hints", "type", "expected"), [
-    ({float, int}, int, True),
-    ({int, tuple[int]}, int, True),
-    ({int, tuple[int]}, float, False),
-    ({str, Literal["x", "y"]}, Literal, True),
-])
+@pytest.mark.parametrize(
+    ("type_hints", "type", "expected"),
+    [
+        ({float, int}, int, True),
+        ({int, tuple}, int, True),
+        ({int, tuple[int]}, int, True),
+        ({int, tuple[int, ...]}, int, True),
+        ({int, tuple[int]}, float, False),
+        ({int, tuple[int, ...]}, float, False),
+        ({str, Literal["x", "y"]}, Literal, True),
+    ],
+)
 def test_contains_type(type_hints, type, expected):
     assert contains_type(type_hints, type) == expected
 
 
-@pytest.mark.parametrize(("type_hints", "type", "expected"), [
-    ({int, float}, int, int),
-    ({int, float}, str, None),
-    ({str, Literal["x", "y"]}, Literal, Literal["x", "y"]),
-])
+@pytest.mark.parametrize(
+    ("type_hints", "type", "expected"),
+    [
+        ({int, float}, int, int),
+        ({int, float}, str, None),
+        ({str, Literal["x", "y"]}, Literal, Literal["x", "y"]),
+    ],
+)
 def test_get_type(type_hints, type, expected):
     assert get_type(type_hints, type) == expected
 
 
-@pytest.mark.parametrize(("type_hints", "expected"), [
-    ({Literal[1, 2]}, {
-        "type": int,
-        "choices": [1, 2]
-    }),
-    ({str, Literal["x", "y"]}, {
-        "type": str,
-        "metavar": ["x", "y"]
-    }),
-    ({Literal[1, "a"]}, Exception),
-])
+@pytest.mark.parametrize(
+    ("type_hints", "expected"),
+    [
+        ({Literal[1, 2]}, {"type": int, "choices": [1, 2]}),
+        ({str, Literal["x", "y"]}, {"type": str, "metavar": ["x", "y"]}),
+        ({Literal[1, "a"]}, Exception),
+    ],
+)
 def test_literal_to_kwargs(type_hints, expected):
     context = nullcontext()
     if expected is Exception:
@@ -120,22 +137,27 @@ class DummyConfig:
     """Nested config"""
 
 
-@pytest.mark.parametrize(("type_hint", "expected"), [
-    (int, False),
-    (DummyConfig, True),
-])
+@pytest.mark.parametrize(
+    ("type_hint", "expected"),
+    [
+        (int, False),
+        (DummyConfig, True),
+    ],
+)
 def test_is_not_builtin(type_hint, expected):
     assert is_not_builtin(type_hint) == expected
 
 
 @pytest.mark.parametrize(
-    ("type_hint", "expected"), [
+    ("type_hint", "expected"),
+    [
         (Annotated[int, "annotation"], {int}),
         (Optional[int], {int, type(None)}),
         (Annotated[Optional[int], "annotation"], {int, type(None)}),
         (Optional[Annotated[int, "annotation"]], {int, type(None)}),
     ],
-    ids=["Annotated", "Optional", "Annotated_Optional", "Optional_Annotated"])
+    ids=["Annotated", "Optional", "Annotated_Optional", "Optional_Annotated"],
+)
 def test_get_type_hints(type_hint, expected):
     assert get_type_hints(type_hint) == expected
 
@@ -175,24 +197,16 @@ def test_get_kwargs():
     ("arg", "expected"),
     [
         (None, dict()),
-        ('{"video": {"num_frames": 123} }', {
-            "video": {
-                "num_frames": 123
-            }
-        }),
+        ('{"video": {"num_frames": 123} }', {"video": {"num_frames": 123}}),
         (
             '{"video": {"num_frames": 123, "fps": 1.0, "foo": "bar"}, "image": {"foo": "bar"} }',  # noqa
             {
-                "video": {
-                    "num_frames": 123,
-                    "fps": 1.0,
-                    "foo": "bar"
-                },
-                "image": {
-                    "foo": "bar"
-                }
-            }),
-    ])
+                "video": {"num_frames": 123, "fps": 1.0, "foo": "bar"},
+                "image": {"foo": "bar"},
+            },
+        ),
+    ],
+)
 def test_media_io_kwargs_parser(arg, expected):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if arg is None:
@@ -227,24 +241,32 @@ def test_compilation_config():
     assert args.compilation_config.level == 3
 
     # set to string form of a dict
-    args = parser.parse_args([
-        "-O",
-        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
-        '"use_inductor": false}',
-    ])
-    assert (args.compilation_config.level == 3 and
-            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
-            and not args.compilation_config.use_inductor)
+    args = parser.parse_args(
+        [
+            "-O",
+            '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+            '"use_inductor": false}',
+        ]
+    )
+    assert (
+        args.compilation_config.level == 3
+        and args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
+        and not args.compilation_config.use_inductor
+    )
 
     # set to string form of a dict
-    args = parser.parse_args([
-        "--compilation-config="
-        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
-        '"use_inductor": true}',
-    ])
-    assert (args.compilation_config.level == 3 and
-            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
-            and args.compilation_config.use_inductor)
+    args = parser.parse_args(
+        [
+            "--compilation-config="
+            '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+            '"use_inductor": true}',
+        ]
+    )
+    assert (
+        args.compilation_config.level == 3
+        and args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
+        and args.compilation_config.use_inductor
+    )
 
 
 def test_prefix_cache_default():
@@ -252,8 +274,7 @@ def test_prefix_cache_default():
     args = parser.parse_args([])
 
     engine_args = EngineArgs.from_cli_args(args=args)
-    assert (not engine_args.enable_prefix_caching
-            ), "prefix caching defaults to off."
+    assert not engine_args.enable_prefix_caching, "prefix caching defaults to off."
 
     # with flag to turn it on.
     args = parser.parse_args(["--enable-prefix-caching"])
@@ -266,29 +287,15 @@ def test_prefix_cache_default():
     assert not engine_args.enable_prefix_caching
 
 
-# yapf: disable
-@pytest.mark.parametrize(("arg", "expected", "option"), [
-    (None, None, "mm-processor-kwargs"),
-    ("{}", {}, "mm-processor-kwargs"),
-    (
-        '{"num_crops": 4}',
-        {
-            "num_crops": 4
-        },
-        "mm-processor-kwargs"
-    ),
-    (
-        '{"foo": {"bar": "baz"}}',
-        {
-            "foo":
-            {
-                "bar": "baz"
-            }
-        },
-        "mm-processor-kwargs"
-    ),
-])
-# yapf: enable
+@pytest.mark.parametrize(
+    ("arg", "expected", "option"),
+    [
+        (None, None, "mm-processor-kwargs"),
+        ("{}", {}, "mm-processor-kwargs"),
+        ('{"num_crops": 4}', {"num_crops": 4}, "mm-processor-kwargs"),
+        ('{"foo": {"bar": "baz"}}', {"foo": {"bar": "baz"}}, "mm-processor-kwargs"),
+    ],
+)
 def test_composite_arg_parser(arg, expected, option):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if arg is None:
@@ -300,8 +307,7 @@ def test_composite_arg_parser(arg, expected, option):
 
 def test_human_readable_model_len():
     # `exit_on_error` disabled to test invalid values below
-    parser = EngineArgs.add_cli_args(
-        FlexibleArgumentParser(exit_on_error=False))
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser(exit_on_error=False))
 
     args = parser.parse_args([])
     assert args.max_model_len is None
