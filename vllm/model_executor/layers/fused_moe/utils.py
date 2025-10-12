@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from math import prod
-from typing import Optional, Union
 
 import torch
 
@@ -60,7 +59,7 @@ def _count_expert_num_tokens(
 
 
 def count_expert_num_tokens(
-    topk_ids: torch.Tensor, num_local_experts: int, expert_map: Optional[torch.Tensor]
+    topk_ids: torch.Tensor, num_local_experts: int, expert_map: torch.Tensor | None
 ) -> torch.Tensor:
     """
     Count the number to tokens assigned to each expert.
@@ -112,7 +111,7 @@ def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
 
 def _nvfp4_quantize(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     is_sf_swizzled_layout: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return flashinfer_fp4_quantize(
@@ -122,9 +121,9 @@ def _nvfp4_quantize(
 
 def _fp8_quantize(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     per_act_token: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Perform fp8 quantization on the inputs.  If a block_shape
@@ -148,9 +147,9 @@ def _fp8_quantize(
 
 def _int8_quantize(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     per_act_token: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Perform int8 quantization on the inputs.  If a block_shape
@@ -175,9 +174,9 @@ def _int8_quantize(
 
 def _mxfp4_quantize(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, None]:
     assert block_shape is None
     # TODO: native mxfp4 is currently not integrated in vllm,
@@ -191,9 +190,9 @@ def _mxfp4_quantize(
 
 def _mxfp8_e4m3_quantize(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert A_scale is None
     assert not per_act_token_quant
@@ -203,9 +202,9 @@ def _mxfp8_e4m3_quantize(
 
 def _mxfp6_e3m2_quantize(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, None]:
     assert block_shape is None
 
@@ -220,9 +219,9 @@ def _mxfp6_e3m2_quantize(
 
 def _mxfp6_e2m3_quantize(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, None]:
     assert block_shape is None
 
@@ -237,12 +236,12 @@ def _mxfp6_e2m3_quantize(
 
 def moe_kernel_quantize_input(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    quant_dtype: Union[None, torch.dtype, str],
+    A_scale: torch.Tensor | None,
+    quant_dtype: None | torch.dtype | str,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
     is_fp4_scale_swizzled: bool = True,
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     if quant_dtype == torch.float8_e4m3fn:
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
@@ -273,7 +272,7 @@ def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
         return m[idx, ...]
 
 
-def normalize_scales_shape(scales: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+def normalize_scales_shape(scales: torch.Tensor | None) -> torch.Tensor | None:
     if scales is not None:
         if scales.numel() == 1:
             scales = scales.view(1, 1)
@@ -283,9 +282,9 @@ def normalize_scales_shape(scales: Optional[torch.Tensor]) -> Optional[torch.Ten
 
 
 def normalize_batched_scales_shape(
-    scales: Optional[torch.Tensor],
+    scales: torch.Tensor | None,
     num_experts: int,
-) -> Optional[torch.Tensor]:
+) -> torch.Tensor | None:
     if scales is not None and scales.ndim < 3:
         if scales.numel() == 1:
             scales = scales.view(1)
@@ -300,9 +299,9 @@ def normalize_batched_scales_shape(
 
 def _validate_scale_shape(
     a: torch.Tensor,
-    a_scale: Optional[torch.Tensor],
+    a_scale: torch.Tensor | None,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]],
+    block_shape: list[int] | None,
 ) -> None:
     if a_scale is None:
         return

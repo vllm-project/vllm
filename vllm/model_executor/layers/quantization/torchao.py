@@ -63,7 +63,7 @@ class TorchAOConfig(QuantizationConfig):
     def __init__(
         self,
         torchao_config,
-        skip_modules: Optional[list[str]] = None,
+        skip_modules: list[str] | None = None,
         is_checkpoint_torchao_serialized: bool = False,
     ) -> None:
         """
@@ -301,7 +301,7 @@ class TorchAOLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return F.linear(x, layer.weight, bias)
 

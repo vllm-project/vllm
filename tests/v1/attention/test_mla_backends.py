@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for v1 MLA backends without GPUModelRunner dependency."""
 
-from typing import Optional, Union
-
 import pytest
 import torch
 
@@ -81,8 +79,8 @@ def create_and_prepopulate_kv_cache(
     num_blocks: int,
     common_attn_metadata: CommonAttentionMetadata,
     randomize_blocks: bool = True,
-    kv_cache_dtype: Optional[str] = None,
-    scale: Union[float, torch.Tensor] = 1.0,
+    kv_cache_dtype: str | None = None,
+    scale: float | torch.Tensor = 1.0,
 ) -> torch.Tensor:
     """Create and prepopulate an MLA KV cache with context data.
 

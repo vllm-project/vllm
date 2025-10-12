@@ -7,7 +7,6 @@ import inspect
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Optional
 
 import torch
 from torch import nn
@@ -46,8 +45,8 @@ def initialize_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    model_class: Optional[type[nn.Module]] = None,
-    model_config: Optional[ModelConfig] = None,
+    model_class: type[nn.Module] | None = None,
+    model_config: ModelConfig | None = None,
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
     if model_config is None:
@@ -268,7 +267,7 @@ class ParamMapping:
                     index,
                 )
 
-    def get_sub_modules(self, module_name: str) -> Optional[tuple[str, list[str]]]:
+    def get_sub_modules(self, module_name: str) -> tuple[str, list[str]] | None:
         for key, value in self.packed_mapping.items():
             if module_name.endswith(key):
                 return key, value
