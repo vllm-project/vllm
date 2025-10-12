@@ -27,9 +27,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     modular_triton_fused_moe,
     try_get_optimal_moe_config,
 )
-from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-    moe_lora_align_block_size,
-)
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
 
 
@@ -124,7 +121,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     sorted_token_ids_lora,
                     expert_ids_lora,
                     num_tokens_post_padded_lora,
-                ) = moe_lora_align_block_size(
+                ) = self.punica_wrapper.moe_lora_align_block_size(
                     curr_topk_ids,
                     token_lora_mapping,
                     config["BLOCK_SIZE_M"],

@@ -44,8 +44,8 @@ __global__ void moe_lora_align_sum_kernel(
   for (int i = start_idx; i < numel && i < start_idx + tokens_per_thread; ++i) {
     int mask = token_lora_mapping[i / topk_num] == lora_id;
     int idx = index(num_experts, threadIdx.x + 1, topk_ids[i]);
-    atomicAdd(&tokens_cnts[idx], mask);
-    // tokens_cnts[idx] += mask;
+    // atomicAdd(&tokens_cnts[idx], mask);
+    tokens_cnts[idx] += mask;
   }
 
   __syncthreads();
