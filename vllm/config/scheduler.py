@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import InitVar
 from typing import Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SkipValidation, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -31,7 +31,7 @@ class SchedulerConfig:
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
 
-    max_num_batched_tokens: int = Field(default=None, ge=1)
+    max_num_batched_tokens: SkipValidation[int] = Field(default=None, ge=1)
     """Maximum number of tokens to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
