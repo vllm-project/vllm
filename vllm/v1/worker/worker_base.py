@@ -25,6 +25,9 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.outputs import ModelRunnerOutput
+else:
+    SchedulerOutput = object
+    ModelRunnerOutput = object
 
 logger = init_logger(__name__)
 

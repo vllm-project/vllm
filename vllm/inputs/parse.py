@@ -120,7 +120,7 @@ def split_enc_dec_inputs(
 class PromptComponents(NamedTuple):
     text: str | None = None
     token_ids: list[int] | None = None
-    embeds: torch.Tensor | None = None
+    embeds: "torch.Tensor | None" = None
 
 
 def get_prompt_components(prompt: PromptType) -> PromptComponents:

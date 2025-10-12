@@ -17,6 +17,13 @@ if TYPE_CHECKING:
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
+else:
+    KVConnectorMetadata = object
+    LoRARequest = object
+    MultiModalFeatureSpec = object
+    PoolingParams = object
+    SamplingParams = object
+    Request = object
 
 
 @bc_linter_include
@@ -30,7 +37,7 @@ class NewRequestData:
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: LoRARequest | None
-    prompt_embeds: torch.Tensor | None = None
+    prompt_embeds: "torch.Tensor | None" = None
 
     @classmethod
     def from_request(
@@ -162,7 +169,7 @@ class SchedulerOutput:
     # for filling the next token bitmask
     structured_output_request_ids: dict[str, int]
     # the bitmask for the whole batch
-    grammar_bitmask: npt.NDArray[np.int32] | None
+    grammar_bitmask: "npt.NDArray[np.int32] | None"
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None

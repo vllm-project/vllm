@@ -4,7 +4,7 @@
 import hashlib
 import importlib.metadata
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import regex as re
@@ -34,6 +34,10 @@ else:
         globals(),
         "transformers.models.gpt2.tokenization_gpt2",
     )
+
+    AnyTokenizer = Any
+    SchedulerOutput = object
+    InputBatch = object
 
 logger = init_logger(__name__)
 

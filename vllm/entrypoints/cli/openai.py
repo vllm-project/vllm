@@ -14,6 +14,8 @@ from vllm.entrypoints.cli.types import CLISubcommand
 
 if TYPE_CHECKING:
     from vllm.utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = argparse.ArgumentParser
 
 
 def _register_signal_handlers():
