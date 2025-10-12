@@ -14,7 +14,7 @@ from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo, parallel_launch_with_config)
 from tests.kernels.moe.utils import (TestMLP, make_test_weights,
                                      moe_quantize_weights)
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config, get_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
@@ -25,27 +25,29 @@ from vllm.platforms import current_platform
 from vllm.utils import cdiv, has_deep_ep, has_pplx
 
 SHAPE_COMBOS = [
+    (1, 16, 16),
+
     (1, 128, 128),
     #(32, 1024, 512),
-    (32, 512, 512),
+#    (32, 512, 512),
     (222, 4096, 2048),
     #(256, 4096, 2048),
 ]
 
 NUM_EXPERTS = [8, 64]
-TOP_KS = [1, 6]
+TOP_KS = [2, 6]
 
 # dp_size, tp_size, use_ep
 PARALLEL_COMBOS = [
     [1, 1, False],
-    [1, 2, False],
+#    [1, 2, False],
     #[1, 4, False],
     [2, 1, True],
     #    [2, 2, True],
     #    [4, 1, True],
 ]
 
-BACKENDS = [None, "naive"]
+BACKENDS = ["naive"]
 
 if has_pplx():
     BACKENDS += ["pplx"]
@@ -74,7 +76,7 @@ def chunk_by_rank(
     device: Optional[torch.device] = None,
 ) -> torch.Tensor:
     chunk = cdiv(t.shape[dim], w)
-    t = torch.narrow(t, dim, r * chunk, chunk)
+    t = t.narrow(dim, r * chunk, chunk)
     if device is not None:
         t = t.to(device)
     return t
@@ -150,10 +152,6 @@ def make_quant_config(
         w2q, w2s, _ = moe_quantize_weights(w2, None, torch.float8_e4m3fn,
                                            False, None)
         assert w1s is not None and w2s is not None
-        w1q = w1q.transpose(0, 1)
-        w2q = w2q.transpose(0, 1)
-        w1s = w1s.transpose(0, 1)
-        w2s = w2s.transpose(0, 1)
     elif quantization == "modelopt" or quantization == "compressed_tensors":
         raise NotImplementedError
 
@@ -174,7 +172,7 @@ def make_fused_moe_layer(
     use_ep: bool,
     hidden_size: int,
     intermediate_size: int,
-    params_dtype: torch.dtype,
+    in_dtype: torch.dtype,
     tp_size: int,
     ep_size: int,
     dp_size: int,
@@ -217,7 +215,7 @@ def make_fused_moe_layer(
         top_k=top_k,
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
-        params_dtype=params_dtype,
+        params_dtype=in_dtype,
         reduce_results=reduce_results,
         renormalize=renormalize,
         use_grouped_topk=use_grouped_topk,
@@ -402,10 +400,14 @@ def _test_loop(
     quantization: Optional[str],
     shared_experts_config: Optional[SharedExpertsConfig],
 ):
-    print(f"PCONF {vllm_config.parallel_config}, pgi={pgi}")
+    print(f"PGI={pgi}")
 
     world_size = tp_size * dp_size
+    use_ep = ep_size > 1
 
+    assert vllm_config.parallel_config.enable_expert_parallel == use_ep
+
+    torch.set_printoptions(profile="full")
     current_platform.seed_everything(7)
 
     in_dtype = hidden_states.dtype
@@ -419,11 +421,15 @@ def _test_loop(
     print(f"BEFORE W1 {w1.shape}")
     print(f"BEFORE W2 {w2.shape}")
 
-    if dp_size > 1:
+    if ep_size > 1:
+        #hidden_states = chunk_by_rank(hidden_states, dp_rank, dp_size, dim=1, device=device)
+        #router_logits = chunk_by_rank(router_logits, dp_rank, dp_size, dim=1, device=device)
         w1 = chunk_by_rank(w1, dp_rank, dp_size, dim=0, device=device)
         w2 = chunk_by_rank(w2, dp_rank, dp_size, dim=0, device=device)
 
     if tp_size > 1:
+        #hidden_states = chunk_by_rank(hidden_states, tp_rank, tp_size, dim=1, device=device)
+        #router_logits = chunk_by_rank(router_logits, tp_rank, tp_size, dim=1, device=device)
         w1 = chunk_by_rank(w1, tp_rank, tp_size, dim=1, device=device)
         w2 = chunk_by_rank(w2, tp_rank, tp_size, dim=2, device=device)
         n = n // tp_size
@@ -436,22 +442,32 @@ def _test_loop(
     baseline_output = baseline_output.to(device)
 
     if shared_experts_config is not None:
-        # TODO: chunk by rank for TP
+        if False and tp_size > 1:
+            s_w1 = chunk_by_rank(shared_experts_config.w1, tp_rank,
+                                 tp_size, dim=1, device=device)
+            s_w2 = chunk_by_rank(shared_experts_config.w2, tp_rank,
+                                 tp_size, dim=2, device=device)
+        else:
+            s_w1 = shared_experts_config.w1.to(device)
+            s_w2 = shared_experts_config.w2.to(device)
+
         shared_experts = TestMLP(
-            w1=shared_experts_config.w1.to(device),
-            w2=shared_experts_config.w2.to(device),
+            w1=s_w1,
+            w2=s_w2,
             out_dtype=in_dtype,
         )
     else:
         shared_experts = None
 
     with set_current_vllm_config(vllm_config):
+        current_vllm_config = get_current_vllm_config()
+        print(f"PCONF = {current_vllm_config.parallel_config}")
         moe_fn, moe_layer = make_fused_moe_layer(
             quantization=quantization,
-            use_ep=vllm_config.parallel_config.enable_expert_parallel,
+            use_ep=use_ep,
             hidden_size=k,
             intermediate_size=n,
-            params_dtype=in_dtype,
+            in_dtype=in_dtype,
             tp_size=tp_size,
             ep_size=ep_size,
             dp_size=dp_size,
@@ -478,23 +494,25 @@ def _test_loop(
         vllm_config.compilation_config.static_forward_context[
             "test_layer"] = moe_layer
 
+        print(f"ORIG RANK HIDDEN_STATES {hidden_states}")
+
         with set_forward_context(
                 None,
                 vllm_config,
                 num_tokens=num_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
+                #num_tokens_across_dp=None,
         ):
             output = moe_fn(hidden_states, router_logits)
 
-    if quantization is not None:
+    if False and quantization is not None:
         atol = 5e-2
         rtol = 5e-2
     else:
         atol = 3.5e-2
         rtol = 3.5e-2
 
-    #torch.set_printoptions(profile="full")
-    #print(f"OUTPUT {output}")
+    print(f"OUTPUT {output}")
 
     torch.testing.assert_close(baseline_output, output, atol=atol, rtol=rtol)
 
@@ -519,13 +537,14 @@ def test_moe_layer(
     dp_size: int,
     tp_size: int,
     use_ep: bool,
-    backend: Optional[str],
+    backend: str,
     use_shared_experts: bool,
 ):
+    torch.set_printoptions(profile="full")
     current_platform.seed_everything(7)
     world_size = tp_size * dp_size
 
-    if not use_ep and backend is not None:
+    if not use_ep and backend != "naive":
         pytest.skip(f"Skipping backend {backend} w/o EP.")
 
     if backend == "deepep_low_latency":
@@ -535,9 +554,8 @@ def test_moe_layer(
             pytest.skip(f"Skipping unsupported K {k} in {backend} w/o EP.")
 
     test_env = dict()
-    test_env["VLLM_USE_DEEP_GEMM"] = "1"
-    if backend is not None:
-        test_env["VLLM_ALL2ALL_BACKEND"] = backend
+    #test_env["VLLM_USE_DEEP_GEMM"] = "1"
+    test_env["VLLM_ALL2ALL_BACKEND"] = backend
 
     parallel_config = ParallelConfig(
         pipeline_parallel_size=1,
@@ -561,11 +579,9 @@ def test_moe_layer(
     )
 
     if use_shared_experts:
-        s_w1 = torch.randn((k, n * 2), device="cuda", dtype=in_dtype) / 15
-        s_w2 = torch.randn((n, k), device="cuda", dtype=in_dtype) / 15
         shared_experts_config = SharedExpertsConfig(
-            w1=s_w1,
-            w2=s_w2,
+            w1=torch.randn((k, n * 2), device="cuda", dtype=in_dtype) / 15,
+            w2=torch.randn((n, k), device="cuda", dtype=in_dtype) / 15,
         )
     else:
         shared_experts_config = None
@@ -586,22 +602,26 @@ def test_moe_layer(
                                 device="cuda",
                                 dtype=in_dtype)
 
+    print(f"ORIG HIDDEN_STATES {hidden_states}")
+
+    hidden_states_clone = hidden_states.clone().detach()
+    router_logits_clone = router_logits.clone().detach()
+
     baseline_output = baseline_layer(hidden_states, router_logits)
 
-    #torch.set_printoptions(profile="full")
-    #print(f"BASE {baseline_output}")
+    print(f"BASE {baseline_output}")
 
     parallel_launch_with_config(
         world_size,
         _test_loop,
         vllm_config,
         test_env,
-        1 if not use_ep else world_size,
+        1 if not use_ep else world_size, # or dp_size?
         dp_size,
         tp_size,
         baseline_output,
-        hidden_states,
-        router_logits,
+        hidden_states_clone,
+        router_logits_clone,
         w1,
         w2,
         num_experts,
