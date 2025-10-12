@@ -1,3 +1,63 @@
+# Set Enviroment
+
+1. Docker image: 
+   ```
+   rocm/ali-private:ubuntu22.04_rocm7.0.1.42_vllm_5b842c2_aiter_6b586ae_torch2.8.0_20250917
+   ```
+2. Upgrade PyBind: 
+   ```
+   pip install --upgrade pybind11
+   ```
+3. Install Aiter dev/perf branch:
+   ``` 
+   pip uninstall aiter
+   git clone -b dev/perf git@github.com:ROCm/aiter.git
+   cd aiter
+   git submodule sync && git submodule update --init --recursive
+   python3 setup.py install
+   ```
+4. Install Rocm/vLLM dev/perf branch:
+   ```
+   pip uninstall vllm
+   git clone -b dev/perf git@github.com:ROCm/vllm.git
+   cd vllm
+   python3 -m pip install -r requirements/common.txt
+   export PYTORCH_ROCM_ARCH="gfx942"
+   python3 setup.py develop
+   ```
+
+# Curl request
+1. curl a single request to quickly check the functionality
+
+   ```
+    curl -X POST "http://localhost:8000/v1/completions" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "prompt": "Who are you?", "temperature": 0, "top_p": 1, "top_k": 0, "repetition_penalty": 1.0, "presence_penalty": 0, "frequency_penalty": 0, "stream": false, "ignore_eos": false, "n": 1, "seed": 123 
+    }'
+   ```
+
+# Benchmark
+1. Take deepseek as example, you can use the following command to benchmark serve.
+    ```
+    model="/path-to-model/deepseek-r1-FP8-Dynamic/"
+    vllm bench serve \
+        --host localhost \
+        --port 8000 \
+        --model ${model} \
+        --dataset-name random \
+        --random-input-len 3500 \
+        --random-output-len 1024 \
+        --max-concurrency 64 \
+        --num-prompts 128 \
+        --percentile-metrics ttft,tpot,itl,e2el \
+        --ignore-eos \
+        # --profile
+        # --seed 123 \
+        # --request-rate 2 \
+        2>&1 | tee log.client.log
+    ```
+
 # Evaluation
 
 ## Text Model Evaluation
@@ -89,3 +149,4 @@ Vision Language Model accuracy evualuation is done using the tool from
 The launch scripts are attached to give an idea what are the configuration that was validated
 at some point in time that works.
 It also covers the models that are of interested in this branch.
+
