@@ -26,6 +26,17 @@
    python3 setup.py develop
    ```
 
+# Launch server
+1. deepseek-r1 PTPC FP8
+- download weight: https://huggingface.co/EmbeddedLLM/deepseek-r1-FP8-Dynamic
+    ```
+    huggingface-cli download EmbeddedLLM/deepseek-r1-FP8-Dynamic --local-dir EmbeddedLLM/deepseek-r1-FP8-Dynamic
+    ```
+- launch server:
+    ```
+    bash launch_deepseekr1_ptpc_fp8.sh
+    ```
+
 # Curl request
 1. curl a single request to quickly check the functionality
 
@@ -149,4 +160,3 @@ Vision Language Model accuracy evualuation is done using the tool from
 The launch scripts are attached to give an idea what are the configuration that was validated
 at some point in time that works.
 It also covers the models that are of interested in this branch.
-
