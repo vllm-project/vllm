@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import os
-from typing import Optional
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -32,9 +31,9 @@ except json.JSONDecodeError:
 
 
 def get_env_vars_to_copy(
-    exclude_vars: Optional[set[str]] = None,
-    additional_vars: Optional[set[str]] = None,
-    destination: Optional[str] = None,
+    exclude_vars: set[str] | None = None,
+    additional_vars: set[str] | None = None,
+    destination: str | None = None,
 ) -> set[str]:
     """
     Get the environment variables to copy to downstream Ray actors.

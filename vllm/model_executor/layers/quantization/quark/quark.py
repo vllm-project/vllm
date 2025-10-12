@@ -43,8 +43,8 @@ class QuarkConfig(QuantizationConfig):
     def __init__(
         self,
         quant_config: dict[str, Any],
-        kv_cache_group: Optional[list[str]] = None,
-        kv_cache_config: Optional[dict[str, Any]] = None,
+        kv_cache_group: list[str] | None = None,
+        kv_cache_config: dict[str, Any] | None = None,
         pack_method: str = "reorder",
     ):
         super().__init__()
@@ -178,8 +178,8 @@ class QuarkConfig(QuantizationConfig):
 
     def _is_fp8_w8a8(
         self,
-        weight_quant: Optional[dict[str, Any]],
-        input_quant: Optional[dict[str, Any]],
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
     ) -> bool:
         # Confirm weights and input quantized.
         if weight_quant is None or input_quant is None:
@@ -209,8 +209,8 @@ class QuarkConfig(QuantizationConfig):
 
     def _is_static_tensor_w8a8(
         self,
-        weight_quant: Optional[dict[str, Any]],
-        input_quant: Optional[dict[str, Any]],
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
     ) -> bool:
         # Confirm weights and input quantized.
         if weight_quant is None or input_quant is None:
@@ -237,8 +237,8 @@ class QuarkConfig(QuantizationConfig):
 
     def _is_ocp_mx(
         self,
-        weight_quant: Optional[dict[str, Any]],
-        input_quant: Optional[dict[str, Any]],
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
     ) -> bool:
         # Confirm weights and input quantized.
         if weight_quant is None or input_quant is None:
@@ -370,7 +370,7 @@ class QuarkConfig(QuantizationConfig):
 
         return scheme
 
-    def get_cache_scale(self, name: str) -> Optional[str]:
+    def get_cache_scale(self, name: str) -> str | None:
         """
         Check whether the param name matches the format for k/v cache scales
         in quark. If this is the case, return its equivalent param name
@@ -429,7 +429,7 @@ class QuarkLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ):
         """
         Use the output of create_weights and the CompressedTensorsScheme
@@ -454,7 +454,7 @@ class QuarkKVCacheMethod(BaseKVCacheMethod):
         super().__init__(quant_config)
 
     @staticmethod
-    def validate_kv_cache_config(kv_cache_config: Optional[dict[str, Any]]):
+    def validate_kv_cache_config(kv_cache_config: dict[str, Any] | None):
         """
         Validator for the kv cache configuration. Useful for controlling the
         kv cache quantization schemes, that are being supported in vLLM

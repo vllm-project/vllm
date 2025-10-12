@@ -4,12 +4,12 @@
 import contextlib
 import os
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING, Callable, Optional, Union
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import msgspec
@@ -56,13 +56,13 @@ class EngineZmqAddresses:
     # ZMQ output socket addresses for each front-end client (responses)
     outputs: list[str]
     # ZMQ input socket address of DP coordinator if applicable
-    coordinator_input: Optional[str] = None
+    coordinator_input: str | None = None
     # ZMQ output socket address of DP coordinator if applicable
-    coordinator_output: Optional[str] = None
+    coordinator_output: str | None = None
     # ZMQ socket for front-end to connect to DP coordinator.
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
-    frontend_stats_publish_address: Optional[str] = None
+    frontend_stats_publish_address: str | None = None
 
 
 @dataclass
@@ -73,8 +73,8 @@ class EngineHandshakeMetadata:
     """
 
     addresses: EngineZmqAddresses
-    parallel_config: dict[str, Union[int, str, list[int]]]
-    parallel_config_hash: Optional[str] = None
+    parallel_config: dict[str, int | str | list[int]]
+    parallel_config_hash: str | None = None
 
 
 class CoreEngineProcManager:
@@ -94,7 +94,7 @@ class CoreEngineProcManager:
         handshake_address: str,
         executor_class: type[Executor],
         log_stats: bool,
-        client_handshake_address: Optional[str] = None,
+        client_handshake_address: str | None = None,
     ):
         context = get_mp_context()
         common_kwargs = {
@@ -221,8 +221,8 @@ class CoreEngineActorManager:
         addresses: EngineZmqAddresses,
         executor_class: type[Executor],
         log_stats: bool,
-        placement_groups: Optional[list["PlacementGroup"]] = None,
-        local_dp_ranks: Optional[list[int]] = None,
+        placement_groups: list["PlacementGroup"] | None = None,
+        local_dp_ranks: list[int] | None = None,
     ):
         import copy
 
@@ -675,8 +675,8 @@ def launch_core_engines(
     num_api_servers: int = 1,
 ) -> Iterator[
     tuple[
-        Optional[Union[CoreEngineProcManager, CoreEngineActorManager]],
-        Optional[DPCoordinator],
+        CoreEngineProcManager | CoreEngineActorManager | None,
+        DPCoordinator | None,
         EngineZmqAddresses,
     ]
 ]:
@@ -829,8 +829,8 @@ def wait_for_engine_startup(
     core_engines: list[CoreEngine],
     parallel_config: ParallelConfig,
     cache_config: CacheConfig,
-    proc_manager: Optional[CoreEngineProcManager],
-    coord_process: Optional[Process],
+    proc_manager: CoreEngineProcManager | None,
+    coord_process: Process | None,
 ):
     # Wait for engine core process(es) to send ready messages.
     local_count = parallel_config.data_parallel_size_local

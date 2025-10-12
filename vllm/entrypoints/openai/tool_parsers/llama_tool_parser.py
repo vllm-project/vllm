@@ -3,7 +3,6 @@
 
 import json
 from collections.abc import Sequence
-from typing import Union
 
 import partial_json_parser
 import regex as re
@@ -134,7 +133,7 @@ class Llama3JsonToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         if not (
             current_text.startswith(self.bot_token) or current_text.startswith("{")
         ):

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -26,8 +25,8 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         dtype: torch.dtype,
         short_factor: list[float],
         long_factor: list[float],
-        short_mscale: Optional[float] = None,
-        long_mscale: Optional[float] = None,
+        short_mscale: float | None = None,
+        long_mscale: float | None = None,
     ):
         super().__init__()
 
@@ -106,9 +105,9 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-        offsets: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert key is not None
         query = query.view(*query.shape[:-1], -1, self.head_size)
         key = key.view(*key.shape[:-1], -1, self.head_size)

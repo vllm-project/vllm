@@ -12,7 +12,7 @@ import os
 import random
 from contextlib import contextmanager
 from dataclasses import asdict
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
@@ -28,8 +28,8 @@ from vllm.utils import FlexibleArgumentParser
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
     prompts: list[str]
-    stop_token_ids: Optional[list[int]] = None
-    lora_requests: Optional[list[LoRARequest]] = None
+    stop_token_ids: list[int] | None = None
+    lora_requests: list[LoRARequest] | None = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on

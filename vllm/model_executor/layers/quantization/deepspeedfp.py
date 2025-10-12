@@ -140,7 +140,7 @@ class DeepSpeedFPLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         weight = layer.weight
         y = weight.ds_dequantize()

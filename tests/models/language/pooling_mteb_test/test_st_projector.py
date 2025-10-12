@@ -23,6 +23,7 @@ ST_PROJECTOR_MODELS = [
         architecture="Gemma3TextModel",
         mteb_score=0.7473819294684156,
         enable_test=True,
+        dtype="float32",
     ),
 ]
 

@@ -9,7 +9,6 @@ import textwrap
 import time
 import uuid
 from collections import defaultdict
-from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -154,7 +153,7 @@ class FakeNixlWrapper:
         local_block_descs_ids: list[int],
         remote_xfer_side_handle: int,
         remote_block_descs_ids: list[int],
-        notif_msg: Optional[bytes] = None,
+        notif_msg: bytes | None = None,
     ) -> int:
         return uuid.uuid4().int
 
@@ -982,7 +981,7 @@ class FakePlatform(Platform):
         return {"oot": ("oot",)}
 
     @classmethod
-    def get_nixl_memory_type(cls) -> Optional[str]:
+    def get_nixl_memory_type(cls) -> str | None:
         """
         Returns the nixl memory type for the current platform.
         """

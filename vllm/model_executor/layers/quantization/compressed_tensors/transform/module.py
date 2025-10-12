@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
-from collections.abc import Hashable
-from typing import Callable
+from collections.abc import Callable, Hashable
 
 import torch
 from compressed_tensors.transform import (

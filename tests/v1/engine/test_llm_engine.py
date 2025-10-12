@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import random
 from typing import TYPE_CHECKING
 
@@ -13,6 +11,8 @@ from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 if TYPE_CHECKING:
     from tests.conftest import VllmRunner
+else:
+    VllmRunner = object
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"

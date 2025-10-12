@@ -4,7 +4,7 @@
 import ast
 import json
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any
 
 import regex as re
 
@@ -66,7 +66,7 @@ class Glm4MoeModelToolParser(ToolParser):
         def _is_string_type(
             tool_name: str,
             arg_name: str,
-            tools: Optional[list[ChatCompletionToolsParam]],
+            tools: list[ChatCompletionToolsParam] | None,
         ) -> bool:
             if tools is None:
                 return False
@@ -144,7 +144,7 @@ class Glm4MoeModelToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         self._buffer += delta_text
         cur_text = self._buffer
         start_idx = cur_text.find(self.tool_call_start_token)

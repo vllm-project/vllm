@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -84,9 +83,9 @@ class TopKTopPSampler(nn.Module):
         self,
         logits: torch.Tensor,
         generators: dict[int, torch.Generator],
-        k: Optional[torch.Tensor],
-        p: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        k: torch.Tensor | None,
+        p: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         PyTorch-native implementation of top-k and top-p sampling.
 
@@ -105,9 +104,9 @@ class TopKTopPSampler(nn.Module):
         self,
         logits: torch.Tensor,
         generators: dict[int, torch.Generator],
-        k: Optional[torch.Tensor],
-        p: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        k: torch.Tensor | None,
+        p: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """More optimized implementation for top-k and top-p sampling."""
         # We prefer `random_sample` over `flashinfer_sample` when sorting is
         # not needed. This is because `random_sample` does not require
@@ -132,9 +131,9 @@ class TopKTopPSampler(nn.Module):
         self,
         logits: torch.Tensor,
         generators: dict[int, torch.Generator],
-        k: Optional[torch.Tensor],
-        p: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        k: torch.Tensor | None,
+        p: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         PyTorch-native implementation of top-k and top-p sampling for CPU.
 
@@ -170,8 +169,8 @@ class TopKTopPSampler(nn.Module):
 
 def apply_top_k_top_p(
     logits: torch.Tensor,
-    k: Optional[torch.Tensor],
-    p: Optional[torch.Tensor],
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
 ) -> torch.Tensor:
     """Apply top-k and top-p masks to the logits.
 
@@ -262,8 +261,8 @@ def random_sample(
 
 def flashinfer_sample(
     logits: torch.Tensor,
-    k: Optional[torch.Tensor],
-    p: Optional[torch.Tensor],
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
     generators: dict[int, torch.Generator],
 ) -> torch.Tensor:
     """Sample from the logits using FlashInfer.

@@ -3,7 +3,7 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator, Mapping
-from typing import Any, Optional, Union
+from typing import Any
 
 from fastapi import Request
 
@@ -48,7 +48,7 @@ class ServingScores(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
+        request_logger: RequestLogger | None,
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(
@@ -63,12 +63,12 @@ class ServingScores(OpenAIServing):
         tokenizer: AnyTokenizer,
         texts_1: list[str],
         texts_2: list[str],
-        request: Union[RerankRequest, ScoreRequest],
+        request: RerankRequest | ScoreRequest,
         request_id: str,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        lora_request: Optional[Union[LoRARequest, None]] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> Union[list[PoolingRequestOutput], ErrorResponse]:
+        tokenization_kwargs: dict[str, Any] | None = None,
+        lora_request: LoRARequest | None | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+    ) -> list[PoolingRequestOutput] | ErrorResponse:
         input_texts = texts_1 + texts_2
 
         engine_prompts: list[TokensPrompt] = []
@@ -125,7 +125,7 @@ class ServingScores(OpenAIServing):
         # Non-streaming response
         final_res_batch: list[PoolingRequestOutput] = []
 
-        embeddings: list[Optional[PoolingRequestOutput]] = [None] * len(engine_prompts)
+        embeddings: list[PoolingRequestOutput | None] = [None] * len(engine_prompts)
 
         async for i, res in result_generator:
             embeddings[i] = res
@@ -152,11 +152,11 @@ class ServingScores(OpenAIServing):
 
     def _preprocess_score(
         self,
-        request: Union[RerankRequest, ScoreRequest],
+        request: RerankRequest | ScoreRequest,
         tokenizer: AnyTokenizer,
         tokenization_kwargs: dict[str, Any],
-        data_1: Union[str, ScoreContentPartParam],
-        data_2: Union[str, ScoreContentPartParam],
+        data_1: str | ScoreContentPartParam,
+        data_2: str | ScoreContentPartParam,
     ) -> tuple[str, TokensPrompt]:
         model_config = self.model_config
 
@@ -176,14 +176,14 @@ class ServingScores(OpenAIServing):
     async def _cross_encoding_score(
         self,
         tokenizer: AnyTokenizer,
-        data_1: Union[list[str], list[ScoreContentPartParam]],
-        data_2: Union[list[str], list[ScoreContentPartParam]],
-        request: Union[RerankRequest, ScoreRequest],
+        data_1: list[str] | list[ScoreContentPartParam],
+        data_2: list[str] | list[ScoreContentPartParam],
+        request: RerankRequest | ScoreRequest,
         request_id: str,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-        lora_request: Optional[Union[LoRARequest, None]] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> Union[list[PoolingRequestOutput], ErrorResponse]:
+        tokenization_kwargs: dict[str, Any] | None = None,
+        lora_request: LoRARequest | None | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+    ) -> list[PoolingRequestOutput] | ErrorResponse:
         request_prompts: list[str] = []
         engine_prompts: list[TokensPrompt] = []
 
@@ -259,7 +259,7 @@ class ServingScores(OpenAIServing):
         result_generator = merge_async_iterators(*generators)
 
         # Non-streaming response
-        final_res_batch: list[Optional[PoolingRequestOutput]] = [None] * len(
+        final_res_batch: list[PoolingRequestOutput | None] = [None] * len(
             engine_prompts
         )
 
@@ -270,12 +270,12 @@ class ServingScores(OpenAIServing):
 
     async def _run_scoring(
         self,
-        data_1: Union[list[str], str, ScoreMultiModalParam],
-        data_2: Union[list[str], str, ScoreMultiModalParam],
-        request: Union[ScoreRequest, RerankRequest],
+        data_1: list[str] | str | ScoreMultiModalParam,
+        data_2: list[str] | str | ScoreMultiModalParam,
+        request: ScoreRequest | RerankRequest,
         request_id: str,
-        raw_request: Optional[Request] = None,
-    ) -> Union[list[PoolingRequestOutput], ErrorResponse]:
+        raw_request: Request | None = None,
+    ) -> list[PoolingRequestOutput] | ErrorResponse:
         lora_request = self._maybe_get_adapters(request)
 
         tokenizer = await self.engine_client.get_tokenizer()
@@ -339,8 +339,8 @@ class ServingScores(OpenAIServing):
     async def create_score(
         self,
         request: ScoreRequest,
-        raw_request: Optional[Request] = None,
-    ) -> Union[ScoreResponse, ErrorResponse]:
+        raw_request: Request | None = None,
+    ) -> ScoreResponse | ErrorResponse:
         """
         Score API similar to Sentence Transformers cross encoder
 
@@ -377,8 +377,8 @@ class ServingScores(OpenAIServing):
             return self.create_error_response(str(e))
 
     async def do_rerank(
-        self, request: RerankRequest, raw_request: Optional[Request] = None
-    ) -> Union[RerankResponse, ErrorResponse]:
+        self, request: RerankRequest, raw_request: Request | None = None
+    ) -> RerankResponse | ErrorResponse:
         """
         Rerank API based on JinaAI's rerank API; implements the same
         API interface. Designed for compatibility with off-the-shelf
@@ -468,7 +468,7 @@ class ServingScores(OpenAIServing):
         final_res_batch: list[PoolingRequestOutput],
         request_id: str,
         model_name: str,
-        documents: Union[list[str], ScoreMultiModalParam],
+        documents: list[str] | ScoreMultiModalParam,
         top_n: int,
     ) -> RerankResponse:
         """

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from itertools import product
-from typing import Callable, Optional
 
 import pytest
 import torch
@@ -68,7 +68,7 @@ def test_rotary_embedding(
     seq_len: int,
     num_heads: int,
     head_size: int,
-    rotary_dim: Optional[int],
+    rotary_dim: int | None,
     dtype: torch.dtype,
     seed: int,
     device: str,

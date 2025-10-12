@@ -28,9 +28,8 @@ def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
     sampling_param_tests: list[dict[str, Any]] = [
         dict(),
         # dict(min_tokens=20),
-        # TODO enable these with https://github.com/vllm-project/vllm/pull/26467.
-        # dict(repetition_penalty=0.1),
-        # dict(bad_words=[]),
+        dict(presence_penalty=-1.0),
+        dict(bad_words=["the", " the"]),
     ]
 
     default_params = dict(
@@ -42,9 +41,9 @@ def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
         m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
         # m.setenv("VLLM_KERNEL_OVERRIDE_BATCH_INVARIANT", "1")
 
-        outputs = []
+        outputs: list[tuple[str, list]] = []
         for test_preemption in [False, True]:
-            for executor in ["uni", "mp"]:
+            for executor in ["mp", "uni"]:
                 for async_scheduling in [False, True]:
                     cache_arg: dict[str, Any] = (
                         dict(num_gpu_blocks_override=32)
@@ -78,6 +77,21 @@ def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
                                     ),
                                 )
                             )
+
+                        if not outputs:
+                            # First check that the different parameter configs
+                            # actually result in different output.
+                            for other_test, params in zip(
+                                results[1:], sampling_param_tests[1:]
+                            ):
+                                with pytest.raises(AssertionError):
+                                    check_outputs_equal(
+                                        outputs_0_lst=results[0],
+                                        outputs_1_lst=other_test,
+                                        name_0=f"baseline params={params}",
+                                        name_1=f"other params={params}",
+                                    )
+
                         outputs.append((test_config, results))
 
     baseline_config, baseline_tests = outputs[0]

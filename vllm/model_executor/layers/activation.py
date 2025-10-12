@@ -3,7 +3,6 @@
 """Custom activation functions."""
 
 import math
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -486,7 +485,7 @@ class ScaledActivation(nn.Module):
         act_module: nn.Module,
         intermediate_size: int,
         input_is_parallel: bool = True,
-        params_dtype: Optional[torch.dtype] = None,
+        params_dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.act = act_module

@@ -4,7 +4,7 @@
 import hashlib
 from collections.abc import Mapping
 from dataclasses import field
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal, TypeAlias
 
 from pydantic import ConfigDict, Field, field_validator
 from pydantic.dataclasses import dataclass
@@ -23,31 +23,31 @@ class BaseDummyOptions:
 class VideoDummyOptions(BaseDummyOptions):
     """Options for generating dummy video data during profiling."""
 
-    num_frames: Optional[int] = Field(None, gt=0)
-    width: Optional[int] = Field(None, gt=0)
-    height: Optional[int] = Field(None, gt=0)
+    num_frames: int | None = Field(None, gt=0)
+    width: int | None = Field(None, gt=0)
+    height: int | None = Field(None, gt=0)
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
 class ImageDummyOptions(BaseDummyOptions):
     """Options for generating dummy image data during profiling."""
 
-    width: Optional[int] = Field(None, gt=0)
-    height: Optional[int] = Field(None, gt=0)
+    width: int | None = Field(None, gt=0)
+    height: int | None = Field(None, gt=0)
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
 class AudioDummyOptions(BaseDummyOptions):
     """Options for generating dummy audio data during profiling."""
 
-    length: Optional[int] = Field(None, gt=0)
+    length: int | None = Field(None, gt=0)
 
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
-DummyOptions = Union[
-    BaseDummyOptions, VideoDummyOptions, ImageDummyOptions, AudioDummyOptions
-]
+DummyOptions: TypeAlias = (
+    BaseDummyOptions | VideoDummyOptions | ImageDummyOptions | AudioDummyOptions
+)
 
 
 @config
@@ -75,7 +75,7 @@ class MultiModalConfig:
     """Additional args passed to process media inputs, keyed by modalities.
     For example, to set num_frames for video, set
     `--media-io-kwargs '{"video": {"num_frames": 40} }'`"""
-    mm_processor_kwargs: Optional[dict[str, object]] = None
+    mm_processor_kwargs: dict[str, object] | None = None
     """Arguments to be forwarded to the model's processor for multi-modal data,
     e.g., image processor. Overrides for the multi-modal processor obtained
     from `transformers.AutoProcessor.from_pretrained`.
@@ -123,7 +123,7 @@ class MultiModalConfig:
     This reduces engine startup time but shifts the responsibility to users for
     estimating the peak memory usage of the activation of multimodal encoder and
     embedding cache."""
-    video_pruning_rate: Optional[float] = None
+    video_pruning_rate: float | None = None
     """Sets pruning rate for video pruning via Efficient Video Sampling.
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
@@ -132,7 +132,7 @@ class MultiModalConfig:
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
     def _validate_limit_per_prompt(
-        cls, value: dict[str, Union[int, dict[str, int]]]
+        cls, value: dict[str, int | dict[str, int]]
     ) -> dict[str, DummyOptions]:
         for k, v in value.items():
             # Handle legacy format where only count is specified
@@ -179,7 +179,7 @@ class MultiModalConfig:
             return 999
         return limit_data.count
 
-    def get_dummy_options(self, modality: str) -> Optional[BaseDummyOptions]:
+    def get_dummy_options(self, modality: str) -> BaseDummyOptions | None:
         """
         Get the configurable dummy data options for a modality.
         Returns None if no options are configured for this modality.

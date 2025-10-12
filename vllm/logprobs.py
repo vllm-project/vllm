@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional
 
 
 # We use dataclass for now because it is used for
@@ -18,12 +17,12 @@ class Logprob:
     """
 
     logprob: float
-    rank: Optional[int] = None
-    decoded_token: Optional[str] = None
+    rank: int | None = None
+    decoded_token: str | None = None
 
 
 # {token_id -> logprob} per each sequence group. None if the corresponding
 # sequence group doesn't require prompt logprob.
-PromptLogprobs = list[Optional[dict[int, Logprob]]]
+PromptLogprobs = list[dict[int, Logprob] | None]
 # {token_id -> logprob} for each sequence group.
 SampleLogprobs = list[dict[int, Logprob]]

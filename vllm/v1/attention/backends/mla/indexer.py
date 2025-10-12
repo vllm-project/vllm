@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Union
+from typing import ClassVar
 
 import torch
 
@@ -52,7 +52,7 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         return (0, 1, 2)
 
     @classmethod
-    def get_supported_kernel_block_size(cls) -> list[Union[int, MultipleOf]]:
+    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
         return [64]
 
 
@@ -105,8 +105,8 @@ class DeepseekV32IndexerMetadata:
     num_prefills: int
     num_prefill_tokens: int
 
-    decode: Optional[DeepSeekV32IndexerDecodeMetadata] = None
-    prefill: Optional[DeepseekV32IndexerPrefillMetadata] = None
+    decode: DeepSeekV32IndexerDecodeMetadata | None = None
+    prefill: DeepseekV32IndexerPrefillMetadata | None = None
 
 
 # TODO (zyongye) optimize this, this is now vibe coded

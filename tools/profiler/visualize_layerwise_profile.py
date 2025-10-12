@@ -7,7 +7,7 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -373,7 +373,7 @@ def plot_trace_df(
     traces_df: pd.DataFrame,
     plot_metric: str,
     plot_title: str,
-    output: Optional[Path] = None,
+    output: Path | None = None,
 ):
     def get_phase_description(traces_df: pd.DataFrame, phase: str) -> str:
         phase_df = traces_df.query(f'phase == "{phase}"')

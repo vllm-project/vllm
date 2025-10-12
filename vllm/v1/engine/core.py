@@ -7,12 +7,12 @@ import signal
 import threading
 import time
 from collections import deque
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, TypeVar
 
 import msgspec
 import zmq
@@ -83,7 +83,7 @@ class EngineCore:
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        executor_fail_callback: Optional[Callable] = None,
+        executor_fail_callback: Callable | None = None,
     ):
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
@@ -171,14 +171,14 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
-        self.batch_queue: Optional[
-            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput]]
-        ] = None
+        self.batch_queue: (
+            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput]] | None
+        ) = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
-        self.request_block_hasher: Optional[Callable[[Request], list[BlockHash]]] = None
+        self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
         if (
             self.vllm_config.cache_config.enable_prefix_caching
             or self.scheduler.get_kv_connector() is not None
@@ -337,7 +337,7 @@ class EngineCore:
 
     def step_with_batch_queue(
         self,
-    ) -> tuple[Optional[dict[int, EngineCoreOutputs]], bool]:
+    ) -> tuple[dict[int, EngineCoreOutputs] | None, bool]:
         """Schedule and execute batches with the batch queue.
         Note that if nothing to output in this step, None is returned.
 
@@ -424,7 +424,7 @@ class EngineCore:
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
 
-    def wake_up(self, tags: Optional[list[str]] = None):
+    def wake_up(self, tags: list[str] | None = None):
         self.model_executor.wake_up(tags)
 
     def is_sleeping(self) -> bool:
@@ -448,8 +448,8 @@ class EngineCore:
     def save_sharded_state(
         self,
         path: str,
-        pattern: Optional[str] = None,
-        max_size: Optional[int] = None,
+        pattern: str | None = None,
+        max_size: int | None = None,
     ) -> None:
         self.model_executor.save_sharded_state(
             path=path, pattern=pattern, max_size=max_size
@@ -457,10 +457,10 @@ class EngineCore:
 
     def collective_rpc(
         self,
-        method: Union[str, Callable[..., _R]],
-        timeout: Optional[float] = None,
+        method: str | Callable[..., _R],
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict[str, Any]] = None,
+        kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
@@ -509,11 +509,11 @@ class EngineCoreProc(EngineCore):
         handshake_address: str,
         executor_class: type[Executor],
         log_stats: bool,
-        client_handshake_address: Optional[str] = None,
+        client_handshake_address: str | None = None,
         engine_index: int = 0,
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
-        self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs], bytes]]()
+        self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
         )
@@ -606,7 +606,7 @@ class EngineCoreProc(EngineCore):
         identity: bytes,
         local_client: bool,
         vllm_config: VllmConfig,
-        client_handshake_address: Optional[str],
+        client_handshake_address: str | None,
     ) -> Generator[EngineZmqAddresses, None, None]:
         """
         Perform startup handshakes.
@@ -667,7 +667,7 @@ class EngineCoreProc(EngineCore):
         local_client: bool,
         headless: bool,
         vllm_config: VllmConfig,
-        parallel_config_to_update: Optional[ParallelConfig] = None,
+        parallel_config_to_update: ParallelConfig | None = None,
     ) -> Generator[EngineZmqAddresses, None, None]:
         with make_zmq_socket(
             ctx,
@@ -710,7 +710,7 @@ class EngineCoreProc(EngineCore):
         handshake_socket: zmq.Socket,
         local_client: bool,
         headless: bool,
-        parallel_config: Optional[ParallelConfig] = None,
+        parallel_config: ParallelConfig | None = None,
     ) -> EngineZmqAddresses:
         # Send registration message.
         handshake_socket.send(
@@ -765,7 +765,7 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        engine_core: Optional[EngineCoreProc] = None
+        engine_core: EngineCoreProc | None = None
         try:
             parallel_config: ParallelConfig = kwargs["vllm_config"].parallel_config
             if parallel_config.data_parallel_size > 1 or dp_rank > 0:
@@ -911,7 +911,7 @@ class EngineCoreProc(EngineCore):
     def process_input_sockets(
         self,
         input_addresses: list[str],
-        coord_input_address: Optional[str],
+        coord_input_address: str | None,
         identity: bytes,
         ready_event: threading.Event,
     ):
@@ -980,7 +980,7 @@ class EngineCoreProc(EngineCore):
     def process_output_sockets(
         self,
         output_paths: list[str],
-        coord_output_path: Optional[str],
+        coord_output_path: str | None,
         engine_index: int,
     ):
         """Output socket IO thread."""
@@ -1059,7 +1059,7 @@ class DPEngineCoreProc(EngineCoreProc):
         handshake_address: str,
         executor_class: type[Executor],
         log_stats: bool,
-        client_handshake_address: Optional[str] = None,
+        client_handshake_address: str | None = None,
     ):
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
@@ -1332,7 +1332,7 @@ class DPEngineCoreActor(DPEngineCoreProc):
         identity: bytes,
         local_client: bool,
         vllm_config: VllmConfig,
-        client_handshake_address: Optional[str],
+        client_handshake_address: str | None,
     ):
         """
         For Ray, we don't need to actually perform handshake.

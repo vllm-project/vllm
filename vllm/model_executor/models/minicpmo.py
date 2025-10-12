@@ -24,8 +24,8 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Callable, Literal, Optional, Union
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 from torch import nn
@@ -89,7 +89,7 @@ class MiniCPMOAudioFeatureInputs(TensorSchema):
     type: Literal["audio_features"] = "audio_features"
 
     audio_features: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("bns", "c", "l", dynamic_dims={"l"}),
     ]
     """
@@ -99,7 +99,7 @@ class MiniCPMOAudioFeatureInputs(TensorSchema):
     """
 
     audio_feature_lens: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "s"),
     ]
     """
@@ -121,12 +121,14 @@ class MiniCPMOAudioEmbeddingInputs(TensorSchema):
     type: Literal["audio_embeds"] = "audio_embeds"
 
     audio_embeds: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "s", "h", dynamic_dims={"s"}),
     ]
 
 
-MiniCPMOAudioInputs = Union[MiniCPMOAudioFeatureInputs, MiniCPMOAudioEmbeddingInputs]
+MiniCPMOAudioInputs: TypeAlias = (
+    MiniCPMOAudioFeatureInputs | MiniCPMOAudioEmbeddingInputs
+)
 
 
 def _minicpmo_field_config(hf_inputs: Mapping[str, torch.Tensor]):
@@ -162,8 +164,8 @@ class MiniCPMOAudioEmbeddingItems(DictEmbeddingItems):
 class MiniCPMOMultiModalDataParser(MiniCPMVMultiModalDataParser):
     def _parse_audio_data(
         self,
-        data: Union[dict[str, torch.Tensor], ModalityData[AudioItem]],
-    ) -> Optional[ModalityDataItems[Any, Any]]:
+        data: dict[str, torch.Tensor] | ModalityData[AudioItem],
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return MiniCPMOAudioEmbeddingItems(
                 data,
@@ -176,7 +178,7 @@ class MiniCPMOMultiModalDataParser(MiniCPMVMultiModalDataParser):
 class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     audio_pattern = "(<audio>./</audio>)"
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {**super().get_supported_mm_limits(), "audio": None}
 
     def get_audio_placeholder(
@@ -253,7 +255,7 @@ class MiniCPMODummyInputsBuilder(MiniCPMVDummyInputsBuilder[MiniCPMOProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         audio_len = (
@@ -479,7 +481,7 @@ class MiniCPMWhisperEncoder(WhisperEncoder):
     def forward(
         self,
         input_features: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> BaseModelOutputWithPast:
         # Ignore copy
         input_features = input_features.to(
@@ -549,7 +551,7 @@ class MiniCPMO(MiniCPMV2_6):
     }
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "(<image>./</image>)"
         if modality.startswith("video"):
@@ -722,7 +724,7 @@ class MiniCPMO(MiniCPMV2_6):
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
-    ) -> Optional[MiniCPMOAudioInputs]:
+    ) -> MiniCPMOAudioInputs | None:
         audio_features = kwargs.pop("audio_features", None)
         audio_embeds = kwargs.pop("audio_embeds", None)
 
@@ -785,7 +787,7 @@ class MiniCPMO(MiniCPMV2_6):
     def _process_audio_input(
         self,
         audio_input: MiniCPMOAudioInputs,
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+    ) -> torch.Tensor | list[torch.Tensor]:
         if audio_input["type"] == "audio_embeds":
             return audio_input["audio_embeds"]
 

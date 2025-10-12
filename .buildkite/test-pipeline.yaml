@@ -403,6 +403,7 @@ steps:
     - pytest -v -s compile/test_fusion_all_reduce.py
     - pytest -v -s compile/test_decorator.py
     - pytest -v -s compile/test_noop_elimination.py
+    - pytest -v -s compile/test_aot_compile.py
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30

@@ -5,14 +5,13 @@ import contextlib
 import multiprocessing
 import time
 import weakref
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Generic,
     Optional,
     TypeVar,
@@ -66,7 +65,7 @@ class ConstantList(Generic[T], Sequence):
     def clear(self):
         raise TypeError("Cannot clear a constant list")
 
-    def index(self, item: T, start: int = 0, stop: Optional[int] = None) -> int:
+    def index(self, item: T, start: int = 0, stop: int | None = None) -> int:
         return self._x.index(item, start, stop if stop is not None else len(self._x))
 
     @overload
@@ -75,7 +74,7 @@ class ConstantList(Generic[T], Sequence):
     @overload
     def __getitem__(self, s: slice, /) -> list[T]: ...
 
-    def __getitem__(self, item: Union[int, slice]) -> Union[T, list[T]]:
+    def __getitem__(self, item: int | slice) -> T | list[T]:
         return self._x[item]
 
     @overload
@@ -84,7 +83,7 @@ class ConstantList(Generic[T], Sequence):
     @overload
     def __setitem__(self, s: slice, value: T, /): ...
 
-    def __setitem__(self, item: Union[int, slice], value: Union[T, list[T]]):
+    def __setitem__(self, item: int | slice, value: T | list[T]):
         raise TypeError("Cannot set item in a constant list")
 
     def __delitem__(self, item):
@@ -108,7 +107,7 @@ class CpuGpuBuffer:
 
     def __init__(
         self,
-        *size: Union[int, torch.SymInt],
+        *size: int | torch.SymInt,
         dtype: torch.dtype,
         device: torch.device,
         pin_memory: bool,
@@ -128,12 +127,12 @@ class CpuGpuBuffer:
                 )
             self.np = self.cpu.numpy()
 
-    def copy_to_gpu(self, n: Optional[int] = None) -> torch.Tensor:
+    def copy_to_gpu(self, n: int | None = None) -> torch.Tensor:
         if n is None:
             return self.gpu.copy_(self.cpu, non_blocking=True)
         return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
 
-    def copy_to_cpu(self, n: Optional[int] = None) -> torch.Tensor:
+    def copy_to_cpu(self, n: int | None = None) -> torch.Tensor:
         """NOTE: Because this method is non-blocking, explicit synchronization
         is needed to ensure the data is copied to CPU."""
         if n is None:
@@ -173,7 +172,7 @@ class APIServerProcessManager:
         num_servers: int,
         input_addresses: list[str],
         output_addresses: list[str],
-        stats_update_address: Optional[str] = None,
+        stats_update_address: str | None = None,
     ):
         """Initialize and start API server worker processes.
 
@@ -227,9 +226,8 @@ class APIServerProcessManager:
 
 def wait_for_completion_or_failure(
     api_server_manager: APIServerProcessManager,
-    engine_manager: Optional[
-        Union["CoreEngineProcManager", "CoreEngineActorManager"]
-    ] = None,
+    engine_manager: Union["CoreEngineProcManager", "CoreEngineActorManager"]
+    | None = None,
     coordinator: Optional["DPCoordinator"] = None,
 ) -> None:
     """Wait for all processes to complete or detect if any fail.
