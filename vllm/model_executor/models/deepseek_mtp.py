@@ -19,9 +19,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import resolve_obj_by_qualname
 
-from .deepseek_v2 import DeepseekV2DecoderLayer, get_spec_layer_idx_from_weight_name
+from .deepseek_v2 import (
+    DeepseekV2DecoderLayer,
+    enable_dsa_topk_indices_buffer,
+    get_spec_layer_idx_from_weight_name,
+)
 from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
@@ -61,20 +64,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.device = current_platform.device_type
 
         self.is_v32 = hasattr(config, "index_topk")
-        self.enable_dsa_topk_indices_buffer = resolve_obj_by_qualname(
-            current_platform.get_attn_backend_cls(
-                selected_backend=None,
-                head_size=None,
-                dtype=None,
-                kv_cache_dtype=None,
-                block_size=None,
-                use_v1=True,
-                use_mla=True,
-                has_sink=False,
-                use_sparse=True,
-            )
-        ).enable_dsa_topk_indices_buffer()
-        if self.is_v32 and self.enable_dsa_topk_indices_buffer:
+        if self.is_v32 and enable_dsa_topk_indices_buffer():
             topk_tokens = config.index_topk
             topk_indices_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
