@@ -503,6 +503,8 @@ class FusedMoE(CustomOp):
 
         self.quant_config = quant_config
 
+        logger.debug("FusedMoEConfig = %s", self.moe_config)
+
         def _get_quant_method() -> FusedMoEMethodBase:
             """
             Helper method to ensure self.quant_method is never None and

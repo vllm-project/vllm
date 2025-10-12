@@ -36,6 +36,9 @@ def _set_vllm_config(
 
     temp_file = tempfile.mkstemp()[1]
 
+    vllm_config.parallel_config.data_parallel_rank = rank
+    print(f"INIT CONF {rank}, {local_rank}, {vllm_config.parallel_config}")
+
     with set_current_vllm_config(vllm_config):
         init_distributed_environment(
             world_size=world_size,
