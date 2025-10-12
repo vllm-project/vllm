@@ -24,7 +24,9 @@ vllm serve $model_path \
   --no-enable-prefix-caching \
   --disable-log-requests \
   --enable-expert-parallel \
-  --enforce-eager \
   --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
   --gpu_memory_utilization 0.9 \
   --block-size 1
+
+  #--enforce-eager \
+
