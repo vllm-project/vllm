@@ -192,7 +192,6 @@ class Ernie4_5_MoeMoE(nn.Module):
             top_k=config.moe_k,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=True,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -211,14 +210,6 @@ class Ernie4_5_MoeMoE(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-
-        if self.has_shared_experts:
-            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
-
-        if self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states
-            )
 
         return final_hidden_states.view(orig_shape)
 

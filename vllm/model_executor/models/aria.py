@@ -275,7 +275,6 @@ class AriaTextMoELayer(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
-            reduce_results=True,
             prefix=f"{prefix}.experts",
         )
 
@@ -293,12 +292,8 @@ class AriaTextMoELayer(nn.Module):
 
         router_output = torch.nn.functional.linear(hidden_states, self.router_weight)
 
-        sparse_expert_output = self.experts(hidden_states, router_output)
-
-        if self.shared_experts is not None:
-            return sparse_expert_output[0] + sparse_expert_output[1]
-        else:
-            return sparse_expert_output
+        # NOTE: hidden_states may be modified inplace by `SharedFusedMoE`
+        return self.experts(hidden_states, router_output)
 
 
 class AriaTextDecoderLayer(LlamaDecoderLayer):

@@ -1004,7 +1004,6 @@ class FusedMoE(CustomOp):
         hidden_size: Input hidden state size of the transformer
         intermediate_size: Intermediate size of the experts
         params_dtype: Data type for the parameters.
-        reduce_results: Whether to all all_reduce on the output of the layer
         renormalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
@@ -1017,7 +1016,6 @@ class FusedMoE(CustomOp):
         hidden_size: int,
         intermediate_size: int,
         params_dtype: Optional[torch.dtype] = None,
-        reduce_results: bool = False,
         renormalize: bool = True,
         use_grouped_topk: bool = False,
         num_expert_group: Optional[int] = None,
@@ -1071,6 +1069,8 @@ class FusedMoE(CustomOp):
             dp_size_=dp_size_,
             vllm_parallel_config=vllm_config.parallel_config,
         )
+
+        # print(f"AFTER TP_SIZE, DP_SIZE = {self.tp_size, self.dp_size}")
 
         self.global_num_experts = num_experts + num_redundant_experts
         self.zero_expert_num = zero_expert_num
@@ -1157,7 +1157,6 @@ class FusedMoE(CustomOp):
         assert intermediate_size % self.tp_size == 0
         self.hidden_size = hidden_size
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
-        self.reduce_results = reduce_results
         self.renormalize = renormalize
         self.use_grouped_topk = use_grouped_topk
         if self.use_grouped_topk:
@@ -1263,6 +1262,10 @@ class FusedMoE(CustomOp):
 
     @property
     def shared_experts(self) -> Optional[torch.nn.Module]:
+        return None
+
+    @property
+    def shared_fused_combine(self) -> Optional[Callable]:
         return None
 
     @property
@@ -1819,6 +1822,7 @@ class FusedMoE(CustomOp):
             if name not in NON_EXPERT_WEIGHTS
             and weight.shape != torch.Size([])
             and not name.startswith("_shared_experts.")
+            and not name.startswith("_shared_fused_combine.")
         ]
 
     def set_eplb_state(
@@ -2006,7 +2010,7 @@ class FusedMoE(CustomOp):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor:
         og_hidden_states = hidden_states.shape[-1]
         if self.hidden_size != og_hidden_states:
             hidden_states = F.pad(
@@ -2016,32 +2020,16 @@ class FusedMoE(CustomOp):
                 value=0.0,
             )
 
-        if self.shared_experts is None:
-            if current_platform.is_tpu():
-                # TODO: Once the OOM issue for the TPU backend is resolved, we
-                # will switch to using the moe_forward custom op.
-                fused_output = self.forward_impl(hidden_states, router_logits)
-                assert not isinstance(fused_output, tuple)
-            else:
-                fused_output = torch.ops.vllm.moe_forward(
-                    hidden_states, router_logits, self.layer_name
-                )
-            return fused_output[..., :og_hidden_states]
+        if current_platform.is_tpu():
+            # TODO: Once the OOM issue for the TPU backend is resolved, we
+            # will switch to using the moe_forward custom op.
+            fused_output = self.forward_impl(hidden_states, router_logits)
         else:
-            if current_platform.is_tpu():
-                # TODO: Once the OOM issue for the TPU backend is resolved, we
-                # will switch to using the moe_forward custom op.
-                shared_output, fused_output = self.forward_impl(
-                    hidden_states, router_logits
-                )
-            else:
-                shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
-                    hidden_states, router_logits, self.layer_name
-                )
-            return (
-                shared_output[..., :og_hidden_states],
-                fused_output[..., :og_hidden_states],
+            fused_output = torch.ops.vllm.moe_forward(
+                hidden_states, router_logits, self.layer_name
             )
+
+        return fused_output[..., :og_hidden_states]
 
     def forward_cuda(
         self,
@@ -2050,11 +2038,25 @@ class FusedMoE(CustomOp):
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         return self.forward_native(hidden_states, router_logits)
 
+    def _combine_and_reduce_output(
+        self,
+        states: torch.Tensor,
+        do_combine: bool = True,
+        cond: bool = True,
+    ) -> torch.Tensor:
+        if do_combine:
+            states = get_ep_group().combine(states)
+
+        if cond and (self.tp_size > 1 or self.ep_size > 1):
+            states = self.maybe_all_reduce_tensor_model_parallel(states)
+
+        return states
+
     def forward_impl_chunked(
         self,
         full_hidden_states: torch.Tensor,
         full_router_logits: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor:
         assert self.batched_hidden_states is not None
         assert self.batched_router_logits is not None
         assert self.batched_hidden_states.dtype == full_hidden_states.dtype
@@ -2068,6 +2070,8 @@ class FusedMoE(CustomOp):
         full_fused_final_hidden_states = torch.empty_like(full_hidden_states)
         if self.shared_experts is not None:
             full_shared_final_hidden_states = torch.empty_like(full_hidden_states)
+        else:
+            full_shared_final_hidden_states = None
 
         def process_chunk(chunk_start, chunk_end, skip_result_store=False):
             chunk_size = chunk_end - chunk_start
@@ -2087,16 +2091,10 @@ class FusedMoE(CustomOp):
                 batched_hidden_states = self.batched_hidden_states
                 batched_router_logits = self.batched_router_logits
 
-            assert (
-                batched_hidden_states.size(0)  # type: ignore
-                >= chunk_size
-            )
-            assert (
-                batched_router_logits.size(0)  # type: ignore
-                >= chunk_size
-            )
-            staged_hidden_states = batched_hidden_states[:chunk_size, :]  # type: ignore
-            staged_router_logits = batched_router_logits[:chunk_size, :]  # type: ignore
+            assert batched_hidden_states.size(0) >= chunk_size
+            assert batched_router_logits.size(0) >= chunk_size
+            staged_hidden_states = batched_hidden_states[:chunk_size, :]
+            staged_router_logits = batched_router_logits[:chunk_size, :]
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
 
@@ -2141,6 +2139,8 @@ class FusedMoE(CustomOp):
                     final_hidden_states,
                 )
 
+            assert self.shared_experts is None or isinstance(final_hidden_states, tuple)
+
             if self.zero_expert_num is not None and self.zero_expert_num > 0:
                 assert isinstance(final_hidden_states, tuple)
                 assert self.shared_experts is None
@@ -2154,6 +2154,7 @@ class FusedMoE(CustomOp):
                         final_hidden_states, non_blocking=True
                     )
                 else:
+                    assert full_shared_final_hidden_states is not None
                     full_shared_final_hidden_states[chunk_start:chunk_end, :].copy_(
                         final_hidden_states[0], non_blocking=True
                     )
@@ -2191,19 +2192,39 @@ class FusedMoE(CustomOp):
                     chunk_start, chunk_end, skip_result_store=chunk_start_ >= num_tokens
                 )
 
-        if self.shared_experts is None:
-            return full_fused_final_hidden_states
-        else:
-            return (full_shared_final_hidden_states, full_fused_final_hidden_states)
+        if self.shared_experts is not None:
+            assert full_shared_final_hidden_states is not None
+
+            # Probably wrong
+            # if (False and
+            #     self.tp_size > 1 and
+            #     self.must_reduce_shared_expert_outputs()):
+            #     full_shared_final_hidden_states = (
+            #         tensor_model_parallel_all_reduce(
+            #             full_shared_final_hidden_states))
+
+            assert self.shared_fused_combine is not None
+            full_fused_final_hidden_states = self.shared_fused_combine(
+                full_shared_final_hidden_states, full_fused_final_hidden_states
+            )
+
+        full_fused_final_hidden_states = self._combine_and_reduce_output(
+            full_fused_final_hidden_states, do_combine=False
+        )
+
+        return full_fused_final_hidden_states
 
     def forward_impl(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor:
         assert self.quant_method is not None
 
         self.ensure_moe_quant_config()
+
+        # print(f"GOT HERE 0 {self.use_chunking} TP={self.tp_size}"
+        #       f"DP={self.dp_size} EP={self.ep_size} ")
 
         if self.use_dp_chunking:
             return self.forward_impl_chunked(hidden_states, router_logits)
@@ -2212,12 +2233,15 @@ class FusedMoE(CustomOp):
             self.dp_size > 1 and not self.quant_method.using_modular_kernel
         )
 
+        # print(f"GOT HERE 1 {do_naive_dispatch_combine}")
+
         # If there are shared experts but we are not using a modular kernel, the
         # shared experts must be called here
         if (
             not isinstance(self.quant_method.fused_experts, FusedMoEModularKernel)
             and self.shared_experts is not None
         ):
+            # TODO: watch out for inplace
             shared_output = self.shared_experts(hidden_states)
         else:
             shared_output = None
@@ -2259,42 +2283,57 @@ class FusedMoE(CustomOp):
                 logical_replica_count=self.logical_replica_count,
             )
 
-            if shared_output is not None:
-                assert not isinstance(final_hidden_states, tuple)
-                assert self.shared_experts is not None
-                final_hidden_states = (
-                    shared_output,
-                    final_hidden_states,
+        if self.zero_expert_num is not None and self.zero_expert_num > 0:
+            assert isinstance(final_hidden_states, tuple)
+            final_hidden_states, zero_expert_result = final_hidden_states
+        elif shared_output is not None:
+            #
+            # shared experts were called by FusedMoE layer forward
+            #
+            assert not isinstance(final_hidden_states, tuple)
+            assert self.shared_experts is not None
+            final_hidden_states = (shared_output, final_hidden_states)
+
+        if self.shared_experts is not None:
+            assert self.shared_fused_combine is not None
+
+            # print(f"GOT HERE 2 {self.reduce_results} "
+            #       f"{self.tp_size > 1 or self.ep_size > 1}")
+
+            must_reduce = self.must_reduce_shared_expert_outputs()
+
+            final_hidden_states = (
+                self._combine_and_reduce_output(
+                    final_hidden_states[0],
+                    do_combine=False,
+                    cond=must_reduce,
+                ),
+                self._combine_and_reduce_output(
+                    final_hidden_states[1],
+                    do_combine=do_naive_dispatch_combine,
+                    cond=not must_reduce,
+                ),
+            )
+
+            return self.shared_fused_combine(
+                final_hidden_states[0], final_hidden_states[1]
+            )
+        elif self.zero_expert_num is not None and self.zero_expert_num > 0:
+            assert isinstance(final_hidden_states, torch.Tensor)
+            assert zero_expert_result is not None
+            return (
+                self._combine_and_reduce_output(
+                    final_hidden_states, do_combine=do_naive_dispatch_combine
                 )
-            elif self.zero_expert_num is not None and self.zero_expert_num > 0:
-                assert isinstance(final_hidden_states, tuple)
-                final_hidden_states, zero_expert_result = final_hidden_states
-
-            def reduce_output(
-                states: torch.Tensor, do_combine: bool = True
-            ) -> torch.Tensor:
-                if do_naive_dispatch_combine and do_combine:
-                    states = get_ep_group().combine(states, self.is_sequence_parallel)
-
-                if (
-                    not self.is_sequence_parallel
-                    and self.reduce_results
-                    and (self.tp_size > 1 or self.ep_size > 1)
-                ):
-                    states = self.maybe_all_reduce_tensor_model_parallel(states)
-
-                return states
-
-            if self.shared_experts is not None:
-                return (
-                    reduce_output(final_hidden_states[0], do_combine=False),
-                    reduce_output(final_hidden_states[1]),
-                )
-            elif self.zero_expert_num is not None and self.zero_expert_num > 0:
-                assert isinstance(final_hidden_states, torch.Tensor)
-                return reduce_output(final_hidden_states) + zero_expert_result
-            else:
-                return reduce_output(final_hidden_states)
+                + zero_expert_result
+            )
+        else:
+            # print("GOT HERE A")
+            assert not isinstance(final_hidden_states, tuple)
+            return self._combine_and_reduce_output(
+                final_hidden_states,
+                do_combine=do_naive_dispatch_combine,
+            )
 
     @classmethod
     def make_expert_params_mapping(
@@ -2342,8 +2381,8 @@ class FusedMoE(CustomOp):
             f"top_k={self.top_k}, "
             f"intermediate_size_per_partition={self.intermediate_size_per_partition}, "  # noqa: E501
             f"tp_size={self.tp_size},\n"
+            f"dp_size={self.dp_size},\n"
             f"ep_size={self.ep_size}, "
-            f"reduce_results={self.reduce_results}, "
             f"renormalize={self.renormalize}, "
             f"use_grouped_topk={self.use_grouped_topk}"
         )
@@ -2363,7 +2402,6 @@ def moe_forward(
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    assert self.shared_experts is None
     return self.forward_impl(hidden_states, router_logits)
 
 
@@ -2380,36 +2418,6 @@ direct_register_custom_op(
     op_func=moe_forward,
     mutates_args=["hidden_states"],
     fake_impl=moe_forward_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
-)
-
-
-def moe_forward_shared(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    layer_name: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
-    assert self.shared_experts is not None
-    return self.forward_impl(hidden_states, router_logits)
-
-
-def moe_forward_shared_fake(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    layer_name: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    shared_out = torch.empty_like(hidden_states)
-    fused_out = torch.empty_like(hidden_states)
-    return shared_out, fused_out
-
-
-direct_register_custom_op(
-    op_name="moe_forward_shared",
-    op_func=moe_forward_shared,
-    mutates_args=["hidden_states"],
-    fake_impl=moe_forward_shared_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
