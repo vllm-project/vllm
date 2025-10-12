@@ -123,6 +123,7 @@ mkdocs.yaml @hmellor
 /requirements/kv_connectors.txt @NickLucche
 
 # Pooling models
+/examples/*/pooling/ @noooop
 /tests/models/*/pooling* @noooop
 /tests/entrypoints/pooling @noooop
 /vllm/config/pooler.py @noooop
