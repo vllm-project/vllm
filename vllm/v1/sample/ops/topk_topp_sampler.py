@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -10,9 +9,9 @@ import triton.language as tl
 from packaging import version
 
 from vllm import envs
-from vllm.config import LogprobsMode
+from vllm.config.model import LogprobsMode
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 
 logger = init_logger(__name__)
 
@@ -85,7 +84,10 @@ class TopKTopPSampler(nn.Module):
                         "FlashInfer.")
                     self.forward = self.forward_native
         elif current_platform.is_cpu():
-            self.forward = self.forward_cpu
+            if current_platform.get_cpu_architecture() == CpuArchEnum.RISCV:
+                self.forward = self.forward_native
+            else:
+                self.forward = self.forward_cpu
         else:
             self.forward = self.forward_native
 
@@ -96,9 +98,9 @@ class TopKTopPSampler(nn.Module):
         self,
         logits: torch.Tensor,
         generators: dict[int, torch.Generator],
-        k: Optional[torch.Tensor],
-        p: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        k: torch.Tensor | None,
+        p: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         PyTorch-native implementation of top-k and top-p sampling.
 
@@ -134,9 +136,9 @@ class TopKTopPSampler(nn.Module):
         self,
         logits: torch.Tensor,
         generators: dict[int, torch.Generator],
-        k: Optional[torch.Tensor],
-        p: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        k: torch.Tensor | None,
+        p: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """More optimized implementation for top-k and top-p sampling."""
         # We prefer `random_sample` over `flashinfer_sample` when sorting is
         # not needed. This is because `random_sample` does not require
@@ -161,9 +163,9 @@ class TopKTopPSampler(nn.Module):
         self,
         logits: torch.Tensor,
         generators: dict[int, torch.Generator],
-        k: Optional[torch.Tensor],
-        p: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        k: torch.Tensor | None,
+        p: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         PyTorch-native implementation of top-k and top-p sampling for CPU.
 
@@ -199,8 +201,8 @@ class TopKTopPSampler(nn.Module):
 
 def apply_top_k_top_p(
     logits: torch.Tensor,
-    k: Optional[torch.Tensor],
-    p: Optional[torch.Tensor],
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
 ) -> torch.Tensor:
     """Apply top-k and top-p masks to the logits.
 
@@ -931,8 +933,8 @@ def random_sample(
 
 def flashinfer_sample(
     logits: torch.Tensor,
-    k: Optional[torch.Tensor],
-    p: Optional[torch.Tensor],
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
     generators: dict[int, torch.Generator],
 ) -> torch.Tensor:
     """Sample from the logits using FlashInfer.

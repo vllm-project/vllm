@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from concurrent.futures import Future
-from typing import Optional
 
 import pytest
 
@@ -14,9 +13,9 @@ pytestmark = pytest.mark.cpu_test
 class DummyModelRunnerOutput(ModelRunnerOutput):
     def __init__(
         self,
-        finished_sending: Optional[set[str]] = None,
-        finished_recving: Optional[set[str]] = None,
-        invalid_block_ids: Optional[set[int]] = None,
+        finished_sending: set[str] | None = None,
+        finished_recving: set[str] | None = None,
+        invalid_block_ids: set[int] | None = None,
     ):
         self.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending,

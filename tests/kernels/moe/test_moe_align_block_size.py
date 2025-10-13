@@ -5,8 +5,6 @@
 Run `pytest tests/kernels/moe/test_moe_align_block_size.py`.
 """
 
-from typing import Optional
-
 import pytest
 import torch
 
@@ -94,7 +92,7 @@ def torch_moe_align_block_size(
     topk_ids: torch.Tensor,
     block_size: int,
     num_experts: int,
-    expert_map: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
     pad_sorted_ids: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
