@@ -2065,6 +2065,26 @@ class ResponseUsage(OpenAIBaseModel):
     total_tokens: int
 
 
+def serialize_message(msg):
+    """
+    Serializes a single message
+    """
+    if isinstance(msg, dict):
+        return msg
+    elif hasattr(msg, "__dict__"):
+        return msg.to_dict()
+    else:
+        # fallback to pyandic dump
+        return msg.model_dump_json()
+
+
+def serialize_messages(msgs):
+    """
+    Serializes multiple messages
+    """
+    return [serialize_message(msg) for msg in msgs] if msgs else None
+
+
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
@@ -2107,35 +2127,13 @@ class ResponsesResponse(OpenAIBaseModel):
     # https://github.com/openai/harmony/issues/78
     @field_serializer("output_messages", when_used="json")
     def serialize_output_messages(self, msgs, _info):
-        if msgs:
-            serialized = []
-            for m in msgs:
-                if isinstance(m, dict):
-                    serialized.append(m)
-                elif hasattr(m, "__dict__"):
-                    serialized.append(m.to_dict())
-                else:
-                    # fallback to pyandic dump
-                    serialized.append(m.model_dump_json())
-            return serialized
-        return None
+        return serialize_messages(msgs)
 
     # NOTE: openAI harmony doesn't serialize TextContent properly, this fixes it
     # https://github.com/openai/harmony/issues/78
     @field_serializer("input_messages", when_used="json")
     def serialize_input_messages(self, msgs, _info):
-        if msgs:
-            serialized = []
-            for m in msgs:
-                if isinstance(m, dict):
-                    serialized.append(m)
-                elif hasattr(m, "__dict__"):
-                    serialized.append(m.to_dict())
-                else:
-                    # fallback to pyandic dump
-                    serialized.append(m.model_dump_json())
-            return serialized
-        return None
+        return serialize_messages(msgs)
 
     @classmethod
     def from_request(
