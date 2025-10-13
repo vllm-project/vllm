@@ -150,8 +150,8 @@ class FlashAttentionMetadata:
     suffix_kv_lens: torch.Tensor | None
 
     # For GQA DCP
-    max_dcp_context_kv_len: Optional[int] = None
-    dcp_context_kv_lens: Optional[torch.Tensor] = None
+    max_dcp_context_kv_len: int | None = None
+    dcp_context_kv_lens: torch.Tensor | None = None
 
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
@@ -682,9 +682,9 @@ class FlashAttentionImpl(AttentionImpl):
         value_cache: torch.Tensor,
         output: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
-        q_descale: Optional[torch.Tensor] = None,
-        k_descale: Optional[torch.Tensor] = None,
-        v_descale: Optional[torch.Tensor] = None,
+        q_descale: torch.Tensor | None = None,
+        k_descale: torch.Tensor | None = None,
+        v_descale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         cu_seqlens_q = attn_metadata.query_start_loc
         max_seqlen_q = attn_metadata.max_query_len
