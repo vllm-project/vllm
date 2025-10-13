@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
+
+
 class EngineGenerateError(Exception):
     """Raised when a AsyncLLM.generate() fails. Recoverable."""
 
@@ -16,3 +19,8 @@ class EngineDeadError(Exception):
         # Make stack trace clearer when using with LLMEngine by
         # silencing irrelevant ZMQError.
         self.__suppress_context__ = suppress_context
+
+
+@dataclass
+class FaultInfo:
+    pass
