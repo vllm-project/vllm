@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import ClassVar, Optional, Union
+from typing import ClassVar
 
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
@@ -49,7 +49,7 @@ class FlashInferMLABackend(MLACommonBackend):
         return [torch.float16, torch.bfloat16]
 
     @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+    def get_supported_kv_cache_dtypes(cls) -> list[str | None]:
         return ["auto", "fp16", "bf16", "fp8", "fp8_e4m3"]
 
     @classmethod
@@ -57,11 +57,11 @@ class FlashInferMLABackend(MLACommonBackend):
         return [32, 64]
 
     @classmethod
-    def get_min_compute_capability(cls) -> Optional[DeviceCapability]:
+    def get_min_compute_capability(cls) -> DeviceCapability | None:
         return DeviceCapability(10, 0)
 
     @classmethod
-    def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
+    def get_max_compute_capability(cls) -> DeviceCapability | None:
         return DeviceCapability(10, 3)
 
 
@@ -79,12 +79,12 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
         **mla_args,
     ) -> None:
@@ -118,16 +118,16 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             )
 
         self._workspace_buffer = g_fi_workspace
-        self.bmm1_scale: Optional[float] = None
-        self.bmm2_scale: Optional[float] = None
+        self.bmm1_scale: float | None = None
+        self.bmm2_scale: float | None = None
 
     def _forward_decode(
         self,
-        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         layer: AttentionLayer,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 

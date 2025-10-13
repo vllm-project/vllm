@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Generic, Optional, Protocol, TypeVar, Union, cast
+from typing import Generic, Protocol, TypeVar, cast
 
 import torch
 
@@ -67,7 +67,7 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @classmethod
-    def get_supported_kernel_block_size(cls) -> list[Union[int, MultipleOf]]:
+    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
         return cls.get_impl_cls().get_supported_kernel_block_size()
 
     @classmethod
@@ -117,11 +117,11 @@ class AttentionBackend(ABC):
         return (not supported_dtypes) or dtype in supported_dtypes
 
     @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+    def get_supported_kv_cache_dtypes(cls) -> list[str | None]:
         return ["auto"]
 
     @classmethod
-    def supports_kv_cache_dtype(cls, kv_cache_dtype: Optional[str]) -> bool:
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: str | None) -> bool:
         supported_kv_cache_dtypes = cls.get_supported_kv_cache_dtypes()
         return (not supported_kv_cache_dtypes) or (
             kv_cache_dtype is not None and kv_cache_dtype in supported_kv_cache_dtypes
@@ -132,7 +132,7 @@ class AttentionBackend(ABC):
         return []
 
     @classmethod
-    def supports_block_size(cls, block_size: Optional[int]) -> bool:
+    def supports_block_size(cls, block_size: int | None) -> bool:
         if block_size is None:
             return True
         try:
@@ -157,11 +157,11 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
-    def get_min_compute_capability(cls) -> Optional[DeviceCapability]:
+    def get_min_compute_capability(cls) -> DeviceCapability | None:
         return None
 
     @classmethod
-    def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
+    def get_max_compute_capability(cls) -> DeviceCapability | None:
         return None
 
     @classmethod
@@ -177,13 +177,13 @@ class AttentionBackend(ABC):
         cls,
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
-        block_size: Optional[int],
+        kv_cache_dtype: str | None,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
         device_capability: DeviceCapability,
-    ) -> Optional[str]:
+    ) -> str | None:
         return None
 
     @classmethod
@@ -191,8 +191,8 @@ class AttentionBackend(ABC):
         cls,
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
-        block_size: Optional[int],
+        kv_cache_dtype: str | None,
+        block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -297,18 +297,18 @@ class AttentionImpl(ABC, Generic[T]):
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[list[float]] = None,
-        sliding_window: Optional[int] = None,
+        num_kv_heads: int | None = None,
+        alibi_slopes: list[float] | None = None,
+        sliding_window: int | None = None,
         kv_cache_dtype: str = "auto",
-        logits_soft_cap: Optional[float] = None,
+        logits_soft_cap: float | None = None,
         attn_type: str = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[str] = None,
+        kv_sharing_target_layer_name: str | None = None,
     ) -> None:
         raise NotImplementedError
 
     @classmethod
-    def get_supported_kernel_block_size(cls) -> list[Union[int, MultipleOf]]:
+    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
         # TODO: implement this function for all backends.
         return [MultipleOf(1)]
 
@@ -321,9 +321,9 @@ class AttentionImpl(ABC, Generic[T]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -347,21 +347,21 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
-        q_lora_rank: Optional[int],
+        q_lora_rank: int | None,
         kv_lora_rank: int,
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
-        indexer: Optional[object] = None,
+        indexer: object | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -374,9 +374,9 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         k_pe: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 

@@ -3,7 +3,7 @@
 """Attention backend registry"""
 
 import enum
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from vllm.utils import resolve_obj_by_qualname
 
@@ -56,7 +56,7 @@ BACKEND_MAP = {
 }
 
 
-def register_attn_backend(backend: _Backend, class_path: Optional[str] = None):
+def register_attn_backend(backend: _Backend, class_path: str | None = None):
     """
     Decorator: register a custom attention backend into BACKEND_MAPPING.
     - If class_path is provided, use it.

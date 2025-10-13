@@ -76,7 +76,7 @@ class FlashMLASparseBackend(AttentionBackend):
         return [torch.bfloat16]
 
     @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[Optional[str]]:
+    def get_supported_kv_cache_dtypes(cls) -> list[str | None]:
         return ["auto", "bf16", "fp8_ds_mla"]
 
     @classmethod
@@ -88,11 +88,11 @@ class FlashMLASparseBackend(AttentionBackend):
         return True
 
     @classmethod
-    def get_min_compute_capability(cls) -> Optional[DeviceCapability]:
+    def get_min_compute_capability(cls) -> DeviceCapability | None:
         return DeviceCapability(10, 0)
 
     @classmethod
-    def get_max_compute_capability(cls) -> Optional[DeviceCapability]:
+    def get_max_compute_capability(cls) -> DeviceCapability | None:
         return DeviceCapability(10, 3)
 
     @staticmethod
@@ -128,12 +128,12 @@ class FlashMLASparseMetadata:
 
     @dataclass
     class FP8KernelMetadata:
-        scheduler_metadata: Optional[torch.Tensor]
+        scheduler_metadata: torch.Tensor | None
         num_splits: torch.Tensor
         dummy_block_table: torch.Tensor
         cache_lens: torch.Tensor
 
-    fp8_extra_metadata: Optional[FP8KernelMetadata] = None
+    fp8_extra_metadata: FP8KernelMetadata | None = None
 
 
 @triton.jit
@@ -391,14 +391,14 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
-        topk_indice_buffer: Optional[torch.Tensor] = None,
+        topk_indice_buffer: torch.Tensor | None = None,
         indexer: Optional["Indexer"] = None,
         **mla_args,
     ) -> None:
@@ -484,9 +484,9 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode
