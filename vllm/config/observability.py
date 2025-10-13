@@ -3,7 +3,7 @@
 
 import hashlib
 from functools import cached_property
-from typing import Any, Literal, Optional, cast
+from typing import Any, Literal, cast
 
 from pydantic import field_validator, model_validator
 from pydantic.dataclasses import dataclass
@@ -82,7 +82,7 @@ class ObservabilityConfig:
 
     @field_validator("show_hidden_metrics_for_version", mode="before")
     @classmethod
-    def _normalize_version(cls, value: Optional[str]) -> Optional[str]:
+    def _normalize_version(cls, value: str | None) -> str | None:
         if value is None:
             return value
         value = value.lstrip("v")
@@ -93,33 +93,37 @@ class ObservabilityConfig:
             )
         return value
 
-    @field_validator("otlp_traces_endpoint", mode="after")
-    @classmethod
-    def _validate_endpoint(cls, value: Optional[str]) -> Optional[str]:
-        if value is None:
-            return value
-        if not (value.startswith("http://") or value.startswith("https://")):
-            raise ValueError("otlp_traces_endpoint must start with http:// or https://")
-
-        from vllm.tracing import is_otel_available, otel_import_error_traceback
-
-        if not is_otel_available():
-            raise ValueError(
-                "OpenTelemetry is not available. Unable to configure "
-                "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
-                f"installed. Original error:\n{otel_import_error_traceback}"
-            )
-
-        return value
-
     @field_validator("collect_detailed_traces", mode="before")
     @classmethod
-    def _parse_collect_traces(cls, value: Any) -> Optional[list[DetailedTraceModules]]:
-        if value is None:
+    def _parse_collect_traces(cls, value: Any) -> list[DetailedTraceModules] | None:
+        if value in (None, "", []):
             return None
 
-        assert isinstance(value, list)
-        return [v.strip() for item in value for v in str(item).split(",") if v.strip()]
+        items: list[str] = []
+
+        def add(obj: Any):
+            if obj is None:
+                return
+            elif isinstance(obj, str):
+                items.extend(part.strip().lower() for part in obj.split(","))
+            elif isinstance(obj, (list, tuple, set)):
+                for x in obj:
+                    add(x)
+            else:
+                items.append(str(obj).strip().lower())
+
+        add(value)
+
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            if item and item not in seen:
+                seen.add(item)
+                out.append(item)
+
+        if not out:
+            return None
+        return cast(list[DetailedTraceModules], out)
 
     @model_validator(mode="after")
     def _validate_tracing_config(self):
@@ -127,4 +131,14 @@ class ObservabilityConfig:
             raise ValueError(
                 "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
             )
+
+        from vllm.tracing import is_otel_available, otel_import_error_traceback
+
+        if not is_otel_available() and self.otlp_traces_endpoint is not None:
+            raise ValueError(
+                "OpenTelemetry is not available. Unable to configure "
+                "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
+                f"installed. Original error:\n{otel_import_error_traceback}"
+            )
+
         return self
