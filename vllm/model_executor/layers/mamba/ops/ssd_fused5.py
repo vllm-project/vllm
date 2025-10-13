@@ -67,11 +67,11 @@ from .mamba_ssm import softplus
         "NEED_MASK_CS_DS": lambda args: args["dstate"] / args["CS_BLOCK_SIZE_DS"]
         != args["dstate"] // args["CS_BLOCK_SIZE_DS"]
         or args["dstate"] != args["BLOCK_SIZE_DSTATE"],
-        "NEED_MASK_CS_CS_inner": lambda args: args["HAS_INITSTATES"]
-        or args["chunk_size"] / args["CS_BLOCK_SIZE_CS_inner"]
+        "NEED_MASK_CS_CS_inner": lambda args: args["chunk_size"]
+        / args["CS_BLOCK_SIZE_CS_inner"]
         != args["chunk_size"] // args["CS_BLOCK_SIZE_CS_inner"],
-        "NEED_MASK_CS_CS_outer": lambda args: args["HAS_INITSTATES"]
-        or args["chunk_size"] / args["CS_BLOCK_SIZE_CS_outer"]
+        "NEED_MASK_CS_CS_outer": lambda args: args["chunk_size"]
+        / args["CS_BLOCK_SIZE_CS_outer"]
         != args["chunk_size"] // args["CS_BLOCK_SIZE_CS_outer"],
         "NEED_MASK_1_DS": lambda args: args["dstate"] / args["BLOCK_SIZE_DS"]
         != args["dstate"] // args["BLOCK_SIZE_DS"],
@@ -590,8 +590,8 @@ def _fused5_ssd_kernel(
     prev_state_stride_dstate = stride_states_G_dstate
 
     seq_idx_prev = tl.load(seq_idx_ptr - stride_seq_idx_chunk, mask=pid_c >= 1, other=0)
+    seq_idx_m = tl.load(seq_idx_ptr)  # current seq idx
     if HAS_INITSTATES:  # if new sequence, switch to initial states
-        seq_idx_m = tl.load(seq_idx_ptr)  # current seq idx
         if seq_idx_prev != seq_idx_m:
             # - replace prev_states_ptr with init_states
             prev_state_base_ptr = (
@@ -638,34 +638,10 @@ def _fused5_ssd_kernel(
             offs_hd[None, :] * prev_state_stride_hdim
             + offs_k_dstate[:, None] * prev_state_stride_dstate
         )
-        scale_m = tl.exp(dA_cs_m)
 
-        if BLOCK_SIZE_DSTATE <= CS_WHOLEBLOCK_DS:
-            if (not NEED_MASK_HD) and (not NEED_MASK_CS_DS):
-                C = tl.load(
-                    C_ptrs,
-                    mask=(offs_cs[:, None] < chunk_size_limit),
-                    other=0.0,
-                )
-                prev_states = tl.load(prev_states_ptrs)
-            else:
-                C = tl.load(
-                    C_ptrs,
-                    mask=(offs_cs[:, None] < chunk_size_limit)
-                    & (offs_k_dstate[None, :] < dstate),
-                    other=0.0,
-                )
-                prev_states = tl.load(
-                    prev_states_ptrs,
-                    mask=(offs_k_dstate[:, None] < dstate) & (offs_hd[None, :] < hdim),
-                    other=0.0,
-                )
-            prev_states = prev_states.to(C_ptr.dtype.element_ty)
-            acc = tl.dot(C, prev_states, out_dtype=acc.dtype) * (scale_m[:, None]).to(
-                acc.dtype
-            )
-        else:
-            for k in range(0, dstate, CS_BLOCK_SIZE_DS):
+        if seq_idx_prev == seq_idx_m:  # if new sequence, add previous chunk affect
+            scale_m = tl.exp(dA_cs_m)
+            if BLOCK_SIZE_DSTATE <= CS_WHOLEBLOCK_DS:
                 if (not NEED_MASK_HD) and (not NEED_MASK_CS_DS):
                     C = tl.load(
                         C_ptrs,
@@ -677,20 +653,46 @@ def _fused5_ssd_kernel(
                     C = tl.load(
                         C_ptrs,
                         mask=(offs_cs[:, None] < chunk_size_limit)
-                        & (offs_k_dstate[None, :] < dstate - k),
+                        & (offs_k_dstate[None, :] < dstate),
                         other=0.0,
                     )
                     prev_states = tl.load(
                         prev_states_ptrs,
-                        mask=(offs_k_dstate[:, None] < dstate - k)
+                        mask=(offs_k_dstate[:, None] < dstate)
                         & (offs_hd[None, :] < hdim),
                         other=0.0,
                     )
                 prev_states = prev_states.to(C_ptr.dtype.element_ty)
-                acc += tl.dot(C, prev_states, out_dtype=acc.dtype)
-                C_ptrs += CS_BLOCK_SIZE_DS
-                prev_states_ptrs += CS_BLOCK_SIZE_DS
-            acc *= (scale_m[:, None]).to(acc.dtype)
+                acc = tl.dot(C, prev_states, out_dtype=acc.dtype) * (
+                    scale_m[:, None]
+                ).to(acc.dtype)
+            else:
+                for k in range(0, dstate, CS_BLOCK_SIZE_DS):
+                    if (not NEED_MASK_HD) and (not NEED_MASK_CS_DS):
+                        C = tl.load(
+                            C_ptrs,
+                            mask=(offs_cs[:, None] < chunk_size_limit),
+                            other=0.0,
+                        )
+                        prev_states = tl.load(prev_states_ptrs)
+                    else:
+                        C = tl.load(
+                            C_ptrs,
+                            mask=(offs_cs[:, None] < chunk_size_limit)
+                            & (offs_k_dstate[None, :] < dstate - k),
+                            other=0.0,
+                        )
+                        prev_states = tl.load(
+                            prev_states_ptrs,
+                            mask=(offs_k_dstate[:, None] < dstate - k)
+                            & (offs_hd[None, :] < hdim),
+                            other=0.0,
+                        )
+                    prev_states = prev_states.to(C_ptr.dtype.element_ty)
+                    acc += tl.dot(C, prev_states, out_dtype=acc.dtype)
+                    C_ptrs += CS_BLOCK_SIZE_DS
+                    prev_states_ptrs += CS_BLOCK_SIZE_DS
+                acc *= (scale_m[:, None]).to(acc.dtype)
 
         offs_k = tl.arange(0, CS_BLOCK_SIZE_CS_inner)
         cb_ptrs = cb_ptr + (
@@ -1054,4 +1056,4 @@ def _fused5_ssd(
     final_states = states_G[nchunks].to(
         states_G.dtype, copy=True
     )  # copy and convert to expected dtype
-    return out_x, states_G[:nchunks], final_states, dA_cumsum, dt_out
+    return out_x, states_G[1:], final_states, dA_cumsum, dt_out
