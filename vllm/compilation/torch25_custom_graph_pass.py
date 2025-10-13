@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -23,7 +23,7 @@ class Torch25CustomGraphPass(ABC):  # noqa (redefinition)
         """
 
     @abstractmethod
-    def uuid(self) -> Optional[Any]:
+    def uuid(self) -> Any | None:
         """
         Return an ID to uniquely identify your custom pass implementation.
         Return None to skip inductor code caching entirely.
