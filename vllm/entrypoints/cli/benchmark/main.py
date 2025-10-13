@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import argparse
 import typing
 
@@ -12,10 +10,12 @@ from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 
 if typing.TYPE_CHECKING:
     from vllm.utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = argparse.ArgumentParser
 
 
 class BenchmarkSubcommand(CLISubcommand):
-    """ The `bench` subcommand for the vLLM CLI. """
+    """The `bench` subcommand for the vLLM CLI."""
 
     name = "bench"
     help = "vLLM bench subcommand."
@@ -28,14 +28,14 @@ class BenchmarkSubcommand(CLISubcommand):
         pass
 
     def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+        self, subparsers: argparse._SubParsersAction
+    ) -> FlexibleArgumentParser:
         bench_parser = subparsers.add_parser(
             self.name,
             description=self.help,
-            usage=f"vllm {self.name} <bench_type> [options]")
-        bench_subparsers = bench_parser.add_subparsers(required=True,
-                                                       dest="bench_type")
+            usage=f"vllm {self.name} <bench_type> [options]",
+        )
+        bench_subparsers = bench_parser.add_subparsers(required=True, dest="bench_type")
 
         for cmd_cls in BenchmarkSubcommandBase.__subclasses__():
             cmd_subparser = bench_subparsers.add_parser(
@@ -47,7 +47,8 @@ class BenchmarkSubcommand(CLISubcommand):
             cmd_subparser.set_defaults(dispatch_function=cmd_cls.cmd)
             cmd_cls.add_cli_args(cmd_subparser)
             cmd_subparser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(
-                subcmd=f"{self.name} {cmd_cls.name}")
+                subcmd=f"{self.name} {cmd_cls.name}"
+            )
         return bench_parser
 
 

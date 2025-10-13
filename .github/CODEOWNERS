@@ -23,6 +23,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
 /vllm/config @simon-mo @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
+/vllm/config/cache.py @simon-mo @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg @heheda12345
 
 # vLLM V1
 /vllm/v1 @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat
@@ -120,3 +121,11 @@ mkdocs.yaml @hmellor
 
 # KVConnector installation files
 /requirements/kv_connectors.txt @NickLucche
+
+# Pooling models
+/examples/*/pooling/ @noooop
+/tests/models/*/pooling* @noooop
+/tests/entrypoints/pooling @noooop
+/vllm/config/pooler.py @noooop
+/vllm/pooling_params.py @noooop
+/vllm/model_executor/layers/pooler.py @noooop

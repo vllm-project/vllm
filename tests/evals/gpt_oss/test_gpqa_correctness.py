@@ -25,8 +25,19 @@ def run_gpqa_eval(model_name: str, base_url: str) -> float:
 
     # Build the command to run the evaluation
     cmd = [
-        sys.executable, "-m", "gpt_oss.evals", "--eval", "gpqa", "--model",
-        model_name, "--reasoning-effort", "low", "--base-url", base_url
+        sys.executable,
+        "-m",
+        "gpt_oss.evals",
+        "--eval",
+        "gpqa",
+        "--model",
+        model_name,
+        "--reasoning-effort",
+        "low",
+        "--base-url",
+        base_url,
+        "--n-threads",
+        "200",
     ]
 
     try:
@@ -36,7 +47,8 @@ def run_gpqa_eval(model_name: str, base_url: str) -> float:
             text=True,
             capture_output=True,
             timeout=1800,  # 30 minute timeout
-            env={"OPENAI_API_KEY": "dummy"})
+            env={"OPENAI_API_KEY": "dummy"},
+        )
 
         print("Evaluation process output:\n", result.stdout)
 
@@ -47,14 +59,16 @@ def run_gpqa_eval(model_name: str, base_url: str) -> float:
 
         # If we still can't find it, raise an error
         raise ValueError(
-            f"Could not parse score from evaluation output:\n{result.stdout}")
+            f"Could not parse score from evaluation output:\n{result.stdout}"
+        )
 
     except subprocess.TimeoutExpired as e:
         raise RuntimeError("Evaluation timed out") from e
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
             f"Evaluation failed with exit code {e.returncode}:\n"
-            f"stdout: {e.stdout}\nstderr: {e.stderr}") from e
+            f"stdout: {e.stdout}\nstderr: {e.stderr}"
+        ) from e
 
 
 def test_gpqa_correctness(request):
@@ -71,19 +85,20 @@ def test_gpqa_correctness(request):
         server_args = server_args_str.split()
 
     # Add standard server arguments
-    server_args.extend([
-        "--max-model-len",
-        "32768",
-        "--trust-remote-code",
-    ])
+    server_args.extend(
+        [
+            "--trust-remote-code",
+        ]
+    )
 
     print(f"Starting GPQA evaluation for model: {model_name}")
     print(f"Expected metric threshold: {expected_metric}")
     print(f"Server args: {' '.join(server_args)}")
 
     # Launch server and run evaluation
-    with RemoteOpenAIServer(model_name, server_args,
-                            max_wait_seconds=1800) as remote_server:
+    with RemoteOpenAIServer(
+        model_name, server_args, max_wait_seconds=1800
+    ) as remote_server:
         base_url = remote_server.url_for("v1")
         print(f"Server started at: {base_url}")
 
@@ -97,6 +112,7 @@ def test_gpqa_correctness(request):
         # Verify metric is within tolerance
         assert measured_metric >= expected_metric - TOL, (
             f"GPQA metric too low: {measured_metric:.4f} < "
-            f"{expected_metric:.4f} - {TOL:.4f} = {expected_metric - TOL:.4f}")
+            f"{expected_metric:.4f} - {TOL:.4f} = {expected_metric - TOL:.4f}"
+        )
 
         print(f"✅ GPQA test passed for {model_name}")
