@@ -79,6 +79,8 @@ class SpeculativeConfig:
     draft_tensor_parallel_size: int | None = None
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
+    tensor_parallel_size: int | None = None
+    """This is only used to capture and reject if passed"""
     disable_logprobs: bool = True
     """If set to True, token log probabilities are not returned during
     speculative decoding. If set to False, token log probabilities are returned
@@ -537,6 +539,12 @@ class SpeculativeConfig:
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
+        if self.tensor_parallel_size is not None:
+            raise ValueError(
+                "'tensor_parallel_size' is not a valid argument in the "
+                "speculative_config. Please pass 'draft_tensor_parallel_size' instead."
+            )
+
         if self.num_speculative_tokens is None:
             raise ValueError(
                 "num_speculative_tokens must be provided with "

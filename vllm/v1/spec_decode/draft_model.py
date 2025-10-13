@@ -6,7 +6,7 @@ from typing import Any
 import torch
 
 from vllm.attention.layer import Attention
-from vllm.config import ModelConfig, VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backends.utils import (
@@ -118,17 +118,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
 
     def load_model(self, target_model: Any) -> None:
         """Takes target_model to satisfy the type checker."""
-        draft_model_config: ModelConfig = (
-            self.vllm_config.speculative_config.draft_model_config
-        )
-        logger.info("Starting to load model %s...", draft_model_config.model)
-
-        # Recompute quant_config, which is configured for the target model
-        # But the draft model might not be quantized.
-        vllm_config_draft: VllmConfig = self.vllm_config.replace(
-            quant_config=None,
-            model_config=draft_model_config,
-        )
 
         # This must be computed before loading the draft model
         # because that mutates the forward_context of the vllm_config
@@ -138,12 +127,16 @@ class DraftModelProposer(SpecDecodeBaseProposer):
 
         from vllm.compilation.backends import set_model_tag
 
+        draft_vllm_config: VllmConfig = create_vllm_config_for_draft_model(
+            target_model_vllm_config=self.vllm_config
+        )
+        logger.info(
+            "Starting to load model %s with tensor_parallel_size %d...",
+            draft_vllm_config.model_config.model,
+            draft_vllm_config.parallel_config.tensor_parallel_size,
+        )
         with set_model_tag("draft_model"):
-            self.model = get_model(
-                vllm_config=vllm_config_draft,
-                model_config=draft_model_config,
-                prefix="draft_model",
-            )
+            self.model = get_model(vllm_config=draft_vllm_config, prefix="draft_model")
 
         # This must be computed after loading the draft model
         # because that mutates the forward_context of the vllm_config
@@ -152,6 +145,24 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             - target_attn_layer_names
         )
         self.attn_layer_names = list(draft_attn_layer_names)
+
+
+def create_vllm_config_for_draft_model(
+    target_model_vllm_config: VllmConfig,
+) -> VllmConfig:
+    """The vllm_config is configured for the target model, e.g.
+    its quant_config and parallel_config. But the draft model might
+    not be quantized the same way, and might have different tensor_parallel_size.
+    We need to create a new vllm_config for the draft model.
+    This is vllm_config is useful when loading the draft model.
+    """
+    old = target_model_vllm_config
+    new: VllmConfig = old.replace(
+        quant_config=None,  # quant_config is recomputed in __init__()
+        model_config=old.speculative_config.draft_model_config,
+        parallel_config=old.speculative_config.draft_parallel_config,
+    )
+    return new
 
 
 @dataclass

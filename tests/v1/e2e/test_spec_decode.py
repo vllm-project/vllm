@@ -11,9 +11,12 @@ from tests.utils import get_attn_backend_list_based_on_platform, large_gpu_mark
 from vllm import LLM, SamplingParams
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.assets.image import VLM_IMAGES_DIR
+from vllm.config.vllm import VllmConfig
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.engine.arg_utils import EngineArgs
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
+from vllm.v1.spec_decode.draft_model import create_vllm_config_for_draft_model
 from vllm.v1.spec_decode.metrics import compute_acceptance_len, compute_acceptance_rate
 
 MTP_SIMILARITY_RATE = 0.8
@@ -434,6 +437,48 @@ def test_draft_model_tensor_parallelism():
     assert_draft_model_correctness(sd_case, enforce_eager=True)
 
 
+def test_draft_model_engine_args_tensor_parallelism():
+    engine_args = EngineArgs(
+        model="Qwen/Qwen3-1.7B-FP8",  # <<< tgt quantized
+        tensor_parallel_size=2,
+        speculative_config={
+            "model": "Qwen/Qwen3-0.6B",  # <<< draft not quantized
+            "method": "draft_model",
+            "num_speculative_tokens": 3,
+            "draft_tensor_parallel_size": 1,  # <<< valid arg name
+        },
+    )
+    tgt_vllm_config: VllmConfig = engine_args.create_engine_config()
+    assert tgt_vllm_config.parallel_config.tensor_parallel_size == 2
+    assert tgt_vllm_config.quant_config.get_name() == "fp8"
+    assert (
+        tgt_vllm_config.speculative_config.draft_parallel_config.tensor_parallel_size
+        == 1
+    )
+
+    draft_vllm_config: VllmConfig = create_vllm_config_for_draft_model(tgt_vllm_config)
+    assert draft_vllm_config.parallel_config.tensor_parallel_size == 1
+    assert draft_vllm_config.quant_config is None
+
+
+def test_draft_model_engine_args_rejects_invalid_tp_argname():
+    """The user should pass "draft_tensor_parallel_size", rather than
+    "tensor_parallel_size". This is to catch bad syntax early."""
+
+    engine_args = EngineArgs(
+        model="Qwen/Qwen3-1.7B",
+        tensor_parallel_size=2,
+        speculative_config={
+            "model": "Qwen/Qwen3-0.6B",
+            "method": "draft_model",
+            "num_speculative_tokens": 3,
+            "tensor_parallel_size": 1,  # invalid arg name
+        },
+    )
+    with pytest.raises(ValueError):
+        engine_args.create_engine_config()
+
+
 def assert_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
     """Compare the outputs using and not using speculative decoding.
     In the greedy decoding case, the outputs must match EXACTLY."""
@@ -447,7 +492,7 @@ def assert_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
             "num_speculative_tokens": args.num_speculative_tokens,
             "max_model_len": args.max_model_len,
             "enforce_eager": enforce_eager,
-            "tensor_parallel_size": args.draft_tensor_parallel_size,
+            "draft_tensor_parallel_size": args.draft_tensor_parallel_size,
             "disable_padded_drafter_batch": True,
             "max_num_seqs": 100,  # limit cudagraph capture runtime
         },
