@@ -492,8 +492,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            if envs.VLLM_FLASH_ATTN_VERSION == 4:
-                return torch.empty_like(query).contiguous()
             return output
 
         attn_type = self.attn_type
