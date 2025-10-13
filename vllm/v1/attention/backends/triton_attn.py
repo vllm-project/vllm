@@ -210,6 +210,11 @@ class TritonAttentionImpl(AttentionImpl):
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
 
+    def supports_quant_query_input(
+        self, attn_metadata: TritonAttentionMetadata | None = None
+    ) -> bool:
+        return current_platform.is_cuda()
+
     def __init__(
         self,
         num_heads: int,
@@ -339,9 +344,8 @@ class TritonAttentionImpl(AttentionImpl):
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
             assert layer._q_scale_float == 1.0, (
-                "A non 1.0 q_scale is not currently supported.")
-
-            # Query quantization is now handled in the attention layer
+                "A non 1.0 q_scale is not currently supported."
+            )
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens

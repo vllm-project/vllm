@@ -307,10 +307,7 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # for attn backends supporting query quantization
         self.query_quant = None
-        if (
-            self.kv_cache_dtype.startswith("fp8")
-            and self.attn_backend.supports_quant_query_input
-        ):
+        if self.kv_cache_dtype.startswith("fp8"):
             self.query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
     def forward(
@@ -333,11 +330,10 @@ class Attention(nn.Module, AttentionLayerBase):
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
 
-        attn_metadata = get_forward_context().attn_metadata
-        if (self.calculate_kv_scales
-                and attn_metadata.enable_kv_scales_calculation):
-            self.calc_kv_scales(query, key, value)
+        if self.calculate_kv_scales:
+            torch.ops.vllm.maybe_calc_kv_scales(query, key, value, self.layer_name)
 
+        forward_context = get_forward_context()
         output_dtype = query.dtype
         if self.query_quant is not None:
             # quantizing with a simple torch operation enables
@@ -346,9 +342,13 @@ class Attention(nn.Module, AttentionLayerBase):
             # Otherwise queries are quantized using custom ops
             # which causes decoding overheads
             assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
-            if not hasattr(
-                    attn_metadata,
-                    'q_data_type') or attn_metadata.q_data_type == FP8_DTYPE:
+
+            # check if query quantization is supported
+            attn_metadata = forward_context.attn_metadata
+            if isinstance(attn_metadata, dict):
+                attn_metadata = attn_metadata.get(self.layer_name)
+
+            if self.impl.supports_quant_query_input(attn_metadata):
                 query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
@@ -365,7 +365,6 @@ class Attention(nn.Module, AttentionLayerBase):
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size)
             if self.use_direct_call:
-                forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
@@ -380,7 +379,6 @@ class Attention(nn.Module, AttentionLayerBase):
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
-                forward_context = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]

@@ -15,6 +15,7 @@ from flashinfer import (
 from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 from flashinfer.utils import FP4Tensor
+
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
@@ -152,11 +153,6 @@ def trtllm_prefill_attn_kvfp8_dequant(
 
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
-
-    @property
-    def supports_quant_query_input(self) -> bool:
-        return supports_trtllm_attention(
-        ) and not flashinfer_disable_q_quantization()
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
@@ -810,6 +806,17 @@ class FlashInferImpl(AttentionImpl):
             and self.kv_cache_dtype.startswith("fp8")
             and quant_key in (kFp8StaticTensorSym, kNvfp4Quant)
         )
+
+    def supports_quant_query_input(
+        self, attn_metadata: FlashInferMetadata | None = None
+    ) -> bool:
+        if flashinfer_disable_q_quantization():
+            return False
+
+        if attn_metadata is None:
+            return self.support_trtllm_attn
+
+        return attn_metadata.prefill_use_trtllm and attn_metadata.decode_use_trtllm
 
     def forward(
         self,

@@ -199,6 +199,11 @@ class AttentionImpl(ABC, Generic[T]):
         """
         return False
 
+    def supports_quant_query_input(
+        self, attn_metadata: "AttentionMetadata | None" = None
+    ) -> bool:
+        return False
+
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
     @abstractmethod
