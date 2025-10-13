@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Optional
 
@@ -8,21 +7,28 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
-                                              AttentionMetadata)
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionLayer,
+    AttentionMetadata,
+)
 from vllm.attention.backends.utils import get_mla_dims
-from vllm.attention.ops.flashmla import (flash_mla_sparse_prefill,
-                                         flash_mla_with_kvcache,
-                                         get_mla_metadata)
+from vllm.attention.ops.flashmla import (
+    flash_mla_sparse_prefill,
+    flash_mla_with_kvcache,
+    get_mla_metadata,
+)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
-from vllm.v1.attention.backends.utils import (AttentionCGSupport,
-                                              AttentionMetadataBuilder,
-                                              CommonAttentionMetadata)
+from vllm.v1.attention.backends.utils import (
+    AttentionCGSupport,
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
@@ -44,19 +50,12 @@ structured as:
 """
 
 
-def _lse2_to_lse(lse_base2: torch.Tensor) -> torch.Tensor:
-    # Convert base-2 LSE to natural-log LSE
-    # Keep FP32 for numerical stability during the merge.
-    return (lse_base2.to(torch.float32) * math.log(2.0))
-
-
 class FlashMLASparseBackend(AttentionBackend):
-
     accept_output_buffer: bool = True
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHMLA_SPARSE_VLLM_V1"
+        return "FLASHMLA_SPARSE"
 
     @staticmethod
     def get_metadata_cls() -> type[AttentionMetadata]:
@@ -95,35 +94,6 @@ class FlashMLASparseBackend(AttentionBackend):
 
 
 @dataclass
-class MLASparsePrefillMetadata:
-    # NOTE(Chen): not call it "FlashMLASparsePrefillMetadata" because
-    # the kernel is not from flashmla
-    block_table: torch.Tensor
-    has_context: bool = False
-    context_lens: Optional[torch.Tensor] = None
-
-
-@dataclass
-class FlashMLASparseDecodeAndContextMetadata:
-    scheduler_metadata: torch.Tensor = None
-    num_splits: torch.Tensor = None
-    cache_lens: torch.Tensor = None
-    prefill_context_lengths: Optional[torch.Tensor] = None
-    prefill_new_k_start_locs: Optional[torch.Tensor] = None
-    dummy_block_table: torch.Tensor = None
-
-    def filter_prefill_indices(
-            self, indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self.prefill_context_lengths is not None
-        prefill_context_lengths = self.prefill_context_lengths.unsqueeze(-1)
-        context_indices = torch.where(indices < prefill_context_lengths,
-                                      indices, -1)
-        new_token_indices = torch.where(indices >= prefill_context_lengths,
-                                        indices - prefill_context_lengths, -1)
-        return context_indices, new_token_indices
-
-
-@dataclass
 class FlashMLASparseMetadata:
     num_reqs: int
     max_query_len: int
@@ -140,12 +110,12 @@ class FlashMLASparseMetadata:
 
     @dataclass
     class FP8KernelMetadata:
-        scheduler_metadata: Optional[torch.Tensor]
+        scheduler_metadata: torch.Tensor | None
         num_splits: torch.Tensor
         dummy_block_table: torch.Tensor
         cache_lens: torch.Tensor
 
-    fp8_extra_metadata: Optional[FP8KernelMetadata] = None
+    fp8_extra_metadata: FP8KernelMetadata | None = None
 
 
 @triton.jit
@@ -194,8 +164,9 @@ def _convert_req_index_to_global_index_kernel(
     base = tl.load(bt_ptr, mask=valid_block, other=0)
 
     # If token == -1 OR block_id OOB, output -1; else base * BLOCK_SIZE + offset
-    out_val = tl.where(is_invalid_tok | (~valid_block), -1,
-                       base * BLOCK_SIZE + inblock_off)
+    out_val = tl.where(
+        is_invalid_tok | (~valid_block), -1, base * BLOCK_SIZE + inblock_off
+    )
 
     # Store results
     out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
@@ -203,31 +174,30 @@ def _convert_req_index_to_global_index_kernel(
 
 
 def triton_convert_req_index_to_global_index(
-        req_id: torch.Tensor,  # int32 [num_tokens]
-        block_table: torch.
-    Tensor,  # int32 [num_requests, max_num_blocks_per_req]
-        token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
-        BLOCK_SIZE: int = 64,
-        NUM_TOPK_TOKENS: int = 2048,
-        BLOCK_N: int = 128,  # tile width along columns
+    req_id: torch.Tensor,  # int32 [num_tokens]
+    block_table: torch.Tensor,  # int32 [num_requests, max_num_blocks_per_req]
+    token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
+    BLOCK_SIZE: int = 64,
+    NUM_TOPK_TOKENS: int = 2048,
+    BLOCK_N: int = 128,  # tile width along columns
 ):
     """
     out[token_id, indice_id] =
-        block_table[req_id[token_id], 
+        block_table[req_id[token_id],
             token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
         + token_indices[token_id, indice_id] % BLOCK_SIZE
 
     Only when token_indices[token_id, indice_id] == -1 do we output -1.
-    For safety, we also output -1 if the derived block_id would be 
+    For safety, we also output -1 if the derived block_id would be
         out-of-bounds.
     """
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
     assert token_indices.dtype == torch.int32
     assert token_indices.shape[1] == NUM_TOPK_TOKENS
-    assert NUM_TOPK_TOKENS % BLOCK_N == 0, \
-        f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible by" \
-        f"BLOCK_N ({BLOCK_N})"
+    assert NUM_TOPK_TOKENS % BLOCK_N == 0, (
+        f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible byBLOCK_N ({BLOCK_N})"
+    )
 
     num_tokens = req_id.shape[0]
     num_requests, max_num_blocks_per_req = block_table.shape
@@ -268,14 +238,16 @@ def triton_convert_req_index_to_global_index(
 
 
 @dataclass
-class FlashMLASparseMetadataBuilder(
-        AttentionMetadataBuilder[FlashMLASparseMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.UNIFORM_BATCH
+class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetadata]):
+    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
-    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
-                 vllm_config: VllmConfig, device: torch.device):
-
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
         cache_config = vllm_config.cache_config
         self.kv_cache_spec = kv_cache_spec
         self.model_config = vllm_config.model_config
@@ -285,28 +257,27 @@ class FlashMLASparseMetadataBuilder(
         props = torch.cuda.get_device_properties(device)
         sm_count = props.multi_processor_count
 
-        self.num_heads = self.model_config.get_num_attention_heads(
-            parallel_config)
+        self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
         self.topk_tokens = vllm_config.model_config.hf_config.index_topk
         self.use_fp8_kv_cache = cache_config.cache_dtype == "fp8_ds_mla"
-        self.topk_tokens_tensor = torch.tensor([self.topk_tokens],
-                                               device=device,
-                                               dtype=torch.int32)
+        self.topk_tokens_tensor = torch.tensor(
+            [self.topk_tokens], device=device, dtype=torch.int32
+        )
         self.max_model_len_tensor = torch.tensor(
-            [self.model_config.max_model_len],
-            device=device,
-            dtype=torch.int32)
+            [self.model_config.max_model_len], device=device, dtype=torch.int32
+        )
         # this is ignored by `flash_mla_with_kvcache` if indices not None
-        self.dummy_block_table = torch.empty((1, 1),
-                                             dtype=torch.int32,
-                                             device=self.device)
+        self.dummy_block_table = torch.empty(
+            (1, 1), dtype=torch.int32, device=self.device
+        )
 
         # Equation taken from FlashMLA/csrc/pybind.cpp
         h_q, h_k = self.num_heads, 1
         s_q = 1  # inversely proportional to s_q, so s_q = 1 is the largest
         max_num_sm_parts = int(
-            max((sm_count // 2) / h_k // (cdiv(h_q // h_k, 2 * 64) * s_q), 1))
+            max((sm_count // 2) / h_k // (cdiv(h_q // h_k, 2 * 64) * s_q), 1)
+        )
         if current_platform.is_device_capability(100):
             max_num_sm_parts *= 2
         self.tile_scheduler_metadata_buffer = torch.empty(
@@ -314,34 +285,38 @@ class FlashMLASparseMetadataBuilder(
             # see: FlashMLA/csrc/params.h
             (max_num_sm_parts, 8),
             dtype=torch.int32,
-            device=device)
+            device=device,
+        )
         self.num_splits_buffer = torch.empty(
             # We pack all the tokens into one batch for sparse attention.
             # Otherwise, we can exceed the sm of `get_mla_metadata`.
-            (
-                2, ),
+            (2,),
             dtype=torch.int32,
-            device=device)
+            device=device,
+        )
         self.req_id_per_token_buffer = torch.empty(
-            (vllm_config.scheduler_config.max_num_batched_tokens, ),
+            (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
-            device=device)
+            device=device,
+        )
 
-    def build(self,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> FlashMLASparseMetadata:
-
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> FlashMLASparseMetadata:
         num_tokens = common_attn_metadata.num_actual_tokens
-        starts = np.asarray(common_attn_metadata.query_start_loc_cpu,
-                            dtype=np.int32)
+        starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)
         seg_lengths = np.diff(starts)
         req_id_per_token = np.repeat(
-            np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths)
+            np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
+        )
         # Zero-fill for cudagraphs
         self.req_id_per_token_buffer.fill_(0)
-        self.req_id_per_token_buffer[:req_id_per_token.shape[0]]\
-            .copy_(torch.from_numpy(req_id_per_token), non_blocking=True)
+        self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
+            torch.from_numpy(req_id_per_token), non_blocking=True
+        )
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
 
         fp8_extra_metadata = None
@@ -357,8 +332,9 @@ class FlashMLASparseMetadataBuilder(
 
             num_sm_parts = tile_scheduler_metadata.size(0)
             # Copy to persistent buffer for full-CG support
-            tile_scheduler_metadata_buffer = \
-                self.tile_scheduler_metadata_buffer[:num_sm_parts]
+            tile_scheduler_metadata_buffer = self.tile_scheduler_metadata_buffer[
+                :num_sm_parts
+            ]
             tile_scheduler_metadata_buffer.copy_(tile_scheduler_metadata)
             self.num_splits_buffer.copy_(num_splits)
 
@@ -371,7 +347,8 @@ class FlashMLASparseMetadataBuilder(
                 # accidentally mark indices invalid, we will use -1 exclusively
                 # to mark invalid indices
                 cache_lens=self.max_model_len_tensor,
-                dummy_block_table=self.dummy_block_table)
+                dummy_block_table=self.dummy_block_table,
+            )
 
         metadata = FlashMLASparseMetadata(
             num_reqs=common_attn_metadata.num_reqs,
@@ -390,62 +367,79 @@ class FlashMLASparseMetadataBuilder(
 
 
 class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
-
     def __init__(
-            self,
-            num_heads: int,
-            head_size: int,
-            scale: float,
-            num_kv_heads: int,
-            alibi_slopes: Optional[list[float]],
-            sliding_window: Optional[int],
-            kv_cache_dtype: str,
-            logits_soft_cap: Optional[float],
-            attn_type: str,
-            kv_sharing_target_layer_name: Optional[str],
-            # MLA Specific Arguments
-            topk_indice_buffer: Optional[torch.Tensor] = None,
-            indexer: Optional["Indexer"] = None,
-            **mla_args) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads,
-                         alibi_slopes, sliding_window, kv_cache_dtype,
-                         logits_soft_cap, attn_type,
-                         kv_sharing_target_layer_name, **mla_args)
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None,
+        attn_type: str,
+        kv_sharing_target_layer_name: str | None,
+        # MLA Specific Arguments
+        topk_indice_buffer: torch.Tensor | None = None,
+        indexer: Optional["Indexer"] = None,
+        **mla_args,
+    ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            **mla_args,
+        )
         self.softmax_scale = scale
         assert indexer is not None
         self.topk_indices_buffer = indexer.topk_indices_buffer
-        self.padding = 128 if current_platform.is_device_capability(
-            100) else 64
+        self.padding = 128 if current_platform.is_device_capability(100) else 64
 
     def _forward_bf16_kv(
-            self, q: torch.Tensor, kv_c_and_k_pe_cache: torch.Tensor,
-            topk_indices: torch.Tensor,
-            attn_metadata: FlashMLASparseMetadata) -> torch.Tensor:
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
+    ) -> torch.Tensor:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
-            -1, 1, kv_c_and_k_pe_cache.shape[-1])
+            -1, 1, kv_c_and_k_pe_cache.shape[-1]
+        )
 
         # NOTE(Chen): kernel requires num_local_head to be a multiple of
         # 64 on hopper and 128 on blackwell
         if self.num_heads % self.padding != 0:
             assert self.padding % self.num_heads == 0
-            logger.warning_once(f"padding num_heads to {self.padding} \
-                    due to sparse attn kernel requirement")
+            logger.warning_once(
+                f"padding num_heads to {self.padding} \
+                    due to sparse attn kernel requirement"
+            )
             q_padded = q.new_empty((q.shape[0], self.padding, q.shape[2]))
-            q_padded[:, :self.num_heads, :] = q
+            q_padded[:, : self.num_heads, :] = q
             q = q_padded
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
-        output = flash_mla_sparse_prefill(q, kv_c_and_k_pe_cache, topk_indices,
-                                          self.softmax_scale)[0]
-        output = output[:, :self.num_heads, :]
+        output = flash_mla_sparse_prefill(
+            q, kv_c_and_k_pe_cache, topk_indices, self.softmax_scale
+        )[0]
+        output = output[:, : self.num_heads, :]
         return output
 
-    def _forward_fp8_kv(self, q: torch.Tensor,
-                        kv_c_and_k_pe_cache: torch.Tensor,
-                        topk_indices: torch.Tensor,
-                        attn_metadata: FlashMLASparseMetadata) -> torch.Tensor:
-
+    def _forward_fp8_kv(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
+    ) -> torch.Tensor:
         assert attn_metadata.fp8_extra_metadata is not None
         extra_metadata = attn_metadata.fp8_extra_metadata
 
@@ -472,9 +466,9 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode
@@ -483,8 +477,8 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
-                "fused output quantization is not yet supported"
-                " for MLACommonImpl")
+                "fused output quantization is not yet supported for MLACommonImpl"
+            )
 
         if attn_metadata is None:
             # The zero fill is required when used with DP + EP
@@ -500,8 +494,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
-                               dim=-1)
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
         # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
@@ -534,11 +527,13 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             )
 
         if self.kv_cache_dtype != "fp8_ds_mla":
-            attn_out = self._forward_bf16_kv(q, kv_cache, topk_indices_global,
-                                             attn_metadata)
+            attn_out = self._forward_bf16_kv(
+                q, kv_cache, topk_indices_global, attn_metadata
+            )
         else:
-            attn_out = self._forward_fp8_kv(q, kv_cache, topk_indices_global,
-                                            attn_metadata)
+            attn_out = self._forward_fp8_kv(
+                q, kv_cache, topk_indices_global, attn_metadata
+            )
 
         self._v_up_proj(attn_out, out=output[:num_actual_toks])
         return output

@@ -4,17 +4,18 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
-from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
-                                                          KVConnectorRole)
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorMetadata)
+from vllm.distributed.kv_transfer.kv_connector.v1 import (
+    KVConnectorBase_V1,
+    KVConnectorRole,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -40,14 +41,13 @@ class OffloadingConnectorMetadata(KVConnectorMetadata):
 
 
 class OffloadingConnector(KVConnectorBase_V1):
-
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         super().__init__(vllm_config, role)
 
         spec = OffloadingSpecFactory.create_spec(vllm_config)
 
-        self.connector_scheduler: Optional[OffloadingConnectorScheduler] = None
-        self.connector_worker: Optional[OffloadingConnectorWorker] = None
+        self.connector_scheduler: OffloadingConnectorScheduler | None = None
+        self.connector_worker: OffloadingConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = OffloadingConnectorScheduler(spec)
         elif role == KVConnectorRole.WORKER:
@@ -57,47 +57,51 @@ class OffloadingConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
-    def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata,
-                          OffloadingConnectorMetadata)
+        assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         pass
 
-    def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata", **kwargs) -> None:
+    def save_kv_layer(
+        self,
+        layer_name: str,
+        kv_layer: torch.Tensor,
+        attn_metadata: "AttentionMetadata",
+        **kwargs,
+    ) -> None:
         pass
 
     def wait_for_save(self):
         assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata,
-                          OffloadingConnectorMetadata)
+        assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
         self.connector_worker.start_store_kv(self._connector_metadata)
 
-    def get_finished(self,
-                     finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
+    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
         return self.connector_worker.get_finished(finished_req_ids)
 
     def get_num_new_matched_tokens(
-            self, request: "Request",
-            num_computed_tokens: int) -> tuple[int, bool]:
+        self, request: "Request", num_computed_tokens: int
+    ) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
-            request, num_computed_tokens)
+            request, num_computed_tokens
+        )
 
-    def update_state_after_alloc(self, request: "Request",
-                                 blocks: "KVCacheBlocks",
-                                 num_external_tokens: int):
+    def update_state_after_alloc(
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+    ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
-            request, blocks, num_external_tokens)
+            request, blocks, num_external_tokens
+        )
 
     def build_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
@@ -109,7 +113,7 @@ class OffloadingConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
@@ -124,8 +128,7 @@ class OffloadingConnectorScheduler:
     def __init__(self, spec: OffloadingSpec):
         self.gpu_block_size = spec.gpu_block_size
         self.offloaded_block_size = spec.offloaded_block_size
-        self.block_size_factor = (self.offloaded_block_size //
-                                  self.gpu_block_size)
+        self.block_size_factor = self.offloaded_block_size // self.gpu_block_size
         self.manager: OffloadingManager = spec.get_manager()
 
         self._requests: dict[ReqId, Request] = {}
@@ -145,17 +148,18 @@ class OffloadingConnectorScheduler:
         self,
         req: Request,
         start_idx: int = 0,
-        end_idx: Optional[int] = None,
+        end_idx: int | None = None,
     ) -> Iterable[BlockHash]:
         return islice(
             req.block_hashes,
             self.block_size_factor * start_idx + self.block_size_factor - 1,
             self.block_size_factor * end_idx if end_idx else None,
-            self.block_size_factor)
+            self.block_size_factor,
+        )
 
     def get_num_new_matched_tokens(
-            self, request: Request,
-            num_computed_tokens: int) -> tuple[int, bool]:
+        self, request: Request, num_computed_tokens: int
+    ) -> tuple[int, bool]:
         """
         Get number of new tokens that can be loaded beyond the
         num_computed_tokens.
@@ -174,8 +178,7 @@ class OffloadingConnectorScheduler:
         """
         num_blocks = request.num_tokens // self.offloaded_block_size
 
-        assert (len(request.block_hashes) //
-                self.block_size_factor == num_blocks)
+        assert len(request.block_hashes) // self.block_size_factor == num_blocks
         block_hashes = self._get_block_hashes(request)
 
         self.manager.touch(block_hashes)
@@ -187,12 +190,14 @@ class OffloadingConnectorScheduler:
 
         start_block_idx = num_computed_tokens // self.offloaded_block_size
         hits = self.manager.lookup(
-            self._get_block_hashes(request, start_idx=start_block_idx))
+            self._get_block_hashes(request, start_idx=start_block_idx)
+        )
         if hits == 0:
             return 0, False
 
-        num_hit_tokens = (self.offloaded_block_size *
-                          (start_block_idx + hits) - num_computed_tokens)
+        num_hit_tokens = (
+            self.offloaded_block_size * (start_block_idx + hits) - num_computed_tokens
+        )
         logger.debug(
             "Request %s hit %s offloaded tokens after %s GPU hit tokens",
             request.request_id,
@@ -204,8 +209,9 @@ class OffloadingConnectorScheduler:
 
         return num_hit_tokens, True
 
-    def update_state_after_alloc(self, request: Request, blocks: KVCacheBlocks,
-                                 num_external_tokens: int):
+    def update_state_after_alloc(
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
+    ):
         self._requests[request.request_id] = request
         # the block ids are updated in _get_reqs_to_store
         self._request_block_ids[request.request_id] = []
@@ -216,31 +222,30 @@ class OffloadingConnectorScheduler:
         block_groups = blocks.get_block_ids()
         block_ids = block_groups[0]
 
-        num_computed_gpu_blocks = sum(block.block_hash is not None
-                                      for block in blocks.blocks[0])
+        num_computed_gpu_blocks = sum(
+            block.block_hash is not None for block in blocks.blocks[0]
+        )
         num_computed_tokens = num_computed_gpu_blocks * self.gpu_block_size
         full_block_tokens = num_computed_tokens + num_external_tokens
         assert full_block_tokens % self.offloaded_block_size == 0
 
         num_pending_gpu_blocks = len(block_ids) - num_computed_gpu_blocks
-        assert (num_external_tokens == num_pending_gpu_blocks *
-                self.gpu_block_size)
+        assert num_external_tokens == num_pending_gpu_blocks * self.gpu_block_size
 
         start_block_idx = num_computed_tokens // self.offloaded_block_size
         num_blocks = full_block_tokens // self.offloaded_block_size
 
-        assert (len(request.block_hashes) // self.block_size_factor
-                >= num_blocks)
-        block_hashes = self._get_block_hashes(request,
-                                              start_idx=start_block_idx,
-                                              end_idx=num_blocks)
+        assert len(request.block_hashes) // self.block_size_factor >= num_blocks
+        block_hashes = self._get_block_hashes(
+            request, start_idx=start_block_idx, end_idx=num_blocks
+        )
 
         src_spec = self.manager.prepare_load(block_hashes)
         dst_spec = GPULoadStoreSpec(block_ids[num_computed_gpu_blocks:])
 
-        block_hashes = self._get_block_hashes(request,
-                                              start_idx=start_block_idx,
-                                              end_idx=num_blocks)
+        block_hashes = self._get_block_hashes(
+            request, start_idx=start_block_idx, end_idx=num_blocks
+        )
 
         self._reqs_to_load[request.request_id] = (src_spec, dst_spec)
         self._reqs_being_loaded[request.request_id].update(block_hashes)
@@ -249,9 +254,7 @@ class OffloadingConnectorScheduler:
     def _get_reqs_to_store(self, scheduler_output: SchedulerOutput):
         reqs_to_store: dict[ReqId, TransferSpec] = {}
         # iterate over both new and cached requests
-        for req_id, new_block_id_groups, preempted in yield_req_data(
-                scheduler_output):
-
+        for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             if preempted:
                 self._request_block_ids[req_id] = []
 
@@ -275,11 +278,13 @@ class OffloadingConnectorScheduler:
             assert len(req.block_hashes) >= num_gpu_blocks
 
             new_block_hashes = self._get_block_hashes(
-                req, start_idx=start_block_idx, end_idx=num_blocks)
+                req, start_idx=start_block_idx, end_idx=num_blocks
+            )
             store_output = self.manager.prepare_store(new_block_hashes)
             if store_output is None:
-                logger.warning("Request %s: cannot store %s blocks", req_id,
-                               num_new_blocks)
+                logger.warning(
+                    "Request %s: cannot store %s blocks", req_id, num_new_blocks
+                )
                 continue
 
             self._next_stored_block_idx[req_id] = num_blocks
@@ -292,7 +297,8 @@ class OffloadingConnectorScheduler:
             self.manager.touch(block_hashes)
 
             new_block_hashes = self._get_block_hashes(
-                req, start_idx=start_block_idx, end_idx=num_blocks)
+                req, start_idx=start_block_idx, end_idx=num_blocks
+            )
             dst_spec = store_output.store_spec
             src_block_ids: list[int] = []
             for idx, blk_hash in enumerate(new_block_hashes):
@@ -317,10 +323,12 @@ class OffloadingConnectorScheduler:
         return reqs_to_store
 
     def build_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
         meta = OffloadingConnectorMetadata(
             reqs_to_load=self._reqs_to_load,
-            reqs_to_store=self._get_reqs_to_store(scheduler_output))
+            reqs_to_store=self._get_reqs_to_store(scheduler_output),
+        )
         self._reqs_to_load = {}
         return meta
 
@@ -346,7 +354,7 @@ class OffloadingConnectorScheduler:
         self,
         request: Request,
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called when a request has finished, before its blocks are freed.
 
@@ -373,15 +381,16 @@ class OffloadingConnectorScheduler:
         """
         for event in self.manager.take_events():
             if event.removed:
-                yield BlockRemoved(block_hashes=event.block_hashes,
-                                   medium=event.medium)
+                yield BlockRemoved(block_hashes=event.block_hashes, medium=event.medium)
             else:
-                yield BlockStored(block_hashes=event.block_hashes,
-                                  parent_block_hash=None,
-                                  token_ids=[],
-                                  lora_id=None,
-                                  block_size=event.block_size,
-                                  medium=event.medium)
+                yield BlockStored(
+                    block_hashes=event.block_hashes,
+                    parent_block_hash=None,
+                    token_ids=[],
+                    lora_id=None,
+                    block_size=event.block_size,
+                    medium=event.medium,
+                )
 
 
 class OffloadingConnectorWorker:
@@ -408,7 +417,7 @@ class OffloadingConnectorWorker:
         return job_id
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        for src_cls, dst_cls, handler in (self.spec.get_handlers(kv_caches)):
+        for src_cls, dst_cls, handler in self.spec.get_handlers(kv_caches):
             self.worker.register_handler(src_cls, dst_cls, handler)
 
     def start_load_kv(self, metadata: OffloadingConnectorMetadata):
@@ -426,8 +435,7 @@ class OffloadingConnectorWorker:
             self._store_jobs[req_id].add(job_id)
             assert self.worker.transfer_async(job_id, transfer_spec)
 
-    def get_finished(self,
-                     finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
+    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.
@@ -471,7 +479,8 @@ class OffloadingConnectorWorker:
 
 
 def yield_req_data(
-        scheduler_output) -> Iterator[tuple[str, tuple[list[int], ...], bool]]:
+    scheduler_output,
+) -> Iterator[tuple[str, tuple[list[int], ...], bool]]:
     """
     Yields:
         (req_id, new_block_id_groups, preempted)
@@ -482,5 +491,8 @@ def yield_req_data(
 
     # cached requests
     cached_reqs = scheduler_output.scheduled_cached_reqs
-    yield from zip(cached_reqs.req_ids, cached_reqs.new_block_ids,
-                   cached_reqs.resumed_from_preemption)
+    yield from zip(
+        cached_reqs.req_ids,
+        cached_reqs.new_block_ids,
+        cached_reqs.resumed_from_preemption,
+    )

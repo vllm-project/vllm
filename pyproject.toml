@@ -20,7 +20,6 @@ license-files = ["LICENSE"]
 readme = "README.md"
 description = "A high-throughput and memory-efficient inference and serving engine for LLMs"
 classifiers = [
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -31,7 +30,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-requires-python = ">=3.9,<3.14"
+requires-python = ">=3.10,<3.14"
 dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
@@ -52,27 +51,10 @@ lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:regi
 where = ["."]
 include = ["vllm*"]
 
-[tool.yapfignore]
-ignore_patterns = [
-    ".buildkite/**",
-    "benchmarks/**",
-    "build/**",
-    "examples/**",
-]
-
-[tool.ruff]
-# Allow lines to be as long as 80.
-line-length = 80
-
 [tool.ruff.lint.per-file-ignores]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
-# Python 3.8 typing - skip V0 code
-"vllm/attention/**/*.py" = ["UP006", "UP035"]
-"vllm/engine/**/*.py" = ["UP006", "UP035"]
-"vllm/executor/**/*.py" = ["UP006", "UP035"]
-"vllm/worker/**/*.py" = ["UP006", "UP035"]
 
 [tool.ruff.lint]
 select = [
@@ -87,7 +69,7 @@ select = [
     # flake8-simplify
     "SIM",
     # isort
-    # "I",
+    "I",
     # flake8-logging-format
     "G",
 ]
@@ -96,28 +78,22 @@ ignore = [
     "F405", "F403",
     # lambda expression assignment
     "E731",
+    # zip without `strict=`
+    "B905",
     # Loop control variable not used within loop body
     "B007",
     # f-string format
     "UP032",
-    # Can remove once 3.10+ is the minimum Python version
-    "UP007",
 ]
+
+[tool.ruff.format]
+docstring-code-format = true
 
 [tool.mypy]
 plugins = ['pydantic.mypy']
 ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
-
-[tool.isort]
-skip_glob = [
-    ".buildkite/*",
-    "benchmarks/*",
-    "examples/*",
-]
-use_parentheses = true
-skip_gitignore = true
 
 [tool.pytest.ini_options]
 markers = [
@@ -207,6 +183,7 @@ ba = "ba"
 
 [tool.typos.type.py.extend-words]
 ba = "ba"
+nd = "nd"
 
 [tool.typos.type.cpp]
 extend-glob = ["*.cu"]
