@@ -88,7 +88,6 @@ def test_enabled_ops(
             backend=backend, level=torch_level, custom_ops=custom_ops
         )
     )
-    # breakpoint()
     with set_current_vllm_config(vllm_config):
         assert CustomOp.default_on() == default_on
 

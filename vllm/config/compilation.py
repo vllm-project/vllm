@@ -239,7 +239,8 @@ class CompilationConfig:
     """
     Whether to use inductor compilation.
 
-    This flag is deprecated and will be removed.
+    This flag is deprecated and will be removed in the next release
+    either 0.12.0 or 0.11.2, whichever is first.
     Please use the 'backend' option instead.
 
     - False: inductor compilation is not used. graph runs in eager
