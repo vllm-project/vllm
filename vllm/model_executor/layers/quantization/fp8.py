@@ -1048,12 +1048,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 expert_map=expert_map,
             )
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert self.block_quant is None
-            assert (not renormalize and custom_routing_function is not None)
             assert activation == 'silu', (
                 f"Expected 'silu' activation but got {activation}")
-            assert scoring_func == 'sigmoid', (
-                f"Expected 'sigmoid' scoring func but got {scoring_func}")
 
             return flashinfer_cutlass_moe_fp8(
                 x,
@@ -1065,6 +1061,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input,
+                use_deepseek_fp8_block_scale=self.block_quant is not None,
             )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts

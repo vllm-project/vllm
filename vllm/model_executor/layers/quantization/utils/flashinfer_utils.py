@@ -170,16 +170,17 @@ def register_moe_scaling_factors(layer: torch.nn.Module) -> None:
 
 
 def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-    moe: Optional[FusedMoEConfig], ) -> mk.FusedMoEPrepareAndFinalize:
+    moe: Optional[FusedMoEConfig], use_deepseek_fp8_block_scale: bool = False) -> mk.FusedMoEPrepareAndFinalize:
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
     use_dp = moe.moe_parallel_config.dp_size > 1 if moe is not None else False
-    return create_flashinfer_prepare_finalize(use_dp)
+    return create_flashinfer_prepare_finalize(use_dp, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale)
 
 
 def select_cutlass_fp8_gemm_impl(
     moe: Optional[FusedMoEConfig],
     quant_config: FusedMoEQuantConfig,
     out_dtype: Optional[torch.dtype] = None,
+    use_deepseek_fp8_block_scale: bool = False,
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
     """Return a GEMM *experts* implementation for fused-MoE layers"""
 
@@ -191,6 +192,7 @@ def select_cutlass_fp8_gemm_impl(
             ep_size=moe.moe_parallel_config.ep_size,
             tp_rank=moe.moe_parallel_config.tp_rank,
             tp_size=moe.moe_parallel_config.tp_size,
+            use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
         )
 
     assert out_dtype is not None, (
@@ -198,6 +200,7 @@ def select_cutlass_fp8_gemm_impl(
     return FlashInferExperts(
         out_dtype=out_dtype,
         quant_config=quant_config,
+        use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
     )
 
 
@@ -211,15 +214,17 @@ def flashinfer_cutlass_moe_fp8(
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
     apply_router_weight_on_input: bool = False,
+    use_deepseek_fp8_block_scale: bool = False,
 ) -> torch.Tensor:
     quant_config = layer.quant_method.get_fused_moe_quant_config(layer)
     assert quant_config is not None
 
     fused_experts = mk.FusedMoEModularKernel(
-        build_flashinfer_fp8_cutlass_moe_prepare_finalize(moe=None),
+        build_flashinfer_fp8_cutlass_moe_prepare_finalize(moe=None, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale),
         select_cutlass_fp8_gemm_impl(moe=None,
                                      quant_config=quant_config,
-                                     out_dtype=hidden_states.dtype))
+                                     out_dtype=hidden_states.dtype,
+                                     use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale))
 
     return fused_experts(
         hidden_states,
