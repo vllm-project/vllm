@@ -399,6 +399,9 @@ def as_reward_model(cls: _T) -> _T:
     # Lazy import
     from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
 
+    from .interfaces_base import default_pooling_type
+
+    @default_pooling_type("ALL")
     class ModelForReward(_create_pooling_model_cls(cls)):
         def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
             pooler_config = vllm_config.model_config.pooler_config
