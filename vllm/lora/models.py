@@ -390,12 +390,12 @@ class LoRAModelManager:
             )
         else:
             self.supports_mm_lora = False
-        if self.supports_mm_lora:  # 从init传进来就可以了，不需要model_config了
+        if self.supports_mm_lora:
             self.mm_mapping: MultiModelKeys = self.model.get_mm_mapping()
             self.mm_config = model_config.multimodal_config
             # limit_per_prompt: int = max(
             #     self.info.get_allowed_mm_limits().values())
-            limit_per_prompt = 5
+            limit_per_prompt = 5 # TODO
 
             # For vision tower
             # max_num_batched_tokens = encoder_budget
