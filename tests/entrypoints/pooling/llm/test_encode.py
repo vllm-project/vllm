@@ -74,7 +74,6 @@ def test_multiple_pooling_params(llm: LLM):
     assert len(PROMPTS) == len(outputs)
 
 
-@pytest.mark.skip_global_cleanup
 def test_right_side_truncation(llm: LLM):
     # Embeddings models should truncate the end of the prompt
     tokenizer = llm.get_tokenizer()

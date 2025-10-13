@@ -33,7 +33,6 @@ def llm():
     cleanup_dist_env_and_memory()
 
 
-@pytest.mark.skip_global_cleanup
 def test_pooling_params(llm: LLM):
     def get_outputs(activation):
         text_1 = "What is the capital of France?"
