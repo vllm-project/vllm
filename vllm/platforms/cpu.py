@@ -178,6 +178,10 @@ class CpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        if cls.get_cpu_architecture() == CpuArchEnum.RISCV:
+            # Disable torch.compile to prevent Inductor from compiling C++ code
+            # with -march=native, which causes APIError during inference
+            os.environ["TORCH_COMPILE_DISABLE"] = "1"
         model_config = vllm_config.model_config
 
         if model_config is not None:
