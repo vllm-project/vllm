@@ -123,8 +123,8 @@ def rank_worker(
                 rtol = 3e-2
 
             torch.set_printoptions(profile="full")
-            #print(f"REF = {ref_out}")
-            #print(f"OUT = {mk_out}")
+            # print(f"REF = {ref_out}")
+            # print(f"OUT = {mk_out}")
 
             torch.testing.assert_close(ref_out, mk_out, atol=atol, rtol=rtol)
             format_result(verbose, config.describe())
@@ -164,8 +164,8 @@ if False:
     DTYPEs = [torch.bfloat16]
     FUSED_MOE_CHUNK_SIZEs = [None, 16]
 else:
-    Ms = [16] #[32, 64]
-    Ks = [512] # must be >= 512 for hybrid
+    Ms = [16]  # [32, 64]
+    Ks = [512]  # must be >= 512 for hybrid
     Ns = [128]
     TOPKs = [4, 1]
     Es = [8]

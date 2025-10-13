@@ -560,7 +560,7 @@ def make_modular_kernel(
 
         if x == 0:
             return 1
-        return int(2**math.ceil(math.log2(x)))
+        return int(2 ** math.ceil(math.log2(x)))
 
     # make moe config
     moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
