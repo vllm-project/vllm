@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
 
 
@@ -39,17 +39,30 @@ class CudagraphDispatcher:
             not self.cudagraph_mode.requires_piecewise_compilation()
         )
 
-        assert (
+        # Check if piecewise compilation is valid considering edge cases
+        piecewise_compilation_valid = (
             not_use_piecewise_compilation
             or self.compilation_config.is_attention_compiled_piecewise()
-        ), (
-            "Compilation level should be CompilationLevel.PIECEWISE when "
-            "cudagraph_mode piecewise cudagraphs is used, "
-            "and attention should be in splitting_ops or "
-            "inductor splitting should be used. "
+            or (
+                # Allow piecewise cudagraphs when using Inductor graph partition
+                # even if is_attention_compiled_piecewise() returns False due to:
+                # 1. Attention fusion enabled (splitting_ops empty)
+                # 2. Mutation ops filtered from splitting_ops
+                self.compilation_config.level == CompilationLevel.PIECEWISE
+                and self.compilation_config.use_inductor_graph_partition
+            )
+        )
+
+        assert piecewise_compilation_valid, (
+            "Compilation level should be PIECEWISE when piecewise cudagraphs "
+            "are requested, and either attention must be in splitting_ops "
+            "or Inductor graph partitioning must be enabled. "
             f"cudagraph_mode={self.cudagraph_mode}, "
             f"compilation_level={self.compilation_config.level}, "
-            f"splitting_ops={self.compilation_config.splitting_ops}"
+            f"use_inductor_graph_partition="
+            f"{self.compilation_config.use_inductor_graph_partition}, "
+            f"splitting_ops={self.compilation_config.splitting_ops}, "
+            f"is_attention_compiled_piecewise={self.compilation_config.is_attention_compiled_piecewise()}"
         )
 
         self.keys_initialized = False
