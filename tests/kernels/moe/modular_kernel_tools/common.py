@@ -278,14 +278,6 @@ class Config:
         if self.needs_pplx() and not has_pplx():  # noqa: SIM103
             return False, "Needs PPLX, but PPLX not available."
 
-        # from vllm.model_executor.layers.fused_moe.deepep_hybrid_prepare_finalize import (  # noqa: E501
-        #     DeepEPHybridPrepareAndFinalize)
-        # from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
-
-        # if (self.prepare_finalize_type == DeepEPHybridPrepareAndFinalize and
-        #     self.fused_experts_type != DeepGemmExperts):
-        #     return False
-
         return True, None
 
 
@@ -585,6 +577,7 @@ def make_modular_kernel(
         num_local_experts=config.num_local_experts,
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
+        # 128 for hybrid DeepEP. TODO(bnell): make this smarter
         max_num_tokens=max(128, next_power_of_2(config.M)),
     )
 
