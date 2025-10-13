@@ -1,6 +1,31 @@
 #!/bin/bash
 set -xe
 
+# Parse command line arguments
+KV_BUFFER_DEVICE="cuda"  # Default to cuda
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --kv_buffer_device)
+      KV_BUFFER_DEVICE="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option $1"
+      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>]"
+      exit 1
+      ;;
+  esac
+done
+
+echo "Running accuracy tests with kv_buffer_device=$KV_BUFFER_DEVICE"
+
+# Build the kv-transfer-config once
+if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
+  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+else
+  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\"}"
+fi
+
 # Models to run
 MODELS=(
     "Qwen/Qwen3-0.6B"
@@ -76,10 +101,16 @@ run_tests_for_model() {
   for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     # Calculate GPU ID - we'll distribute across available GPUs
     GPU_ID=$((i % $(get_num_gpus)))
+    NEXT_GPU=${GPU_ID}
+    # If PREFILLER_TP_SIZE is more than 1
+    for (( j=1; j < PREFILLER_TP_SIZE; j++ )); do
+      NEXT_GPU=$(((GPU_ID + j) % $(get_num_gpus)))
+      GPU_ID="${GPU_ID},${NEXT_GPU}"
+    done
 
     # Calculate port number (base port + instance number)
     PORT=$((8100 + i))
-    # Calculate side channel port. Avoid clash with with TP workers. 
+    # Calculate side channel port. Avoid clash with with TP workers.
     SIDE_CHANNEL_PORT=$((5559 + i))
 
     echo "Starting prefill instance $i on GPU $GPU_ID, port $PORT"
@@ -93,7 +124,7 @@ run_tests_for_model() {
     --enforce-eager \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'"
+    --kv-transfer-config '$KV_CONFIG'"
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
@@ -111,7 +142,12 @@ run_tests_for_model() {
   # Start decode instances
   for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     # Calculate GPU ID - we'll distribute across available GPUs, starting from after prefill GPUs
-    GPU_ID=$(((i + NUM_PREFILL_INSTANCES) % $(get_num_gpus)))
+    GPU_ID=$(((i + NEXT_GPU + 1) % $(get_num_gpus)))
+    # If DECODER_TP_SIZE is more than 1
+    for (( j=1; j < DECODER_TP_SIZE; j++ )); do
+      NEXT_GPU=$(((GPU_ID + j) % $(get_num_gpus)))
+      GPU_ID="${GPU_ID},${NEXT_GPU}"
+    done
     # Calculate port number (base port + instance number)
     PORT=$((8200 + i))
     # Calculate side channel port
@@ -128,7 +164,7 @@ run_tests_for_model() {
     --enforce-eager \
     --gpu-memory-utilization 0.2 \
     --tensor-parallel-size $DECODER_TP_SIZE \
-    --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}'"
+    --kv-transfer-config '$KV_CONFIG'"
 
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"

@@ -3,7 +3,7 @@
 
 import hashlib
 from functools import cached_property
-from typing import Any, Literal, Optional, cast
+from typing import Any, Literal, cast
 
 from pydantic.dataclasses import dataclass
 
@@ -18,7 +18,7 @@ DetailedTraceModules = Literal["model", "worker", "all"]
 class ObservabilityConfig:
     """Configuration for observability - metrics and tracing."""
 
-    show_hidden_metrics_for_version: Optional[str] = None
+    show_hidden_metrics_for_version: str | None = None
     """Enable deprecated Prometheus metrics that have been hidden since the
     specified version. For example, if a previously deprecated metric has been
     hidden since the v0.7.0 release, you use
@@ -31,13 +31,12 @@ class ObservabilityConfig:
         """Check if the hidden metrics should be shown."""
         if self.show_hidden_metrics_for_version is None:
             return False
-        return version._prev_minor_version_was(
-            self.show_hidden_metrics_for_version)
+        return version._prev_minor_version_was(self.show_hidden_metrics_for_version)
 
-    otlp_traces_endpoint: Optional[str] = None
+    otlp_traces_endpoint: str | None = None
     """Target URL to which OpenTelemetry traces will be sent."""
 
-    collect_detailed_traces: Optional[list[DetailedTraceModules]] = None
+    collect_detailed_traces: list[DetailedTraceModules] | None = None
     """It makes sense to set this only if `--otlp-traces-endpoint` is set. If
     set, it will collect detailed traces for the specified modules. This
     involves use of possibly costly and or blocking operations and hence might
@@ -49,16 +48,18 @@ class ObservabilityConfig:
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""
-        return (self.collect_detailed_traces is not None
-                and ("model" in self.collect_detailed_traces
-                     or "all" in self.collect_detailed_traces))
+        return self.collect_detailed_traces is not None and (
+            "model" in self.collect_detailed_traces
+            or "all" in self.collect_detailed_traces
+        )
 
     @cached_property
     def collect_model_execute_time(self) -> bool:
         """Whether to collect model execute time for the request."""
-        return (self.collect_detailed_traces is not None
-                and ("worker" in self.collect_detailed_traces
-                     or "all" in self.collect_detailed_traces))
+        return self.collect_detailed_traces is not None and (
+            "worker" in self.collect_detailed_traces
+            or "all" in self.collect_detailed_traces
+        )
 
     def compute_hash(self) -> str:
         """
@@ -75,25 +76,28 @@ class ObservabilityConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     def __post_init__(self):
-        if (self.collect_detailed_traces is not None
-                and len(self.collect_detailed_traces) == 1
-                and "," in self.collect_detailed_traces[0]):
+        if (
+            self.collect_detailed_traces is not None
+            and len(self.collect_detailed_traces) == 1
+            and "," in self.collect_detailed_traces[0]
+        ):
             self._parse_collect_detailed_traces()
 
         from vllm.tracing import is_otel_available, otel_import_error_traceback
+
         if not is_otel_available() and self.otlp_traces_endpoint is not None:
             raise ValueError(
                 "OpenTelemetry is not available. Unable to configure "
                 "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
-                f"installed. Original error:\n{otel_import_error_traceback}")
+                f"installed. Original error:\n{otel_import_error_traceback}"
+            )
 
     def _parse_collect_detailed_traces(self):
         assert isinstance(self.collect_detailed_traces, list)
         self.collect_detailed_traces = cast(
-            list[DetailedTraceModules],
-            self.collect_detailed_traces[0].split(","))
+            list[DetailedTraceModules], self.collect_detailed_traces[0].split(",")
+        )

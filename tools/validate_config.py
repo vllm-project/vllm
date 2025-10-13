@@ -8,6 +8,7 @@ and that each field has a docstring.
 import ast
 import inspect
 import sys
+from itertools import pairwise
 
 import regex as re
 
@@ -20,28 +21,17 @@ def get_attr_docs(cls_node: ast.ClassDef) -> dict[str, str]:
     https://davidism.com/mit-license/
     """
 
-    def pairwise(iterable):
-        """
-        Manually implement https://docs.python.org/3/library/itertools.html#itertools.pairwise
-
-        Can be removed when Python 3.9 support is dropped.
-        """
-        iterator = iter(iterable)
-        a = next(iterator, None)
-
-        for b in iterator:
-            yield a, b
-            a = b
-
     out = {}
 
     # Consider each pair of nodes.
     for a, b in pairwise(cls_node.body):
         # Must be an assignment then a constant string.
-        if (not isinstance(a, (ast.Assign, ast.AnnAssign))
-                or not isinstance(b, ast.Expr)
-                or not isinstance(b.value, ast.Constant)
-                or not isinstance(b.value.value, str)):
+        if (
+            not isinstance(a, (ast.Assign, ast.AnnAssign))
+            or not isinstance(b, ast.Expr)
+            or not isinstance(b.value, ast.Constant)
+            or not isinstance(b.value.value, str)
+        ):
             continue
 
         doc = inspect.cleandoc(b.value.value)
@@ -61,25 +51,27 @@ def get_attr_docs(cls_node: ast.ClassDef) -> dict[str, str]:
 
 
 class ConfigValidator(ast.NodeVisitor):
-
-    def __init__(self):
-        ...
+    def __init__(self): ...
 
     def visit_ClassDef(self, node):
         # Validate class with both @config and @dataclass decorators
         decorators = [
-            id for d in node.decorator_list if (isinstance(d, ast.Name) and (
-                (id := d.id) == 'config' or id == 'dataclass')) or
-            (isinstance(d, ast.Call) and (isinstance(d.func, ast.Name) and
-                                          (id := d.func.id) == 'dataclass'))
+            id
+            for d in node.decorator_list
+            if (
+                isinstance(d, ast.Name)
+                and ((id := d.id) == "config" or id == "dataclass")
+            )
+            or (
+                isinstance(d, ast.Call)
+                and (isinstance(d.func, ast.Name) and (id := d.func.id) == "dataclass")
+            )
         ]
 
-        if set(decorators) == {'config', 'dataclass'}:
+        if set(decorators) == {"config", "dataclass"}:
             validate_class(node)
-        elif set(decorators) == {'config'}:
-            fail(
-                f"Class {node.name} with config decorator must be a dataclass.",
-                node)
+        elif set(decorators) == {"config"}:
+            fail(f"Class {node.name} with config decorator must be a dataclass.", node)
 
         self.generic_visit(node)
 
@@ -93,9 +85,11 @@ def validate_class(class_node: ast.ClassDef):
             # Skip ClassVar and InitVar
             # see https://docs.python.org/3/library/dataclasses.html#class-variables
             # and https://docs.python.org/3/library/dataclasses.html#init-only-variables
-            if (isinstance(stmt.annotation, ast.Subscript)
-                    and isinstance(stmt.annotation.value, ast.Name)
-                    and stmt.annotation.value.id in {"ClassVar", "InitVar"}):
+            if (
+                isinstance(stmt.annotation, ast.Subscript)
+                and isinstance(stmt.annotation.value, ast.Name)
+                and stmt.annotation.value.id in {"ClassVar", "InitVar"}
+            ):
                 continue
 
             if isinstance(stmt.target, ast.Name):
@@ -103,22 +97,30 @@ def validate_class(class_node: ast.ClassDef):
                 if stmt.value is None:
                     fail(
                         f"Field '{field_name}' in {class_node.name} must have "
-                        "a default value.", stmt)
+                        "a default value.",
+                        stmt,
+                    )
 
                 if field_name not in attr_docs:
                     fail(
                         f"Field '{field_name}' in {class_node.name} must have "
-                        "a docstring.", stmt)
+                        "a docstring.",
+                        stmt,
+                    )
 
-                if isinstance(stmt.annotation, ast.Subscript) and \
-                   isinstance(stmt.annotation.value, ast.Name) \
-                    and stmt.annotation.value.id == "Union" and \
-                        isinstance(stmt.annotation.slice, ast.Tuple):
+                if (
+                    isinstance(stmt.annotation, ast.Subscript)
+                    and isinstance(stmt.annotation.value, ast.Name)
+                    and stmt.annotation.value.id == "Union"
+                    and isinstance(stmt.annotation.slice, ast.Tuple)
+                ):
                     args = stmt.annotation.slice.elts
                     literal_args = [
-                        arg for arg in args
-                        if isinstance(arg, ast.Subscript) and isinstance(
-                            arg.value, ast.Name) and arg.value.id == "Literal"
+                        arg
+                        for arg in args
+                        if isinstance(arg, ast.Subscript)
+                        and isinstance(arg.value, ast.Name)
+                        and arg.value.id == "Literal"
                     ]
                     if len(literal_args) > 1:
                         fail(
@@ -126,7 +128,9 @@ def validate_class(class_node: ast.ClassDef):
                             "use a single "
                             "Literal type. Please use 'Literal[Literal1, "
                             "Literal2]' instead of 'Union[Literal1, Literal2]'"
-                            ".", stmt)
+                            ".",
+                            stmt,
+                        )
 
 
 def validate_ast(tree: ast.stmt):

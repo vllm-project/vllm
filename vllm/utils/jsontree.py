@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helper functions to work with nested JSON structures."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from functools import reduce
-from typing import TYPE_CHECKING, Callable, TypeVar, Union, cast, overload
+from typing import TYPE_CHECKING, TypeAlias, TypeVar, cast, overload
 
 if TYPE_CHECKING:
     import torch
@@ -14,23 +14,20 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 _U = TypeVar("_U")
 
-JSONTree = Union[
-    dict[str, "JSONTree[_T]"],
-    list["JSONTree[_T]"],
-    tuple["JSONTree[_T]", ...],
-    _T,
-]
+JSONTree: TypeAlias = (
+    dict[str, "JSONTree[_T]"] | list["JSONTree[_T]"] | tuple["JSONTree[_T]", ...] | _T
+)
 """A nested JSON structure where the leaves need not be JSON-serializable."""
 
-_JSONTree = Union[
-    dict[str, "JSONTree[_T]"],
-    list["JSONTree[_T]"],
-    tuple["JSONTree[_T]", ...],
-    dict[str, _T],
-    list[_T],
-    tuple[_T, ...],
-    _T,
-]
+_JSONTree: TypeAlias = (
+    dict[str, "JSONTree[_T]"]
+    | list["JSONTree[_T]"]
+    | tuple["JSONTree[_T]", ...]
+    | dict[str, _T]
+    | list[_T]
+    | tuple[_T, ...]
+    | _T
+)
 """
 Same as `JSONTree` but with additional `Union` members to satisfy overloads.
 """
@@ -52,46 +49,41 @@ def json_iter_leaves(value: JSONTree[_T]) -> Iterable[_T]:
 def json_map_leaves(
     func: Callable[["torch.Tensor"], "torch.Tensor"],
     value: "BatchedTensorInputs",
-) -> "BatchedTensorInputs":
-    ...
+) -> "BatchedTensorInputs": ...
 
 
 @overload
 def json_map_leaves(
     func: Callable[[_T], _U],
-    value: Union[_T, dict[str, _T]],
-) -> Union[_U, dict[str, _U]]:
-    ...
+    value: _T | dict[str, _T],
+) -> _U | dict[str, _U]: ...
 
 
 @overload
 def json_map_leaves(
     func: Callable[[_T], _U],
-    value: Union[_T, list[_T]],
-) -> Union[_U, list[_U]]:
-    ...
+    value: _T | list[_T],
+) -> _U | list[_U]: ...
 
 
 @overload
 def json_map_leaves(
     func: Callable[[_T], _U],
-    value: Union[_T, tuple[_T, ...]],
-) -> Union[_U, tuple[_U, ...]]:
-    ...
+    value: _T | tuple[_T, ...],
+) -> _U | tuple[_U, ...]: ...
 
 
 @overload
 def json_map_leaves(
     func: Callable[[_T], _U],
     value: JSONTree[_T],
-) -> JSONTree[_U]:
-    ...
+) -> JSONTree[_U]: ...
 
 
 def json_map_leaves(
     func: Callable[[_T], _U],
-    value: Union["BatchedTensorInputs", _JSONTree[_T]],
-) -> Union["BatchedTensorInputs", _JSONTree[_U]]:
+    value: "BatchedTensorInputs" | _JSONTree[_T],
+) -> "BatchedTensorInputs" | _JSONTree[_U]:
     """Apply a function to each leaf in a nested JSON structure."""
     if isinstance(value, dict):
         return {
@@ -109,28 +101,25 @@ def json_map_leaves(
 @overload
 def json_reduce_leaves(
     func: Callable[[_T, _T], _T],
-    value: Union[_T, dict[str, _T]],
+    value: _T | dict[str, _T],
     /,
-) -> _T:
-    ...
+) -> _T: ...
 
 
 @overload
 def json_reduce_leaves(
     func: Callable[[_T, _T], _T],
-    value: Union[_T, list[_T]],
+    value: _T | list[_T],
     /,
-) -> _T:
-    ...
+) -> _T: ...
 
 
 @overload
 def json_reduce_leaves(
     func: Callable[[_T, _T], _T],
-    value: Union[_T, tuple[_T, ...]],
+    value: _T | tuple[_T, ...],
     /,
-) -> _T:
-    ...
+) -> _T: ...
 
 
 @overload
@@ -138,8 +127,7 @@ def json_reduce_leaves(
     func: Callable[[_T, _T], _T],
     value: JSONTree[_T],
     /,
-) -> _T:
-    ...
+) -> _T: ...
 
 
 @overload
@@ -148,16 +136,15 @@ def json_reduce_leaves(
     value: JSONTree[_T],
     initial: _U,
     /,
-) -> _U:
-    ...
+) -> _U: ...
 
 
 def json_reduce_leaves(
-        func: Callable[..., Union[_T, _U]],
-        value: _JSONTree[_T],
-        initial: _U = cast(_U, ...),  # noqa: B008
-        /,
-) -> Union[_T, _U]:
+    func: Callable[..., _T | _U],
+    value: _JSONTree[_T],
+    initial: _U = cast(_U, ...),  # noqa: B008
+    /,
+) -> _T | _U:
     """
     Apply a function of two arguments cumulatively to each leaf in a
     nested JSON structure, from left to right, so as to reduce the
