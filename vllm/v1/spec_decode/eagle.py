@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
 
@@ -133,17 +134,23 @@ class EagleProposer:
         next_token_ids: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
+        input_batch: Optional[InputBatch] = None,
+        input_requests: Optional[dict[str, CachedRequestState]] = None,
         mm_embeds: Optional[list[torch.Tensor]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
+        req_early_stop_signal: Optional[torch.Tensor] = None
+
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
-            target_hidden_states = self.model.combine_hidden_states(
-                target_hidden_states)
-            assert target_hidden_states.shape[-1] == self.hidden_size
+            target_hidden_states, batch_early_stop_signal = \
+                self.extract_eagle3_states(target_hidden_states)
+            self.batch_to_req_early_stop_signal(batch_early_stop_signal,
+                                                common_attn_metadata,
+                                                input_batch, input_requests)
 
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
@@ -323,7 +330,7 @@ class EagleProposer:
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
-        return draft_token_ids
+        return draft_token_ids, req_early_stop_signal
 
     def propose_tree(
         self,
@@ -493,6 +500,74 @@ class EagleProposer:
                                                         1] - total_num_drafts
             total_num_drafts = self.cu_drafts_per_level[level + 1]
         return draft_token_ids_list
+
+    def extract_eagle3_states(self, target_hidden_states):
+        assert isinstance(self.model, Eagle3LlamaForCausalLM)
+        combined_states = self.model.combine_hidden_states(
+            target_hidden_states)
+
+        processed_hidden_states = combined_states[..., :self.hidden_size]
+        if self.speculative_config.early_stop_thinking:
+            assert processed_hidden_states.shape[-1] == self.hidden_size
+
+            if self.speculative_config.early_stop_method == "remain":
+                assert combined_states.shape[-1] == self.hidden_size + 1
+                pred_remain = torch.exp(
+                    combined_states[...,
+                                    self.hidden_size].float()).view(-1, 1)
+                return processed_hidden_states, pred_remain
+
+            elif self.speculative_config.early_stop_method == "confidence":
+                assert combined_states.shape[-1] == self.hidden_size + 1
+                pred_confidence = torch.sigmoid(
+                    combined_states[...,
+                                    self.hidden_size].float()).view(-1, 1)
+                return processed_hidden_states, pred_confidence
+
+            elif self.speculative_config.early_stop_method == (
+                    "confidence_progress_remain"):
+                assert combined_states.shape[-1] == self.hidden_size + 3
+                pred_confidence = torch.sigmoid(
+                    combined_states[..., self.hidden_size].float())[:, None]
+                pred_progress = torch.sigmoid(
+                    combined_states[..., self.hidden_size + 1].float())[:,
+                                                                        None]
+                pred_remain = torch.exp(combined_states[..., self.hidden_size +
+                                                        2].float())[:, None]
+                pred_signals = torch.cat(
+                    (pred_confidence, pred_progress, pred_remain),
+                    dim=-1).view(-1, 3)
+                return processed_hidden_states, pred_signals
+
+            else:
+                raise ValueError("Invalid early stop method: {}".format(
+                    self.speculative_config.early_stop_method))
+
+        return processed_hidden_states, None
+
+    def batch_to_req_early_stop_signal(self, batch_early_stop_signal,
+                                       common_attn_metadata, input_batch,
+                                       input_requests):
+        query_start_loc = common_attn_metadata.query_start_loc
+        req_early_stop_signal = None
+        if (batch_early_stop_signal is not None and input_batch is not None
+                and input_requests is not None):
+            signal_batch_size, signal_num = batch_early_stop_signal.shape
+            assert query_start_loc[-1] == signal_batch_size
+            req_early_stop_signal = \
+                batch_early_stop_signal[query_start_loc[1:] - 1]
+
+            req_early_stop_signal_cpu = req_early_stop_signal.cpu().tolist()
+            assert (len(req_early_stop_signal_cpu) == len(input_batch.req_ids))
+
+            for i, req_id in enumerate(input_batch.req_ids):
+                req_state = input_requests[req_id]
+                signal = req_early_stop_signal_cpu[i]
+
+                if (len(req_state.output_token_ids) < 1 or not signal
+                        or not req_state.thinking_state):
+                    continue
+                req_state.update_early_stop_signal(signal)
 
     def prepare_inputs(
         self,

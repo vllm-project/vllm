@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Datastructures defining a GPU input batch
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, cast
 
 import numpy as np
@@ -46,6 +46,11 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
 
+    thinking_state: bool = False
+    need_early_exit: bool = False
+    early_stop_signal_list: list[list[float]] = field(default_factory=list)
+    early_stop_ewma_score: list[float] = field(default_factory=list)
+
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
 
@@ -65,6 +70,17 @@ class CachedRequestState:
             return self.prompt_token_ids[idx]
         else:
             return self.output_token_ids[idx - self.num_prompt_tokens]
+
+    def update_early_stop_signal(self, score: list[float], alpha: float = 0.1):
+        if score and score[-1] < 1000:
+            if not self.early_stop_ewma_score:
+                self.early_stop_ewma_score = score
+            else:
+                assert len(score) == len(self.early_stop_ewma_score)
+                for i in range(len(score)):
+                    self.early_stop_ewma_score[i] = alpha * score[i] + (
+                        1 - alpha) * self.early_stop_ewma_score[i]
+            self.early_stop_signal_list.append(score)
 
 
 class InputBatch:

@@ -1985,6 +1985,11 @@ class SpeculativeConfig:
         ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
 
+    early_stop_thinking: bool = False
+
+    early_stop_method: Optional[Literal["confidence", "remain", "progress",
+                                        "confidence_progress_remain"]] = None
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

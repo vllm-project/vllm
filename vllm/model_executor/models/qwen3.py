@@ -27,7 +27,7 @@ from typing import Any, Optional, Union
 
 import torch
 from torch import nn
-from transformers import Qwen3Config
+from transformers import AutoTokenizer, Qwen3Config
 
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
@@ -42,6 +42,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.utils import ThinkSettings
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
@@ -286,6 +287,30 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         self.quant_config = quant_config
         self.model = Qwen3Model(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            vllm_config.model_config.model)
+        start_think_ids = tokenizer.encode("<think>", add_special_tokens=False)
+        stop_think_ids = tokenizer.encode("</think>", add_special_tokens=False)
+        assert len(start_think_ids) == 1 and len(stop_think_ids) == 1, \
+            f"Invalid think IDs: " \
+            f"</think> {start_think_ids}, " \
+            f"</think> {stop_think_ids}"
+
+        self.think_settings = ThinkSettings(
+            start_think_id=start_think_ids[0],
+            stop_think_id=stop_think_ids[0],
+        )
+
+        for text in self.think_settings.step_split_tokens:
+            encoded_tokens = tokenizer.encode(text, add_special_tokens=False)
+            if len(encoded_tokens) == 1:
+                self.think_settings.step_split_token_ids.add(encoded_tokens[0])
+        for text in self.think_settings.discourse_marker_tokens:
+            encoded_tokens = tokenizer.encode(text, add_special_tokens=False)
+            if len(encoded_tokens) == 1:
+                self.think_settings.discourse_marker_token_ids.add(
+                    encoded_tokens[0])
 
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:

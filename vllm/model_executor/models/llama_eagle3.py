@@ -127,13 +127,25 @@ class LlamaModel(nn.Module):
             )
         ])
         if hasattr(self.config, "target_hidden_size"):
-            self.fc = torch.nn.Linear(self.config.target_hidden_size * 3,
-                                      self.config.hidden_size,
-                                      bias=False)
+            fc_input_size = self.config.target_hidden_size * 3
         else:
-            self.fc = torch.nn.Linear(self.config.hidden_size * 3,
-                                      self.config.hidden_size,
-                                      bias=False)
+            fc_input_size = self.config.hidden_size * 3
+
+        fc_output_size = self.config.hidden_size
+
+        if hasattr(self.config, "early_stop_method"):
+            early_stop_method = self.config.early_stop_method
+            if early_stop_method in ["confidence", "progress", "remain"]:
+                fc_output_size = self.config.hidden_size + 1
+            elif early_stop_method == "confidence_progress_remain":
+                fc_output_size = self.config.hidden_size + 3
+            else:
+                logger.error("Unknown confidence loss type: %s",
+                             early_stop_method)
+        logger.info("eagle fc_output_size=%d", fc_output_size)
+
+        self.fc = torch.nn.Linear(fc_input_size, fc_output_size, bias=False)
+
         self.norm = RMSNorm(
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,

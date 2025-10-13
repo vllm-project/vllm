@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -93,6 +93,8 @@ class CachedRequestData:
     new_token_ids: list[list[int]]
     new_block_ids: list[tuple[list[int], ...]]
     num_computed_tokens: list[int]
+
+    thinking_states: list[bool] = field(default_factory=list)
 
     @property
     def num_reqs(self) -> int:

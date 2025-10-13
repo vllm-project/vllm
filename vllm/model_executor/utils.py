@@ -3,6 +3,7 @@
 """Utils for model executor."""
 
 import copy
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import torch
@@ -94,3 +95,44 @@ def get_moe_expert_mapping(
             if child_map is not None:
                 return child_map()
         return []
+
+
+@dataclass
+class ThinkSettings:
+    start_think_id: int  # '<think>'
+    stop_think_id: int  # '</think>'
+    min_think_tokens: int = 15
+    ewma_alpha: float = 0.1
+    use_ewma: bool = True
+    think_prob_threshold: dict[str, float] = field(default_factory=lambda: {
+        "remain": 100.0,
+        "confidence": 0.8,
+        "progress": 0.3
+    })
+    step_split_tokens: list[str] = field(
+        default_factory=lambda:
+        ["\n\n", "\n\n\n", ".\n\n", ".\n\n\n", " \n\n", " \n\n\n"])
+    step_split_token_ids: set[int] = field(default_factory=set)
+    discourse_marker_tokens: list[str] = field(default_factory=lambda: [
+        "Wait", "Hmm", "Yet", "Instead", "Alternatively", "However", "But",
+        "Therefore", "Thus", "So", "Well", "Okay", "Right", "Alright", "First",
+        "Next", "Let", "Let's"
+    ])
+    discourse_marker_token_ids: set[int] = field(default_factory=set)
+
+    def judge_score(self, scores: list[float], method: str):
+        method_list = method.split("_")
+        can_stop = True
+        for score, score_method in zip(scores, method_list):
+            if score_method == "remain":
+                can_stop = can_stop and score < self.think_prob_threshold[
+                    "remain"]
+            elif score_method == "confidence":
+                can_stop = can_stop and score > self.think_prob_threshold[
+                    "confidence"]
+            elif score_method == "progress":
+                can_stop = can_stop and score > self.think_prob_threshold[
+                    "progress"]
+            else:
+                raise ValueError(f"Invalid score method: {score_method}")
+        return can_stop

@@ -142,6 +142,7 @@ class Scheduler(SchedulerInterface):
 
         speculative_config = vllm_config.speculative_config
 
+        self.early_stop_thinking = False
         self.use_eagle = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
         if speculative_config:
@@ -150,6 +151,9 @@ class Scheduler(SchedulerInterface):
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
 
+            self.early_stop_thinking = speculative_config.early_stop_thinking
+            if self.early_stop_thinking:
+                logger.info("early_stop_thinking %s", self.early_stop_thinking)
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
@@ -635,11 +639,13 @@ class Scheduler(SchedulerInterface):
         new_token_ids: list[list[int]] = []
         new_block_ids: list[tuple[list[int], ...]] = []
         num_computed_tokens: list[int] = []
+        thinking_states: list[bool] = []
 
         use_connector = self.connector is not None
         for req in itertools.chain(running_reqs, resumed_reqs):
             req_id = req.request_id
             req_ids.append(req_id)
+            thinking_states.append(req.thinking_state)
             num_tokens = (num_scheduled_tokens[req_id] -
                           len(spec_decode_tokens.get(req_id, ())))
             if self.use_pp:
@@ -669,6 +675,7 @@ class Scheduler(SchedulerInterface):
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
+            thinking_states=thinking_states,
         )
 
     def _try_schedule_encoder_inputs(

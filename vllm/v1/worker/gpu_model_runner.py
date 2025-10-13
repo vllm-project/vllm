@@ -42,6 +42,7 @@ from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
                                                    supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
+from vllm.model_executor.utils import ThinkSettings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
                                     PlaceholderRange)
@@ -470,6 +471,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
             pooling_params = new_req_data.pooling_params
+            if (self.speculative_config
+                    and self.speculative_config.early_stop_thinking):
+                thinking_state = True
+            else:
+                thinking_state = False
 
             if sampling_params and \
                 sampling_params.sampling_type == SamplingType.RANDOM_SEED:
@@ -498,6 +504,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                thinking_state=thinking_state,
             )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1741,6 +1748,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
 
+        if self.speculative_config and self.speculative_config.use_eagle(
+        ) and self.speculative_config.early_stop_thinking:
+            self._apply_early_stop_thinking(valid_sampled_token_ids)
+
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
         # NOTE(woosuk): As an exception, when using PP, the scheduler sends
@@ -1889,7 +1900,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 mm_embeds = self._gather_mm_embeddings(scheduler_output,
                                                        shift_computed_tokens=1)
 
-            draft_token_ids = self.drafter.propose(
+            draft_token_ids, req_early_stop_signal = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -1897,7 +1908,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
                 mm_embeds=mm_embeds,
+                input_batch=self.input_batch,
+                input_requests=self.requests,
             )
+
+            if (self.speculative_config.early_stop_thinking
+                    and req_early_stop_signal is not None):
+                req_early_stop_signal_cpu = req_early_stop_signal.cpu().tolist(
+                )
+                assert (len(req_early_stop_signal_cpu) == len(
+                    self.input_batch.req_ids))
+
+                for i, req_id in enumerate(self.input_batch.req_ids):
+                    req_state = self.requests[req_id]
+                    signal = req_early_stop_signal_cpu[i]
+
+                    if (len(req_state.output_token_ids) < 1 or not signal
+                            or not req_state.thinking_state):
+                        continue
+                    req_state.update_early_stop_signal(signal)
+
             spec_token_ids = draft_token_ids.tolist()
         return spec_token_ids
 
@@ -1934,6 +1964,56 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
+
+    def _apply_early_stop_thinking(
+        self,
+        valid_sampled_token_ids: list[list[int]],
+    ) -> None:
+        think_settings: ThinkSettings = self.model.think_settings
+        assert isinstance(self.drafter, EagleProposer)
+
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            req_state = self.requests[req_id]
+            request_out_tokens = valid_sampled_token_ids[i]
+
+            if think_settings.stop_think_id in request_out_tokens:
+                req_state.thinking_state = False
+                continue
+
+            if len(req_state.output_token_ids
+                   ) < 1 or not req_state.thinking_state:
+                continue
+            if not req_state.early_stop_ewma_score:
+                continue
+
+            signal = (req_state.early_stop_ewma_score
+                      if think_settings.use_ewma else
+                      req_state.early_stop_signal_list[-1])
+
+            stop_idx = -1
+            token_can_stop = False
+            if req_state.output_token_ids[
+                    -1] in think_settings.step_split_token_ids:
+                token_can_stop = True
+            else:
+                for j, token in enumerate(request_out_tokens[:-1]):
+                    if token in think_settings.step_split_token_ids:
+                        stop_idx = j
+                        token_can_stop = True
+                        break
+
+            if (token_can_stop and len(req_state.output_token_ids)
+                    > think_settings.min_think_tokens):
+                method = self.speculative_config.early_stop_method
+
+                if think_settings.judge_score(signal, method):
+                    assert len(request_out_tokens) >= stop_idx + 2
+                    valid_sampled_token_ids[i][
+                        stop_idx + 1] = think_settings.stop_think_id
+                    valid_sampled_token_ids[i] = valid_sampled_token_ids[
+                        i][:stop_idx + 2]
+                    req_state.thinking_state = False
+                    continue
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         allowed_config_names = {"load_config", "model_config"}
