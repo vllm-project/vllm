@@ -46,7 +46,7 @@ logger = init_logger(__name__)
 
 
 class FlashAttentionBackend(AttentionBackend):
-    accept_output_buffer: bool = True
+    accept_output_buffer: bool = envs.VLLM_FLASH_ATTN_VERSION != 4
     supports_quant_query_input: bool = True
 
     @classmethod
@@ -483,7 +483,9 @@ class FlashAttentionImpl(AttentionImpl):
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
         """
-        assert output is not None, "Output tensor must be provided."
+        assert output is not None or envs.VLLM_FLASH_ATTN_VERSION == 4, (
+            "Output tensor must be provided."
+        )
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
@@ -492,9 +494,19 @@ class FlashAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
+            if envs.VLLM_FLASH_ATTN_VERSION == 4:
+                return torch.empty_like(query).contiguous()
             return output
 
         attn_type = self.attn_type
+
+        if envs.VLLM_FLASH_ATTN_VERSION == 4:
+            hidden_size = query.shape[-1]
+            query = query.view(-1, self.num_heads, self.head_size)
+            if key is not None:
+                key = key.view(-1, self.num_kv_heads, self.head_size)
+            if value is not None:
+                value = value.view(-1, self.num_kv_heads, self.head_size)
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
@@ -574,7 +586,7 @@ class FlashAttentionImpl(AttentionImpl):
                     None if self.sliding_window[0] == -1 else self.sliding_window[0],
                     None if self.sliding_window[1] == -1 else self.sliding_window[1],
                 )
-                out, lse, *rest = flash_attn_varlen_func(
+                output, lse, *rest = flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
                     k=key_cache,
                     v=value_cache,
@@ -587,7 +599,7 @@ class FlashAttentionImpl(AttentionImpl):
                     learnable_sink=self.sinks,
                     softcap=self.logits_soft_cap,
                 )
-                output.copy_(out)
+                return output.view(-1, hidden_size)
             else:
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
