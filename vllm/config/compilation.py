@@ -178,7 +178,7 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    mode: Optional[int] = None
+    mode: int | None = None
     """The mode of compilation:
 
     - None: If None, we will select the default compilation mode.
@@ -189,7 +189,7 @@ class CompilationConfig:
          Requires no dynamic-shape-dependent control-flow.
     - 3: VLLM_COMPILE, single Dynamo trace, custom vLLM caching, custom passes,
          custom cudagraph partitioning, etc."""
-    debug_dump_path: Optional[Path] = None
+    debug_dump_path: Path | None = None
     """The path to dump the debug information."""
     cache_dir: str = ""
     """The directory to store the compiled graph, to accelerate Inductor
