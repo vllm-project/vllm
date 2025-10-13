@@ -3,10 +3,11 @@
 
 import hashlib
 import uuid
-from dataclasses import field
 from typing import Any, Literal, get_args
 
+from pydantic import Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
+from typing_extensions import Self
 
 from vllm.config.utils import config
 
@@ -24,14 +25,13 @@ class KVTransferConfig:
     """The KV connector for vLLM to transmit KV caches between vLLM instances.
     """
 
-    engine_id: str | None = None
+    engine_id: str = Field(default=None, validate_default=True)
     """The engine id for KV transfers."""
 
-    kv_buffer_device: str | None = "cuda"
-    """The device used by kv connector to buffer the KV cache. Choices are 
-    'cuda' and 'cpu'."""
+    kv_buffer_device: Literal["cuda", "cpu"] = "cuda"
+    """The device used by kv connector to buffer the KV cache."""
 
-    kv_buffer_size: float = 1e9
+    kv_buffer_size: float = Field(default=1e9, gt=0)
     """The buffer size for TorchDistributedConnector. Measured in number of
     bytes. Recommended value: 1e9 (about 1GB)."""
 
@@ -44,7 +44,7 @@ class KVTransferConfig:
     0 for prefill instance, 1 for decode instance.
     Currently only 1P1D is supported."""
 
-    kv_parallel_size: int = 1
+    kv_parallel_size: int = Field(default=1, ge=1)
     """The number of parallel instances for KV cache transfer. For
     P2pNcclConnector, this should be 2."""
 
@@ -54,7 +54,7 @@ class KVTransferConfig:
     kv_port: int = 14579
     """The KV connector port, used to build distributed connection."""
 
-    kv_connector_extra_config: dict[str, Any] = field(default_factory=dict)
+    kv_connector_extra_config: dict[str, Any] = Field(default_factory=dict)
     """any extra config that the connector may need."""
 
     kv_connector_module_path: str | None = None
@@ -79,21 +79,23 @@ class KVTransferConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __post_init__(self) -> None:
-        if self.engine_id is None:
-            self.engine_id = str(uuid.uuid4())
+    @field_validator("engine_id", mode="before")
+    @classmethod
+    def _validate_engine_id(cls, engine_id: Any | None) -> Any:
+        """Must be set here instead of `default_factory` to ensure
+        that each instance of `KVTransferConfig` gets a unique `engine_id`."""
+        if engine_id is None:
+            return str(uuid.uuid4())
+        return engine_id
 
-        if self.kv_role is not None and self.kv_role not in get_args(KVRole):
-            raise ValueError(
-                f"Unsupported kv_role: {self.kv_role}. "
-                f"Supported roles are {get_args(KVRole)}"
-            )
-
+    @model_validator(mode="after")
+    def _validate_kv_transfer_config(self) -> Self:
         if self.kv_connector is not None and self.kv_role is None:
             raise ValueError(
-                "Please specify kv_disagg_role when kv_connector "
+                "Please specify kv_role when kv_connector "
                 f"is set, supported roles are {get_args(KVRole)}"
             )
+        return self
 
     @property
     def is_kv_transfer_instance(self) -> bool:

@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from dataclasses import field
 from typing import Any, Literal
 
 import torch
-from pydantic import ConfigDict, SkipValidation
+from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -19,13 +18,11 @@ Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
-    device: SkipValidation[Device | torch.device | None] = "auto"
+    device: Device | str | torch.device | None = "auto"
     """Device type for vLLM execution.
-    This parameter is deprecated and will be
-    removed in a future release.
-    It will now be set automatically based
-    on the current platform."""
-    device_type: str = field(init=False)
+    This parameter is deprecated and will be removed in a future release.
+    It will now be set automatically based on the current platform."""
+    device_type: str = Field(init=False)
     """Device type from the current platform. This is set in
     `__post_init__`."""
 
