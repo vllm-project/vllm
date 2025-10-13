@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Set
-from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -62,7 +61,7 @@ class GritLMMeanPool(nn.Module):
         arr: np.ndarray,
         target: np.ndarray,
         start_idx: int = 0,
-        end_idx: Optional[int] = None,
+        end_idx: int | None = None,
     ) -> int:
         """
         Find the first occurrence of `target` in `arr` starting from
@@ -152,8 +151,8 @@ class GritLMMeanPool(nn.Module):
     def forward_one(
         self,
         hidden_states: torch.Tensor,
-        prompt_len: Optional[torch.Tensor] = None,
-        instr_len: Optional[torch.Tensor] = None,
+        prompt_len: torch.Tensor | None = None,
+        instr_len: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert prompt_len is None or prompt_len == hidden_states.shape[0], (
             "partial prefill not supported with MEAN pooling"
@@ -166,7 +165,7 @@ class GritLMMeanPool(nn.Module):
         hidden_states: torch.Tensor,
         prompt_lens: torch.Tensor,
         instr_lens: torch.Tensor,
-    ) -> Union[list[torch.Tensor], torch.Tensor]:
+    ) -> list[torch.Tensor] | torch.Tensor:
         offset = 0
         pooled_data = list[torch.Tensor]()
 
@@ -182,9 +181,9 @@ class GritLMMeanPool(nn.Module):
 
     def forward(
         self,
-        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+        hidden_states: torch.Tensor | list[torch.Tensor],
         pooling_metadata: PoolingMetadata,
-    ) -> Union[list[torch.Tensor], torch.Tensor]:
+    ) -> list[torch.Tensor] | torch.Tensor:
         prompt_lens = get_prompt_lens(hidden_states, pooling_metadata)
         instr_lens = torch.tensor(
             [

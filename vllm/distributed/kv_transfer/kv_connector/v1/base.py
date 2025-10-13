@@ -37,8 +37,8 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import torch
 
@@ -80,7 +80,7 @@ class KVConnectorHMAMixin:
         self,
         request: "Request",
         block_ids: tuple[list[int], ...],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called exactly once when a request has finished, before its blocks are
         freed.
@@ -125,7 +125,7 @@ class KVConnectorBase_V1(ABC):
             "Initializing KVConnectorBase_V1. This API is experimental and "
             "subject to change in the future as we iterate the design."
         )
-        self._connector_metadata: Optional[KVConnectorMetadata] = None
+        self._connector_metadata: KVConnectorMetadata | None = None
         self._vllm_config = vllm_config
         self._role = role
 
@@ -254,7 +254,7 @@ class KVConnectorBase_V1(ABC):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[set[str] | None, set[str] | None]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens on the worker.
@@ -313,7 +313,7 @@ class KVConnectorBase_V1(ABC):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[Optional[int], bool]:
+    ) -> tuple[int | None, bool]:
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
@@ -393,7 +393,7 @@ class KVConnectorBase_V1(ABC):
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called exactly once when a request has finished, before its blocks are
         freed.
@@ -420,7 +420,7 @@ class KVConnectorBase_V1(ABC):
         return ()
 
     @classmethod
-    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> Optional[str]:
+    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """
         Get the required KV cache layout for this connector.
         Args:
@@ -438,7 +438,7 @@ class KVConnectorBase_V1(ABC):
             )
         return None
 
-    def get_finished_count(self) -> Optional[int]:
+    def get_finished_count(self) -> int | None:
         """
         Get the count of requests expected to complete send/receive operations
         via this connector.
@@ -451,7 +451,7 @@ class KVConnectorBase_V1(ABC):
 
     @classmethod
     def build_kv_connector_stats(
-        cls, data: Optional[dict[str, Any]] = None
+        cls, data: dict[str, Any] | None = None
     ) -> Optional["KVConnectorStats"]:
         """
         KVConnectorStats resolution method. This method allows dynamically

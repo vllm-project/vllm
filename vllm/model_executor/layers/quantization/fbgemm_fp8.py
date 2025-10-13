@@ -171,7 +171,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.quant_config.use_marlin:
             return apply_fp8_marlin_linear(

@@ -4,7 +4,7 @@
 import dataclasses as dt
 import enum
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 import regex as re
 
@@ -36,7 +36,7 @@ class Indices:
         return self.end - self.start
 
 
-def string_overlap(a: str, b: str) -> tuple[Optional[Indices], Optional[Indices]]:
+def string_overlap(a: str, b: str) -> tuple[Indices | None, Indices | None]:
     """
     Find the longest overlap where the end of string a matches the start
     of string b.
@@ -90,7 +90,7 @@ class Olmo3ReasoningBuffer:
     # is when we switch to content state.
     state: Olmo3ReasoningState = Olmo3ReasoningState.REASONING
 
-    def process_buffer(self) -> Optional[DeltaMessage]:
+    def process_buffer(self) -> DeltaMessage | None:
         start_think_idx = self.buffer.find(self.think_start)
 
         if start_think_idx >= 0:
@@ -142,12 +142,12 @@ class Olmo3ReasoningBuffer:
         # is the length of the text buffer
         return len(self.buffer)
 
-    def add_text(self, delta_text: str) -> Optional[DeltaMessage]:
+    def add_text(self, delta_text: str) -> DeltaMessage | None:
         # we start by adding the delta text to the buffer
         self.buffer += delta_text
 
         # setting this to empty before starting
-        delta_message: Optional[DeltaMessage] = None
+        delta_message: DeltaMessage | None = None
 
         # we start by computing the overlap between the delta_text
         # and start/end of think tokens.
@@ -254,8 +254,8 @@ class Olmo3ReasoningParser(ReasoningParser):
     def extract_reasoning_content(
         self,
         model_output: str,
-        request: Union[ChatCompletionRequest, ResponsesRequest],
-    ) -> tuple[Optional[str], Optional[str]]:
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> tuple[str | None, str | None]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
         something else, all content is considered non-reasoning content.
@@ -287,7 +287,7 @@ class Olmo3ReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """Extract content using token ID sequence state machine"""
 
         delta_message = self.buffer.add_text(delta_text)
