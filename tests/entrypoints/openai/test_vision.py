@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from typing import Union
 
 import openai
 import pytest
@@ -80,7 +79,7 @@ def base64_encoded_image(local_asset_server) -> dict[str, str]:
 
 
 def dummy_messages_from_image_url(
-    image_urls: Union[str, list[str]],
+    image_urls: str | list[str],
     content_text: str = "What's in this image?",
 ):
     if isinstance(image_urls, str):

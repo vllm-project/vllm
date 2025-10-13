@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from typing import Union
 
 import openai
 import pytest
@@ -55,7 +54,7 @@ def base64_encoded_audio() -> dict[str, str]:
 
 
 def dummy_messages_from_audio_url(
-    audio_urls: Union[str, list[str]],
+    audio_urls: str | list[str],
     content_text: str = "What's happening in this audio?",
 ):
     if isinstance(audio_urls, str):
