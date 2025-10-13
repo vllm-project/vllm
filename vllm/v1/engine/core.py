@@ -19,6 +19,7 @@ import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
+from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
@@ -91,11 +92,12 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
-        logger.info(
-            "Initializing a V1 LLM engine (v%s) with config: %s",
-            VLLM_VERSION,
-            vllm_config,
-        )
+        if is_global_first_rank():
+            logger.info(
+                "Initializing a V1 LLM engine (v%s) with config: %s",
+                VLLM_VERSION,
+                vllm_config,
+            )
 
         self.log_stats = log_stats
 

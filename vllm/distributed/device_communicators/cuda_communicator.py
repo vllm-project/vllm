@@ -13,6 +13,7 @@ from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric
 from vllm.distributed.device_communicators.pynccl_allocator import (
     is_symmetric_memory_enabled,
 )
+from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -95,34 +96,34 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import NaiveAll2AllManager
 
                 self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
-                logger.info("Using naive all2all manager.")
             elif all2all_backend == "allgather_reducescatter":
                 from .all2all import AgRsAll2AllManager
 
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
-                logger.info("Using AllGather-ReduceScatter all2all manager.")
             elif all2all_backend == "pplx":
                 from .all2all import PPLXAll2AllManager
 
                 self.all2all_manager = PPLXAll2AllManager(self.cpu_group)
-                logger.info("Using PPLX all2all manager.")
             elif all2all_backend == "deepep_high_throughput":
                 from .all2all import DeepEPHTAll2AllManager
 
                 self.all2all_manager = DeepEPHTAll2AllManager(self.cpu_group)
-                logger.info("Using DeepEP High-Throughput all2all manager.")
             elif all2all_backend == "deepep_low_latency":
                 from .all2all import DeepEPLLAll2AllManager
 
                 self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
-                logger.info("Using DeepEP Low-Latency all2all manager.")
             elif all2all_backend == "flashinfer_all2allv":
                 from .all2all import FlashInferAllToAllManager
 
                 self.all2all_manager = FlashInferAllToAllManager(self.cpu_group)
-                logger.info("Using Flashinfer all2allv manager.")
             else:
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
+
+            if is_global_first_rank():
+                logger.info(
+                    "Using %s all2all manager.",
+                    self.all2all_manager.__class__.__name__,
+                )
 
     def all_reduce(self, input_):
         # since currently we perform copy input -> symm_input -> out-of-place AR
