@@ -170,3 +170,19 @@ def test_gptoss_mxfp4mxfp8_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatc
 def test_gptoss_mxfp4mxfp8_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
     can_initialize("openai/gpt-oss-20b", hf_overrides=HF_OVERRIDE_TEXT)
+
+
+def test_gptoss_dp2_mxfp4mxfp8_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
+    monkeypatch.setenv("VLLM_ALL2ALL_BACKEND", "deepep_high_throughput")
+    can_initialize(
+        "openai/gpt-oss-20b", ["--data-parallel-size", "2", "--enable-expert-parallel"], hf_overrides=HF_OVERRIDE_TEXT
+    )
+
+
+def test_gptoss_dp2_mxfp4bf16_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "1")
+    monkeypatch.setenv("VLLM_ALL2ALL_BACKEND", "deepep_high_throughput")
+    can_initialize(
+        "openai/gpt-oss-20b", ["--data-parallel-size", "2", "--enable-expert-parallel"], hf_overrides=HF_OVERRIDE_TEXT
+    )

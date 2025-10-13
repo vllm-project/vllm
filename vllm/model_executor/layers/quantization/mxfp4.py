@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
+    mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
@@ -776,6 +777,25 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_bias=layer.w2_bias,
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
+            )
+        elif self.mxfp4_backend in [
+            Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM,
+            Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS,
+        ]:
+            return mxfp4_w4a8_moe_quant_config(
+                quant_dtype="mxfp8",
+                weight_dtype="mxfp4",
+                w1_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+            )
+        elif self.mxfp4_backend in [Mxfp4Backend.SM100_FI_MXFP4_BF16]:
+            return mxfp4_w4a16_moe_quant_config(
+                w1_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
             )
         else:
             w1_scale = layer.w13_weight_scale
