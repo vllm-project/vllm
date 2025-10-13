@@ -599,8 +599,6 @@ class OpenAIServingResponses(OpenAIServing):
                 tool_output_tokens=num_tool_output_tokens,
             ),
         )
-        print("INPUT MESSAGES \n\n", input_messages)
-        print("\n\nOUTPUT MESSAGES \n\n", output_messages)
         response = ResponsesResponse.from_request(
             request,
             sampling_params,
