@@ -4,7 +4,6 @@
 import copy
 from dataclasses import dataclass, fields
 from math import prod
-from typing import Optional
 
 import torch
 from typing_extensions import Self
@@ -74,8 +73,8 @@ class AttentionSpec(KVCacheSpec):
 
 @dataclass(frozen=True)
 class FullAttentionSpec(AttentionSpec):
-    sliding_window: Optional[int] = None
-    attention_chunk_size: Optional[int] = None
+    sliding_window: int | None = None
+    attention_chunk_size: int | None = None
     """
     When hybrid allocator is disabled and the model contains both full 
     attention layers and sliding window attention layers, sliding 
@@ -96,7 +95,7 @@ class FullAttentionSpec(AttentionSpec):
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
     @classmethod
-    def merge_window_sizes(cls, window_sizes: set[int]) -> Optional[int]:
+    def merge_window_sizes(cls, window_sizes: set[int]) -> int | None:
         if len(window_sizes) == 0:
             return None
         elif len(window_sizes) == 1:
@@ -154,7 +153,7 @@ class FullAttentionSpec(AttentionSpec):
 @dataclass(frozen=True)
 class MLAAttentionSpec(FullAttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
-    cache_dtype_str: Optional[str] = None
+    cache_dtype_str: str | None = None
 
     @property
     def page_size_bytes(self) -> int:
@@ -237,7 +236,7 @@ class SlidingWindowSpec(AttentionSpec):
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype]
-    page_size_padded: Optional[int] = None
+    page_size_padded: int | None = None
     mamba_type: str = "mamba2"
     num_speculative_blocks: int = 0
 
@@ -342,7 +341,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             )
 
     @classmethod
-    def from_specs(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> Optional[Self]:
+    def from_specs(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> Self | None:
         """
         Return a SameTypeKVCacheSpecs object if all layers have the same type
         of KV cache spec. Return None if not.

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import numpy as np
 import torch
@@ -95,7 +94,7 @@ def _synchronize_dp_ranks(
     should_attempt_ubatching: bool,
     should_attempt_dp_padding: bool,
     parallel_config: ParallelConfig,
-) -> tuple[bool, Optional[torch.Tensor]]:
+) -> tuple[bool, torch.Tensor | None]:
     """
     1. Decides if each DP rank is going to microbatch. Either all ranks
     run with microbatching or none of them do.
@@ -156,10 +155,10 @@ def coordinate_batch_across_dp(
     allow_microbatching: bool,
     allow_dp_padding: bool,
     parallel_config: ParallelConfig,
-    num_tokens_padded: Optional[int] = None,
-    uniform_decode: Optional[bool] = None,
-    num_scheduled_tokens_per_request: Optional[np.ndarray] = None,
-) -> tuple[Optional[UBatchSlices], Optional[torch.Tensor]]:
+    num_tokens_padded: int | None = None,
+    uniform_decode: bool | None = None,
+    num_scheduled_tokens_per_request: np.ndarray | None = None,
+) -> tuple[UBatchSlices | None, torch.Tensor | None]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
     should be split into microbatches.

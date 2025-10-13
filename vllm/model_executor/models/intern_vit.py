@@ -9,7 +9,6 @@
 # --------------------------------------------------------
 from collections.abc import Iterable
 from functools import partial
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -121,8 +120,8 @@ class InternVisionPatchModel(nn.Module):
 
     def forward(
         self,
-        pixel_values: Optional[torch.Tensor] = None,
-        pixel_embeds: Optional[torch.Tensor] = None,
+        pixel_values: torch.Tensor | None = None,
+        pixel_embeds: torch.Tensor | None = None,
     ) -> torch.FloatTensor:
         if pixel_values is None and pixel_embeds is None:
             raise ValueError("You have to specify pixel_values or pixel_embeds")
@@ -144,7 +143,7 @@ class InternParallelAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
         num_dummy_heads: int = 0,
         prefix: str = "",
@@ -240,7 +239,7 @@ class InternMLP(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -277,7 +276,7 @@ class InternVisionEncoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
         num_dummy_heads: int = 0,
         prefix: str = "",
@@ -312,7 +311,7 @@ class InternVisionEncoderLayer(nn.Module):
     def _init_attn(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         *,
         num_dummy_heads: int,
         prefix: str = "",
@@ -350,9 +349,9 @@ class InternVisionEncoder(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
+        num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
         use_data_parallel: bool = False,
@@ -395,9 +394,9 @@ class InternVisionModel(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
+        num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
         use_data_parallel: bool = False,
@@ -422,8 +421,8 @@ class InternVisionModel(nn.Module):
 
     def forward(
         self,
-        pixel_values: Optional[torch.Tensor] = None,
-        pixel_embeds: Optional[torch.Tensor] = None,
+        pixel_values: torch.Tensor | None = None,
+        pixel_embeds: torch.Tensor | None = None,
     ) -> torch.FloatTensor:
         if pixel_values is None and pixel_embeds is None:
             raise ValueError("You have to specify pixel_values or pixel_embeds")
