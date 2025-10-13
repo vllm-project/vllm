@@ -143,7 +143,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             # Prefer to use the MarlinMoE kernel when it is supported.
             if not check_moe_marlin_supports_layer(layer, group_size):
                 if (
-                    weight_quant.strategy in QuantizationStrategy.GROUP
+                    weight_quant.strategy == QuantizationStrategy.GROUP
                     and weight_quant.actorder
                     in (ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC)
                 ):
