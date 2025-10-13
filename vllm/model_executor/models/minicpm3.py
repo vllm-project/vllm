@@ -25,7 +25,7 @@
 # limitations under the License.
 """Inference-only MiniCPM3 model compatible with HuggingFace weights."""
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch import nn
@@ -63,10 +63,10 @@ class MiniCPM3Attention(nn.Module):
         q_lora_rank: int,
         kv_lora_rank: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
+        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -214,8 +214,8 @@ class MiniCPM3Model(MiniCPMModel):
         self,
         prefix: str,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig],
-        quant_config: Optional[QuantizationConfig],
+        cache_config: CacheConfig | None,
+        quant_config: QuantizationConfig | None,
     ):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
