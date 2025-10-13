@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import json
-import regex as re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+import regex as re
 from partial_json_parser.core.options import Allow
 from transformers import PreTrainedTokenizerBase
 
@@ -165,6 +165,22 @@ class ApertusToolParser(ToolParser):
         # Check if we're in a tool call block
         if self.tool_calls_prefix not in current_text:
             return DeltaMessage(content=delta_text)
+
+        # If we just entered a tool call block, send any text before the prefix
+        if (
+            self.tool_calls_prefix not in previous_text
+            and self.tool_calls_prefix in current_text
+        ):
+            prefix_idx = current_text.find(self.tool_calls_prefix)
+            if prefix_idx > 0:
+                # There's text before the tool call - extract it from delta_text
+                # We need to send the portion of delta_text that's before the prefix
+                prefix_idx_in_delta = delta_text.find(self.tool_calls_prefix)
+                if prefix_idx_in_delta > 0:
+                    return DeltaMessage(content=delta_text[:prefix_idx_in_delta])
+                elif prefix_idx_in_delta == -1 and len(previous_text) < prefix_idx:
+                    # The entire delta_text is before the prefix
+                    return DeltaMessage(content=delta_text)
 
         json_str = self._extract_json_str(current_text)
 

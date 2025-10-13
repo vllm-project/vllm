@@ -376,6 +376,67 @@ Supported models:
 
 Flags: `--tool-call-parser olmo3`
 
+### Apertus Models (`apertus`)
+
+The Apertus tool parser supports models that generate tool calls in a custom format using special delimiter tokens.
+
+**Tool Call Format:**
+
+Apertus models generate tool calls enclosed between `<|tools_prefix|>` and `<|tools_suffix|>` tokens. Each tool call is represented as a JSON object where the key is the function name and the value is a dictionary of arguments:
+
+`<|tools_prefix|>[{"function_name": {"arg1": "value1", "arg2": "value2"}}, ...]<|tools_suffix|>`
+
+
+**Features:** 
+
+* Supports both single and parallel tool calls
+* Streaming support with incremental argument updates
+* Handles incomplete JSON during streaming
+* Automatically extracts and parses tool calls from model output
+
+**Configuration Examples:**
+
+Basic server setup:
+
+```bash
+vllm serve <apertus-model-name> \
+    --enable-auto-tool-choice \
+    --tool-call-parser apertus 
+```
+
+If you god error when calling apertus the model with unction definition:
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "get_weather",
+    "description": "Determine weather in my location",
+    "strict": true,
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "location": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "location",
+        "unit"
+      ]
+    }
+  }
+}
+```
+The chat template got a bug, use the one in the VLLM project
+
+```bash
+vllm serve <apertus-model-name> \
+    --enable-auto-tool-choice \
+    --tool-call-parser apertus \
+    --chat-template examples/tool_chat_template_apertus.jinja
+```
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
