@@ -312,7 +312,7 @@ async def test_base64_embed_dtype_not_supported(
 
     assert responses_base64.status_code == 400
     assert responses_base64.json()["error"]["message"].startswith(
-        f"embed_dtype [{bad_embed_dtype}] not support."
+        f"embed_dtype={bad_embed_dtype!r} is not supported."
     )
 
 
