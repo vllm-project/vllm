@@ -229,14 +229,16 @@ class GptOssModel(nn.Module):
         *,
         vllm_config: VllmConfig,
         prefix: str = "",
+        unpadded_vocab_size: int,
     ):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.parallel_config = vllm_config.parallel_config
         self.config.hidden_size = self.config.hidden_size
         self.embedding = VocabParallelEmbedding(
-            self.config.vocab_size,
+            unpadded_vocab_size,
             self.config.hidden_size,
+            org_num_embeddings=self.config.vocab_size,
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
@@ -665,15 +667,16 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
         self.config = vllm_config.model_config.hf_config
         lora_config = vllm_config.lora_config
 
-        self.model = GptOssModel(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
-        )
-
         # Calculate vocab size with LoRA support
         unpadded_vocab_size = self.config.vocab_size
         if lora_config:
             unpadded_vocab_size += lora_config.lora_extra_vocab_size
+
+        self.model = GptOssModel(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+            unpadded_vocab_size=unpadded_vocab_size,
+        )
 
         self.lm_head = ParallelLMHead(
             unpadded_vocab_size,
