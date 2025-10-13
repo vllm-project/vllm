@@ -538,7 +538,7 @@ def apply_rtn_marlin_linear(
     quant_type: ScalarType,
     output_size_per_partition: int,
     input_size_per_partition: int,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
 ) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
