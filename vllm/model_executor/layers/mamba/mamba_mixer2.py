@@ -509,20 +509,21 @@ class MambaMixer2(MambaBase, CustomOp):
         prefix_caching_enabled = self.cache_config.enable_prefix_caching
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
-            attn_metadata = attn_metadata[self.prefix]
-            assert isinstance(attn_metadata, Mamba2AttentionMetadata)
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-            # conv_state = (..., dim, width-1) yet contiguous along 'dim'
-            conv_state = self_kv_cache[0].transpose(-1, -2)
-            ssm_state = self_kv_cache[1]
-            state_indices_tensor = attn_metadata.state_indices_tensor
-            has_initial_states_p = attn_metadata.has_initial_states_p
-            prep_initial_states = attn_metadata.prep_initial_states
-            chunk_size = attn_metadata.chunk_size
-            seq_idx_p = attn_metadata.seq_idx_p
-            query_start_loc_p = attn_metadata.query_start_loc_p
-            cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
-            last_chunk_indices_p = attn_metadata.last_chunk_indices_p
+            attn_metadata = attn_metadata.get(self.prefix)
+            if attn_metadata is not None:
+                assert isinstance(attn_metadata, Mamba2AttentionMetadata)
+                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+                # conv_state = (..., dim, width-1) yet contiguous along 'dim'
+                conv_state = self_kv_cache[0].transpose(-1, -2)
+                ssm_state = self_kv_cache[1]
+                state_indices_tensor = attn_metadata.state_indices_tensor
+                has_initial_states_p = attn_metadata.has_initial_states_p
+                prep_initial_states = attn_metadata.prep_initial_states
+                chunk_size = attn_metadata.chunk_size
+                seq_idx_p = attn_metadata.seq_idx_p
+                query_start_loc_p = attn_metadata.query_start_loc_p
+                cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
+                last_chunk_indices_p = attn_metadata.last_chunk_indices_p
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
