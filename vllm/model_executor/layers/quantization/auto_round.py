@@ -407,8 +407,6 @@ class AutoRoundConfig(QuantizationConfig):
                 if (layer_name == prefix or layer_name == f"model.{prefix}"
                     ) and self.extra_config[layer_name].get('bits', 16) >= 16:
                     return UnquantizedLinearMethod()
-        if (current_platform.is_cpu() or current_platform.is_xpu()
-                or self.backend == "ipex"):
         if (
             current_platform.is_cpu()
             or current_platform.is_xpu()
