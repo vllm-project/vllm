@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import pytest
 import torch
@@ -20,7 +19,7 @@ def merge_attn_states_torch(
     prefix_lse: torch.Tensor,  # [NUM_HEADS, NUM_TOKENS]
     suffix_output: torch.Tensor,  # [NUM_TOKENS, NUM_HEADS, HEAD_SIZE]
     suffix_lse: torch.Tensor,  # [NUM_HEADS, NUM_TOKENS]
-    output_lse: Optional[torch.Tensor] = None,  # [NUM_HEADS, NUM_TOKENS]
+    output_lse: torch.Tensor | None = None,  # [NUM_HEADS, NUM_TOKENS]
 ):
     p_lse = prefix_lse
     s_lse = suffix_lse

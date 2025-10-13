@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Optional
 
 from prometheus_client import REGISTRY
 from prometheus_client import Metric as PromMetric
@@ -144,7 +143,7 @@ def get_metrics_snapshot() -> list[Metric]:
     return collected
 
 
-def _get_samples(metric: PromMetric, suffix: Optional[str] = None) -> list[Sample]:
+def _get_samples(metric: PromMetric, suffix: str | None = None) -> list[Sample]:
     name = (metric.name + suffix) if suffix is not None else metric.name
     return [s for s in metric.samples if s.name == name]
 

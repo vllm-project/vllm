@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -368,7 +368,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         return handle
 
     # DeepEP LL uses RDMA so no SMs are used for communication
-    def max_sms_used(self) -> Optional[int]:
+    def max_sms_used(self) -> int | None:
         return 0
 
 
@@ -376,6 +376,11 @@ class FlashInferAllToAllManager(All2AllManagerBase):
     """
     All2All communication based on flashinfer kernels.
     """
+
+    # This type lint could be removed after all of the work in
+    # https://github.com/vllm-project/vllm/issues/26533 done.
+    rank: int
+    world_size: int
 
     def __init__(self, cpu_group):
         assert has_flashinfer_all2all(), (
