@@ -114,8 +114,11 @@ def maybe_get_vit_flash_attn_backend(
 
 def allocate_tensor(shape: torch.Size, device: torch.device, dtype: torch.dtype):
     if get_current_vllm_config().model_config.init_attn_out:
+        # Use torch.zeros at the cost of ~1 us latency. This is useful
+        # when the attention backend requires initialized output tensors.
         return torch.zeros(shape, device=device, dtype=dtype)
     else:
+        # Use torch.empty to avoid initializing tensor with zero.
         return torch.empty(shape, device=device, dtype=dtype)
 
 
@@ -355,10 +358,13 @@ class Attention(nn.Module, AttentionLayerBase):
             output_shape = output_shape if output_shape is not None else query.shape
             hidden_size = output_shape[-1]
 
-            # Use torch.empty to avoid initializing tensor with zero.
             num_tokens = output_shape.numel() // hidden_size
-            reshaped_output_shape = torch.Size((num_tokens, self.num_heads, self.head_size))
-            output = allocate_tensor(reshaped_output_shape, device=query.device, dtype=output_dtype)
+            reshaped_output_shape = torch.Size(
+                (num_tokens, self.num_heads, self.head_size)
+            )
+            output = allocate_tensor(
+                reshaped_output_shape, device=query.device, dtype=output_dtype
+            )
 
             # Reshape the query, key, and value tensors.
             # NOTE(woosuk): We do this outside the custom op to minimize the
