@@ -174,27 +174,6 @@ VLM_TEST_SETTINGS = {
         # when processing the 3rd prompt in vLLM
         marks=[pytest.mark.core_model, pytest.mark.skip(reason="Test hangs")],
     ),
-    # PaliGemma has PrefixLM attention
-    "paligemma-transformers": VLMTestInfo(
-        models=["google/paligemma-3b-mix-224"],
-        test_type=VLMTestType.IMAGE,
-        prompt_formatter=identity,
-        img_idx_to_prompt=lambda idx: "",
-        # PaliGemma uses its own sample prompts because the default one fails
-        single_image_prompts=IMAGE_ASSETS.prompts(
-            {
-                "stop_sign": "caption es",
-                "cherry_blossom": "What is in the picture?",
-            }
-        ),
-        auto_cls=AutoModelForImageTextToText,
-        vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
-        image_size_factors=[(0.25, 0.5, 1.0)],
-        vllm_runner_kwargs={
-            "model_impl": "transformers",
-        },
-        marks=[pytest.mark.core_model],
-    ),
     # Gemma3 has bidirectional mask on images
     "gemma3-transformers": VLMTestInfo(
         models=["google/gemma-3-4b-it"],
@@ -218,6 +197,27 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
+        image_size_factors=[(0.25, 0.5, 1.0)],
+        vllm_runner_kwargs={
+            "model_impl": "transformers",
+        },
+        marks=[pytest.mark.core_model],
+    ),
+    # PaliGemma has PrefixLM attention
+    "paligemma-transformers": VLMTestInfo(
+        models=["google/paligemma-3b-mix-224"],
+        test_type=VLMTestType.IMAGE,
+        prompt_formatter=identity,
+        img_idx_to_prompt=lambda idx: "",
+        # PaliGemma uses its own sample prompts because the default one fails
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "caption es",
+                "cherry_blossom": "What is in the picture?",
+            }
+        ),
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
         image_size_factors=[(0.25, 0.5, 1.0)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
