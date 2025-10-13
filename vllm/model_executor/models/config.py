@@ -6,8 +6,7 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
-from vllm.platforms import current_platform
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, round_up
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 if TYPE_CHECKING:
@@ -70,12 +69,11 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
             max_position = config.max_position_embeddings
             # Jina-embeddings-v3 has max_position_embeddings=8194, which will cause
             # out-of-bound index issue at RoPE for long prompts with torch.compile,
-            # because it can't be divided by triton num_warps(default=4).
+            # because it can't be divided by triton num_warps(default=4 or 8).
             # To deal with this, we increase max_position to multiple of n_warps,
             # so that triton kernel won't hit out-of-bound index in RoPE cache.
-            if current_platform.is_cuda_alike() and not model_config.enforce_eager:
-                n_warps_pad = 8
-                max_position = cdiv(max_position, n_warps_pad) * n_warps_pad
+            if not model_config.enforce_eager:
+                max_position = round_up(max_position, 8)
 
             config.rotary_kwargs = {
                 "head_size": head_dim,
