@@ -13,6 +13,7 @@ if(QUTLASS_SRC_DIR)
     CONFIGURE_COMMAND ""
     BUILD_COMMAND ""
   )
+  set(qutlass_SOURCE_DIR "${QUTLASS_SRC_DIR}")
 else()
   FetchContent_Declare(
     qutlass
