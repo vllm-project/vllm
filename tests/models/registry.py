@@ -905,7 +905,16 @@ _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersForCausalLM": _HfExamplesInfo(
         "hmellor/Ilama-3.2-1B", trust_remote_code=True
     ),
-    "TransformersForMultimodalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
+    "TransformersForMultimodalLM": _HfExamplesInfo(
+        "BAAI/Emu3-Chat-hf",
+        extras={
+            "llava-onevision": "llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+            "gemma3": "google/gemma-3-4b-it",
+            "idefics3": "HuggingFaceTB/SmolVLM-256M-Instruct",
+            "paligemma": "google/paligemma-3b-mix-224",
+            "qwen2_5_vl": "Qwen/Qwen2.5-VL-3B-Instruct",
+        },
+    ),
     "TransformersMoEForCausalLM": _HfExamplesInfo(
         "allenai/OLMoE-1B-7B-0924", min_transformers_version="4.57.0.dev0"
     ),
