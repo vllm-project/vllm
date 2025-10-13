@@ -38,7 +38,7 @@ class NemotronHConfig(PretrainedConfig):
             passed when calling [`NemotronHModel`]
         tie_word_embeddings (`bool`, *optional*, defaults to `False`):
             Whether the model's input and output word embeddings should be
-            tied. Note that this is only relevant if the model has a output
+            tied. Note that this is only relevant if the model has an output
             word embedding layer.
         hidden_size (`int`, *optional*, defaults to 4096):
             Dimension of the hidden representations.
@@ -203,11 +203,11 @@ class NemotronHConfig(PretrainedConfig):
         # Validate hybrid_override_pattern
         # M: Mamba2, *: Attention, -: MLP
         assert len(self.hybrid_override_pattern) == self.num_hidden_layers, (
-            "hybrid_override_pattern must have same length as "
-            "num_hidden_layers")
+            "hybrid_override_pattern must have same length as num_hidden_layers"
+        )
         assert re.match(r"^[*-M]+$", self.hybrid_override_pattern), (
-            "hybrid_override_pattern must only contain characters "
-            "'M', '*', or '-'")
+            "hybrid_override_pattern must only contain characters 'M', '*', or '-'"
+        )
 
         # for backward compatibility
         if num_key_value_heads is None:
@@ -253,7 +253,10 @@ class NemotronHConfig(PretrainedConfig):
     @property
     def layers_block_type(self):
         return [
-            "mamba" if self.hybrid_override_pattern[i] == "M" else
-            "attention" if self.hybrid_override_pattern[i] == "*" else "mlp"
+            "mamba"
+            if self.hybrid_override_pattern[i] == "M"
+            else "attention"
+            if self.hybrid_override_pattern[i] == "*"
+            else "mlp"
             for i in range(self.num_hidden_layers)
         ]

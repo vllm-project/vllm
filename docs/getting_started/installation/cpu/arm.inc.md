@@ -48,6 +48,10 @@ docker run --rm \
             --dtype=bfloat16 \
             other vLLM OpenAI server arguments
 ```
+
+!!! tip
+    An alternative of `--privileged=true` is `--cap-add SYS_NICE --security-opt seccomp=unconfined`.
+
 # --8<-- [end:build-image-from-source]
 # --8<-- [start:extra-information]
 # --8<-- [end:extra-information]
