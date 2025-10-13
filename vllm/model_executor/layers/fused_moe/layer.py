@@ -7,6 +7,7 @@ from contextlib import nullcontext
 from enum import Enum
 from typing import Literal, get_args, overload
 
+import functools
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
@@ -239,8 +240,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 num_of_experts=moe.num_experts,
                 use_fp8=use_fp8,
             )
-
-            #print(f"MAX NUM TOKENS = {moe.max_num_tokens}")
 
             handle = all2all_manager.get_handle(all_to_all_args)
             prepare_finalize = DeepEPHybridPrepareAndFinalize(
@@ -1210,7 +1209,8 @@ class FusedMoE(CustomOp):
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
         )
-        print(f"VLLM_MOE_DP_CHUNK_SIZE={envs.VLLM_MOE_DP_CHUNK_SIZE}")
+
+        logger.debug("FusedMoE config=%s", moe)
 
         self.moe_config = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
@@ -1868,11 +1868,13 @@ class FusedMoE(CustomOp):
         self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
         self.logical_replica_count = logical_replica_count[moe_layer_idx]
 
+    @functools.cache
     def ensure_moe_quant_config(self):
         if self.quant_method.moe_quant_config is None:
             self.quant_method.moe_quant_config = (
                 self.quant_method.get_fused_moe_quant_config(self)
             )
+        logger.debug("FusedMoE quant_config=%s", self.quant_method.moe_quant_config)
 
     @staticmethod
     def select_experts(
