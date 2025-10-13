@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -68,7 +67,7 @@ class RobertaEmbedding(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         token_type_ids = _decode_token_type_ids(input_ids)
 
@@ -124,8 +123,8 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Fix Roberta positions here outside of the CUDA graph.
         # Because we need the to extract the sequences from
@@ -143,7 +142,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
 
     def _build_model(
         self, vllm_config: VllmConfig, prefix: str = ""
-    ) -> Union[BertModel, BertWithRope]:
+    ) -> BertModel | BertWithRope:
         if vllm_config.model_config.hf_config.position_embedding_type == "rotary":
             return JinaRobertaModel(vllm_config=vllm_config, prefix=prefix)
         else:
@@ -240,11 +239,11 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        token_type_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         replace_roberta_positions(
             input_ids=input_ids, position_ids=positions, padding_idx=self.padding_idx

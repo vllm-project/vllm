@@ -43,8 +43,8 @@ _require_petit = _import_petit_kernel
 
 
 def _check_petit_nvfp4_supported(
-    quant_method: str, group_size: Optional[int]
-) -> tuple[bool, Optional[str]]:
+    quant_method: str, group_size: int | None
+) -> tuple[bool, str | None]:
     if quant_method != "NVFP4":
         return (
             False,
@@ -62,7 +62,7 @@ def _check_petit_nvfp4_supported(
     return (True, None)
 
 
-def verify_petit_nvfp4_supported(quant_method: str, group_size: Optional[int]) -> None:
+def verify_petit_nvfp4_supported(quant_method: str, group_size: int | None) -> None:
     supported, error_msg = _check_petit_nvfp4_supported(quant_method, group_size)
     if not supported:
         assert error_msg is not None
@@ -98,7 +98,7 @@ def apply_petit_nvfp4_linear(
     weight_scale_2: torch.Tensor,
     size_n: int,
     size_k: int,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # Trigger (or get) the import here as well.
     petit_kernel = _import_petit_kernel()

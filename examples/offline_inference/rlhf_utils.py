@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
-from typing import Callable, Optional, TypedDict
+from collections.abc import Callable
+from typing import TypedDict
 
 import torch
 import zmq
@@ -71,7 +72,7 @@ class WorkerExtension:
 
 
 def rebuild_ipc(
-    handle: tuple[Callable, tuple], device_id: Optional[int] = None
+    handle: tuple[Callable, tuple], device_id: int | None = None
 ) -> torch.Tensor:
     func, args = handle
     list_args = list(args)
@@ -109,7 +110,7 @@ class ColocateWorkerExtension:
             self._zmq_ctx = zmq.Context()
         socket = self._zmq_ctx.socket(zmq.REP)
         socket.connect(zmq_handles[self.report_device_id()])
-        buffer: Optional[torch.Tensor] = None
+        buffer: torch.Tensor | None = None
         while True:
             payload: tuple[Callable, tuple] | list[FlattenedTensorMetadata] | None = (
                 socket.recv_pyobj()
