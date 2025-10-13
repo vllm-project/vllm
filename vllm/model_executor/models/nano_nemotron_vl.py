@@ -713,37 +713,12 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
 class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
     """Basic image-only MultiModalProcessor for InternVL-style models."""
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        image_token_id = hf_processor.image_token_id
-
-        # Since there may be extra tokens in the feature placeholders,
-        # we need to pass the image token ID to the model to select the
-        # tokens to merge from the vision encoder outputs
-        processed_outputs["image_token_id"] = torch.tensor(image_token_id)
-
-        return processed_outputs
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
-        num_images = len(image_num_patches)
 
         return dict(
             pixel_values_flat=MultiModalFieldConfig.flat_from_sizes(
@@ -751,7 +726,6 @@ class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
             ),
             image_num_patches=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
-            image_token_id=MultiModalFieldConfig.shared("image", num_images),
         )
 
     def _get_prompt_updates(
@@ -817,25 +791,6 @@ class NanoNemotronVLMultiModalProcessor(
 ):
     """MultiModalProcessor extended for video support"""
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        processed_outputs = super()._call_hf_processor(
-            prompt, mm_data, mm_kwargs, tok_kwargs
-        )
-
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        if (
-            self.info.supports_video
-            and (video_token_id := hf_processor.video_token_id) is not None
-        ):
-            processed_outputs["video_token_id"] = torch.tensor(video_token_id)
-        return processed_outputs
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -844,13 +799,12 @@ class NanoNemotronVLMultiModalProcessor(
         image_fields = super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs)
         if self.info.supports_video:
             video_num_patches = hf_inputs.get("video_num_patches", torch.empty(0))
-            num_videos = len(video_num_patches)
+
             video_fields = dict(
                 pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
                     "video", video_num_patches
                 ),
                 video_num_patches=MultiModalFieldConfig.batched("video"),
-                video_token_id=MultiModalFieldConfig.shared("video", num_videos),
             )
         else:
             video_fields = {}
@@ -1056,8 +1010,6 @@ class NemotronH_Nano_VL_V2(
         )
         self.mlp1 = self.mlp1.to(self.language_model.config.torch_dtype)
 
-        self.img_context_token_id = None
-        self.video_context_token_id = None
         self.config = config
         self.model_config = vllm_config.model_config
 
@@ -1115,12 +1067,6 @@ class NemotronH_Nano_VL_V2(
                 type="image_embeds",
                 data=image_embeds,
             )
-
-        image_token_id = kwargs.pop("image_token_id", None)
-        if isinstance(image_token_id, torch.Tensor):
-            image_token_id = image_token_id.item()
-
-        self.img_context_token_id = image_token_id
 
         if pixel_values_flat is not None:
             return NanoNemotronVLImagePixelInputs(
@@ -1273,13 +1219,6 @@ class NemotronH_Nano_VL_V2(
                 type="video_embeds",
                 data=video_embeds,
             )
-
-        video_token_id = kwargs["video_token_id"]
-        if isinstance(video_token_id, torch.Tensor):
-            video_token_id = video_token_id.flatten().unique().item()
-
-        assert isinstance(video_token_id, int)
-        self.video_context_token_id = video_token_id
 
         if pixel_values_flat_video is not None:
             expected_h = expected_w = self.config.force_image_size
