@@ -16,8 +16,8 @@
 | meta-llama/Llama-4-*                                | Llama4ForConditionalGeneration | ❌ |
 | microsoft/Phi-3-mini-128k-instruct                  | Phi3ForCausalLM                | 🟨 |
 | microsoft/phi-4                                     | Phi3ForCausalLM                | ❌ |
-| google/gemma-3-27b-it                               | Gemma3ForConditionalGeneration | 🟨 |
-| google/gemma-3-4b-it                                | Gemma3ForConditionalGeneration | ❌ |
+| google/gemma-3-27b-it                               | TransformersForMultimodalLM    | 🟨 |
+| google/gemma-3-4b-it                                | TransformersForMultimodalLM    | ❌ |
 | deepseek-ai/DeepSeek-R1                             | DeepseekV3ForCausalLM          | ❌ |
 | deepseek-ai/DeepSeek-V3                             | DeepseekV3ForCausalLM          | ❌ |
 | RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8  | LlamaForCausalLM               | ✅ |

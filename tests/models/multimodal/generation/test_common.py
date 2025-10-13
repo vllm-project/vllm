@@ -113,25 +113,6 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16" if current_platform.is_cpu() else "auto",
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
-    "paligemma": VLMTestInfo(
-        models=["google/paligemma-3b-mix-224"],
-        test_type=VLMTestType.IMAGE,
-        prompt_formatter=identity,
-        img_idx_to_prompt=lambda idx: "",
-        # Paligemma uses its own sample prompts because the default one fails
-        single_image_prompts=IMAGE_ASSETS.prompts(
-            {
-                "stop_sign": "caption es",
-                "cherry_blossom": "What is in the picture?",
-            }
-        ),
-        auto_cls=AutoModelForImageTextToText,
-        vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
-        dtype="bfloat16",
-        marks=[
-            pytest.mark.skip(reason="vLLM does not support PrefixLM attention mask")
-        ],
-    ),
     "qwen2_5_vl": VLMTestInfo(
         models=["Qwen/Qwen2.5-VL-3B-Instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE, VLMTestType.VIDEO),
@@ -192,6 +173,27 @@ VLM_TEST_SETTINGS = {
         # FIXME: Investigate why the test hangs
         # when processing the 3rd prompt in vLLM
         marks=[pytest.mark.core_model, pytest.mark.skip(reason="Test hangs")],
+    ),
+    # PaliGemma has PrefixLM attention
+    "paligemma-transformers": VLMTestInfo(
+        models=["google/paligemma-3b-mix-224"],
+        test_type=VLMTestType.IMAGE,
+        prompt_formatter=identity,
+        img_idx_to_prompt=lambda idx: "",
+        # PaliGemma uses its own sample prompts because the default one fails
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "caption es",
+                "cherry_blossom": "What is in the picture?",
+            }
+        ),
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
+        image_size_factors=[(0.25, 0.5, 1.0)],
+        vllm_runner_kwargs={
+            "model_impl": "transformers",
+        },
+        marks=[pytest.mark.core_model],
     ),
     # Gemma3 has bidirectional mask on images
     "gemma3-transformers": VLMTestInfo(
