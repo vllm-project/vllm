@@ -1218,6 +1218,7 @@ class FusedMoE(CustomOp):
         zero_expert_type: str | None = None,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
+        routing_method_type: int = 2,
     ):
         super().__init__()
 
@@ -1391,6 +1392,8 @@ class FusedMoE(CustomOp):
         self.e_score_correction_bias = e_score_correction_bias
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
+        # Optional routing method id for backends that support multiple types
+        self.routing_method_type = routing_method_type
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError(

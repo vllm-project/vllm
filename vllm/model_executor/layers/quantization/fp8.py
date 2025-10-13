@@ -1226,9 +1226,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert activation == "silu", (
                 f"Expected 'silu' activation but got {activation}"
             )
-            assert scoring_func == "sigmoid", (
-                f"Expected 'sigmoid' scoring func but got {scoring_func}"
-            )
+            # assert scoring_func == "sigmoid", (
+            #     f"Expected 'sigmoid' scoring func but got {scoring_func}"
+            # )
             if self.block_quant:
                 import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
 
@@ -1257,6 +1257,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     local_num_experts=layer.local_num_experts,
                     block_shape=self.weight_block_size,
                     routed_scaling=routed_scaling_factor,
+                    routing_method_type=getattr(layer, "routing_method_type", 2),
                 )
             else:
                 assert not renormalize and custom_routing_function is not None

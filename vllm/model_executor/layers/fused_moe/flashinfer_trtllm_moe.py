@@ -30,19 +30,20 @@ def flashinfer_fused_moe_blockscale_fp8(
     local_num_experts: int,
     block_shape: list[int],
     routed_scaling: float = 1.0,
+    routing_method_type: int = 2,
 ) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
 
     assert top_k <= global_num_experts
-    assert top_k <= 8
+    assert top_k <= 10
     assert topk_group <= 4
     assert global_num_experts > num_expert_group
     assert global_num_experts % num_expert_group == 0
     assert global_num_experts % 4 == 0
     assert top_k < (topk_group * global_num_experts / num_expert_group)
     assert block_shape == [128, 128]
-    # Routing kernel expects #experts <= #threads 256
-    assert global_num_experts <= 256
+    # Routing kernel expects #experts <= #threads 512
+    assert global_num_experts <= 512
 
     a_q, a_sf = per_token_group_quant_fp8(x, block_shape[1])
     # NOTE: scales of hidden states have to be transposed!
@@ -67,7 +68,7 @@ def flashinfer_fused_moe_blockscale_fp8(
         tile_tokens_dim=calculate_tile_tokens_dim(
             x.shape[0], top_k, global_num_experts
         ),
-        routing_method_type=2,  # DeepSeek-styled routing method
+        routing_method_type=routing_method_type,
         use_shuffled_weight=False,
     )
 
@@ -89,6 +90,7 @@ def flashinfer_fused_moe_blockscale_fp8_fake(
     local_num_experts: int,
     block_shape: list[int],
     routed_scaling: float = 1.0,
+    routing_method_type: int = 2,
 ) -> torch.Tensor:
     return torch.empty_like(x)
 
