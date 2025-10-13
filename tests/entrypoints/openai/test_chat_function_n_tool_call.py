@@ -203,7 +203,7 @@ async def test_multiple_tool_calls(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_invalid_tool_call(client: openai.AsyncOpenAI):
-    """Verify that incomplete or ambiguous tool instructions do not produce tool calls."""
+    """Verify that incomplete or ambiguous tool instructions do not produce valid tool calls."""
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES_INVALID_CALL,
@@ -214,8 +214,11 @@ async def test_invalid_tool_call(client: openai.AsyncOpenAI):
 
     message = response.choices[0].message
     assert message is not None, "Expected message in response"
-    assert hasattr(message, "content"), "Expected content field in message"
-    assert not getattr(message, "tool_calls", []) or len(message.tool_calls) == 0, f"Model unexpectedly attempted a tool call on invalid input: {message.tool_calls}"
+    assert hasattr(message, "content"), "Expected 'content' field in message"
+    assert not getattr(message, "tool_calls", []), (
+        f"Model unexpectedly attempted a tool call on invalid input: {message.tool_calls}"
+    )
+
 
 
 @pytest.mark.asyncio
