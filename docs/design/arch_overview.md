@@ -69,6 +69,11 @@ Sometimes you may see the API server entrypoint used directly instead of via the
 python -m vllm.entrypoints.openai.api_server --model <model>
 ```
 
+!!! warning
+
+    `python -m vllm.entrypoints.openai.api_server` is deprecated
+    and may become unsupported in a future release.
+
 That code can be found in <gh-file:vllm/entrypoints/openai/api_server.py>.
 
 More details on the API server can be found in the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) document.

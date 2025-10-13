@@ -59,7 +59,7 @@ enabling the corresponding APIs:
 #### Predefined models
 
 If the [Pooler][vllm.model_executor.layers.pooler.Pooler] defined by the model accepts `pooler_config`,
-you can override some of its attributes via the `--override-pooler-config` option.
+you can override some of its attributes via the `--pooler-config` option.
 
 #### Converted models
 
@@ -75,7 +75,7 @@ the pooler assigned to each task has the following attributes by default:
 When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
 its Sentence Transformers configuration file (`modules.json`) takes priority over the model's defaults.
 
-You can further customize this via the `--override-pooler-config` option,
+You can further customize this via the `--pooler-config` option,
 which takes priority over both the model's and Sentence Transformers's defaults.
 
 ## Offline Inference
