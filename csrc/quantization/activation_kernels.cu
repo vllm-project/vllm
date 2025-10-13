@@ -461,15 +461,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   // We need to warm-up the pipeline.
   #pragma unroll
   for (int i = 0; i < NUM_STAGES - 1; i++) {
-    // We unroll the loop with no branches.
-    auto smem_load_ptr_staged = smem_load_ptr + load_stage_offset;
-    load_stage_offset += LOAD_STAGE_SIZE;
-    cp_async4(smem_load_ptr_staged, load_ptr);
-    load_ptr += GROUP_SIZE / 8;
-    cp_async_fence();
+    load_and_advance_y_pred();
   }
-
-  t_load = NUM_STAGES - 1;
 
   __nv_fp8x4_e4m3* y_q_base_ptr =
       reinterpret_cast<__nv_fp8x4_e4m3*>(_y_q) + lane_id;
@@ -610,7 +603,15 @@ void persistent_masked_m_silu_mul_quant(
 
   static constexpr int GROUP_SIZE = 128;
 
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  auto stream = at::cuda::getCurrentCUDAStream();
+
+  cudaStreamAttrValue stream_attribute;
+  stream_attribute.accessPolicyWindow.base_ptr = tokens_per_expert.data_ptr();
+  stream_attribute.accessPolicyWindow.num_bytes = (E + 1) * 4;
+  stream_attribute.accessPolicyWindow.hitRatio = 1.0f;
+  stream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
+  cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow,
+                         &stream_attribute);
 
   #define KERNEL(BLOCK_COUNT, USE_UE8M0, THREAD_COUNT, STAGES)                 \
     static constexpr int NUM_WARPS = THREAD_COUNT / WARP_SIZE;                 \
