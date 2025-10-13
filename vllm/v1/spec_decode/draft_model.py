@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, replace
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -45,10 +45,10 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         target_hidden_states: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
-        last_token_indices: Optional[torch.Tensor],
+        last_token_indices: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]] = None,
+        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """
         This function processes the inputs first before calling the .propose()
