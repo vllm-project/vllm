@@ -3,7 +3,6 @@
 
 import types
 
-import numpy as np
 import pytest
 import torch
 import torch.nn as nn
