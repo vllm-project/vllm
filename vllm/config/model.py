@@ -187,6 +187,7 @@ class ModelConfig:
     - 1k -> 1000\n
     - 1K -> 1024\n
     - 25.6k -> 25,600"""
+    init_attn_out: bool = False
     spec_target_max_model_len: Optional[int] = None
     """Specify the maximum length for spec decoding draft models."""
     quantization: SkipValidation[Optional[QuantizationMethods]] = None

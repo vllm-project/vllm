@@ -111,6 +111,13 @@ def maybe_get_vit_flash_attn_backend(
     return attn_backend, flash_attn_varlen_func
 
 
+def allocate_tensor(shape: torch.Size, device: torch.device, dtype: torch.dtype):
+    if get_current_vllm_config().model_config.init_attn_out:
+        return torch.zeros(shape, device=device, dtype=dtype)
+    else:
+        return torch.empty(shape, device=device, dtype=dtype)
+
+
 class Attention(nn.Module, AttentionLayerBase):
     """Attention layer.
 
@@ -349,8 +356,8 @@ class Attention(nn.Module, AttentionLayerBase):
 
             # Use torch.empty to avoid initializing tensor with zero.
             output_numel = output_shape.numel()
-            output_shape = (output_numel//(self.num_heads * self.head_size), self.num_heads, self.head_size)
-            output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
+            output_shape = torch.Size((output_numel//(self.num_heads * self.head_size), self.num_heads, self.head_size))
+            output = allocate_tensor(output_shape, device=query.device, dtype=output_dtype)
 
             # Reshape the query, key, and value tensors.
             # NOTE(woosuk): We do this outside the custom op to minimize the
@@ -708,7 +715,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.calc_kv_scales(q, kv_c_normed, k_pe)
 
             if self.attn_backend.accept_output_buffer:
-                output = torch.zeros(output_shape, dtype=q.dtype, device=q.device)
+                output = allocate_tensor(output_shape, dtype=q.dtype, device=q.device)
                 self.impl.forward(
                     self,
                     q,
@@ -725,7 +732,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
         else:
             if self.attn_backend.accept_output_buffer:
-                output = torch.zeros(output_shape, dtype=q.dtype, device=q.device)
+                output = allocate_tensor(output_shape, dtype=q.dtype, device=q.device)
                 torch.ops.vllm.unified_mla_attention_with_output(
                     q,
                     kv_c_normed,
