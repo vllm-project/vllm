@@ -367,11 +367,6 @@ class CompilationConfig:
     since we know all keys are in a range [0, max_capture_size],
     we can optimize it to list[int] for better lookup performance."""
 
-    use_horizontal_fusion = True
-    """Whether use horizontal fusion. This is
-    useful for fusing qk-norm and qk-rope when query and key have
-    different shapes."""
-
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)
     """custom ops that are enabled"""
@@ -503,7 +498,13 @@ class CompilationConfig:
         if isinstance(self.pass_config, dict):
             self.pass_config = PassConfig(**self.pass_config)
 
-        if self.use_horizontal_fusion and is_torch_equal_or_newer("2.9.0.dev"):
+        if (
+            is_torch_equal_or_newer("2.9.0.dev")
+            and "combo_kernels" not in self.inductor_compile_config
+            and "benchmark_combo_kernel" not in self.inductor_compile_config
+        ):
+            # use horizontal fusion, which is useful for fusing qk-norm and
+            # qk-rope when query and key have different shapes.
             self.inductor_compile_config["combo_kernels"] = True
             self.inductor_compile_config["benchmark_combo_kernel"] = True
 
