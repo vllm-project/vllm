@@ -75,6 +75,22 @@ HANDSHAKE_TIMEOUT_MINS = 5
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
+class EngineCoreGuard:
+    def __init__(self):
+        pass
+
+
+def busy_loop_wrapper(busy_loop_func):
+    """
+    Wrap the busy loop function to perform fault tolerance.
+    """
+
+    def run_with_fault_tolerance(self):
+        pass
+
+    return run_with_fault_tolerance
+
+
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
@@ -799,6 +815,7 @@ class EngineCoreProc(EngineCore):
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
+    @busy_loop_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
@@ -1148,6 +1165,7 @@ class DPEngineCoreProc(EngineCoreProc):
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
+    @busy_loop_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 

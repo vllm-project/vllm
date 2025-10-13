@@ -417,6 +417,11 @@ class BackgroundResources:
             raise EngineDeadError()
 
 
+class ClientGuard:
+    def __init__(self):
+        pass
+
+
 class MPClient(EngineCoreClient):
     """
     MPClient: base client for multi-proc EngineCore.

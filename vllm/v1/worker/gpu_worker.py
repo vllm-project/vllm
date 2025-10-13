@@ -49,6 +49,11 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
 
+class WorkerGuard:
+    def __init__(self):
+        pass
+
+
 class Worker(WorkerBase):
     def __init__(
         self,
