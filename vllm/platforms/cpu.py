@@ -8,8 +8,9 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from importlib.util import find_spec
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
+import regex as re
 import torch
 
 from vllm.logger import init_logger
@@ -127,7 +128,7 @@ class CpuPlatform(Platform):
         selected_backend: "_Backend",
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: Optional[str],
+        kv_cache_dtype: str | None,
         block_size: int,
         use_v1: bool,
         use_mla: bool,
@@ -274,6 +275,8 @@ class CpuPlatform(Platform):
                     "epilogue_fusion": True,
                 }
             )
+            if compilation_config.use_inductor:
+                compilation_config.custom_ops = ["none"]
 
         if vllm_config.lora_config is not None:
             compilation_config.level = CompilationLevel.NO_COMPILATION
@@ -334,6 +337,7 @@ class CpuPlatform(Platform):
         lscpu_output = subprocess.check_output(
             "lscpu -J -e=CPU,CORE,NODE", shell=True, text=True
         )
+        lscpu_output = re.sub(r'"node":\s*-\s*(,|\n)', r'"node": 0\1', lscpu_output)
         logical_cpu_list: list[LogicalCPUInfo] = json.loads(
             lscpu_output, object_hook=LogicalCPUInfo.json_decoder
         )["cpus"]
