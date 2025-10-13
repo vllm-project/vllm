@@ -461,8 +461,15 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   // We need to warm-up the pipeline.
   #pragma unroll
   for (int i = 0; i < NUM_STAGES - 1; i++) {
-    load_and_advance_y_pred();
+    // We unroll the loop with no branches.
+    auto smem_load_ptr_staged = smem_load_ptr + load_stage_offset;
+    load_stage_offset += LOAD_STAGE_SIZE;
+    cp_async4(smem_load_ptr_staged, load_ptr);
+    load_ptr += GROUP_SIZE / 8;
+    cp_async_fence();
   }
+
+  t_load = NUM_STAGES - 1;
 
   __nv_fp8x4_e4m3* y_q_base_ptr =
       reinterpret_cast<__nv_fp8x4_e4m3*>(_y_q) + lane_id;
