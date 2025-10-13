@@ -173,7 +173,7 @@ Single node deployment with EPLB enabled:
 ```bash
 # Single node with EPLB load balancing
 vllm serve deepseek-ai/DeepSeek-V3-0324 \
-    --tensor-parallel-size 1 \      # Tensor parallelism
+    --tensor-parallel-size 1 \       # Tensor parallelism
     --data-parallel-size 8 \         # Data parallelism
     --enable-expert-parallel \       # Enable EP
     --all2all-backend pplx \         # Use pplx communication backend
