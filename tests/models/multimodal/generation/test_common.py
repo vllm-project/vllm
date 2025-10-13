@@ -188,13 +188,12 @@ VLM_TEST_SETTINGS = {
         multi_image_prompt="<start_of_image><start_of_image>Describe the two images in detail.",  # noqa: E501
         max_model_len=8192,
         auto_cls=AutoModelForImageTextToText,
-        # FIXME: `do_pan_and_scan` does not work yet
+        # TODO: Support `do_pan_and_scan` in transformers backend
         # patch_hf_runner=model_utils.gemma3_patch_hf_runner,
         vllm_output_post_proc=model_utils.gemma3_vllm_to_hf_output,
         image_size_factors=[(0.25, 0.5, 1.0)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
-            # FIXME: `do_pan_and_scan` does not work yet
             # "mm_processor_kwargs": {"do_pan_and_scan": True},
         },
         marks=[pytest.mark.core_model],
