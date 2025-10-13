@@ -330,7 +330,7 @@ class CompilationConfig:
     minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=
     FULL_AND_PIECEWISE instead.
     """
-    specialize_lora: bool = True
+    cudagraph_specialize_lora: bool = True
     """Whether to create separate cuda graphs for cases with and without active
     LoRA adapters. When set to False, the LoRA-enabled cuda graph will be used
     for all cases, incurring the overhead of running LoRA ops even when no

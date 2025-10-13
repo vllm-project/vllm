@@ -5,7 +5,7 @@ import gc
 import itertools
 import time
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from itertools import product
@@ -3759,14 +3759,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             start_free_gpu_memory = torch.cuda.mem_get_info()[0]
             cudagraph_mode = self.compilation_config.cudagraph_mode
             assert cudagraph_mode is not None
-            lora_cases = [self.lora_config is not None]
-            if self.lora_config and self.compilation_config.specialize_lora:
-                lora_cases.append(False)
+
+            if self.lora_config:
+                if self.compilation_config.cudagraph_specialize_lora:
+                    lora_cases = [True, False]
+                else:
+                    lora_cases = [True]
+            else:
+                lora_cases = [False]
+
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
 
-                compilation_cases = product(
-                    reversed(self.cudagraph_batch_sizes), lora_cases
+                compilation_cases = list(
+                    product(reversed(self.cudagraph_batch_sizes), lora_cases)
                 )
                 self._capture_cudagraphs(
                     compilation_cases,
@@ -3788,8 +3794,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     for x in self.cudagraph_batch_sizes
                     if max_num_tokens >= x >= self.uniform_decode_query_len
                 ]
-                compilation_cases_decode = product(
-                    reversed(decode_cudagraph_batch_sizes), lora_cases
+                compilation_cases_decode = list(
+                    product(reversed(decode_cudagraph_batch_sizes), lora_cases)
                 )
                 self._capture_cudagraphs(
                     compilation_cases=compilation_cases_decode,
@@ -3820,7 +3826,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _capture_cudagraphs(
         self,
-        compilation_cases: Iterable[tuple[int, bool]],
+        compilation_cases: list[tuple[int, bool]],
         cudagraph_runtime_mode: CUDAGraphMode,
         uniform_decode: bool,
     ):
@@ -3832,7 +3838,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
             compilation_cases = tqdm(
-                list(compilation_cases),
+                compilation_cases,
                 disable=not self.load_config.use_tqdm_on_load,
                 desc="Capturing CUDA graphs ({}, {})".format(
                     "decode" if uniform_decode else "mixed prefill-decode",

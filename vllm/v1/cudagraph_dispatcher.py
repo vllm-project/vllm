@@ -69,9 +69,13 @@ class CudagraphDispatcher:
         # This should be called only after attention backend is initialized.
 
         # LoRA activation cases to specialize the cuda graphs on
-        lora_cases = [self.vllm_config.lora_config is not None]
-        if self.vllm_config.lora_config and self.compilation_config.specialize_lora:
-            lora_cases.append(False)
+        if self.vllm_config.lora_config:
+            if self.compilation_config.cudagraph_specialize_lora:
+                lora_cases = [True, False]
+            else:
+                lora_cases = [True]
+        else:
+            lora_cases = [False]
 
         # Note: we create all valid keys for cudagraph here but do not
         # guarantee all keys would be used. For example, if we allow lazy
