@@ -188,7 +188,6 @@ def qr_variable_input(rank, world_size):
         except AssertionError:
             print("Assertion failed! Allreduce results are incorrect.")
             raise
-        # dist.barrier(group=cpu_group)
         num += 1
 
 
