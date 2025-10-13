@@ -77,14 +77,15 @@ class TestSetting:
             method="encode",
         ),
         # vision language model
-        TestSetting(
-            model="microsoft/Phi-3.5-vision-instruct",
-            model_args=["--trust-remote-code", "--max-model-len", "2048"],
-            pp_size=2,
-            tp_size=1,
-            attn_backend="FLASH_ATTN",
-            method="generate_with_image",
-        ),
+        # See https://github.com/vllm-project/vllm/issues/26716.
+        # TestSetting(
+        #     model="microsoft/Phi-3.5-vision-instruct",
+        #     model_args=["--trust-remote-code", "--max-model-len", "2048"],
+        #     pp_size=2,
+        #     tp_size=1,
+        #     attn_backend="FLASH_ATTN",
+        #     method="generate_with_image",
+        # ),
     ],
 )
 def test_compile_correctness(
@@ -109,41 +110,46 @@ def test_compile_correctness(
     with monkeypatch.context() as m:
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
         final_args = [
-            "--enforce-eager",
             *model_args,
             "-pp",
             str(pp_size),
             "-tp",
             str(tp_size),
+            "-O.cudagraph_mode=none",
         ]
 
         all_args: list[list[str]] = []
         all_envs: list[dict[str, str] | None] = []
 
-        for level in [
-            CompilationLevel.NO_COMPILATION,
+        for comp_level in [
+            CompilationLevel.DYNAMO_AS_IS,
+            CompilationLevel.DYNAMO_ONCE,
             CompilationLevel.PIECEWISE,
         ]:
-            all_args.append(final_args + [f"-O{level}"])
-            all_envs.append({})
+            for level in [CompilationLevel.NO_COMPILATION, comp_level]:
+                all_args.append(
+                    final_args + [f"-O.level={level}", "-O.backend=inductor"]
+                )
 
-        # inductor will change the output, so we only compare if the output
-        # is close, not exactly the same.
-        compare_all_settings(
-            model,
-            all_args,
-            all_envs,
-            method=method if method != "generate" else "generate_close",
-        )
-        all_envs.clear()
-        all_args.clear()
+            # inductor will change the output, so we only compare if the output
+            # is close, not exactly the same.
+            compare_all_settings(
+                model,
+                all_args,
+                all_envs,
+                method=method if method != "generate" else "generate_close",
+            )
+            all_envs.clear()
+            all_args.clear()
 
         for level in [
             CompilationLevel.NO_COMPILATION,
             CompilationLevel.DYNAMO_AS_IS,
             CompilationLevel.DYNAMO_ONCE,
+            CompilationLevel.PIECEWISE,
         ]:
-            all_args.append(final_args + [f"-O{level}"])
+            all_args.append(final_args + [f"-O.level={level}", "-O.backend=eager"])
+            all_envs.append({})
             all_envs.append({})
 
         compare_all_settings(model, all_args * 3, all_envs, method=method)
