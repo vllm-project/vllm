@@ -269,7 +269,7 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size, it
             2,
             [(4, 4), (4, 4), (4, 4), (4, 4)],
         ),  # chunk_size larger than cont batches
-        (64, 8, 5, [(64, 32, 16, 8, 8)]),  # mode examples with varied lengths
+        (64, 8, 5, [(64, 32, 16, 8, 8)]),
         # large-ish chunk_size (256)
         (64, 256, 1, [(5,), (1,), (1,), (1,)]),  # irregular sizes with small sequences
         (
