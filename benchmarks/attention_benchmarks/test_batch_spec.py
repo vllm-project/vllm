@@ -16,6 +16,7 @@ from batch_spec import (
     parse_batch_spec,
     parse_manual_batch,
 )
+from benchmark import generate_batch_specs_from_ranges
 
 
 def test_basic_patterns():
@@ -157,6 +158,104 @@ def test_error_handling():
         print("  ✓ Invalid kv_len raises ValueError")
 
 
+def test_range_generation_simple():
+    """Test simple range generation."""
+    print("\nTesting range generation (simple)...")
+
+    ranges = [{"template": "q{q_len}kv1k", "q_len": {"start": 1, "stop": 5, "step": 1}}]
+    specs = generate_batch_specs_from_ranges(ranges)
+    expected = ["q1kv1k", "q2kv1k", "q3kv1k", "q4kv1k", "q5kv1k"]
+    assert specs == expected, f"Expected {expected}, got {specs}"
+    print(f"  ✓ Simple range: {len(specs)} specs generated")
+
+
+def test_range_generation_multiple():
+    """Test multiple range specifications."""
+    print("\nTesting range generation (multiple ranges)...")
+
+    ranges = [
+        {"template": "q{q_len}kv1k", "q_len": {"start": 1, "stop": 3, "step": 1}},
+        {"template": "q{q_len}kv1k", "q_len": {"start": 10, "stop": 20, "step": 5}},
+    ]
+    specs = generate_batch_specs_from_ranges(ranges)
+    expected = ["q1kv1k", "q2kv1k", "q3kv1k", "q10kv1k", "q15kv1k", "q20kv1k"]
+    assert specs == expected, f"Expected {expected}, got {specs}"
+    print(f"  ✓ Multiple ranges: {len(specs)} specs generated")
+
+
+def test_range_generation_large():
+    """Test large range similar to study4 config."""
+    print("\nTesting range generation (large range)...")
+
+    ranges = [
+        {"template": "q{q_len}kv1k", "q_len": {"start": 1, "stop": 16, "step": 1}},
+        {"template": "q{q_len}kv1k", "q_len": {"start": 17, "stop": 64, "step": 2}},
+        {"template": "q{q_len}kv1k", "q_len": {"start": 65, "stop": 128, "step": 4}},
+    ]
+    specs = generate_batch_specs_from_ranges(ranges)
+    expected_count = 16 + 24 + 16  # (1-16) + (17,19,21...63) + (65,69,73...125)
+    assert len(specs) == expected_count, (
+        f"Expected {expected_count} specs, got {len(specs)}"
+    )
+    print(f"  ✓ Large range: {len(specs)} specs generated")
+
+
+def test_range_generation_cartesian():
+    """Test Cartesian product with multiple parameters."""
+    print("\nTesting range generation (Cartesian product)...")
+
+    ranges = [
+        {
+            "template": "q{q_len}kv{kv_len}k",
+            "q_len": {"start": 1, "stop": 2, "step": 1},
+            "kv_len": {"start": 1, "stop": 2, "step": 1},
+        }
+    ]
+    specs = generate_batch_specs_from_ranges(ranges)
+    # Should generate Cartesian product: (1,1), (1,2), (2,1), (2,2)
+    expected = ["q1kv1k", "q1kv2k", "q2kv1k", "q2kv2k"]
+    assert specs == expected, f"Expected {expected}, got {specs}"
+    print(f"  ✓ Cartesian product: {len(specs)} specs generated")
+
+
+def test_range_generation_end_inclusive():
+    """Test end_inclusive parameter."""
+    print("\nTesting range generation (end_inclusive)...")
+
+    # Test inclusive (default)
+    ranges_inclusive = [
+        {"template": "q{q_len}kv1k", "q_len": {"start": 1, "stop": 3, "step": 1}}
+    ]
+    specs = generate_batch_specs_from_ranges(ranges_inclusive)
+    expected = ["q1kv1k", "q2kv1k", "q3kv1k"]
+    assert specs == expected, f"Expected {expected}, got {specs}"
+    print(f"  ✓ end_inclusive default (true): {specs}")
+
+    # Test explicit inclusive
+    ranges_explicit_inclusive = [
+        {
+            "template": "q{q_len}kv1k",
+            "q_len": {"start": 1, "stop": 5, "step": 1, "end_inclusive": True},
+        }
+    ]
+    specs = generate_batch_specs_from_ranges(ranges_explicit_inclusive)
+    expected = ["q1kv1k", "q2kv1k", "q3kv1k", "q4kv1k", "q5kv1k"]
+    assert specs == expected, f"Expected {expected}, got {specs}"
+    print("  ✓ end_inclusive=true: includes stop value")
+
+    # Test exclusive
+    ranges_exclusive = [
+        {
+            "template": "q{q_len}kv1k",
+            "q_len": {"start": 1, "stop": 5, "step": 1, "end_inclusive": False},
+        }
+    ]
+    specs = generate_batch_specs_from_ranges(ranges_exclusive)
+    expected = ["q1kv1k", "q2kv1k", "q3kv1k", "q4kv1k"]
+    assert specs == expected, f"Expected {expected}, got {specs}"
+    print("  ✓ end_inclusive=false: excludes stop value")
+
+
 def main():
     """Run all tests."""
     print("=" * 60)
@@ -171,6 +270,11 @@ def main():
     test_batch_stats()
     test_manual_batch()
     test_error_handling()
+    test_range_generation_simple()
+    test_range_generation_multiple()
+    test_range_generation_large()
+    test_range_generation_cartesian()
+    test_range_generation_end_inclusive()
 
     print("\n" + "=" * 60)
     print("All tests passed! ✓")
