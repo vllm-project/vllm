@@ -31,7 +31,7 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.workspace import current_workspace_manager
+from vllm.v1.worker.workspace import PerKVCacheTokenWorkspace, current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -110,8 +110,6 @@ class FlashMLASparseMetadata:
     block_size: int = 64
     topk_tokens: int = 2048
 
-    # Prefill ("> decode_threshold" tokens) vs decode bookkeeping. Requests are
-    # assumed to be ordered so that all prefills come before decodes.
     num_prefill_reqs: int = 0
     num_decode_reqs: int = 0
     num_prefill_tokens: int = 0
@@ -204,7 +202,7 @@ def _convert_req_index_to_global_index_kernel(
 
 def triton_convert_req_index_to_global_index(
     req_id: torch.Tensor,  # int32 [num_tokens]
-    block_table: torch.Tensor,
+    block_table: torch.Tensor,  # int32 [num_requests, max_num_blocks_per_req]
     token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
     BLOCK_SIZE: int = 64,
     NUM_TOPK_TOKENS: int = 2048,
@@ -309,17 +307,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         self.mla_dims = get_mla_dims(self.model_config)
 
         hf_config = vllm_config.model_config.hf_config
-        topk_tokens = getattr(hf_config, "index_topk", None)
-        if topk_tokens is None:
-            attn_cfg = getattr(hf_config, "attn_module_list_cfg", None)
-            if attn_cfg:
-                topk_tokens = attn_cfg[0].get("topk_tokens")
-        if topk_tokens is None:
-            raise AttributeError(
-                "Unable to determine topk_tokens from hf_config"
-                " for FlashMLA sparse backend"
-            )
-        self.topk_tokens = topk_tokens
+        self.topk_tokens = hf_config.index_topk
         self.use_fp8_kv_cache = cache_config.cache_dtype == "fp8_ds_mla"
         self.topk_tokens_tensor = torch.tensor(
             [self.topk_tokens], device=device, dtype=torch.int32
@@ -381,7 +369,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 
         (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=self.reorder_batch_threshold or 0
+                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
             )
         )
 
@@ -479,10 +467,6 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         assert indexer is not None
         self.topk_indices_buffer = indexer.topk_indices_buffer
         self.padding = 128 if current_platform.is_device_capability(100) else 64
-
-        # Store workspace spec for prefill_bf16_workspace
-        # (will be allocated via get_workspace)
-        from vllm.v1.worker.workspace import PerKVCacheTokenWorkspace
 
         self.prefill_bf16_workspace_spec = PerKVCacheTokenWorkspace(
             shape=(head_size,), dtype=torch.bfloat16, name="prefill_bf16_workspace"

@@ -581,7 +581,6 @@ def sparse_attn_indexer(
             total_seq_lens,
             topk_indices_buffer,
         )
-
     attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata, DeepseekV32IndexerMetadata)
     slot_mapping = attn_metadata.slot_mapping
@@ -618,7 +617,6 @@ def sparse_attn_indexer(
         )
 
         for chunk in prefill_metadata.chunks:
-            # Use sliced views from the shared workspace
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
             cp_gather_indexer_k_quant_cache(

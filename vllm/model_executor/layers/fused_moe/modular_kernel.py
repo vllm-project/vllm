@@ -23,7 +23,7 @@ from vllm.v1.worker.ubatching import (
     dbo_register_recv_hook,
     dbo_yield,
 )
-from vllm.v1.worker.workspace import current_workspace_manager
+from vllm.v1.worker.workspace import WorkspaceSpec, current_workspace_manager
 
 #
 # This file defines a set of base classes used to make MoE kernels more modular.
@@ -643,8 +643,7 @@ class FusedMoEModularKernel(torch.nn.Module):
     a FusedMoEPermuteExpertsUnpermute to provide an interface that
     is compatible with the `fused_experts` function in fused_moe.py.
 
-    It takes care of managing any required scratch space using the
-    workspace system.
+    It takes care of managing any required scratch space.
 
     Note: Instances of this class should only be used for a single model
     layer due to any layer specific state that may be used by the component
@@ -744,10 +743,6 @@ class FusedMoEModularKernel(torch.nn.Module):
             local_num_experts,
             expert_tokens_meta,
         )
-
-        # Allocate workspaces using the workspace system
-        # The workspace system automatically handles DBO (dual batch overlap)
-        from vllm.v1.worker.workspace import WorkspaceSpec
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
