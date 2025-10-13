@@ -181,8 +181,6 @@ def maybe_make_prepare_finalize(
             use_fp8=use_fp8,
         )
 
-        #print(f"MAX NUM TOKENS = {moe.max_num_tokens}")
-
         handle = all2all_manager.get_handle(all_to_all_args)
         prepare_finalize = DeepEPHybridPrepareAndFinalize(
             handle,
