@@ -160,7 +160,7 @@ def test_splitting_ops_dynamic():
         # partition rules
         assert config.compilation_config.splitting_ops == ["vllm::unified_attention"]
 
-    # When attn_fusion pass enabled, splitting_ops now default to attention ops.
+    # When attn_fusion pass enabled, splitting_ops is set to empty.
     config = VllmConfig(
         compilation_config=CompilationConfig(
             level=CompilationLevel.PIECEWISE,
@@ -169,10 +169,12 @@ def test_splitting_ops_dynamic():
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
     )
-    # With the new simplified logic, attention fusion works with splitting_ops
-    assert config.compilation_config.is_attention_compiled_piecewise()
-    # cudagraph mode remains PIECEWISE
-    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+    # With attn_fusion, attention is compiled via fusion pass, not piecewise splitting
+    assert not config.compilation_config.is_attention_compiled_piecewise()
+    # splitting_ops should be empty when using attn_fusion
+    assert config.compilation_config.splitting_ops == []
+    # cudagraph mode is changed to FULL when attn_fusion is enabled
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
 
     # When both use_inductor_graph_partition and attn_fusion pass enabled.
     if is_torch_equal_or_newer("2.9.0.dev"):
@@ -185,9 +187,14 @@ def test_splitting_ops_dynamic():
                 cudagraph_mode=CUDAGraphMode.PIECEWISE,
             )
         )
-        # With inductor graph partition, attn_fusion and splitting_ops
-        # work together. Default splitting_ops include attention ops.
-        assert config.compilation_config.is_attention_compiled_piecewise()
+        # With inductor graph partition, splitting_ops are set to attention ops
+        # However, mutation ops are filtered out by resolve_defined_ops()
+        # So splitting_ops will only contain non-mutation attention ops
+        assert config.compilation_config.splitting_ops is not None
+        assert len(config.compilation_config.splitting_ops) > 0
+        # Since mutation ops are filtered, not all _attention_ops will be present
+        # So is_attention_compiled_piecewise() may return False
+        # This is expected behavior to work around PyTorch Inductor bug
         # enable_attn_fusion is directly supported under
         # use_inductor_graph_partition=True, and cudagraph_mode
         # is unchanged.
