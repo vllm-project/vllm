@@ -54,7 +54,7 @@ async def test_async_llm_replace_default_loggers(log_stats_enabled_engine_args):
     engine = AsyncLLM.from_engine_args(
         log_stats_enabled_engine_args, stat_loggers=[RayPrometheusStatLogger]
     )
-    assert isinstance(engine.logger_manager.prometheus_logger, RayPrometheusStatLogger)
+    assert isinstance(engine.logger_manager.stat_loggers[0], RayPrometheusStatLogger)
     engine.shutdown()
 
 
