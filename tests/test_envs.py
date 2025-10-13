@@ -44,8 +44,9 @@ def test_refresh_envs_cache(monkeypatch: pytest.MonkeyPatch):
     refresh_envs_cache()
 
     # No more cache miss after environment variable refresh
-    # NOTE: We can't directly use CacheInfo().hits, as some environment variable
-    # initialization calls the __getattr__ as well (e.g. VLLM_DP_RANK_LOCAL).
+    # NOTE: We use misses over hits in the test, as some environment variable
+    # initializations calls the __getattr__ which messed up the hit counts
+    # (e.g. VLLM_DP_RANK_LOCAL).
     assert __getattr__.cache_info().misses == environment_variables_cnt
     assert envs.VLLM_HOST_IP == "1.1.1.1"
     assert envs.VLLM_PORT == 1234
