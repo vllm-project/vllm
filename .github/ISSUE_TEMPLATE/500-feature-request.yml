@@ -30,8 +30,8 @@ body:
     value: >
       Thanks for contributing 🎉!
 - type: checkboxes
+  id: plan-to-implement
   attributes:
-    id: plan-to-implement
     options:
       - label: Are you planning to implement this feature?
 - type: checkboxes
