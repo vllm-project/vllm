@@ -4,7 +4,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 import torch
 
@@ -353,7 +353,7 @@ class OffloadingConnectorScheduler:
     def request_finished(
         self,
         request: Request,
-        block_ids: Union[tuple[list[int], ...], list[int]],
+        block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.
