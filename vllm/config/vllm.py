@@ -575,8 +575,7 @@ class VllmConfig:
         # Enable quant_fp8 CUDA ops on all archs except B200.
         # On B200 the native implementation is faster than CUDA kernel.
         # https://github.com/vllm-project/vllm/issues/25094
-        if (not current_platform.is_device_capability(100) and
-            has_blocked_weights()):
+        if not current_platform.is_device_capability(100) and has_blocked_weights():
             custom_ops = self.compilation_config.custom_ops
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
