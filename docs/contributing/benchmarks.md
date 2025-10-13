@@ -912,7 +912,7 @@ vllm bench serve \
 ```
 
 For reranker models, this will create `num-prompts / random-batch-size` requests with
-`random-batch-size` "documents" where each one has close to `random-input-len` tokens. 
+`random-batch-size` "documents" where each one has close to `random-input-len` tokens.
 In the example above, this results in 2 rerank requests with 5 "documents" each where
 each document has close to 512 tokens.
 
