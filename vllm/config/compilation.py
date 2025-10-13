@@ -199,9 +199,10 @@ class CompilationConfig:
     used for the compilation directly (it sees the whole graph). When the
     compilation level is 3, the backend is used for the piecewise compilation
     (it sees a part of the graph). The backend can not be custom for compilation
-    level 3. Furthermore, compilation is only piecewise if splitting ops is set
-    accordingly and use_inductor_cudagraphs_partition is off. Note that the
-    default options for splitting ops are sufficient for piecewise compilation.
+    level 3, i.e. the backend must be either eager or inductor. Furthermore,
+    compilation is only piecewise if splitting ops is set accordingly and
+    use_inductor_cudagraphs_partition is off. Note that the default options for
+    splitting ops are sufficient for piecewise compilation.
     """
     custom_ops: list[str] = field(default_factory=list)
     """Fine-grained control over which custom ops to enable/disable. Use 'all'
@@ -239,8 +240,7 @@ class CompilationConfig:
     """
     Whether to use inductor compilation.
 
-    This flag is deprecated and will be removed in the next release
-    either 0.12.0 or 0.11.2, whichever is first.
+    This flag is deprecated and will be removed in the next release 0.12.0.
     Please use the 'backend' option instead.
 
     - False: inductor compilation is not used. graph runs in eager
@@ -761,8 +761,9 @@ class CompilationConfig:
             return self.level == CompilationLevel.PIECEWISE
 
         # Inductor partition case
-        return (self.backend == "inductor" and 
-                self.level > CompilationLevel.NO_COMPILATION)
+        return (
+            self.backend == "inductor" and self.level > CompilationLevel.NO_COMPILATION
+        )
 
     def custom_op_log_check(self):
         """

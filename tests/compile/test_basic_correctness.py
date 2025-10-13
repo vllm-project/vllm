@@ -127,7 +127,9 @@ def test_compile_correctness(
             CompilationLevel.PIECEWISE,
         ]:
             for level in [CompilationLevel.NO_COMPILATION, comp_level]:
-                all_args.append(final_args + [f"-O.level={level}", "-O.backend=inductor"])
+                all_args.append(
+                    final_args + [f"-O.level={level}", "-O.backend=inductor"]
+                )
 
             # inductor will change the output, so we only compare if the output
             # is close, not exactly the same.
