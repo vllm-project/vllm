@@ -92,7 +92,7 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supporte
 # (backend_name, cudagraph_mode, compilation_mode, supported)
 combo_cases_2 = [
     ("FA2", "FULL", 0, True),  # no compilation + full cudagraph
-    ("FA2", "FULL", 3, True),  # piecewise compilation + full cudagraph
+    ("FA2", "FULL", 3, True),  # VLLM_COMPILE + full cudagraph
     ("FA2", "PIECEWISE", 0, False),  # no compilation + piecewise cudagraph
     ("FA2", "PIECEWISE", 3, True),  # piecewise compilation + piecewise cudagraph
     (
