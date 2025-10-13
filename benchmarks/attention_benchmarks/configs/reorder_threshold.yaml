@@ -17,24 +17,24 @@ mode: "decode_vs_prefill"
 #   - decode: threshold >= query_length (forces decode pipeline)
 #   - prefill: threshold < query_length (forces prefill pipeline)
 #
-# We use q<N>kv1k format which creates q_len=N, kv_len=1024 requests
-# This tests different query lengths with fixed KV cache context
+# We use q<N>s1k format which creates q_len=N, seq_len=1024 requests
+# This tests different query lengths with fixed sequence length context
 #
 # Using batch_spec_ranges for automatic generation:
 batch_spec_ranges:
-  - template: "q{q_len}kv1k"
+  - template: "q{q_len}s1k"
     q_len:
       start: 1
       stop: 16
       step: 1
       end_inclusive: false
-  - template: "q{q_len}kv1k"
+  - template: "q{q_len}s1k"
     q_len:
       start: 16
       stop: 64
       step: 2
       end_inclusive: false
-  - template: "q{q_len}kv1k"
+  - template: "q{q_len}s1k"
     q_len:
       start: 64
       stop: 1024

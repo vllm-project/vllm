@@ -14,30 +14,30 @@ model:
 
 batch_specs:
   # Small batches, varying sequence lengths
-  - "16q1kv512"     # 16 requests, 512 KV cache
-  - "16q1kv1k"      # 16 requests, 1k KV cache
-  - "16q1kv2k"      # 16 requests, 2k KV cache
-  - "16q1kv4k"      # 16 requests, 4k KV cache
+  - "16q1s512"     # 16 requests, 512 KV cache
+  - "16q1s1k"      # 16 requests, 1k KV cache
+  - "16q1s2k"      # 16 requests, 2k KV cache
+  - "16q1s4k"      # 16 requests, 4k KV cache
 
   # Medium batches
-  - "32q1kv1k"      # 32 requests, 1k KV cache
-  - "32q1kv2k"      # 32 requests, 2k KV cache
-  - "32q1kv4k"      # 32 requests, 4k KV cache
-  - "32q1kv8k"      # 32 requests, 8k KV cache
+  - "32q1s1k"      # 32 requests, 1k KV cache
+  - "32q1s2k"      # 32 requests, 2k KV cache
+  - "32q1s4k"      # 32 requests, 4k KV cache
+  - "32q1s8k"      # 32 requests, 8k KV cache
 
   # Large batches
-  - "64q1kv1k"      # 64 requests, 1k KV cache
-  - "64q1kv2k"      # 64 requests, 2k KV cache
-  - "64q1kv4k"      # 64 requests, 4k KV cache
-  - "64q1kv8k"      # 64 requests, 8k KV cache
+  - "64q1s1k"      # 64 requests, 1k KV cache
+  - "64q1s2k"      # 64 requests, 2k KV cache
+  - "64q1s4k"      # 64 requests, 4k KV cache
+  - "64q1s8k"      # 64 requests, 8k KV cache
 
   # Very large batches
-  - "128q1kv1k"     # 128 requests, 1k KV cache
-  - "128q1kv2k"     # 128 requests, 2k KV cache
+  - "128q1s1k"     # 128 requests, 1k KV cache
+  - "128q1s2k"     # 128 requests, 2k KV cache
 
   # Long context
-  - "32q1kv16k"     # 32 requests, 16k KV cache
-  - "32q1kv32k"     # 32 requests, 32k KV cache
+  - "32q1s16k"     # 32 requests, 16k KV cache
+  - "32q1s32k"     # 32 requests, 32k KV cache
 
 backends:
   - cutlass_mla
