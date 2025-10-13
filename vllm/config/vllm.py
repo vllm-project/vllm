@@ -331,7 +331,7 @@ class VllmConfig:
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
             if (
                 self.compilation_config.backend == "inductor"
-                and self.compilation_config.level > CompilationMode.NO_COMPILATION
+                and self.compilation_config.mode > CompilationMode.NONE
             ):
                 self.compilation_config.custom_ops.append("none")
             else:
