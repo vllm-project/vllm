@@ -27,11 +27,21 @@ logger = init_logger(__name__)
 
 
 class CompilationMode:
-    # constants for the modes of the compilation process
+    """The compilation approach used for torch.compile-based compilation of the
+    model."""
+
     NONE = 0
+    """NONE (int): No torch.compile compilation is applied.
+    The model runs as-is."""
     STOCK_TORCH_COMPILE = 1
+    """STOCK_TORCH_COMPILE (int): Uses the standard `torch.compile`
+    compilation pipeline."""
     DYNAMO_TRACE_ONCE = 2
+    """DYNAMO_TRACE_ONCE (int): Uses TorchDynamo to trace the model once for
+    static graph optimization."""
     VLLM_COMPILE = 3
+    """VLLM_COMPILE (int): Uses piecewise compilation backend for optimized
+    inference workloads."""
 
 
 class CUDAGraphMode(enum.Enum):

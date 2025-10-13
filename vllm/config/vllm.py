@@ -84,14 +84,9 @@ class VllmConfig:
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
     """`torch.compile` and cudagraph capture configuration for the model.
 
-    As a shorthand, `-O<n>` can be used to directly specify the compilation
-    mode `n`: `-O3` is equivalent to `-O.mode=3` (same as `-O='{"mode":3}'`).
-    Currently, -O <n> and -O=<n> are supported as well but this will likely be
-    removed in favor of clearer -O<n> syntax in the future.
-
-    NOTE: mode 0 is the default mode without any optimization. mode 1 and 2
-    are for internal testing only. mode 3 is the recommended mode for
-    production, also default in V1.
+    As a shorthand, one can append compilation arguments via 
+    -0.parameter=arguement such as `-O.mode=3` (same as `-O='{"mode":3}'`).
+    NOTE: mode 3 is the default mode without any optimization.
 
     You can specify the full compilation config like so:
     `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
