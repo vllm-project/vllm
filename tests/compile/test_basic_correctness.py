@@ -146,7 +146,7 @@ def test_compile_correctness(
             CompilationLevel.DYNAMO_ONCE,
             CompilationLevel.PIECEWISE,
         ]:
-            all_args.append(final_args + [f"-O.{level}", "-O.backend=eager"])
+            all_args.append(final_args + [f"-O.level={level}", "-O.backend=eager"])
             all_envs.append({})
             all_envs.append({})
 
