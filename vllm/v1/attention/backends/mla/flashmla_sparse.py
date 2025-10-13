@@ -119,12 +119,12 @@ class FlashMLASparseMetadata:
 
     @dataclass
     class FP8KernelMetadata:
-        scheduler_metadata: Optional[torch.Tensor]
+        scheduler_metadata: torch.Tensor | None
         num_splits: torch.Tensor
         dummy_block_table: torch.Tensor
         cache_lens: torch.Tensor
 
-    fp8_extra_metadata: Optional[FP8KernelMetadata] = None
+    fp8_extra_metadata: FP8KernelMetadata | None = None
 
 
 @triton.jit
@@ -209,11 +209,11 @@ def triton_convert_req_index_to_global_index(
     BLOCK_SIZE: int = 64,
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,  # tile width along columns
-    prefill_token_mask: Optional[torch.Tensor] = None,
-    prefill_seen: Optional[torch.Tensor] = None,
-    prefill_unique_out: Optional[torch.Tensor] = None,
-    prefill_unique_count: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    prefill_token_mask: torch.Tensor | None = None,
+    prefill_seen: torch.Tensor | None = None,
+    prefill_unique_out: torch.Tensor | None = None,
+    prefill_unique_count: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Convert per-request indices into global cache slots.
 
     Returns:
@@ -451,14 +451,14 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
-        topk_indice_buffer: Optional[torch.Tensor] = None,
+        topk_indice_buffer: torch.Tensor | None = None,
         indexer: Optional["Indexer"] = None,
         **mla_args,
     ) -> None:
@@ -489,9 +489,9 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         )
 
         # Small buffers allocated directly
-        self.prefill_seen_buffer: Optional[torch.Tensor] = None
-        self.prefill_unique_output: Optional[torch.Tensor] = None
-        self.prefill_unique_count: Optional[torch.Tensor] = None
+        self.prefill_seen_buffer: torch.Tensor | None = None
+        self.prefill_unique_output: torch.Tensor | None = None
+        self.prefill_unique_count: torch.Tensor | None = None
 
     def _forward_bf16_kv(
         self,
@@ -557,9 +557,9 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode
@@ -598,10 +598,10 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
 
         use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
 
-        prefill_token_mask: Optional[torch.Tensor] = None
-        prefill_seen: Optional[torch.Tensor] = None
-        prefill_unique_out: Optional[torch.Tensor] = None
-        prefill_unique_count: Optional[torch.Tensor] = None
+        prefill_token_mask: torch.Tensor | None = None
+        prefill_seen: torch.Tensor | None = None
+        prefill_unique_out: torch.Tensor | None = None
+        prefill_unique_count: torch.Tensor | None = None
 
         if use_fp8_cache and attn_metadata.num_prefill_tokens > 0:
             if kv_cache.numel() == 0:
