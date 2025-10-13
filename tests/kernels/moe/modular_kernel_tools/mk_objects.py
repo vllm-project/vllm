@@ -196,12 +196,7 @@ register_experts(
 
 # Disable on blackwell for now
 if has_deep_ep() and not current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
-        DeepEPHTPrepareAndFinalize,
-    )
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
-        DeepEPLLPrepareAndFinalize,
-    )
+    pass
 
     # register_prepare_and_finalize(
     #     DeepEPHTPrepareAndFinalize,
@@ -245,8 +240,9 @@ if False and has_pplx():
         backend="pplx",
     )
 
-if False and (has_flashinfer_cutlass_fused_moe()
-        and current_platform.has_device_capability(100)):
+if False and (
+    has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100)
+):
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )

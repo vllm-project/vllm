@@ -8,7 +8,6 @@ from enum import Enum
 from functools import partial
 from typing import Literal, get_args, overload
 
-import functools
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
@@ -255,8 +254,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 handle,
                 num_dispatchers=all2all_manager.world_size,
                 dp_size=all2all_manager.dp_world_size,
-                rank_expert_offset=all2all_manager.rank *
-                moe.num_local_experts,
+                rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
             )
 
         return prepare_finalize
@@ -278,6 +276,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         # completely initialized, i.e. all weights loaded and post
         # processed.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        logger.debug("FusedMoE quant_config=%s", self.moe_quant_config)
 
         prepare_finalize = self.maybe_make_prepare_finalize()
 
