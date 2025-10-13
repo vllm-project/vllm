@@ -1137,7 +1137,7 @@ class FusedMoE(CustomOp):
             )
             self.local_num_experts = local_num_experts
             self.register_buffer("expert_map", expert_map)
-            logger.info_once(
+            logger.debug_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Expert "
                 "placement strategy: %s. Local/global"
                 " number of experts: %s/%s. Experts local to global index map:"

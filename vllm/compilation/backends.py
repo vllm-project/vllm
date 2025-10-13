@@ -240,9 +240,9 @@ class CompilerManager:
             if graph_index == 0:
                 # adds some info logging for the first graph
                 if runtime_shape is None:
-                    logger.info("Cache the graph for dynamic shape for later use")
+                    logger.debug("Cache the graph for dynamic shape for later use")
                 else:
-                    logger.info(
+                    logger.debug(
                         "Cache the graph of shape %s for later use", str(runtime_shape)
                     )
             if runtime_shape is None:
@@ -601,7 +601,7 @@ class VllmBackend:
         if disable_cache:
             logger.info("vLLM's torch.compile cache is disabled.")
         else:
-            logger.info(
+            logger.debug(
                 "Using cache directory: %s for vLLM's torch.compile", local_cache_dir
             )
 
@@ -615,7 +615,7 @@ class VllmBackend:
         from .monitor import torch_compile_start_time
 
         dynamo_time = time.time() - torch_compile_start_time
-        logger.info("Dynamo bytecode transform time: %.2f s", dynamo_time)
+        logger.debug("Dynamo bytecode transform time: %.2f s", dynamo_time)
         self.compilation_config.compilation_time += dynamo_time
 
         # we control the compilation process, each instance can only be

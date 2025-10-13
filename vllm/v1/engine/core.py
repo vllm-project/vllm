@@ -19,7 +19,6 @@ import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
-from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
@@ -92,7 +91,7 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
-        if is_global_first_rank():
+        if vllm_config.parallel_config.data_parallel_rank == 0:
             logger.info(
                 "Initializing a V1 LLM engine (v%s) with config: %s",
                 VLLM_VERSION,
@@ -726,7 +725,6 @@ class EngineCoreProc(EngineCore):
         )
 
         # Receive initialization message.
-        logger.info("Waiting for init message from front-end.")
         if not handshake_socket.poll(timeout=HANDSHAKE_TIMEOUT_MINS * 60_000):
             raise RuntimeError(
                 "Did not receive response from front-end "

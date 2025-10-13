@@ -2846,7 +2846,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Args:
             eep_scale_up: the model loading is for elastic EP scale up.
         """
-        logger.info("Starting to load model %s...", self.model_config.model)
+        if is_global_first_rank():
+            logger.info_once("Starting to load model %s...", self.model_config.model)
         if eep_scale_up:
             from vllm.distributed.parallel_state import get_ep_group
 
