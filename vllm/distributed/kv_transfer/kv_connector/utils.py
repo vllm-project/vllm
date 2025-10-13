@@ -7,7 +7,7 @@ KV cache helper for store.
 from collections import defaultdict
 from collections.abc import Sequence
 from concurrent.futures import CancelledError, Future
-from typing import Literal, Optional, Union, cast
+from typing import Literal, cast
 
 import torch
 
@@ -136,7 +136,7 @@ class KVOutputAggregator:
         # Aggregate kv_connector_output from all workers
 
         def update_finished_set(
-            req_ids: Optional[set[str]],
+            req_ids: set[str] | None,
             remaining_count_dict: dict[str, int],
             finished_set: set[str],
         ) -> None:
@@ -197,7 +197,7 @@ class KVOutputAggregator:
         to the respective list of outputs."""
         result_future: Future[ModelRunnerOutput] = Future()
 
-        outputs: list[Optional[ModelRunnerOutput]] = [None] * len(output_futures)
+        outputs: list[ModelRunnerOutput | None] = [None] * len(output_futures)
 
         def make_callback(idx):
             def callback(fut):
@@ -230,8 +230,8 @@ class KVOutputAggregator:
 def _make_src_and_dst_indices(
     src_block_ids: list[int],
     dst_block_ids: list[int],
-    src_device: Union[torch.device, str],
-    dst_device: Union[torch.device, str],
+    src_device: torch.device | str,
+    dst_device: torch.device | str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     src_indices = torch.tensor(src_block_ids, device=src_device, dtype=torch.int64)
     dst_indices = torch.tensor(dst_block_ids, device=dst_device, dtype=torch.int64)

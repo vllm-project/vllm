@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
-from typing import Optional, Union, cast
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -55,7 +55,7 @@ class CustomAllreduce:
     def __init__(
         self,
         group: ProcessGroup,
-        device: Union[int, str, torch.device],
+        device: int | str | torch.device,
         max_size=8192 * 1024,
         symm_mem_enabled=False,
     ) -> None:
@@ -264,7 +264,7 @@ class CustomAllreduce:
             )
         return out
 
-    def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
+    def custom_all_reduce(self, input: torch.Tensor) -> torch.Tensor | None:
         """The main allreduce API that provides support for cuda graph."""
         # When custom allreduce is disabled, this will be None.
         if self.disabled or not self.should_custom_ar(input):
@@ -296,8 +296,8 @@ class CustomAllreduce:
     @staticmethod
     def create_shared_buffer(
         size_in_bytes: int,
-        group: Optional[ProcessGroup] = None,
-        uncached: Optional[bool] = False,
+        group: ProcessGroup | None = None,
+        uncached: bool | None = False,
     ) -> list[int]:
         pointer, handle = ops.allocate_shared_buffer_and_handle(size_in_bytes)
 
@@ -317,8 +317,8 @@ class CustomAllreduce:
     @staticmethod
     def free_shared_buffer(
         pointers: list[int],
-        group: Optional[ProcessGroup] = None,
-        rank: Optional[int] = None,
+        group: ProcessGroup | None = None,
+        rank: int | None = None,
     ) -> None:
         if rank is None:
             rank = dist.get_rank(group=group)
