@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from mcp import ClientSession
 from mcp.client.sse import sse_client
@@ -80,7 +80,7 @@ class ToolServer(ABC):
         pass
 
     @abstractmethod
-    def get_tool_description(self, namespace: str) -> Optional[ToolNamespaceConfig]:
+    def get_tool_description(self, namespace: str) -> ToolNamespaceConfig | None:
         """
         Return the tool description for the given namespace.
         If the namespace is not supported, return None.
@@ -89,7 +89,7 @@ class ToolServer(ABC):
 
     @abstractmethod
     def new_session(
-        self, namespace: str, session_id: str, headers: Optional[dict[str, str]] = None
+        self, namespace: str, session_id: str, headers: dict[str, str] | None = None
     ) -> AbstractAsyncContextManager[Any]:
         """
         Create a session for the namespace.
@@ -160,7 +160,7 @@ class MCPToolServer(ToolServer):
 
     @asynccontextmanager
     async def new_session(
-        self, namespace: str, session_id: str, headers: Optional[dict[str, str]] = None
+        self, namespace: str, session_id: str, headers: dict[str, str] | None = None
     ):
         url = self.urls.get(namespace)
         request_headers = {"x-session-id": session_id}
@@ -196,7 +196,7 @@ class DemoToolServer(ToolServer):
     def has_namespace(self, namespace: str) -> bool:
         return namespace in self.tools
 
-    def get_tool_description(self, namespace: str) -> Optional[ToolNamespaceConfig]:
+    def get_tool_description(self, namespace: str) -> ToolNamespaceConfig | None:
         if namespace not in self.tools:
             return None
         if namespace == "browser":
@@ -208,7 +208,7 @@ class DemoToolServer(ToolServer):
 
     @asynccontextmanager
     async def new_session(
-        self, namespace: str, session_id: str, headers: Optional[dict[str, str]] = None
+        self, namespace: str, session_id: str, headers: dict[str, str] | None = None
     ):
         if namespace not in self.tools:
             raise KeyError(f"Namespace '{namespace}' is not supported")

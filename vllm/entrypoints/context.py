@@ -6,7 +6,7 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from contextlib import AsyncExitStack
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, StreamState, TextContent
@@ -64,7 +64,7 @@ class ConversationContext(ABC):
     @abstractmethod
     async def init_tool_sessions(
         self,
-        tool_server: Optional[ToolServer],
+        tool_server: ToolServer | None,
         exit_stack: AsyncExitStack,
         request_id: str,
         mcp_tools: dict[str, Mcp],
@@ -104,7 +104,7 @@ class SimpleContext(ConversationContext):
 
     async def init_tool_sessions(
         self,
-        tool_server: Optional[ToolServer],
+        tool_server: ToolServer | None,
         exit_stack: AsyncExitStack,
         request_id: str,
         mcp_tools: dict[str, Mcp],
@@ -129,9 +129,9 @@ class HarmonyContext(ConversationContext):
                 (includes both elevated and custom MCP tools)
         """
         self._messages = messages
-        self.finish_reason: Optional[str] = None
+        self.finish_reason: str | None = None
         self.available_tools = enabled_tool_namespaces
-        self._tool_sessions: dict[str, Union[ClientSession, Tool]] = {}
+        self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_namespaces: set[str] = set()
 
         self.parser = get_streamable_parser_for_assistant()
@@ -153,7 +153,7 @@ class HarmonyContext(ConversationContext):
         if self.parser.current_channel in {"analysis", "commentary"}:
             self.num_reasoning_tokens += 1
 
-    def append_output(self, output: Union[RequestOutput, list[Message]]) -> None:
+    def append_output(self, output: RequestOutput | list[Message]) -> None:
         if isinstance(output, RequestOutput):
             output_token_ids = output.outputs[0].token_ids
             self.parser = get_streamable_parser_for_assistant()
@@ -388,7 +388,7 @@ class HarmonyContext(ConversationContext):
 
     async def init_tool_sessions(
         self,
-        tool_server: Optional[ToolServer],
+        tool_server: ToolServer | None,
         exit_stack: AsyncExitStack,
         request_id: str,
         mcp_tools: dict[str, Mcp],
@@ -438,7 +438,7 @@ class StreamingHarmonyContext(HarmonyContext):
     def messages(self) -> list:
         return self._messages
 
-    def append_output(self, output: Union[RequestOutput, list[Message]]) -> None:
+    def append_output(self, output: RequestOutput | list[Message]) -> None:
         if isinstance(output, RequestOutput):
             # append_output is called for each output token in streaming case,
             # so we only want to add the prompt tokens once for each message.

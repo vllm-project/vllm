@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Literal, NamedTuple, Optional, TypedDict, Union, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, TypeAlias, TypedDict, cast
 
 from typing_extensions import TypeIs
 
@@ -23,8 +23,8 @@ if TYPE_CHECKING:
 
 
 def parse_raw_prompts(
-    prompt: Union[str, list[str], list[int], list[list[int]]],
-) -> Union[Sequence[TextPrompt], Sequence[TokensPrompt]]:
+    prompt: str | list[str] | list[int] | list[list[int]],
+) -> Sequence[TextPrompt] | Sequence[TokensPrompt]:
     if isinstance(prompt, str):
         # case 1: a string
         return [TextPrompt(prompt=prompt)]
@@ -76,9 +76,9 @@ class ParsedEmbedsPrompt(TypedDict):
     content: EmbedsPrompt
 
 
-ParsedSingletonPrompt = Union[
-    ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt, ParsedEmbedsPrompt
-]
+ParsedSingletonPrompt: TypeAlias = (
+    ParsedStrPrompt | ParsedTextPrompt | ParsedTokensPrompt | ParsedEmbedsPrompt
+)
 
 
 def parse_singleton_prompt(prompt: SingletonPrompt) -> ParsedSingletonPrompt:
@@ -106,7 +106,7 @@ def is_explicit_encoder_decoder_prompt(
 
 def split_enc_dec_inputs(
     inputs: ProcessorInputs,
-) -> tuple[Optional[SingletonInputs], SingletonInputs]:
+) -> tuple[SingletonInputs | None, SingletonInputs]:
     if "encoder" in inputs and "decoder" in inputs:
         # NOTE: This passes pyright but not mypy
         return (
@@ -118,9 +118,9 @@ def split_enc_dec_inputs(
 
 
 class PromptComponents(NamedTuple):
-    text: Optional[str] = None
-    token_ids: Optional[list[int]] = None
-    embeds: Optional["torch.Tensor"] = None
+    text: str | None = None
+    token_ids: list[int] | None = None
+    embeds: "torch.Tensor | None" = None
 
 
 def get_prompt_components(prompt: PromptType) -> PromptComponents:

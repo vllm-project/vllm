@@ -16,10 +16,11 @@ import sys
 import tempfile
 import time
 import warnings
+from collections.abc import Callable
 from contextlib import ExitStack, contextmanager, suppress
 from multiprocessing import Process
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, Union
+from typing import Any, Literal
 from unittest.mock import patch
 
 import cloudpickle
@@ -113,7 +114,7 @@ class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
 
     def _start_server(
-        self, model: str, vllm_serve_args: list[str], env_dict: Optional[dict[str, str]]
+        self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
     ) -> None:
         """Subclasses override this method to customize server process launch"""
         env = os.environ.copy()
@@ -136,11 +137,11 @@ class RemoteOpenAIServer:
         model: str,
         vllm_serve_args: list[str],
         *,
-        env_dict: Optional[dict[str, str]] = None,
-        seed: Optional[int] = 0,
+        env_dict: dict[str, str] | None = None,
+        seed: int | None = 0,
         auto_port: bool = True,
-        max_wait_seconds: Optional[float] = None,
-        override_hf_configs: Optional[dict[str, Any]] = None,
+        max_wait_seconds: float | None = None,
+        override_hf_configs: dict[str, Any] | None = None,
     ) -> None:
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
@@ -205,7 +206,7 @@ class RemoteOpenAIServer:
             # force kill if needed
             self.proc.kill()
 
-    def _poll(self) -> Optional[int]:
+    def _poll(self) -> int | None:
         """Subclasses override this method to customize process polling"""
         return self.proc.poll()
 
@@ -270,7 +271,7 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
     """Launch test server with custom child process"""
 
     def _start_server(
-        self, model: str, vllm_serve_args: list[str], env_dict: Optional[dict[str, str]]
+        self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
     ) -> None:
         self.proc: Process = Process(
             target=self.child_process_fxn, args=(env_dict, model, vllm_serve_args)
@@ -281,12 +282,12 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
         self,
         model: str,
         vllm_serve_args: list[str],
-        child_process_fxn: Callable[[Optional[dict[str, str]], str, list[str]], None],
+        child_process_fxn: Callable[[dict[str, str] | None, str, list[str]], None],
         *,
-        env_dict: Optional[dict[str, str]] = None,
-        seed: Optional[int] = 0,
+        env_dict: dict[str, str] | None = None,
+        seed: int | None = 0,
         auto_port: bool = True,
-        max_wait_seconds: Optional[float] = None,
+        max_wait_seconds: float | None = None,
     ) -> None:
         """Store custom child process function then invoke superclass
         constructor which will indirectly launch it."""
@@ -300,7 +301,7 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
             max_wait_seconds=max_wait_seconds,
         )
 
-    def _poll(self) -> Optional[int]:
+    def _poll(self) -> int | None:
         return self.proc.exitcode
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -566,11 +567,11 @@ def compare_two_settings(
     model: str,
     arg1: list[str],
     arg2: list[str],
-    env1: Optional[dict[str, str]] = None,
-    env2: Optional[dict[str, str]] = None,
+    env1: dict[str, str] | None = None,
+    env2: dict[str, str] | None = None,
     *,
     method: str = "generate",
-    max_wait_seconds: Optional[float] = None,
+    max_wait_seconds: float | None = None,
 ) -> None:
     """
     Launch API server with two different sets of arguments/environments
@@ -596,10 +597,10 @@ def compare_two_settings(
 def compare_all_settings(
     model: str,
     all_args: list[list[str]],
-    all_envs: list[Optional[dict[str, str]]],
+    all_envs: list[dict[str, str] | None],
     *,
     method: str = "generate",
-    max_wait_seconds: Optional[float] = None,
+    max_wait_seconds: float | None = None,
 ) -> None:
     """
     Launch API server with several different sets of arguments/environments
@@ -804,8 +805,8 @@ def get_physical_device_indices(devices):
 def wait_for_gpu_memory_to_clear(
     *,
     devices: list[int],
-    threshold_bytes: Optional[int] = None,
-    threshold_ratio: Optional[float] = None,
+    threshold_bytes: int | None = None,
+    threshold_ratio: float | None = None,
     timeout_s: float = 120,
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
@@ -1021,7 +1022,7 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
 
 
 def create_new_process_for_each_test(
-    method: Optional[Literal["spawn", "fork"]] = None,
+    method: Literal["spawn", "fork"] | None = None,
 ) -> Callable[[Callable[_P, None]], Callable[_P, None]]:
     """Creates a decorator that runs each test function in a new process.
 
@@ -1117,9 +1118,9 @@ async def completions_with_server_args(
     prompts: list[str],
     model_name: str,
     server_cli_args: list[str],
-    num_logprobs: Optional[int],
+    num_logprobs: int | None,
     max_wait_seconds: int = 240,
-    max_tokens: Union[int, list] = 5,
+    max_tokens: int | list = 5,
 ) -> list[Completion]:
     """Construct a remote OpenAI server, obtain an async client to the
     server & invoke the completions API to obtain completions.

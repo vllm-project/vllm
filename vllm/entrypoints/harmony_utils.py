@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import datetime
 import json
 from collections.abc import Iterable, Sequence
-from typing import Literal, Optional, Union
+from typing import Literal
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -75,12 +73,12 @@ BUILTIN_TOOLS = {
 
 def build_system_and_developer_messages(
     # Tool for ResponsesAPI, ChatCompletionToolsParam for CompletionsAPI
-    request_tools: Union[list[Tool], list[ChatCompletionToolsParam]],
-    tool_server: Optional[ToolServer],
-    instructions: Optional[str] = None,
-    reasoning_effort: Optional[Literal["high", "medium", "low"]] = None,
-    start_date: Optional[str] = None,
-    model_identity: Optional[str] = None,
+    request_tools: list[Tool] | list[ChatCompletionToolsParam],
+    tool_server: ToolServer | None,
+    instructions: str | None = None,
+    reasoning_effort: Literal["high", "medium", "low"] | None = None,
+    start_date: str | None = None,
+    model_identity: str | None = None,
 ) -> list[Message]:
     """Builds system and developer messages for a Harmony request.
 
@@ -169,7 +167,7 @@ def get_encoding():
 
 
 def create_function_tools_namespace(
-    function_tools: list[Union[Tool, ChatCompletionToolsParam]],
+    function_tools: list[Tool | ChatCompletionToolsParam],
 ) -> ToolNamespaceConfig:
     """
     Create a Harmony ToolNamespaceConfig from function tools.
@@ -196,7 +194,7 @@ def create_function_tools_namespace(
     return namespace_config
 
 
-def create_tool_definition(tool: Union[ChatCompletionToolsParam, Tool]):
+def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
     """Convert a tool to a Harmony ToolDescription."""
     if isinstance(tool, ChatCompletionToolsParam):
         return ToolDescription.new(
@@ -273,7 +271,7 @@ def get_system_message(
 def get_developer_message(
     instructions: str | None = None,
     tool_namespaces: list | None = None,
-) -> Optional[Message]:
+) -> Message | None:
     """
     Construct developer message for custom (non-elevated) tools.
 
@@ -312,7 +310,7 @@ def get_user_message(content: str) -> Message:
 
 def parse_response_input(
     response_msg: ResponseInputOutputItem,
-    prev_responses: list[Union[ResponseOutputItem, ResponseReasoningItem]],
+    prev_responses: list[ResponseOutputItem | ResponseReasoningItem],
 ) -> Message:
     if not isinstance(response_msg, dict):
         response_msg = response_msg.model_dump()
