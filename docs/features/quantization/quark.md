@@ -48,7 +48,7 @@ to fetch model and tokenizer.
     MAX_SEQ_LEN = 512
 
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, device_map="auto", torch_dtype="auto",
+        MODEL_ID, device_map="auto", dtype="auto",
     )
     model.eval()
 

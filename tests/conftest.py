@@ -342,7 +342,7 @@ class HfRunner:
         )
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
-        model_kwargs.setdefault("torch_dtype", torch_dtype)
+        model_kwargs.setdefault("dtype", torch_dtype)
 
         if is_sentence_transformer:
             # Lazy init required for AMD CI
@@ -388,7 +388,7 @@ class HfRunner:
         if not skip_tokenizer_init:
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_name,
-                torch_dtype=torch_dtype,
+                dtype=torch_dtype,
                 trust_remote_code=trust_remote_code,
             )
 
@@ -398,7 +398,7 @@ class HfRunner:
 
         self.processor = AutoProcessor.from_pretrained(
             model_name,
-            torch_dtype=torch_dtype,
+            dtype=torch_dtype,
             trust_remote_code=trust_remote_code,
         )
         if skip_tokenizer_init:
