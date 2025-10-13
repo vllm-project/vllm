@@ -3,7 +3,6 @@
 
 import json
 from collections.abc import Sequence
-from typing import Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -108,7 +107,7 @@ class GraniteToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         start_idx = consume_space(0, current_text)
         if current_text[start_idx:].startswith(self.bot_token):
             start_idx = consume_space(start_idx + len(self.bot_token), current_text)
