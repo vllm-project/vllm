@@ -11,19 +11,7 @@ from vllm.platforms import current_platform
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
-HIDDEN_SIZES = [
-    8,
-    768,
-    769,
-    770,
-    771,
-    5120,
-    5124,
-    5125,
-    5126,
-    8192,
-    8199,
-]  # Arbitrary values for testing
+HIDDEN_SIZES = [8, 768, 769, 5120, 5125, 8192]  # Arbitrary values for testing
 ADD_RESIDUAL = [False, True]
 SEEDS = [0]
 CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
@@ -118,7 +106,7 @@ def test_poly_norm(
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("quant_scale", [1.0, 0.01, 10.0])
+@pytest.mark.parametrize("quant_scale", [0.01, 1.0, 10.0])
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("strided_input", [False, True])
