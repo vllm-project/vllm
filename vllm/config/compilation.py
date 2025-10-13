@@ -7,8 +7,8 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
-from warnings import warn
+from typing import TYPE_CHECKING, Any, ClassVar
+
 from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
@@ -234,7 +234,7 @@ class CompilationConfig:
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
 
     # Inductor capture
-    use_inductor: Optional[bool] = None
+    use_inductor: bool | None = None
     """
     Whether to use inductor compilation.
 
@@ -581,7 +581,7 @@ class CompilationConfig:
         if self.backend == "":
             self.backend = "inductor"
 
-    def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
+    def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
         """
         Initialize the backend for the compilation config from a vllm config.
         Arguments:
@@ -757,19 +757,12 @@ class CompilationConfig:
         if not self.use_inductor_graph_partition:
             # Dynamo-level FX split case
             return self.level == CompilationLevel.PIECEWISE
-        inductor_used = (
-            self.level == CompilationLevel.PIECEWISE and self.backend == "inductor"
-        ) or (
-            self.level >= CompilationLevel.DYNAMO_AS_IS and self.backend == "inductor"
-        )
-        use_inductor_piecewise_compilation = (
-            inductor_used
-            and self.use_inductor_graph_partition
-            and not self.splitting_ops_contain_attention()
-        )
 
         # Inductor partition case
-        return self.level > CompilationLevel.NO_COMPILATION and self.use_inductor
+        if self.backend == "inductor":
+            return self.level > CompilationLevel.NO_COMPILATION
+
+        return False
 
     def custom_op_log_check(self):
         """
