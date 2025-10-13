@@ -24,6 +24,9 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_kernel_override_batch_invariant,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -49,6 +52,7 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
+FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -287,6 +291,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
+        if vllm_kernel_override_batch_invariant():
+            self.decode_fixed_split_size = 2048
+            self.prefill_fixed_split_size = 4096
+            self.disable_split_kv = True
+        else:
+            self.decode_fixed_split_size = -1
+            self.prefill_fixed_split_size = -1
+            self.disable_split_kv = False
+
         self.compilation_config = vllm_config.compilation_config
         max_num_pages_per_req = cdiv(
             self.model_config.max_model_len, self.kv_cache_spec.block_size
@@ -390,8 +403,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
+            buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE
+            if vllm_kernel_override_batch_invariant():
+                buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
             self._workspace_buffer = torch.zeros(
-                FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device=self.device
+                buffer_size, dtype=torch.uint8, device=self.device
             )
         return self._workspace_buffer
 
@@ -668,6 +684,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         logits_soft_cap=self.logits_soft_cap,
                         q_data_type=self.q_data_type,
                         kv_data_type=self.kv_cache_dtype,
+                        fixed_split_size=self.prefill_fixed_split_size,
+                        disable_split_kv=self.disable_split_kv,
                     )
                 else:
                     attn_metadata.qo_indptr_gpu = qo_indptr_cpu.to(
@@ -729,6 +747,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         logits_soft_cap=self.logits_soft_cap,
                         q_data_type=self.q_data_type,
                         kv_data_type=self.kv_cache_dtype,
+                        fixed_split_size=self.decode_fixed_split_size,
+                        disable_split_kv=self.disable_split_kv,
                     )
         return attn_metadata
 
@@ -1117,6 +1137,8 @@ def fast_plan_decode(
     rope_scale: float | None = None,
     rope_theta: float | None = None,
     non_blocking: bool = True,
+    fixed_split_size: int = -1,
+    disable_split_kv: bool = False,
 ) -> None:
     """
     A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for
@@ -1153,6 +1175,10 @@ def fast_plan_decode(
             rope_scale,
             rope_theta,
             non_blocking,
+            None,  # block_tables
+            None,  # seq_lens
+            fixed_split_size,
+            disable_split_kv,
         )
         self.vllm_first_call = False
         return
@@ -1218,8 +1244,8 @@ def fast_plan_decode(
             head_dim,
             False,  # causal
             window_left,
-            -1,  # fixed_split_size
-            False,  # disable_split_kv
+            fixed_split_size,
+            disable_split_kv,
         )
     except Exception as e:
         raise RuntimeError(f"Error in tensor core plan: {e}") from e
