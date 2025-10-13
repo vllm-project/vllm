@@ -32,7 +32,7 @@ def is_flashinfer_fp4_cutlass_moe_available() -> bool:
         envs.VLLM_USE_FLASHINFER_MOE_FP4
         and has_flashinfer_cutlass_fused_moe()
         and current_platform.is_cuda()
-        and current_platform.is_device_capability(100)
+        and any(current_platform.is_device_capability(cap) for cap in [100, 120])
     )
 
 
