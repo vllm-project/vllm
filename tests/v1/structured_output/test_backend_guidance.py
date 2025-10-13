@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from transformers import AutoTokenizer
 
-from vllm.config import DecodingConfig, VllmConfig
+from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
@@ -15,7 +15,7 @@ def test_backend_guidance_rollback_terminated():
     # it should be reverted in case EOS is not accepted by the target
     # model.
     vllm_config = VllmConfig(
-        decoding_config=DecodingConfig(
+        decoding_config=StructuredOutputsConfig(
             backend="guidance",
         )
     )
@@ -32,7 +32,18 @@ def test_backend_guidance_rollback_terminated():
     )
 
     prompt = tokenizer.encode('{"a": "b"}')
-    grammar.accept_tokens("test", prompt + [tokenizer.eos_token_id])
+    dummy = tokenizer.encode("d")
+    for token in prompt:
+        assert grammar.accept_tokens("test", [token])
     assert grammar.is_terminated()
+    # We are in a terminated state, giving EOS should be accepted
+    assert grammar.accept_tokens("", [tokenizer.eos_token_id])
+    # Giving any other token should also be accepted
+    assert grammar.accept_tokens("", dummy)
+    # Rollback is done from where state was terminated, so from 'prompt[-1]'
     grammar.rollback(1)
     assert not grammar.is_terminated()
+    assert grammar.accept_tokens("", prompt[-1:])
+    assert grammar.is_terminated()
+    grammar.rollback(len(prompt))
+    assert not grammar.accept_tokens("", dummy)
