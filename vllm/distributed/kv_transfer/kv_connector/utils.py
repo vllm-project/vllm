@@ -4,7 +4,6 @@
 KV cache helper for store.
 """
 
-from collections import defaultdict
 from collections.abc import Sequence
 from concurrent.futures import CancelledError, Future
 from typing import Literal, cast
@@ -127,8 +126,9 @@ class KVOutputAggregator:
     def __init__(self, world_size: int):
         # Complete transfer tracker. Used to track finished requests
         # [req_id -> n_remaining_workers]
-        self._recv_remaining_count = defaultdict[str, int](lambda: world_size)
-        self._send_remaining_count = defaultdict[str, int](lambda: world_size)
+        self._recv_remaining_count = dict[str, int]()
+        self._send_remaining_count = dict[str, int]()
+        self._expected_finished_reqs = world_size
 
     def aggregate(
         self, outputs: list[ModelRunnerOutput], output_rank: int = 0
@@ -141,7 +141,10 @@ class KVOutputAggregator:
             finished_set: set[str],
         ) -> None:
             for req_id in req_ids or ():
-                remaining_count_dict[req_id] -= 1
+                remaining_count = remaining_count_dict.get(
+                    req_id, self._expected_finished_reqs
+                )
+                remaining_count_dict[req_id] = remaining_count - 1
                 if remaining_count_dict[req_id] == 0:
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
@@ -154,6 +157,19 @@ class KVOutputAggregator:
             kv_output = model_runner_output.kv_connector_output
             if not kv_output:
                 continue
+            # Allow the worker to dynamically update the expected number of
+            # finished sending/recving for new requests
+            if (
+                output.expected_finished_reqs > 0
+                and output.expected_finished_reqs != self._expected_finished_reqs
+            ):
+                logger.debug(
+                    "Expected finished requests updated from %d to %d",
+                    self._expected_finished_reqs,
+                    output.expected_finished_reqs,
+                )
+                self._expected_finished_reqs = output.expected_finished_reqs
+
             update_finished_set(
                 kv_output.finished_sending, self._send_remaining_count, finished_sending
             )
@@ -179,16 +195,17 @@ class KVOutputAggregator:
             invalid_block_ids |= kv_output.invalid_block_ids
 
         # select output of the worker specified by output_rank
-        output = outputs[output_rank]
+        runner_output = outputs[output_rank]
 
-        output.kv_connector_output = KVConnectorOutput(
+        runner_output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
             kv_connector_stats=aggregated_kv_connector_stats or None,
             invalid_block_ids=invalid_block_ids,
+            expected_finished_reqs=self._expected_finished_reqs,
         )
 
-        return output
+        return runner_output
 
     def async_aggregate(
         self, output_futures: Sequence[Future[ModelRunnerOutput]], output_rank: int = 0
