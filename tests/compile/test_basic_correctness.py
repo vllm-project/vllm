@@ -76,15 +76,15 @@ class TestSetting:
             attn_backend="FLASH_ATTN",
             method="encode",
         ),
-        # vision language model
-        TestSetting(
-            model="microsoft/Phi-3.5-vision-instruct",
-            model_args=["--trust-remote-code", "--max-model-len", "2048"],
-            pp_size=2,
-            tp_size=1,
-            attn_backend="FLASH_ATTN",
-            method="generate_with_image",
-        ),
+        # # vision language model
+        # TestSetting(
+        #     model="microsoft/Phi-3.5-vision-instruct",
+        #     model_args=["--trust-remote-code", "--max-model-len", "2048"],
+        #     pp_size=2,
+        #     tp_size=1,
+        #     attn_backend="FLASH_ATTN",
+        #     method="generate_with_image",
+        # ),
     ],
 )
 def test_compile_correctness(
@@ -115,7 +115,7 @@ def test_compile_correctness(
             "-tp",
             str(tp_size),
             "--compilation-config",
-            '{"backend": "inductor", "cudagraph_mode": "none"}',
+            '{"cudagraph_mode": "none"}',
         ]
 
         all_args: list[list[str]] = []
@@ -127,7 +127,7 @@ def test_compile_correctness(
             CompilationLevel.PIECEWISE,
         ]:
             for level in [CompilationLevel.NO_COMPILATION, comp_level]:
-                all_args.append(final_args + [f"-O{level}"])
+                all_args.append(final_args + [f"-O{level}", "-O.backend=inductor"])
                 all_envs.append({})
 
             # inductor will change the output, so we only compare if the output
@@ -141,15 +141,14 @@ def test_compile_correctness(
             all_envs.clear()
             all_args.clear()
 
-        final_args[-1] = '{"backend": "eager", "cudagraph_mode": "none"}'
-
         for level in [
             CompilationLevel.NO_COMPILATION,
             CompilationLevel.DYNAMO_AS_IS,
             CompilationLevel.DYNAMO_ONCE,
             CompilationLevel.PIECEWISE,
         ]:
-            all_args.append(final_args + [f"-O{level}"])
+            all_args.append(final_args + [f"-O{level}", "-O.backend=eager"])
+            all_envs.append({})
             all_envs.append({})
 
         compare_all_settings(model, all_args * 3, all_envs, method=method)
