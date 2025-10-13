@@ -95,7 +95,9 @@ class ObservabilityConfig:
 
     @field_validator("collect_detailed_traces", mode="before")
     @classmethod
-    def _validate_collect_detailed_traces(cls, value: Any) -> list[DetailedTraceModules] | None:
+    def _validate_collect_detailed_traces(
+        cls, value: Any
+    ) -> list[DetailedTraceModules] | None:
         if value in (None, "", []):
             return None
 
