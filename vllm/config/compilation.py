@@ -796,9 +796,7 @@ class CompilationConfig:
             return self.mode == CompilationMode.VLLM_COMPILE
 
         # Inductor partition case
-        return (
-            self.backend == "inductor" and self.level > CompilationLevel.NO_COMPILATION
-        )
+        return self.backend == "inductor" and self.mode > CompilationMode.NONE
 
     def custom_op_log_check(self):
         """
