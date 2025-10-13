@@ -26,6 +26,7 @@ import regex as re
 FILES = [
     "vllm/*.py",
     "vllm/assets",
+    "vllm/distributed",
     "vllm/entrypoints",
     "vllm/inputs",
     "vllm/logging_utils",
@@ -42,7 +43,6 @@ SEPARATE_GROUPS = [
     "tests",
     "vllm/attention",
     "vllm/compilation",
-    "vllm/distributed",
     "vllm/engine",
     "vllm/executor",
     "vllm/inputs",
