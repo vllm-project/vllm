@@ -123,8 +123,8 @@ def rank_worker(
                 rtol = 3e-2
 
             torch.set_printoptions(profile="full")
-            print(f"REF = {ref_out}")
-            print(f"OUT = {mk_out}")
+            #print(f"REF = {ref_out}")
+            #print(f"OUT = {mk_out}")
 
             torch.testing.assert_close(ref_out, mk_out, atol=atol, rtol=rtol)
             format_result(verbose, config.describe())
