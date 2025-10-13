@@ -28,9 +28,12 @@ After installation of XCode and the Command Line Tools, which include Apple Clan
 ```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
-uv pip install -r requirements/cpu.txt
+uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match
 uv pip install -e .
 ```
+
+!!! tip
+    The `--index-strategy unsafe-best-match` flag is needed to resolve dependencies across multiple package indexes (PyTorch CPU index and PyPI). Without this flag, you may encounter `typing-extensions` version conflicts.
 
 !!! note
     On macOS the `VLLM_TARGET_DEVICE` is automatically set to `cpu`, which is currently the only supported device.
