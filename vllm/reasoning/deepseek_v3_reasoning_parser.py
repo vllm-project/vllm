@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Optional, Union
 
 from transformers import PreTrainedTokenizerBase
 
@@ -45,7 +44,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
 
     def extract_reasoning_content(
         self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         return self._parser.extract_reasoning_content(model_output, request)
 
     def extract_reasoning_content_streaming(
@@ -56,7 +55,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         return self._parser.extract_reasoning_content_streaming(
             previous_text,
             current_text,

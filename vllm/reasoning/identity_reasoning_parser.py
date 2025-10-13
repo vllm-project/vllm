@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Optional, Union
 
 from transformers import PreTrainedTokenizerBase
 
@@ -45,7 +44,7 @@ class IdentityReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         # Just wrap delta_text as content, ignore reasoning
         if delta_text:
             return DeltaMessage(content=delta_text)
@@ -53,7 +52,7 @@ class IdentityReasoningParser(ReasoningParser):
 
     def extract_reasoning_content(
         self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         # No reasoning separation: return None for reasoning_content,
         # and full model_output as content
         return None, model_output
