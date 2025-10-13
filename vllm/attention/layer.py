@@ -970,6 +970,7 @@ direct_register_custom_op(
     mutates_args=[],
     fake_impl=unified_mla_attention_fake,
     dispatch_key=current_platform.dispatch_key,
+    tags=tag_cudagraph_unsafe,
 )
 
 
@@ -1022,4 +1023,5 @@ direct_register_custom_op(
     mutates_args=["output", "output_block_scale"],
     fake_impl=unified_mla_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
+    tags=tag_cudagraph_unsafe,
 )

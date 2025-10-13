@@ -331,7 +331,7 @@ class CompilationConfig:
     FULL_AND_PIECEWISE instead.
     """
 
-    use_inductor_graph_partition: bool = False
+    use_inductor_graph_partition: bool = is_torch_equal_or_newer("2.9.0")
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
@@ -416,6 +416,7 @@ class CompilationConfig:
         factors.append(self.custom_ops)
         factors.append(self.splitting_ops)
         factors.append(self.use_inductor)
+        factors.append(self.use_inductor_graph_partition)
         factors.append(self.inductor_compile_config)
         factors.append(self.inductor_passes)
         factors.append(self.pass_config.uuid())
@@ -672,7 +673,7 @@ class CompilationConfig:
     def set_splitting_ops_for_inductor_graph_partition(self):
         assert self.use_inductor_graph_partition
         if self.splitting_ops is None:
-            self.splitting_ops = list(self._attention_ops)
+            list(self._attention_ops)
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.enable_attn_fusion
@@ -697,6 +698,10 @@ class CompilationConfig:
         )
 
     def splitting_ops_contain_attention(self) -> bool:
+        if self.use_inductor_graph_partition:
+            logger.warning_once("Inductor partition ALWAYS splits on attention")
+            return True
+
         return self.splitting_ops is not None and all(
             op in self.splitting_ops for op in self._attention_ops
         )
