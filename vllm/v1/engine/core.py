@@ -86,7 +86,7 @@ def busy_loop_wrapper(busy_loop_func):
     """
 
     def run_with_fault_tolerance(self):
-        pass
+        busy_loop_func(self)
 
     return run_with_fault_tolerance
 

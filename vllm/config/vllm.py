@@ -24,6 +24,7 @@ from vllm.utils import random_uuid
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationLevel, CUDAGraphMode
 from .device import DeviceConfig
+from .fault_tolerance import FaultToleranceConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
@@ -100,6 +101,8 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
+    fault_tolerance_config: FaultToleranceConfig | None = None
+    """The configurations for fault tolerance."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -786,7 +789,8 @@ class VllmConfig:
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"pooler_config={self.model_config.pooler_config!r}, "
-            f"compilation_config={self.compilation_config!r}"
+            f"compilation_config={self.compilation_config!r},"
+            f"fault_tolerance_config={self.fault_tolerance_config!r}, "
         )
 
 
