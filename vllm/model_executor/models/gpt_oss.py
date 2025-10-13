@@ -32,7 +32,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
-from .interfaces import SupportsEagle3, SupportsPP
+from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -626,8 +626,14 @@ class GptOssModel(nn.Module):
             )
 
 
-class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
+class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
     packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"]}
+
+    embedding_modules = {
+        "embedding": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
+    embedding_padding_modules = ["lm_head"]
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
@@ -657,17 +663,27 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         super().__init__()
         self.vllm_config = vllm_config
         self.config = vllm_config.model_config.hf_config
+        lora_config = vllm_config.lora_config
 
         self.model = GptOssModel(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
         )
+
+        # Calculate vocab size with LoRA support
+        unpadded_vocab_size = self.config.vocab_size
+        if lora_config:
+            unpadded_vocab_size += lora_config.lora_extra_vocab_size
+
         self.lm_head = ParallelLMHead(
-            self.config.vocab_size,
+            unpadded_vocab_size,
             self.config.hidden_size,
+            org_num_embeddings=self.config.vocab_size,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
-        self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        self.logits_processor = LogitsProcessor(
+            unpadded_vocab_size, self.config.vocab_size
+        )
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
