@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -95,11 +94,11 @@ def apply_fp4_marlin_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
-    weight_scale_2: Optional[torch.Tensor],
+    weight_scale_2: torch.Tensor | None,
     workspace: torch.Tensor,
     size_n: int,
     size_k: int,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
 ) -> torch.Tensor:
     # For GPUs that lack FP4 hardware support, we can leverage the

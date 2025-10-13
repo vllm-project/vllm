@@ -22,10 +22,12 @@ def serving() -> OpenAIServing:
     model_config = Mock(spec=ModelConfig)
     model_config.max_model_len = 32768
     models = Mock(spec=OpenAIServingModels)
+    models.model_config = model_config
+    models.processor = Mock()
+    models.io_processor = Mock()
 
     serving = OpenAIServing(
         engine_client=engine_client,
-        model_config=model_config,
         models=models,
         request_logger=None,
     )

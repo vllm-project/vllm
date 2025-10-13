@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from typing import Optional
 
 import pytest
 import torch._dynamo
@@ -41,8 +40,8 @@ FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
 # globals needed for string-import custom Dynamo backend field
-backend: Optional[TestBackend] = None
-backend_unfused: Optional[TestBackend] = None
+backend: TestBackend | None = None
+backend_unfused: TestBackend | None = None
 
 
 class AttentionQuantPatternModel(torch.nn.Module):
@@ -303,7 +302,6 @@ def test_attention_quant_pattern(
     model_class: type[AttentionQuantPatternModel],
     backend: _Backend,
     use_inductor_graph_partition: bool,
-    monkeypatch,
     dist_init,
     caplog_vllm,
 ):
@@ -311,8 +309,6 @@ def test_attention_quant_pattern(
 
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
-
-    monkeypatch.setenv("VLLM_USE_V1", "1")
 
     device = torch.device("cuda:0")
     torch.manual_seed(42)

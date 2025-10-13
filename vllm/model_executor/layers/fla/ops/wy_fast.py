@@ -8,7 +8,6 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
 # ruff: noqa: E501
-from typing import Optional
 
 import torch
 
@@ -123,7 +122,7 @@ def recompute_w_u_fwd(
     beta: torch.Tensor,
     g_cumsum: torch.Tensor,
     A: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
+    cu_seqlens: torch.LongTensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, Hg, K, V = *k.shape, v.shape[-1]
     H = v.shape[-2]
