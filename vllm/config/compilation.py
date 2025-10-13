@@ -761,10 +761,8 @@ class CompilationConfig:
             return self.level == CompilationLevel.PIECEWISE
 
         # Inductor partition case
-        if self.backend == "inductor":
-            return self.level > CompilationLevel.NO_COMPILATION
-
-        return False
+        return (self.backend == "inductor" and 
+                self.level > CompilationLevel.NO_COMPILATION)
 
     def custom_op_log_check(self):
         """
