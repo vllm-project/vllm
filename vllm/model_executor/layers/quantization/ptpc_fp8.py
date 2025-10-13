@@ -34,7 +34,7 @@ class PTPCFp8Config(Fp8Config):
     def __init__(
         self,
         activation_scheme: str = "dynamic",
-        ignored_layers: Optional[list[str]] = None,
+        ignored_layers: list[str] | None = None,
     ) -> None:
         if not current_platform.is_rocm():
             raise ValueError("ptpc_fp8 quantization is supported only on ROCm.")
@@ -107,8 +107,8 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
 
         assert layer.weight.data.dtype == torch.bfloat16, (
-            f"Currently torch._scaled_mm (hipBLASLt) rowwise gemm only support output dtype of bfloat16. {str(layer.weight.data.dtype)} is specified."
-        )  # noqa: E501
+            f"Currently torch._scaled_mm (hipBLASLt) rowwise gemm only support output dtype of bfloat16. {str(layer.weight.data.dtype)} is specified."  # noqa: E501
+        )
         # Quantize the weights.
         qweight, weight_scale = ops.scaled_fp8_quant(
             layer.weight, scale=None, use_per_token_if_dynamic=True
@@ -125,7 +125,7 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.fp8_linear.apply(
             input=x,

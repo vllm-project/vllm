@@ -16,7 +16,6 @@ class DummyV1Scheduler(Scheduler):
 
 def test_scheduler_plugins_v1(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
         # Explicitly turn off engine multiprocessing so
         # that the scheduler runs in this process
         m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")

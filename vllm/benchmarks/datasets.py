@@ -21,13 +21,13 @@ import logging
 import math
 import random
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import cache
 from io import BytesIO
-from typing import Any, Callable, Optional, Union, cast
+from typing import Any, cast
 
 import numpy as np
 from PIL import Image
@@ -75,12 +75,12 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: Union[str, list[str]]
+    prompt: str | list[str]
     prompt_len: int
     expected_output_len: int
-    multi_modal_data: Optional[Union[MultiModalDataDict, dict, list[dict]]] = None
-    lora_request: Optional[LoRARequest] = None
-    request_id: Optional[str] = None
+    multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
+    lora_request: LoRARequest | None = None
+    request_id: str | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -94,8 +94,10 @@ class BenchmarkDataset(ABC):
 
     def __init__(
         self,
-        dataset_path: Optional[str] = None,
+        dataset_path: str | None = None,
         random_seed: int = DEFAULT_SEED,
+        disable_shuffle: bool = False,
+        **kwargs,
     ) -> None:
         """
         Initialize the BenchmarkDataset with an optional dataset path and random
@@ -111,12 +113,13 @@ class BenchmarkDataset(ABC):
         # Set the random seed, ensuring that a None value is replaced with the
         # default seed.
         self.random_seed = random_seed if random_seed is not None else self.DEFAULT_SEED
+        self.disable_shuffle = disable_shuffle
         self.data = None
 
     def apply_multimodal_chat_transformation(
         self,
         prompt: str,
-        mm_content: Optional[Union[MultiModalDataDict, dict, list[dict]]] = None,
+        mm_content: MultiModalDataDict | dict | list[dict] | None = None,
     ) -> list[dict]:
         """
         Transform a prompt and optional multimodal content into a chat format.
@@ -151,9 +154,9 @@ class BenchmarkDataset(ABC):
 
     def get_random_lora_request(
         self,
-        max_loras: Optional[int] = None,
-        lora_path: Optional[str] = None,
-    ) -> Optional[LoRARequest]:
+        max_loras: int | None = None,
+        lora_path: str | None = None,
+    ) -> LoRARequest | None:
         """
         Optionally select a random LoRA request.
 
@@ -381,7 +384,7 @@ def gen_prompt_decode_to_target_len(
     target_token_len: int,
     max_retry: int = 10,
     add_special_tokens: bool = False,
-    rng: Optional[np.random.Generator] = None,
+    rng: np.random.Generator | None = None,
 ) -> tuple[str, list[int]]:
     """
     Ensure decoded-then-encoded prompt length matches the target token length.
@@ -623,7 +626,7 @@ class RandomDataset(BenchmarkDataset):
         # Decode, then re-encode and truncate to preserve token count invariants
         total_input_len = prefix_len + int(input_len)
         prompt, adjusted_token_sequence, token_mismatch = (
-            gen_prompt_decode_to_target_len(  # noqa: E501
+            gen_prompt_decode_to_target_len(
                 tokenizer=tokenizer,
                 token_sequence=token_sequence,
                 target_token_len=total_input_len,
@@ -1044,15 +1047,16 @@ class ShareGPTDataset(BenchmarkDataset):
             if "conversations" in entry and len(entry["conversations"]) >= 2
         ]
         random.seed(self.random_seed)
-        random.shuffle(self.data)
+        if not getattr(self, "disable_shuffle", False):
+            random.shuffle(self.data)
 
     def sample(
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        lora_path: Optional[str] = None,
-        max_loras: Optional[int] = None,
-        output_len: Optional[int] = None,
+        lora_path: str | None = None,
+        max_loras: int | None = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -1174,6 +1178,11 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--skip-chat-template",
         action="store_true",
         help="Skip applying chat template to prompt for datasets that support it.",
+    )
+    parser.add_argument(
+        "--disable-shuffle",
+        action="store_true",
+        help="Disable shuffling of dataset samples for deterministic ordering.",
     )
 
     # group for dataset specific arguments
@@ -1441,7 +1450,9 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
         args.request_id_prefix = ""
 
     if args.dataset_name == "custom":
-        dataset = CustomDataset(dataset_path=args.dataset_path)
+        dataset = CustomDataset(
+            dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
+        )
         input_requests = dataset.sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
@@ -1452,7 +1463,9 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
         )
 
     elif args.dataset_name == "sonnet":
-        dataset = SonnetDataset(dataset_path=args.dataset_path)
+        dataset = SonnetDataset(
+            dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
+        )
         # For the "sonnet" dataset, formatting depends on the backend.
         if args.backend == "openai-chat":
             input_requests = dataset.sample(
@@ -1569,10 +1582,10 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 "like to add support for additional dataset formats."
             )
 
-        if dataset_class.IS_MULTIMODAL and args.backend not in [
-            "openai-chat",
-            "openai-audio",
-        ]:
+        if dataset_class.IS_MULTIMODAL and not (
+            args.backend in ("openai-chat", "openai-audio")
+            or "embeddings-" in args.backend
+        ):
             # multi-modal benchmark is only available on OpenAI Chat
             # endpoint-type.
             raise ValueError(
@@ -1586,6 +1599,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             random_seed=args.seed,
             no_stream=args.no_stream,
             hf_name=args.hf_name,
+            disable_shuffle=args.disable_shuffle,
         ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
@@ -1600,7 +1614,9 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
         # For datasets that follow a similar structure, use a mapping.
         dataset_mapping = {
             "spec_bench": lambda: SpecBench(
-                dataset_path=args.dataset_path, category=args.spec_bench_category
+                dataset_path=args.dataset_path,
+                category=args.spec_bench_category,
+                disable_shuffle=args.disable_shuffle,
             ).sample(
                 num_requests=args.num_prompts,
                 tokenizer=tokenizer,
@@ -1609,7 +1625,9 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 no_oversample=args.no_oversample,
             ),
             "sharegpt": lambda: ShareGPTDataset(
-                random_seed=args.seed, dataset_path=args.dataset_path
+                random_seed=args.seed,
+                dataset_path=args.dataset_path,
+                disable_shuffle=args.disable_shuffle,
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
@@ -1618,7 +1636,9 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 no_oversample=args.no_oversample,
             ),
             "burstgpt": lambda: BurstGPTDataset(
-                random_seed=args.seed, dataset_path=args.dataset_path
+                random_seed=args.seed,
+                dataset_path=args.dataset_path,
+                disable_shuffle=args.disable_shuffle,
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
@@ -1626,7 +1646,9 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 no_oversample=args.no_oversample,
             ),
             "random": lambda: RandomDataset(
-                random_seed=args.seed, dataset_path=args.dataset_path
+                random_seed=args.seed,
+                dataset_path=args.dataset_path,
+                disable_shuffle=args.disable_shuffle,
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
@@ -1639,7 +1661,9 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 no_oversample=args.no_oversample,
             ),
             "random-mm": lambda: RandomMultiModalDataset(
-                random_seed=args.seed, dataset_path=args.dataset_path
+                random_seed=args.seed,
+                dataset_path=args.dataset_path,
+                disable_shuffle=args.disable_shuffle,
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
@@ -1655,7 +1679,9 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 no_oversample=args.no_oversample,
             ),
             "prefix_repetition": lambda: PrefixRepetitionRandomDataset(
-                random_seed=args.seed, dataset_path=args.dataset_path
+                random_seed=args.seed,
+                dataset_path=args.dataset_path,
+                disable_shuffle=args.disable_shuffle,
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
@@ -1733,15 +1759,16 @@ class CustomDataset(BenchmarkDataset):
             )
 
         random.seed(self.random_seed)
-        random.shuffle(self.data)
+        if not getattr(self, "disable_shuffle", False):
+            random.shuffle(self.data)
 
     def sample(
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        lora_path: Optional[str] = None,
-        max_loras: Optional[int] = None,
-        output_len: Optional[int] = None,
+        lora_path: str | None = None,
+        max_loras: int | None = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
         request_id_prefix: str = "",
@@ -1825,7 +1852,8 @@ class SpecBench(CustomDataset):
                 self.data.append({"prompt": prompt})
 
         random.seed(self.random_seed)
-        random.shuffle(self.data)
+        if not getattr(self, "disable_shuffle", False):
+            random.shuffle(self.data)
 
     def sample(self, **kwargs) -> list:
         # leverage CustomDataset sample
@@ -1969,8 +1997,8 @@ class BurstGPTDataset(BenchmarkDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        max_loras: Optional[int] = None,
-        lora_path: Optional[str] = None,
+        max_loras: int | None = None,
+        lora_path: str | None = None,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
@@ -2006,15 +2034,15 @@ class BurstGPTDataset(BenchmarkDataset):
 class HuggingFaceDataset(BenchmarkDataset):
     """Base class for datasets hosted on HuggingFace."""
 
-    SUPPORTED_DATASET_PATHS: Union[set[str], dict[str, Callable]] = set()
+    SUPPORTED_DATASET_PATHS: set[str] | dict[str, Callable] = set()
 
     def __init__(
         self,
         dataset_path: str,
         dataset_split: str,
         no_stream: bool = False,
-        dataset_subset: Optional[str] = None,
-        hf_name: Optional[str] = None,
+        dataset_subset: str | None = None,
+        hf_name: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__(dataset_path=dataset_path, **kwargs)
@@ -2033,7 +2061,8 @@ class HuggingFaceDataset(BenchmarkDataset):
             split=self.dataset_split,
             streaming=self.load_stream,
         )
-        self.data = self.data.shuffle(seed=self.random_seed)
+        if not getattr(self, "disable_shuffle", False):
+            self.data = self.data.shuffle(seed=self.random_seed)
 
 
 # -----------------------------------------------------------------------------
@@ -2054,7 +2083,7 @@ class ConversationDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2123,7 +2152,7 @@ class VisionArenaDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2177,7 +2206,7 @@ class MMVUDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2238,7 +2267,7 @@ class InstructCoderDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
         request_id_prefix: str = "",
@@ -2302,7 +2331,7 @@ class MTBenchDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
         request_id_prefix: str = "",
@@ -2368,7 +2397,7 @@ class BlazeditDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         skip_chat_template: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
@@ -2449,7 +2478,7 @@ class AIMODataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
@@ -2631,7 +2660,7 @@ class ASRDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
@@ -2709,7 +2738,7 @@ class MLPerfDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
@@ -2826,7 +2855,7 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
             for _ in range(prompts_per_prefix):
                 suffix_tokens, token_mistmatch = _generate_exact_length_tokens(
                     suffix_len
-                )  # noqa: E501
+                )
                 token_mismatch_total += token_mistmatch
                 combined_tokens = prefix_tokens + suffix_tokens
                 prompt = tokenizer.decode(combined_tokens)
@@ -2849,7 +2878,8 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
                 abs(token_mismatch_total),
                 sign,
             )
-        random.shuffle(requests)
+        if not getattr(self, "disable_shuffle", False):
+            random.shuffle(requests)
         return requests
 
 
@@ -2872,7 +2902,7 @@ class MMStarDataset(HuggingFaceDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
-        output_len: Optional[int] = None,
+        output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,

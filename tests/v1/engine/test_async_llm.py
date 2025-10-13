@@ -3,7 +3,6 @@
 
 import asyncio
 from contextlib import ExitStack
-from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -53,8 +52,8 @@ async def generate(
     output_kind: RequestOutputKind,
     max_tokens: int,
     n: int = 1,
-    prompt_logprobs: Optional[int] = None,
-    cancel_after: Optional[int] = None,
+    prompt_logprobs: int | None = None,
+    cancel_after: int | None = None,
 ) -> tuple[int, str]:
     # Ensure generate doesn't complete too fast for cancellation test.
     await asyncio.sleep(0.2)
@@ -95,17 +94,11 @@ async def generate(
 )
 @pytest.mark.asyncio
 async def test_load(
-    monkeypatch: pytest.MonkeyPatch,
     output_kind: RequestOutputKind,
     engine_args: AsyncEngineArgs,
     prompt: PromptType,
 ):
-    # TODO(rickyx): Remove monkeypatch once we have a better way to test V1
-    # so that in the future when we switch, we don't have to change all the
-    # tests.
-    with monkeypatch.context() as m, ExitStack() as after:
-        m.setenv("VLLM_USE_V1", "1")
-
+    with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
@@ -149,14 +142,11 @@ async def test_load(
 )
 @pytest.mark.asyncio
 async def test_abort(
-    monkeypatch: pytest.MonkeyPatch,
     output_kind: RequestOutputKind,
     engine_args: AsyncEngineArgs,
     prompt: PromptType,
 ):
-    with monkeypatch.context() as m, ExitStack() as after:
-        m.setenv("VLLM_USE_V1", "1")
-
+    with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
@@ -222,13 +212,8 @@ async def test_abort(
     "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
 )
 @pytest.mark.asyncio
-async def test_multi_abort(
-    monkeypatch: pytest.MonkeyPatch,
-    output_kind: RequestOutputKind,
-):
-    with monkeypatch.context() as m, ExitStack() as after:
-        m.setenv("VLLM_USE_V1", "1")
-
+async def test_multi_abort(output_kind: RequestOutputKind):
+    with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
@@ -304,14 +289,11 @@ async def test_multi_abort(
 )
 @pytest.mark.asyncio
 async def test_finished_flag(
-    monkeypatch: pytest.MonkeyPatch,
     n: int,
     engine_args: AsyncEngineArgs,
     prompt: PromptType,
 ):
-    with monkeypatch.context() as m, ExitStack() as after:
-        m.setenv("VLLM_USE_V1", "1")
-
+    with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
@@ -341,12 +323,10 @@ async def test_finished_flag(
 )
 @pytest.mark.asyncio
 async def test_mid_stream_cancellation(
-    monkeypatch: pytest.MonkeyPatch, engine_args: AsyncEngineArgs, prompt: PromptType
+    engine_args: AsyncEngineArgs, prompt: PromptType
 ):
     """Test that requests can be cancelled mid-stream."""
-    with monkeypatch.context() as m, ExitStack() as after:
-        m.setenv("VLLM_USE_V1", "1")
-
+    with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
@@ -411,9 +391,7 @@ async def test_customize_loggers(monkeypatch):
     be added to the default loggers.
     """
 
-    with monkeypatch.context() as m, ExitStack() as after:
-        m.setenv("VLLM_USE_V1", "1")
-
+    with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(
                 TEXT_ENGINE_ARGS,
@@ -430,10 +408,8 @@ async def test_customize_loggers(monkeypatch):
 
 
 @pytest.mark.asyncio(scope="module")
-async def test_dp_rank_argument(monkeypatch: pytest.MonkeyPatch):
-    with monkeypatch.context() as m, ExitStack() as after:
-        m.setenv("VLLM_USE_V1", "1")
-
+async def test_dp_rank_argument():
+    with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
@@ -466,7 +442,7 @@ async def test_dp_rank_argument(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_check_health(monkeypatch: pytest.MonkeyPatch):
+async def test_check_health():
     """Test that check_health returns normally for healthy engine
     and raises EngineDeadError when the engine is dead.
     """
@@ -474,9 +450,7 @@ async def test_check_health(monkeypatch: pytest.MonkeyPatch):
 
     from vllm.v1.engine.exceptions import EngineDeadError
 
-    with monkeypatch.context() as m, ExitStack() as after:
-        m.setenv("VLLM_USE_V1", "1")
-
+    with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
@@ -503,15 +477,10 @@ async def test_check_health(monkeypatch: pytest.MonkeyPatch):
     "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
 )
 @pytest.mark.asyncio
-async def test_abort_final_output(
-    monkeypatch: pytest.MonkeyPatch,
-    output_kind: RequestOutputKind,
-):
+async def test_abort_final_output(output_kind: RequestOutputKind):
     """Test that abort() returns a final output with correct information."""
 
-    with monkeypatch.context() as m, ExitStack() as after:
-        m.setenv("VLLM_USE_V1", "1")
-
+    with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
@@ -575,9 +544,9 @@ async def collect_outputs(
     prompt: PromptType,
     sampling_params: SamplingParams,
     outputs_list: list[RequestOutput],
-) -> Optional[RequestOutput]:
+) -> RequestOutput | None:
     """Helper to collect outputs and return the final one."""
-    final_output: Optional[RequestOutput] = None
+    final_output: RequestOutput | None = None
     async for output in engine.generate(
         request_id=request_id, prompt=prompt, sampling_params=sampling_params
     ):

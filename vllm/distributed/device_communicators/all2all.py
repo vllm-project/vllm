@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -147,8 +147,9 @@ class PPLXAll2AllManager(All2AllManagerBase):
 
     def __init__(self, cpu_group):
         assert has_pplx(), (
-            "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install pplx_kernels."
-        )  # noqa
+            "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md"
+            " to install pplx_kernels."
+        )
         super().__init__(cpu_group)
 
         if self.internode:
@@ -220,7 +221,8 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
 
     def __init__(self, cpu_group):
         assert has_deep_ep(), (
-            "DeepEP kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install DeepEP kernels."
+            "DeepEP kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md"
+            " to install DeepEP kernels."
         )  # noqa
         super().__init__(cpu_group)
         self.handle_cache = Cache()
@@ -366,7 +368,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         return handle
 
     # DeepEP LL uses RDMA so no SMs are used for communication
-    def max_sms_used(self) -> Optional[int]:
+    def max_sms_used(self) -> int | None:
         return 0
 
 
@@ -374,6 +376,11 @@ class FlashInferAllToAllManager(All2AllManagerBase):
     """
     All2All communication based on flashinfer kernels.
     """
+
+    # This type lint could be removed after all of the work in
+    # https://github.com/vllm-project/vllm/issues/26533 done.
+    rank: int
+    world_size: int
 
     def __init__(self, cpu_group):
         assert has_flashinfer_all2all(), (

@@ -3,7 +3,6 @@
 """Attention layer with FlashAttention."""
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 import torch
@@ -14,6 +13,7 @@ from vllm.attention.backends.abstract import (
     AttentionImpl,
     AttentionMetadata,
     AttentionType,
+    MultipleOf,
     is_quantized_kv_cache,
 )
 from vllm.attention.layer import Attention
@@ -56,6 +56,10 @@ class FlashAttentionBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 96, 128, 160, 192, 224, 256]
+
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
@@ -139,13 +143,13 @@ class FlashAttentionMetadata:
     # For cascade attention.
     use_cascade: bool
     common_prefix_len: int
-    cu_prefix_query_lens: Optional[torch.Tensor]
-    prefix_kv_lens: Optional[torch.Tensor]
-    suffix_kv_lens: Optional[torch.Tensor]
+    cu_prefix_query_lens: torch.Tensor | None
+    prefix_kv_lens: torch.Tensor | None
+    suffix_kv_lens: torch.Tensor | None
 
     # Optional aot scheduling
-    scheduler_metadata: Optional[torch.Tensor] = None
-    prefix_scheduler_metadata: Optional[torch.Tensor] = None
+    scheduler_metadata: torch.Tensor | None = None
+    prefix_scheduler_metadata: torch.Tensor | None = None
     max_num_splits: int = 0
 
     causal: bool = True
@@ -153,9 +157,9 @@ class FlashAttentionMetadata:
 
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
-) -> set[Optional[tuple[int, int]]]:
+) -> set[tuple[int, int] | None]:
     """Get the set of all sliding window configs used in the model."""
-    sliding_window_configs: set[Optional[tuple[int, int]]] = set()
+    sliding_window_configs: set[tuple[int, int] | None] = set()
     layers = get_layers_from_vllm_config(vllm_config, Attention)
     for layer in layers.values():
         assert isinstance(layer.impl, FlashAttentionImpl)
@@ -237,7 +241,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
-        self.aot_sliding_window: Optional[tuple[int, int]] = None
+        self.aot_sliding_window: tuple[int, int] | None = None
 
     def build(
         self,
@@ -398,13 +402,13 @@ class FlashAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float] = None,
+        logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[str] = None,
-        sinks: Optional[torch.Tensor] = None,
+        kv_sharing_target_layer_name: str | None = None,
+        sinks: torch.Tensor | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -455,9 +459,9 @@ class FlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -607,6 +611,7 @@ class FlashAttentionImpl(AttentionImpl):
             q_descale=layer._q_scale,
             k_descale=layer._k_scale,
             v_descale=layer._v_scale,
+            s_aux=self.sinks,
         )
         return output
 
@@ -756,17 +761,18 @@ def cascade_attention(
     suffix_kv_lens: torch.Tensor,
     max_kv_len: int,
     softmax_scale: float,
-    alibi_slopes: Optional[torch.Tensor],
+    alibi_slopes: torch.Tensor | None,
     sliding_window: tuple[int, int],
     logits_soft_cap: float,
     block_table: torch.Tensor,
     common_prefix_len: int,
     fa_version: int,
-    prefix_scheduler_metadata: Optional[torch.Tensor] = None,
-    suffix_scheduler_metadata: Optional[torch.Tensor] = None,
-    q_descale: Optional[torch.Tensor] = None,
-    k_descale: Optional[torch.Tensor] = None,
-    v_descale: Optional[torch.Tensor] = None,
+    prefix_scheduler_metadata: torch.Tensor | None = None,
+    suffix_scheduler_metadata: torch.Tensor | None = None,
+    q_descale: torch.Tensor | None = None,
+    k_descale: torch.Tensor | None = None,
+    v_descale: torch.Tensor | None = None,
+    s_aux: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert alibi_slopes is None, "Cascade attention does not support ALiBi."
     # TODO: Support sliding window.
@@ -801,6 +807,9 @@ def cascade_attention(
         q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
         k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
+        # s_aux is incorporated into prefix_lse inside the GPU kernel,
+        # enabling its effect during the final attention merge.
+        s_aux=s_aux,
     )
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])

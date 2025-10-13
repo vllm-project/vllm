@@ -3,11 +3,10 @@
 
 import warnings
 from collections.abc import Mapping
-from typing import Literal, Optional
+from typing import Literal
 
 import pytest
-from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy, SpecialTokens
-from mistral_common.tokens.tokenizers.tekken import SpecialTokenInfo, Tekkenizer
+from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -153,9 +152,9 @@ def audio_url():
 
 
 def _assert_mm_data_is_image_input(
-    mm_data: Optional[MultiModalDataDict],
+    mm_data: MultiModalDataDict | None,
     image_count: int,
-    skipped_image_indices: Optional[list] = None,
+    skipped_image_indices: list | None = None,
 ) -> None:
     assert mm_data is not None
     assert set(mm_data.keys()) == {"image"}
@@ -170,9 +169,9 @@ def _assert_mm_data_is_image_input(
 
 
 def _assert_mm_uuids(
-    mm_uuids: Optional[MultiModalUUIDDict],
+    mm_uuids: MultiModalUUIDDict | None,
     media_count: int,
-    expected_uuids: list[Optional[str]],
+    expected_uuids: list[str | None],
     modality: str = "image",
 ) -> None:
     if len(expected_uuids) > 0:
@@ -194,9 +193,9 @@ MultiModalDataCounts = Mapping[ModalityType, int]
 
 
 def _assert_mm_data_inputs(
-    mm_data: Optional[MultiModalDataDict],
+    mm_data: MultiModalDataDict | None,
     data_count: MultiModalDataCounts,
-    skipped_media_indices: Optional[dict[str, list]] = None,  # modality -> list[int]
+    skipped_media_indices: dict[str, list] | None = None,  # modality -> list[int]
 ) -> None:
     assert mm_data is not None
     assert set(data_count.keys()) == (set(mm_data.keys()))
@@ -947,7 +946,8 @@ def test_parse_chat_messages_placeholder_one_already_in_prompt(
                     {"type": "image_url", "image_url": {"url": image_url}},
                     {
                         "type": "text",
-                        "text": "What's in <|image_1|> and how does it compare to the other one?",  # noqa: E501
+                        "text": "What's in <|image_1|> and how does it compare to "
+                        "the other one?",
                     },
                 ],
             }
@@ -960,8 +960,8 @@ def test_parse_chat_messages_placeholder_one_already_in_prompt(
     assert conversation == [
         {
             "role": "user",
-            "content": "<|image_2|>\nWhat's in <|image_1|> and how does it compare to the "
-            "other one?",
+            "content": "<|image_2|>\nWhat's in <|image_1|> and how does it compare to "
+            "the other one?",
         }
     ]
     _assert_mm_data_is_image_input(mm_data, 2)
@@ -1364,7 +1364,7 @@ def test_parse_chat_messages_multiple_images_multiple_messages_interleave(
     _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
 
 
-def test_parse_chat_messages_multiple_images_with_uuids_multiple_messages_interleave(  # noqa: E501
+def test_parse_chat_messages_multiple_images_with_uuids_multiple_messages_interleave(
     phi3v_model_config_mm_interleaved,
     phi3v_tokenizer,
     image_url,
@@ -1451,14 +1451,14 @@ def test_parse_chat_messages_multiple_modals_multiple_messages_interleave(
     assert conversation == [
         {
             "role": "user",
-            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
-            "Now listen to this audio\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>",  # noqa: E501
+            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>"
+            "\nNow listen to this audio\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>",
         },
         {"role": "assistant", "content": "Some stuff."},
         {
             "role": "user",
-            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
-            "And what's in the video?\n<|vision_start|><|VIDEO|><|vision_end|>",
+            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>"
+            "\nAnd what's in the video?\n<|vision_start|><|VIDEO|><|vision_end|>",
         },
     ]
 
@@ -1468,7 +1468,7 @@ def test_parse_chat_messages_multiple_modals_multiple_messages_interleave(
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[None])
 
 
-def test_parse_chat_messages_multiple_modals_with_uuids_multiple_messages_interleave(  # noqa: E501
+def test_parse_chat_messages_multiple_modals_with_uuids_multiple_messages_interleave(
     qwen25omni_model_config_mm_interleaved,
     qwen25omni_tokenizer,
     image_url,
@@ -1521,14 +1521,14 @@ def test_parse_chat_messages_multiple_modals_with_uuids_multiple_messages_interl
     assert conversation == [
         {
             "role": "user",
-            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
-            "Now listen to this audio\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>",  # noqa: E501
+            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>"
+            "\nNow listen to this audio\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>",
         },
         {"role": "assistant", "content": "Some stuff."},
         {
             "role": "user",
-            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
-            "And what's in the video?\n<|vision_start|><|VIDEO|><|vision_end|>",
+            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>"
+            "\nAnd what's in the video?\n<|vision_start|><|VIDEO|><|vision_end|>",
         },
     ]
 
@@ -1593,14 +1593,14 @@ def test_parse_chat_messages_multiple_modals_with_uuids_multiple_empty_media_mes
     assert conversation == [
         {
             "role": "user",
-            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
-            "Now listen to this audio\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>",  # noqa: E501
+            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>"
+            "\nNow listen to this audio\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>",
         },
         {"role": "assistant", "content": "Some stuff."},
         {
             "role": "user",
-            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
-            "And what's in the video?\n<|vision_start|><|VIDEO|><|vision_end|>",
+            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>"
+            "\nAnd what's in the video?\n<|vision_start|><|VIDEO|><|vision_end|>",
         },
     ]
 
@@ -1661,14 +1661,14 @@ def test_parse_chat_messages_multiple_modals_with_partial_uuids_multiple_message
     assert conversation == [
         {
             "role": "user",
-            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
-            "Now listen to this audio\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>",  # noqa: E501
+            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>"
+            "\nNow listen to this audio\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>",
         },
         {"role": "assistant", "content": "Some stuff."},
         {
             "role": "user",
-            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
-            "And what's in the video?\n<|vision_start|><|VIDEO|><|vision_end|>",
+            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>"
+            "\nAnd what's in the video?\n<|vision_start|><|VIDEO|><|vision_end|>",
         },
     ]
 
@@ -2118,34 +2118,9 @@ def test_apply_mistral_chat_template_thinking_chunk():
         },
         {"role": "user", "content": "Thanks, what is 3+3?"},
     ]
-
-    # TODO(Julien): upon model release change to a tokenizer already configured.
-    # =================================================================
     mistral_tokenizer = MistralTokenizer.from_pretrained(
-        "mistralai/Devstral-Small-2507"
+        "mistralai/Magistral-Small-2509"
     )
-    assert isinstance(mistral_tokenizer.tokenizer, Tekkenizer)
-    # Add think special tokens to the tokenizer
-    mistral_tokenizer.tokenizer._all_special_tokens[35] = SpecialTokenInfo(
-        rank=35, is_control=True, token_str=SpecialTokens.begin_think.value
-    )
-    mistral_tokenizer.tokenizer._all_special_tokens[36] = SpecialTokenInfo(
-        rank=36, is_control=True, token_str=SpecialTokens.end_think.value
-    )
-    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab = {
-        k: v
-        for k, v in mistral_tokenizer.tokenizer._special_tokens_reverse_vocab.items()
-        if v not in {35, 36}
-    }
-    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab[
-        SpecialTokens.begin_think.value
-    ] = 35
-    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab[
-        SpecialTokens.end_think.value
-    ] = 36
-    mistral_tokenizer.instruct.BEGIN_THINK = 35
-    mistral_tokenizer.instruct.END_THINK = 36
-    # =================================================================
 
     tokens_ids = apply_mistral_chat_template(
         mistral_tokenizer, messages, chat_template=None, tools=None
@@ -2193,7 +2168,8 @@ def test_parse_chat_messages_single_empty_audio_with_uuid(
     assert conversation == [
         {
             "role": "user",
-            "content": "Audio 1: <|audio_bos|><|AUDIO|><|audio_eos|>\nWhat does the audio say?",
+            "content": "Audio 1: <|audio_bos|><|AUDIO|><|audio_eos|>\nWhat does the "
+            "audio say?",
         }
     ]
     _assert_mm_data_inputs(mm_data, {"audio": 1})
@@ -2228,7 +2204,8 @@ async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
     assert conversation == [
         {
             "role": "user",
-            "content": "Audio 1: <|audio_bos|><|AUDIO|><|audio_eos|>\nWhat does the audio say?",
+            "content": "Audio 1: <|audio_bos|><|AUDIO|><|audio_eos|>\nWhat does the "
+            "audio say?",
         }
     ]
     _assert_mm_data_inputs(await mm_future, {"audio": 1})
