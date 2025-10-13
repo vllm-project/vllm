@@ -3,7 +3,7 @@
 
 import hashlib
 from functools import cached_property
-from typing import Any, Literal, cast
+from typing import Any, Literal, get_args
 
 from pydantic import field_validator, model_validator
 from pydantic.dataclasses import dataclass
@@ -37,7 +37,7 @@ class ObservabilityConfig:
     otlp_traces_endpoint: str | None = None
     """Target URL to which OpenTelemetry traces will be sent."""
 
-    collect_detailed_traces: list[DetailedTraceModules] | None = None
+    collect_detailed_traces: list[str] | None = None
     """It makes sense to set this only if `--otlp-traces-endpoint` is set. If
     set, it will collect detailed traces for the specified modules. This
     involves use of possibly costly and or blocking operations and hence might
@@ -93,54 +93,59 @@ class ObservabilityConfig:
             )
         return value
 
-    @field_validator("collect_detailed_traces", mode="before")
+    @field_validator("otlp_traces_endpoint", mode="after")
+    @classmethod
+    def _validate_otlp_available(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+
+        from vllm.tracing import is_otel_available, otel_import_error_traceback
+
+        if not is_otel_available():
+            raise ValueError(
+                "OpenTelemetry is not available. Unable to configure "
+                "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
+                f"installed. Original error:\n{otel_import_error_traceback}"
+            )
+
+        return value
+
+    @field_validator("collect_detailed_traces", mode="after")
     @classmethod
     def _validate_collect_detailed_traces(
-        cls, value: Any
-    ) -> list[DetailedTraceModules] | None:
-        if value in (None, "", []):
+        cls, value: list[str] | None
+    ) -> list[str] | None:
+        if not value:
             return None
 
-        items: list[str] = []
-
-        def add(obj: Any):
-            if obj is None:
-                return
-            elif isinstance(obj, str):
-                items.extend(part.strip().lower() for part in obj.split(","))
-            elif isinstance(obj, (list, tuple, set)):
-                for x in obj:
-                    add(x)
-            else:
-                items.append(str(obj).strip().lower())
-
-        add(value)
+        if len(value) == 1:
+            value = [p for p in (s.strip() for s in value[0].split(",")) if p]
 
         out: list[str] = []
         seen: set[str] = set()
-        for item in items:
-            if item and item not in seen:
-                seen.add(item)
-                out.append(item)
+        for item in value:
+            tok = item.strip().lower()
+            if tok and tok not in seen:
+                seen.add(tok)
+                out.append(tok)
 
         if not out:
             return None
-        return cast(list[DetailedTraceModules], out)
+
+        allowed = set(get_args(DetailedTraceModules))
+        invalid = [t for t in out if t not in allowed]
+        if invalid:
+            raise ValueError(
+                f"collect_detailed_traces values must be one of: {sorted(allowed)}"
+            )
+
+        return out
 
     @model_validator(mode="after")
     def _validate_tracing_config(self):
         if self.collect_detailed_traces and not self.otlp_traces_endpoint:
             raise ValueError(
                 "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
-            )
-
-        from vllm.tracing import is_otel_available, otel_import_error_traceback
-
-        if not is_otel_available() and self.otlp_traces_endpoint is not None:
-            raise ValueError(
-                "OpenTelemetry is not available. Unable to configure "
-                "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
-                f"installed. Original error:\n{otel_import_error_traceback}"
             )
 
         return self
