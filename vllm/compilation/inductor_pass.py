@@ -6,8 +6,9 @@ import hashlib
 import inspect
 import json
 import types
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 import torch
 from torch import fx
@@ -27,7 +28,7 @@ _pass_context = None
 
 
 class PassContext:
-    def __init__(self, runtime_shape: Optional[int]):
+    def __init__(self, runtime_shape: int | None):
         self.runtime_shape = runtime_shape
 
 
@@ -38,7 +39,7 @@ def get_pass_context() -> PassContext:
 
 
 @contextmanager
-def pass_context(runtime_shape: Optional[int]):
+def pass_context(runtime_shape: int | None):
     """A context manager that stores the current pass context,
     usually it is a list of sizes to specialize.
     """
@@ -67,7 +68,7 @@ class InductorPass(CustomGraphPass):
         return InductorPass.hash_source(self)
 
     @staticmethod
-    def hash_source(*srcs: Union[str, Any]):
+    def hash_source(*srcs: str | Any):
         """
         Utility method to hash the sources of functions or objects.
         :param srcs: strings or objects to add to the hash.
@@ -95,7 +96,7 @@ class InductorPass(CustomGraphPass):
         encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def is_applicable_for_shape(self, shape: Optional[int]):
+    def is_applicable_for_shape(self, shape: int | None):
         return True
 
 
@@ -105,9 +106,7 @@ class CallableInductorPass(InductorPass):
     implementation of the UUID.
     """
 
-    def __init__(
-        self, callable: Callable[[fx.Graph], None], uuid: Optional[Any] = None
-    ):
+    def __init__(self, callable: Callable[[fx.Graph], None], uuid: Any | None = None):
         self.callable = callable
         self._uuid = self.hash_source(callable) if uuid is None else uuid
 
