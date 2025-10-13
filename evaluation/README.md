@@ -1,3 +1,110 @@
+# Set Enviroment
+
+1. Docker image: 
+   ```
+   rocm/ali-private:ubuntu22.04_rocm7.0.1.42_vllm_5b842c2_aiter_6b586ae_torch2.8.0_20250917
+   ```
+2. Upgrade PyBind: 
+   ```
+   pip install --upgrade pybind11
+   ```
+3. Install Aiter dev/perf branch:
+   ``` 
+   pip uninstall aiter
+   git clone -b dev/perf git@github.com:ROCm/aiter.git
+   cd aiter
+   git submodule sync && git submodule update --init --recursive
+   python3 setup.py install
+   ```
+4. Install Rocm/vLLM dev/perf branch:
+   ```
+   pip uninstall vllm
+   git clone -b dev/perf git@github.com:ROCm/vllm.git
+   cd vllm
+   python3 -m pip install -r requirements/common.txt
+   export PYTORCH_ROCM_ARCH="gfx942"
+   python3 setup.py develop
+   ```
+
+# Launch server
+1. deepseek-r1 PTPC FP8
+- download weight: https://huggingface.co/EmbeddedLLM/deepseek-r1-FP8-Dynamic
+    ```
+    huggingface-cli download EmbeddedLLM/deepseek-r1-FP8-Dynamic --local-dir EmbeddedLLM/deepseek-r1-FP8-Dynamic
+    ```
+- launch server:
+    ```
+    bash launch_deepseekr1_ptpc_fp8.sh
+    ```
+
+    The example command:
+    ```
+    export VLLM_USE_V1=1
+    export SAFETENSORS_FAST_GPU=1
+    export VLLM_ROCM_USE_AITER=1
+    export VLLM_ROCM_USE_AITER_MOE=1
+    export VLLM_USE_TRITON_FLASH_ATTN=0
+    export NCCL_DEBUG=WARN
+    export VLLM_RPC_TIMEOUT=1800000
+    export VLLM_ROCM_USE_AITER_ASMMOE=1
+    export VLLM_ROCM_USE_AITER_MHA=0
+    export VLLM_ROCM_USE_TRITON_ROPE=1
+
+    # for profiling
+    export VLLM_TORCH_PROFILER_DIR="deepseek_in3k_out1k"
+    export VLLM_TORCH_PROFILER_WITH_STACK=1
+    export VLLM_TORCH_PROFILER_RECORD_SHAPES=1
+
+    model_path="/path-to-model/deepseek-r1-FP8-Dynamic/"
+    vllm serve $model_path \
+    --tensor-parallel-size 8 \
+    --max-num-batched-tokens 32768 \
+    --trust-remote-code \
+    --no-enable-prefix-caching \
+    --disable-log-requests \
+    --enable-expert-parallel \
+    --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
+    --gpu_memory_utilization 0.9 \
+    --block-size 1
+    ```
+
+# Curl request
+1. curl a single request to quickly check the functionality
+
+   ```
+    curl -X POST "http://localhost:8000/v1/completions" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "prompt": "The capital of China", "temperature": 0, "top_p": 1, "top_k": 0, "repetition_penalty": 1.0, "presence_penalty": 0, "frequency_penalty": 0, "stream": false, "ignore_eos": false, "n": 1, "seed": 123 
+    }'
+   ```
+   The result should be:
+   ```
+   {"id":"cmpl-026a60769119489587e46d571b6ebb6a","object":"text_completion","created":1760272161,"model":"/mnt/raid0/zhangguopeng/deepseek-r1-FP8-Dynamic/","choices":[{"index":0,
+   "text":" is Beijing, and Shanghai is its most populous city by urban area population. China","logprobs":null,"finish_reason":"length","stop_reason":null,"token_ids":null,"prompt_logprobs":null,"prompt_token_ids":null}],"service_tier":null,"system_fingerprint":null,"usage":{"prompt_tokens":5,"total_tokens":21,"completion_tokens":16,"prompt_tokens_details":null},"kv_transfer_params":null}
+   ```
+
+# Benchmark
+1. Take deepseek as example, you can use the following command to benchmark serve.
+    ```
+    model="/path-to-model/deepseek-r1-FP8-Dynamic/"
+    vllm bench serve \
+        --host localhost \
+        --port 8000 \
+        --model ${model} \
+        --dataset-name random \
+        --random-input-len 3500 \
+        --random-output-len 1024 \
+        --max-concurrency 64 \
+        --num-prompts 128 \
+        --percentile-metrics ttft,tpot,itl,e2el \
+        --ignore-eos \
+        # --profile
+        # --seed 123 \
+        # --request-rate 2 \
+        2>&1 | tee log.client.log
+    ```
+
 # Evaluation
 
 ## Text Model Evaluation
@@ -5,44 +112,36 @@
 Text model is evaluated using lm-eval (<https://github.com/EleutherAI/lm-evaluation-harness.git>).
 
 1. Install dependencies. `python3 -m pip install lm_eval tenacity`.
-2. Launch vLLM server. Example:
+2. Start lm-eval. Example:
 
     ```bash
     #!/bin/bash
-    rm -rf /root/.cache/vllm
-    export  GPU_ARCHS=gfx942
-    MODEL=deepseek-ai/DeepSeek-R1
-    AITER_ENABLE_VSKIP=0 \
-    VLLM_USE_V1=1 \
-    VLLM_ROCM_USE_AITER=1 \
-    VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE=1 \
-    vllm serve $MODEL \
-    --tensor-parallel-size 8 \
-    --disable-log-requests \
-    --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
-    --trust-remote-code \
-    --block-size 1 \
-    --port 6789 \
-    > server-deepseek-ai_DeepSeek-R1-aiter-v1.log 2>&1
-    ```
-
-3. Start lm-eval. Example:
-
-    ```bash
-    #!/bin/bash
+    model="/path-to-model/deepseek-r1-FP8-Dynamic/"
     lm_eval \
     --model local-completions \
     --tasks gsm8k \
-    --model_args model=deepseek-ai/DeepSeek-R1,base_url=http://127.0.0.1:6789/v1/completions \
-    --batch_size 100 \
-    > lmeval_server-deepseek-ai_DeepSeek-R1-aiter-v1.log 2>&1
+    --model_args model=${model},base_url=http://127.0.0.1:8000/v1/completions \
+    --batch_size 100 
     ```
-
+    The eager-mode result should be:
+    ```
+    |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
+    |-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
+    |gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.9522|±  |0.0059|
+    |     |       |strict-match    |     5|exact_match|↑  |0.9530|±  |0.0058|
+    ```
+    The FULL_AND_PIECEWISE graph-mode result should be:
+    ```
+    |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
+    |-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
+    |gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.9500|±  |0.0060|
+    |     |       |strict-match    |     5|exact_match|↑  |0.9477|±  |0.0061|
+    ```
     **Take notes:**
 
-    1. It is required to set --batch_size to larger value as the default value is 1.
+    - It is required to set --batch_size to larger value as the default value is 1.
     Setting --batch_size > 1 to evaluate if the batching logic is correctly implemented or not.
-    2. Extra details: lm-eval send seed requests. Thus, in vLLM sampling class, it will use the per-request sampling.
+    - Extra details: lm-eval send seed requests. Thus, in vLLM sampling class, it will use the per-request sampling.
 
 ## Visual Model Evaluation
 
