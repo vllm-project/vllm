@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 from torch.nn.parameter import Parameter
@@ -156,7 +156,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if envs.VLLM_USE_NVFP4_CT_EMULATIONS:
             out = run_nvfp4_emulations(

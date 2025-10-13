@@ -13,7 +13,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import numpy as np
@@ -21,8 +21,8 @@ import torch
 import zmq
 
 from vllm import envs
-from vllm.attention.backends.registry import _Backend
-from vllm.attention.selector import backend_name_to_enum, get_attn_backend
+from vllm.attention.backends.registry import _Backend, backend_name_to_enum
+from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
@@ -151,10 +151,10 @@ class NixlConnector(KVConnectorBase_V1):
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler: Optional[NixlConnectorScheduler] = (
+            self.connector_scheduler: NixlConnectorScheduler | None = (
                 NixlConnectorScheduler(vllm_config, self.engine_id)
             )
-            self.connector_worker: Optional[NixlConnectorWorker] = None
+            self.connector_worker: NixlConnectorWorker | None = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = NixlConnectorWorker(vllm_config, self.engine_id)
@@ -187,7 +187,7 @@ class NixlConnector(KVConnectorBase_V1):
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
-    ) -> tuple[Optional[int], bool]:
+    ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens
@@ -212,7 +212,7 @@ class NixlConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
@@ -242,14 +242,14 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
-    def get_kv_connector_stats(self) -> Optional[KVConnectorStats]:
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
         assert self.connector_worker is not None
         return self.connector_worker.get_kv_connector_stats()
 
     @classmethod
     def build_kv_connector_stats(
-        cls, data: Optional[dict[str, Any]] = None
-    ) -> Optional[KVConnectorStats]:
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
         return (
             NixlKVConnectorStats(data=data)
             if data is not None
@@ -551,7 +551,7 @@ class NixlConnectorScheduler:
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
@@ -680,7 +680,7 @@ class NixlConnectorWorker:
             )
 
         # Note: host xfer buffer ops when use_host_buffer is True
-        self.copy_blocks: Optional[CopyBlocksOp] = None
+        self.copy_blocks: CopyBlocksOp | None = None
 
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         # rank will still only pull from a single remote TP worker.
@@ -712,7 +712,7 @@ class NixlConnectorWorker:
         self._reqs_to_process: set[ReqId] = set()
 
         # Handshake metadata of this worker for NIXL transfers.
-        self.xfer_handshake_metadata: Optional[NixlAgentMetadata] = None
+        self.xfer_handshake_metadata: NixlAgentMetadata | None = None
         # Background thread for initializing new NIXL handshakes.
         self._handshake_initiation_executor = ThreadPoolExecutor(
             # NIXL is not guaranteed to be thread-safe, limit 1 worker.
@@ -732,7 +732,7 @@ class NixlConnectorWorker:
         # TODO(mgoin): remove this once we have hybrid memory allocator
         # Optimization for models with local attention (Llama 4)
         # List of block window sizes for each layer for local attention
-        self.block_window_per_layer: list[Optional[int]] = []
+        self.block_window_per_layer: list[int | None] = []
         self.use_mla = self.model_config.use_mla
 
         backend = get_attn_backend(
@@ -1421,6 +1421,8 @@ class NixlConnectorWorker:
         # Remove all requests that are not to be processed (eg aborted).
         for req_id in metadata.reqs_not_processed:
             self._reqs_to_process.discard(req_id)
+            # We should never get an abort after setting an expiry timer
+            assert req_id not in self._reqs_to_send
 
         # Add to requests that are waiting to be read and track expiration.
         for req_id, expiration_time in metadata.reqs_to_send.items():
@@ -1547,7 +1549,7 @@ class NixlConnectorWorker:
         self._recving_transfers[request_id].append((handle, time.perf_counter()))
 
     def _get_block_descs_ids(
-        self, engine_id: str, block_ids: list[int], layer_idx: Optional[int] = None
+        self, engine_id: str, block_ids: list[int], layer_idx: int | None = None
     ) -> np.ndarray:
         """
         Get the descs ids for a set of block ids.
@@ -1593,7 +1595,7 @@ class NixlConnectorWorker:
             block_len = self.block_len_per_layer[layer_idx]
         return block_len
 
-    def get_kv_connector_stats(self) -> Optional[KVConnectorStats]:
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
         Get the KV transfer stats for the connector.
         """
@@ -1631,7 +1633,7 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     if socket_type not in (zmq.ROUTER, zmq.REQ):
         raise ValueError(f"Unexpected socket type: {socket_type}")
 
-    ctx: Optional[zmq.Context] = None
+    ctx: zmq.Context | None = None
     try:
         ctx = zmq.Context()  # type: ignore[attr-defined]
         yield make_zmq_socket(
@@ -1683,7 +1685,7 @@ class NixlKVConnectorStats(KVConnectorStats):
                 accumulator.extend(v)
         return self
 
-    def reduce(self) -> dict[str, Union[int, float]]:
+    def reduce(self) -> dict[str, int | float]:
         # Compute compact representative stats suitable for CLI logging
         if self.is_empty():
             return {

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
@@ -105,7 +104,7 @@ direct_register_custom_op(
 
 def flashinfer_fused_moe_per_tensor_scale_fp8(
     routing_logits: torch.Tensor,
-    routing_bias: Optional[torch.Tensor],
+    routing_bias: torch.Tensor | None,
     hidden_states: torch.Tensor,
     input_scale: torch.Tensor,
     gemm1_weights: torch.Tensor,
@@ -115,8 +114,8 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
     output2_scales_scalar: torch.Tensor,
     num_experts: int,
     top_k: int,
-    num_expert_group: Optional[int],
-    topk_group: Optional[int],
+    num_expert_group: int | None,
+    topk_group: int | None,
     intermediate_size: int,
     local_expert_offset: int,
     local_num_experts: int,
@@ -163,7 +162,7 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
 
 def flashinfer_fused_moe_per_tensor_scale_fp8_fake(
     routing_logits: torch.Tensor,
-    routing_bias: Optional[torch.Tensor],
+    routing_bias: torch.Tensor | None,
     hidden_states: torch.Tensor,
     input_scale: torch.Tensor,
     gemm1_weights: torch.Tensor,
@@ -173,8 +172,8 @@ def flashinfer_fused_moe_per_tensor_scale_fp8_fake(
     output2_scales_scalar: torch.Tensor,
     num_experts: int,
     top_k: int,
-    num_expert_group: Optional[int],
-    topk_group: Optional[int],
+    num_expert_group: int | None,
+    topk_group: int | None,
     intermediate_size: int,
     local_expert_offset: int,
     local_num_experts: int,

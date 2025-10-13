@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 
-from vllm import LLM, SamplingParams, envs
+from vllm import LLM, SamplingParams
 
 MODEL = "meta-llama/llama-2-7b-hf"
 MAX_TOKENS = 200
@@ -15,8 +15,8 @@ def _test_stopping(
     llm: LLM,
     expected_output: str,
     expected_reason: Any,
-    stop: Optional[list[str]] = None,
-    stop_token_ids: Optional[list[int]] = None,
+    stop: list[str] | None = None,
+    stop_token_ids: list[int] | None = None,
     include_in_output: bool = False,
 ) -> None:
     output = llm.generate(
@@ -111,9 +111,7 @@ def _stop_token_id(llm):
 
 @pytest.mark.skip_global_cleanup
 def test_stop_strings():
-    # If V0, must set enforce_eager=False since we use
-    # async output processing below.
-    llm = LLM(MODEL, enforce_eager=envs.VLLM_USE_V1)
+    llm = LLM(MODEL, enforce_eager=True)
 
     _stop_basic(llm)
     _stop_multi_tokens(llm)

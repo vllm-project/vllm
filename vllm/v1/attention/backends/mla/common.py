@@ -190,7 +190,7 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import Generic, Optional, TypeVar, Union
+from typing import ClassVar, Generic, TypeVar
 
 import torch
 from tqdm import tqdm
@@ -243,6 +243,8 @@ try:
 
     flashinfer_available = True
 except ImportError:
+    BatchPrefillWithRaggedKVCacheWrapper = object
+
     flashinfer_available = False
 
 
@@ -337,22 +339,22 @@ class MLACommonPrefillMetadata:
         workspace: torch.Tensor
 
         # for mla DCP
-        cp_chunk_seq_lens: Optional[list[list[int]]] = None
-        origin_context_lens: Optional[list[int]] = None
-        cp_cu_seq_lens: Optional[torch.Tensor] = None
-        chunk_size: Optional[int] = None
-        cu_seq_lens_lst: Optional[list[list[int]]] = None
+        cp_chunk_seq_lens: list[list[int]] | None = None
+        origin_context_lens: list[int] | None = None
+        cp_cu_seq_lens: torch.Tensor | None = None
+        chunk_size: int | None = None
+        cu_seq_lens_lst: list[list[int]] | None = None
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
     max_query_len: int
-    chunked_context: Optional[ChunkedContextMetadata] = None
+    chunked_context: ChunkedContextMetadata | None = None
 
 
 @dataclass
 class FlashInferPrefillMetadata(MLACommonPrefillMetadata):
-    prefill_main: Optional["BatchPrefillWithRaggedKVCacheWrapper"] = None
-    prefill_chunks: list["BatchPrefillWithRaggedKVCacheWrapper"] = field(
+    prefill_main: BatchPrefillWithRaggedKVCacheWrapper | None = None
+    prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = field(
         default_factory=list
     )
 
@@ -362,14 +364,15 @@ class CudnnPrefillMetadata(MLACommonPrefillMetadata):
     class ChunkedContextMetadata(MLACommonPrefillMetadata.ChunkedContextMetadata):
         seq_lens: torch.Tensor
 
-    query_seq_lens: Optional[torch.Tensor] = None
-    cudnn_workspace: Optional[torch.Tensor] = None
+    query_seq_lens: torch.Tensor | None = None
+    cudnn_workspace: torch.Tensor | None = None
 
 
 @dataclass
 class MLACommonDecodeMetadata:
     block_table: torch.Tensor
     seq_lens: torch.Tensor
+    dcp_tot_seq_lens: torch.Tensor | None
 
 
 D = TypeVar("D", bound=MLACommonDecodeMetadata)
@@ -406,12 +409,15 @@ class MLACommonMetadata(Generic[D]):
     num_prefills: int
 
     # The dimension of the attention heads
-    head_dim: Optional[int] = None
+    head_dim: int | None = None
 
-    decode: Optional[D] = None
-    prefill: Optional[
-        Union[MLACommonPrefillMetadata, FlashInferPrefillMetadata, CudnnPrefillMetadata]
-    ] = None
+    decode: D | None = None
+    prefill: (
+        MLACommonPrefillMetadata
+        | FlashInferPrefillMetadata
+        | CudnnPrefillMetadata
+        | None
+    ) = None
 
     def __post_init__(self):
         if self.head_dim is not None:
@@ -454,6 +460,20 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     understand this class
     """
 
+    # Whether the backend supports reordering the batch such that
+    # short sequences (i.e. verification for speculative decoding) are
+    # classified as decode requests.
+    # If True, this will increase `reorder_batch_threshold` (below) when
+    # speculative decoding is enabled, and set `require_uniform=True` when
+    # when reordering the batch. Non-uniform decode requests will
+    # fall back to prefill in this case.
+    supports_uniform_spec_as_decode: ClassVar[bool] = False
+
+    # The threshold for reordering the batch into decode and prefill requests.
+    # If > 1, the batch will be reordered such that requests with
+    # query length <= threshold are classified as decode requests.
+    # Use `supports_uniform_spec_as_decode` (above) to set this automatically
+    # when speculative decoding is enabled.
     reorder_batch_threshold: int = 1
 
     @staticmethod
@@ -493,7 +513,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
-        metadata_cls: Optional[type[M]] = None,
+        metadata_cls: type[M] | None = None,
     ):
         self.metadata_cls = (
             metadata_cls if metadata_cls is not None else MLACommonMetadata
@@ -503,6 +523,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         self.compilation_config = vllm_config.compilation_config
+        self.vllm_config = vllm_config
         self.device = device
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
@@ -564,7 +585,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device=device
             )
 
-            self._fi_prefill_main: Optional[BatchPrefillWithRaggedKVCacheWrapper] = None
+            self._fi_prefill_main: BatchPrefillWithRaggedKVCacheWrapper | None = None
             self._fi_prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = []
 
             self._global_hyperparameters = infer_global_hyperparameters(
@@ -577,6 +598,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 dtype=torch.int8,
                 device=device,
             )
+
+        supports_spec_as_decode = self.supports_uniform_spec_as_decode
+        self._init_reorder_batch_threshold(
+            self.reorder_batch_threshold, supports_spec_as_decode
+        )
 
     def _build_fi_prefill_wrappers(self, prefill: FlashInferPrefillMetadata):
         qo_indptr = prefill.query_start_loc
@@ -662,10 +688,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
+            dcp_tot_seq_lens=dcp_tot_seq_lens_device,
         )
 
     def build_for_cudagraph_capture(
@@ -707,6 +735,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -714,13 +743,18 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold,
+                require_uniform=self.supports_uniform_spec_as_decode,
             )
         )
 
         # Note(hc): update seq_lens of decode reqs under DCP.
         if self.dcp_world_size > 1:
-            seq_lens[:num_decodes] = seq_lens[:num_decodes] // self.dcp_world_size + (
+            assert dcp_local_seq_lens is not None
+            dcp_local_seq_lens[:num_decodes] = seq_lens[
+                :num_decodes
+            ] // self.dcp_world_size + (
                 self.dcp_rank <= (seq_lens[:num_decodes] - 1) % self.dcp_world_size
             )
 
@@ -877,10 +911,15 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
                 seq_lens_cpu=seq_lens_cpu[:num_decodes],
-                seq_lens_device=seq_lens[:num_decodes],
+                seq_lens_device=dcp_local_seq_lens[:num_decodes]
+                if self.dcp_world_size > 1 and dcp_local_seq_lens is not None
+                else seq_lens[:num_decodes],
                 query_start_loc_cpu=query_start_loc_cpu[: num_decodes + 1],
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
+                dcp_tot_seq_lens_device=seq_lens[:num_decodes]
+                if self.dcp_world_size > 1
+                else None,
             )
 
         attn_metadata = self.metadata_cls(
@@ -989,14 +1028,14 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
-        q_lora_rank: Optional[int],
+        q_lora_rank: int | None,
         kv_lora_rank: int,
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
@@ -1004,7 +1043,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
         indexer=None,
-        q_pad_num_heads: Optional[int] = None,
+        q_pad_num_heads: int | None = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported for MLA")
@@ -1192,7 +1231,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 and current_platform.get_device_capability()[0] == 9
             )
 
-        self.dcp_world_size: Optional[int] = None
+        self.dcp_world_size: int | None = None
 
         self.chunked_prefill_workspace_size = (
             MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
@@ -1676,11 +1715,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     @abstractmethod
     def _forward_decode(
         self,
-        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: M,
         layer: AttentionLayer,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         raise NotImplementedError
 
     def forward(
@@ -1691,9 +1730,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
         attn_metadata: M,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
