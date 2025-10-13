@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     CUDA_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
     VLLM_API_KEY: str | None = None
+    VLLM_DEBUG_LOG_API_SERVER_REQUEST_PROMPT: bool = False
     S3_ACCESS_KEY_ID: str | None = None
     S3_SECRET_ACCESS_KEY: str | None = None
     S3_ENDPOINT_URL: str | None = None
@@ -526,6 +527,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to log responses from API Server for debugging
     "VLLM_DEBUG_LOG_API_SERVER_RESPONSE": lambda: os.environ.get(
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False"
+    ).lower()
+    == "true",
+    # Whether to enable debug logging for API server request prompts
+    # When enabled, splits request logging: basic info at INFO level,
+    # prompt details (prompt, prompt_token_ids, prompt_embeds) at DEBUG level
+    "VLLM_DEBUG_LOG_API_SERVER_REQUEST_PROMPT": lambda: os.environ.get(
+        "VLLM_DEBUG_LOG_API_SERVER_REQUEST_PROMPT", "False"
     ).lower()
     == "true",
     # S3 access information, used for tensorizer to load model from S3

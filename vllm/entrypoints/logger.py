@@ -5,6 +5,7 @@ from collections.abc import Sequence
 
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
@@ -34,18 +35,35 @@ class RequestLogger:
             if prompt_token_ids is not None:
                 prompt_token_ids = prompt_token_ids[:max_log_len]
 
-        logger.info(
-            "Received request %s: prompt: %r, "
-            "params: %s, prompt_token_ids: %s, "
-            "prompt_embeds shape: %s, "
-            "lora_request: %s.",
-            request_id,
-            prompt,
-            params,
-            prompt_token_ids,
-            prompt_embeds.shape if prompt_embeds is not None else None,
-            lora_request,
-        )
+        if envs.VLLM_DEBUG_LOG_API_SERVER_REQUEST_PROMPT:
+            # Split logging: basic info at INFO level, prompt details at DEBUG level
+            logger.info(
+                "Received request %s: params: %s, lora_request: %s.",
+                request_id,
+                params,
+                lora_request,
+            )
+            logger.debug(
+                "Request %s prompt details: prompt: %r, prompt_token_ids: %s, prompt_embeds shape: %s",
+                request_id,
+                prompt,
+                prompt_token_ids,
+                prompt_embeds.shape if prompt_embeds is not None else None,
+            )
+        else:
+            # Original logging behavior
+            logger.info(
+                "Received request %s: prompt: %r, "
+                "params: %s, prompt_token_ids: %s, "
+                "prompt_embeds shape: %s, "
+                "lora_request: %s.",
+                request_id,
+                prompt,
+                params,
+                prompt_token_ids,
+                prompt_embeds.shape if prompt_embeds is not None else None,
+                lora_request,
+            )
 
     def log_outputs(
         self,
