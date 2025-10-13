@@ -76,7 +76,8 @@ class TestSetting:
             attn_backend="FLASH_ATTN",
             method="encode",
         ),
-        # # vision language model
+        # vision language model
+        # See https://github.com/vllm-project/vllm/issues/26716.
         # TestSetting(
         #     model="microsoft/Phi-3.5-vision-instruct",
         #     model_args=["--trust-remote-code", "--max-model-len", "2048"],
@@ -114,8 +115,7 @@ def test_compile_correctness(
             str(pp_size),
             "-tp",
             str(tp_size),
-            "--compilation-config",
-            '{"cudagraph_mode": "none"}',
+            "-O.cudagraph_mode=none",
         ]
 
         all_args: list[list[str]] = []
@@ -128,7 +128,6 @@ def test_compile_correctness(
         ]:
             for level in [CompilationLevel.NO_COMPILATION, comp_level]:
                 all_args.append(final_args + [f"-O.{level}", "-O.backend=inductor"])
-                all_envs.append({})
 
             # inductor will change the output, so we only compare if the output
             # is close, not exactly the same.
