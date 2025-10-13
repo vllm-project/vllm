@@ -399,14 +399,37 @@ cases = [
 
 @pytest.mark.parametrize("args", cases)
 @pytest.mark.parametrize("enforce_eager", [True, False])
-def test_draft_model_correctness(
-    args: ArgsTest,
-    enforce_eager: bool,
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
+    assert_draft_model_correctness(args, enforce_eager)
+
+
+@pytest.mark.parametrize(
+    "models",
+    [
+        # target_model,         draft_model
+        ("Qwen/Qwen3-1.7B-FP8", "Qwen/Qwen3-0.6B"),  # target quantized
+        ("Qwen/Qwen3-1.7B", "Qwen/Qwen3-0.6B-FP8"),  # draft quantized
+    ],
+    ids=["target_quantized", "draft_quantized"],
+)
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_draft_model_quantization(models: tuple[str, str], enforce_eager: bool):
+    tgt_model, draft_model = models
+    sd_case = ArgsTest(
+        model=tgt_model,
+        draft_model=draft_model,
+        sampling_config=greedy_sampling(),
+        num_speculative_tokens=3,
+        expected_acceptance_len=2.95 + 1,
+        expected_acceptance_rate=0.95,
+        expected_same_output_fraction=0.95,
+    )
+    assert_draft_model_correctness(sd_case, enforce_eager)
+
+
+def assert_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
     """Compare the outputs using and not using speculative decoding.
     In the greedy decoding case, the outputs must match EXACTLY."""
-    monkeypatch.setenv("VLLM_USE_V1", "1")
     test_prompts = get_test_prompts(mm_enabled=False, quiet=True)
 
     spec_llm = LLM(

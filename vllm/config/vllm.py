@@ -757,6 +757,14 @@ class VllmConfig:
         path = self.compilation_config.debug_dump_path / append_path
         return path
 
+    def replace(self, **kwargs):
+        """
+        Replace attributes of the config, and 'recompute' the config.
+        dataclass.replace() calls __init__() and __post_init__(), source:
+        https://docs.python.org/3/library/dataclasses.html#dataclasses.replace
+        """
+        return replace(self, **kwargs)
+
     def __str__(self):
         return (
             f"model={self.model_config.model!r}, "

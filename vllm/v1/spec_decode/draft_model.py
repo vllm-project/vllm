@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -118,8 +118,11 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         draft_model_config: ModelConfig = (
             self.vllm_config.speculative_config.draft_model_config
         )
-        vllm_config_draft: VllmConfig = replace(
-            self.vllm_config, model_config=draft_model_config
+        # Recompute quant_config, which is configured for the target model
+        # But the draft model might not be quantized.
+        vllm_config_draft: VllmConfig = self.vllm_config.replace(
+            quant_config=None,
+            model_config=draft_model_config,
         )
 
         # This must be computed before loading the draft model
