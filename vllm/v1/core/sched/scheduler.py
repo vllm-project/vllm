@@ -271,6 +271,9 @@ class Scheduler(SchedulerInterface):
                     self.running.remove(preempted_req)
                     if preempted_req in scheduled_running_reqs:
                         scheduled_running_reqs.remove(preempted_req)
+                        token_budget += num_scheduled_tokens[preempted_req.request_id]
+                        req_to_new_blocks.pop(preempted_req.request_id)
+                        num_scheduled_tokens.pop(preempted_req.request_id)
                 else:
                     preempted_req = self.running.pop()
 
