@@ -2133,7 +2133,7 @@ def replace_set_lora(model):
         # TODO: The integer index leads to a recompilation, but converting it
         # to a tensor doesn't seem to work anymore. This might be fixed with a
         # later release of torch_xla.
-        self._original_set_lora(index, lora_a, lora_b, embeddings_tensor, bias)
+        self._original_set_lora(index, lora_a, lora_b, embeddings_tensor)
         torch_xla.sync(wait=False)
 
     def _tpu_reset_lora(self, index: int):
