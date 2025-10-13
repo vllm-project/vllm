@@ -3,7 +3,6 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
-from typing import Optional
 
 import numpy as np
 import torch
@@ -41,7 +40,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -86,8 +84,8 @@ class SpecDecodeBaseProposer:
             vllm_config.model_config
         )
 
-        self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
-        self.draft_indexer_metadata_builder: Optional[AttentionMetadataBuilder] = None
+        self.attn_metadata_builder: AttentionMetadataBuilder | None = None
+        self.draft_indexer_metadata_builder: AttentionMetadataBuilder | None = None
         self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
 
@@ -155,7 +153,7 @@ class SpecDecodeBaseProposer:
         )
 
         # Determine allowed attention backends once during initialization.
-        self.allowed_attn_types: Optional[tuple] = None
+        self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
             # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
@@ -213,10 +211,10 @@ class SpecDecodeBaseProposer:
         target_hidden_states: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
-        last_token_indices: Optional[torch.Tensor],
+        last_token_indices: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]] = None,
+        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = common_attn_metadata.batch_size()
@@ -237,11 +235,11 @@ class SpecDecodeBaseProposer:
 
         assert self.runner is not None
 
-        # FIXME: need to consider multiple kv_cache_groups
-        ubatch_id = dbo_current_ubatch_id()
-        attn_metadata_builder = self.runner.attn_groups[0][0].metadata_builders[
-            ubatch_id
-        ]
+        if self.attn_metadata_builder is None:
+            attn_metadata_builder = self._get_attention_metadata_builder()
+        else:
+            attn_metadata_builder = self.attn_metadata_builder
+
         attn_metadata = attn_metadata_builder.build_for_drafting(
             common_attn_metadata=common_attn_metadata, draft_index=0
         )
@@ -1110,7 +1108,7 @@ class SpecDecodeBaseProposer:
 
             self.model(**model_kwargs)
 
-    def _get_attention_metadata_builder(self) -> list[AttentionMetadataBuilder]:
+    def _get_attention_metadata_builder(self) -> AttentionMetadataBuilder:
         """Find and return the attention metadata builders for EAGLE layers.
 
         Returns:

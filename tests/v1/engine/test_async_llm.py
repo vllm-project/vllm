@@ -3,7 +3,6 @@
 
 import asyncio
 from contextlib import ExitStack
-from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -53,8 +52,8 @@ async def generate(
     output_kind: RequestOutputKind,
     max_tokens: int,
     n: int = 1,
-    prompt_logprobs: Optional[int] = None,
-    cancel_after: Optional[int] = None,
+    prompt_logprobs: int | None = None,
+    cancel_after: int | None = None,
 ) -> tuple[int, str]:
     # Ensure generate doesn't complete too fast for cancellation test.
     await asyncio.sleep(0.2)
@@ -545,9 +544,9 @@ async def collect_outputs(
     prompt: PromptType,
     sampling_params: SamplingParams,
     outputs_list: list[RequestOutput],
-) -> Optional[RequestOutput]:
+) -> RequestOutput | None:
     """Helper to collect outputs and return the final one."""
-    final_output: Optional[RequestOutput] = None
+    final_output: RequestOutput | None = None
     async for output in engine.generate(
         request_id=request_id, prompt=prompt, sampling_params=sampling_params
     ):

@@ -3,7 +3,6 @@
 
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 import numpy as np
 import prometheus_client
@@ -144,7 +143,7 @@ class SpecDecodingProm:
 
     def __init__(
         self,
-        speculative_config: Optional[SpeculativeConfig],
+        speculative_config: SpeculativeConfig | None,
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[str]],
     ):

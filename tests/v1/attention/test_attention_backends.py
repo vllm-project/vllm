@@ -3,7 +3,6 @@
 """Tests for v1 attention backends without GPUModelRunner dependency."""
 
 from functools import partial
-from typing import Optional, Union
 
 import pytest
 import torch
@@ -203,7 +202,7 @@ def run_attention_backend(
     key: torch.Tensor,
     value: torch.Tensor,
     kv_cache: torch.Tensor,
-    sliding_window: Optional[int] = None,
+    sliding_window: int | None = None,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
@@ -290,7 +289,7 @@ def run_attention_backend(
 def _test_backend_correctness(
     batch_spec: BatchSpec,
     model: str,
-    backend_to_test: list[Union[_Backend, str]],
+    backend_to_test: list[_Backend | str],
     mask_mod,
     *,
     block_size: int = 16,
