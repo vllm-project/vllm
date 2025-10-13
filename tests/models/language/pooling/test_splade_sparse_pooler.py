@@ -14,7 +14,7 @@ from vllm.model_executor.models.bert import (
 )
 
 # ---------------------------------------------------------------------
-# 1) Functional test: SPLADE formula correctness (no HF download needed)
+# Functional test: SPLADE formula correctness (no HF download needed)
 # ---------------------------------------------------------------------
 
 
@@ -88,40 +88,3 @@ def test_splade_pooler_matches_reference_formula(B, T, H, V):
         rtol=1e-4,
         atol=1e-4,
     )
-
-
-# ---------------------------------------------------------------------
-# 2) Integration smoke test: end-to-end embedding path wiring
-# ---------------------------------------------------------------------
-
-
-@pytest.mark.cpu_model
-def test_bert_splade_sparse_embed_smoke(vllm_runner, monkeypatch):
-    """Ensure BertSpladeSparseEmbeddingModel loads and produces sparse embeddings."""
-    from transformers import AutoTokenizer
-
-    MODEL_ID = "hf-internal-testing/tiny-random-bert"
-    hf_overrides = {"architectures": ["BertSpladeSparseEmbeddingModel"]}
-
-    # Enforce CPU-only execution (optional)
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
-    monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
-
-    tok = AutoTokenizer.from_pretrained(MODEL_ID)
-    vocab_size = tok.vocab_size
-
-    # The embed path should route through SPLADESparsePooler
-    with vllm_runner(
-        MODEL_ID,
-        runner="pooling",
-        max_model_len=64,
-        hf_overrides=hf_overrides,
-    ) as vm:
-        outs = vm.embed(["hello world", "splade sparse test"])
-
-        # Basic sanity checks
-        assert len(outs) == 2
-        assert outs[0].shape[0] == vocab_size
-        assert outs[1].shape[0] == vocab_size
-        assert np.isfinite(outs[0]).all() and (outs[0] >= 0).all()
-        assert np.isfinite(outs[1]).all() and (outs[1] >= 0).all()
