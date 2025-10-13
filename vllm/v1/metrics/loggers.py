@@ -269,32 +269,34 @@ class PrometheusStatLogger(StatLoggerBase):
             gauge_kv_cache_usage, engine_indexes, model_name
         )
 
-        counter_kv_cache_total_lifetime = self._counter_cls(
-            name="vllm:kv_cache_total_lifetime_seconds",
-            documentation=("Cumulative sum of KV cache block lifetimes in seconds."),
-            labelnames=labelnames,
-        )
-        self.counter_kv_cache_total_lifetime_seconds = make_per_engine(
-            counter_kv_cache_total_lifetime, engine_indexes, model_name
-        )
-
-        counter_kv_cache_total_blocks = self._counter_cls(
-            name="vllm:kv_cache_total_blocks_freed",
+        histogram_kv_cache_lifetime = self._histogram_cls(
+            name="vllm:kv_cache_block_lifetime_seconds",
             documentation=(
-                "Cumulative count of KV cache blocks included in lifetime tracking."
+                "Histogram of individual KV cache block lifetimes in seconds."
             ),
+            buckets=[
+                0.1,
+                0.25,
+                0.5,
+                1.0,
+                2.0,
+                5.0,
+                10.0,
+                30.0,
+                60.0,
+                120.0,
+                300.0,
+                600.0,
+                1200.0,
+                3600.0,
+                7200.0,
+                14400.0,
+            ],
             labelnames=labelnames,
         )
-        self.counter_kv_cache_total_blocks_freed = make_per_engine(
-            counter_kv_cache_total_blocks, engine_indexes, model_name
+        self.histogram_kv_cache_lifetime_seconds = make_per_engine(
+            histogram_kv_cache_lifetime, engine_indexes, model_name
         )
-
-        self._prev_kv_cache_total_lifetime_seconds: dict[int, float] = {
-            idx: 0.0 for idx in engine_indexes
-        }
-        self._prev_kv_cache_total_blocks_freed: dict[int, int] = {
-            idx: 0 for idx in engine_indexes
-        }
 
         counter_prefix_cache_queries = self._counter_cls(
             name="vllm:prefix_cache_queries",
@@ -721,25 +723,10 @@ class PrometheusStatLogger(StatLoggerBase):
             if hasattr(scheduler_stats, "kv_cache_lifetime_stats"):
                 lifetime_stats = scheduler_stats.kv_cache_lifetime_stats
 
-                total_seconds = lifetime_stats.total_lifetime_seconds
-                prev_seconds = self._prev_kv_cache_total_lifetime_seconds[engine_idx]
-                if total_seconds >= prev_seconds:
-                    delta_seconds = total_seconds - prev_seconds
-                    if delta_seconds > 0:
-                        self.counter_kv_cache_total_lifetime_seconds[engine_idx].inc(
-                            delta_seconds
-                        )
-                self._prev_kv_cache_total_lifetime_seconds[engine_idx] = total_seconds
-
-                total_blocks = lifetime_stats.total_blocks_freed
-                prev_blocks = self._prev_kv_cache_total_blocks_freed[engine_idx]
-                if total_blocks >= prev_blocks:
-                    delta_blocks = total_blocks - prev_blocks
-                    if delta_blocks > 0:
-                        self.counter_kv_cache_total_blocks_freed[engine_idx].inc(
-                            delta_blocks
-                        )
-                self._prev_kv_cache_total_blocks_freed[engine_idx] = total_blocks
+                for lifetime in lifetime_stats.drain_pending_lifetimes():
+                    self.histogram_kv_cache_lifetime_seconds[engine_idx].observe(
+                        lifetime
+                    )
 
             if scheduler_stats.spec_decoding_stats is not None:
                 self.spec_decoding_prom.observe(

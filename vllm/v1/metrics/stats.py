@@ -37,6 +37,8 @@ class KVCacheLifetimeStats:
     total_lifetime_seconds: float = 0.0
     # Average lifetime of freed blocks (in seconds)
     average_lifetime_seconds: float = 0.0
+    # Pending lifetime samples to expose to Prometheus histogram observers
+    _pending_lifetimes: list[float] = field(default_factory=list)
 
     def add_block_lifetime(self, lifetime_seconds: float) -> None:
         """Add a new block lifetime to the statistics."""
@@ -45,12 +47,20 @@ class KVCacheLifetimeStats:
         self.average_lifetime_seconds = (
             self.total_lifetime_seconds / self.total_blocks_freed
         )
+        self._pending_lifetimes.append(lifetime_seconds)
+
+    def drain_pending_lifetimes(self) -> list[float]:
+        """Return lifetime samples recorded since the last drain."""
+        pending = self._pending_lifetimes
+        self._pending_lifetimes = []
+        return pending
 
     def reset(self) -> None:
         """Reset all lifetime statistics."""
         self.total_blocks_freed = 0
         self.total_lifetime_seconds = 0.0
         self.average_lifetime_seconds = 0.0
+        self._pending_lifetimes.clear()
 
 
 @dataclass

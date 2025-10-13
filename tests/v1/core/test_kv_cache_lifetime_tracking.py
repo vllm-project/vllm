@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -52,6 +52,17 @@ class TestKVCacheLifetimeStats:
         assert stats.total_blocks_freed == 0
         assert stats.total_lifetime_seconds == 0.0
         assert stats.average_lifetime_seconds == 0.0
+        assert stats.drain_pending_lifetimes() == []
+
+    def test_drain_pending_lifetimes(self):
+        """Test draining pending lifetime samples."""
+        stats = KVCacheLifetimeStats()
+        stats.add_block_lifetime(2.0)
+        stats.add_block_lifetime(4.0)
+
+        pending = stats.drain_pending_lifetimes()
+        assert pending == [2.0, 4.0]
+        assert stats.drain_pending_lifetimes() == []
 
 
 class TestKVCacheBlockLifetime:
@@ -259,11 +270,9 @@ class TestPrometheusMetricIntegration:
 
             logger = PrometheusStatLogger(mock_config, [0])
 
-            # Verify the lifetime metrics exist
-            assert hasattr(logger, "counter_kv_cache_total_lifetime_seconds")
-            assert 0 in logger.counter_kv_cache_total_lifetime_seconds
-            assert hasattr(logger, "counter_kv_cache_total_blocks_freed")
-            assert 0 in logger.counter_kv_cache_total_blocks_freed
+            # Verify the lifetime histogram metric exists
+            assert hasattr(logger, "histogram_kv_cache_lifetime_seconds")
+            assert 0 in logger.histogram_kv_cache_lifetime_seconds
 
     def test_prometheus_metric_recording(self):
         """Test that lifetime statistics are recorded to Prometheus."""
@@ -285,13 +294,9 @@ class TestPrometheusMetricIntegration:
 
             logger = PrometheusStatLogger(mock_config, [0])
 
-            # Mock the counter inc methods
-            mock_total_seconds_counter = MagicMock()
-            mock_total_blocks_counter = MagicMock()
-            logger.counter_kv_cache_total_lifetime_seconds = {
-                0: mock_total_seconds_counter
-            }
-            logger.counter_kv_cache_total_blocks_freed = {0: mock_total_blocks_counter}
+            # Mock the histogram observe method
+            mock_histogram = MagicMock()
+            logger.histogram_kv_cache_lifetime_seconds = {0: mock_histogram}
 
             # Create scheduler stats with lifetime data
             lifetime_stats = KVCacheLifetimeStats()
@@ -309,15 +314,19 @@ class TestPrometheusMetricIntegration:
             # Record the stats
             logger.record(scheduler_stats, None, 0)
 
-            # Verify counters were incremented with correct values
-            mock_total_seconds_counter.inc.assert_called_once_with(30.0)
-            mock_total_blocks_counter.inc.assert_called_once_with(2)
+            # Verify histogram was updated with each lifetime sample
+            mock_histogram.observe.assert_has_calls(
+                [
+                    call(10.0),
+                    call(20.0),
+                ]
+            )
+            assert mock_histogram.observe.call_count == 2
 
             # Record again to ensure only deltas are recorded
             logger.record(scheduler_stats, None, 0)
 
-            mock_total_seconds_counter.inc.assert_called_once()
-            mock_total_blocks_counter.inc.assert_called_once()
+            assert mock_histogram.observe.call_count == 2
 
 
 if __name__ == "__main__":
