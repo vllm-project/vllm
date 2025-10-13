@@ -33,7 +33,7 @@ def _mutated_arg_names(op_overload: torch._ops.OpOverload) -> list[str]:
     ]
 
 
-def resolve_defined_ops(op_names: list[str]) -> list[torch._ops.OpOverload]:
+def resolve_defined_ops(op_names: list[str]) -> list["torch._ops.OpOverload"]:
     """Resolve operator names to OpOverload objects.
 
     Skips operators that fail to resolve (e.g., operators not registered or
