@@ -9,7 +9,7 @@ from packaging import version
 from vllm import envs
 from vllm.config.model import LogprobsMode
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 
 logger = init_logger(__name__)
 
@@ -73,7 +73,10 @@ class TopKTopPSampler(nn.Module):
                 )
                 self.forward = self.forward_native
         elif current_platform.is_cpu():
-            self.forward = self.forward_cpu
+            if current_platform.get_cpu_architecture() == CpuArchEnum.RISCV:
+                self.forward = self.forward_native
+            else:
+                self.forward = self.forward_cpu
         else:
             self.forward = self.forward_native
 
