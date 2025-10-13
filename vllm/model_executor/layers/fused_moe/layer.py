@@ -7,7 +7,6 @@ from enum import Enum
 from functools import partial
 from typing import Literal, cast, get_args, overload
 
-import functools
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter

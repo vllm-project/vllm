@@ -186,8 +186,7 @@ def maybe_make_prepare_finalize(
             handle,
             num_dispatchers=all2all_manager.world_size,
             dp_size=all2all_manager.dp_world_size,
-            rank_expert_offset=all2all_manager.rank *
-            moe.num_local_experts,
+            rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
         )
 
     return prepare_finalize
