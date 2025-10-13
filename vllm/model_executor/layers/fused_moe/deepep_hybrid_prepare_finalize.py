@@ -7,9 +7,10 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+    TopKWeightAndReduceContiguous,
+    TopKWeightAndReduceDelegate,
+)
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils import round_up
 
 
@@ -19,8 +20,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
 
     @staticmethod
-    def maybe_roundup_layer_hidden_size(hidden_size: int,
-                                        dtype: torch.dtype) -> int:
+    def maybe_roundup_layer_hidden_size(hidden_size: int, dtype: torch.dtype) -> int:
         # Round up hidden size so it is compatible with DeepEP High Throughput
         # kernels.
         # DeepEP intranode kernels make copies in units of,
@@ -35,13 +35,18 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         hidden_size_bytes = round_up(hidden_size_bytes, xfer_atom_size)
         return hidden_size_bytes // dtype.itemsize
 
-    def __init__(self, buffer: deep_ep.HybridEpBuffer, num_dispatchers: int,
-                 dp_size: int, rank_expert_offset: int):
+    def __init__(
+        self,
+        buffer: deep_ep.HybridEpBuffer,
+        num_dispatchers: int,
+        dp_size: int,
+        rank_expert_offset: int,
+    ):
         super().__init__()
         self.buffer = buffer
         self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size
-        self.rank_expert_offset = rank_expert_offset #?
+        self.rank_expert_offset = rank_expert_offset  # ?
         self.handle = None
         self.expert_probs = None
 
@@ -90,12 +95,12 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
             # TODO: this only works for topK=1, will need to update for topK>1
             assert topk == 1, (
-                "apply_router_weight_on_input is only implemented for topk=1")
+                "apply_router_weight_on_input is only implemented for topk=1"
+            )
             a1 = a1 * topk_weights.to(a1.dtype)
 
         if quant_config.is_block_quantized:
@@ -112,56 +117,59 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1_post_scale = None
         else:
             a1q = a1
-            a1q_scale = torch.ones(1, device=a1.device, dtype=torch.float32) # hack
+            a1q_scale = torch.ones(1, device=a1.device, dtype=torch.float32)  # hack
             a1_post_scale = quant_config.a1_scale
 
         # use dispatch_with_permute/combine_with_unpermute?
         if True:
-            (
-                expert_x, expert_probs, expert_x_scale, handle
-            ) = self.buffer.dispatch(
+            (expert_x, expert_probs, expert_x_scale, handle) = self.buffer.dispatch(
                 hidden=a1q,
                 scaling_factor=a1q_scale,
                 topk_idx=topk_ids,
                 topk_weights=topk_weights,
-                routing_map=None, # None = generated dynamically
+                routing_map=None,  # None = generated dynamically
                 handle=None,
-                num_dispatched_tokens=-1, #??
+                num_dispatched_tokens=-1,  # ??
             )
 
             self.handle = handle
             self.expert_probs = expert_probs
+            assert self.handle is not None
 
-            (sparse_to_dense_map,
-             rdma_to_attn_map,
-             attn_to_rdma_map,
-             num_of_tokens_for_experts,
-             local_expert_routing_map, #
-             num_tokens) = self.handle
+            (
+                sparse_to_dense_map,
+                rdma_to_attn_map,
+                attn_to_rdma_map,
+                num_of_tokens_for_experts,
+                local_expert_routing_map,  #
+                num_tokens,
+            ) = self.handle
 
         else:
-            (
-                expert_x, expert_probs, expert_x_scale, tokens_per_expert, handle
-            ) = self.buffer.dispatch_with_permute(
-                hidden=a1q,
-                scaling_factor=a1q_scale,
-                topk_idx=topk_ids,
-                topk_weights=topk_weights,
-                routing_map=None, # None = generated dynamically
-                handle=None,
-                num_dispatched_tokens=-1, #??
+            (expert_x, expert_probs, expert_x_scale, tokens_per_expert, handle) = (
+                self.buffer.dispatch_with_permute(
+                    hidden=a1q,
+                    scaling_factor=a1q_scale,
+                    topk_idx=topk_ids,
+                    topk_weights=topk_weights,
+                    routing_map=None,  # None = generated dynamically
+                    handle=None,
+                    num_dispatched_tokens=-1,  # ??
+                )
             )
 
             self.handle = handle
             self.expert_probs = expert_probs
 
-            (sparse_to_dense_map,
-             rdma_to_attn_map,
-             attn_to_rdma_map,
-             num_dispatched_tokens_tensor,
-             local_expert_routing_map,
-             row_id_map,
-             num_tokens) = self.handle
+            (
+                sparse_to_dense_map,
+                rdma_to_attn_map,
+                attn_to_rdma_map,
+                num_dispatched_tokens_tensor,
+                local_expert_routing_map,
+                row_id_map,
+                num_tokens,
+            ) = self.handle
 
         topk = topk_ids.size(1)
         if topk == 1 and expert_probs.dim() == 1:
@@ -186,9 +194,16 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     a1_post_scale,
                     quant_dtype=quant_config.quant_dtype,
                     per_act_token_quant=False,
-                    block_shape=quant_config.block_shape)
+                    block_shape=quant_config.block_shape,
+                )
 
-        return (expert_x, expert_x_scale, expert_tokens_meta, new_topk_ids, expert_probs)
+        return (
+            expert_x,
+            expert_x_scale,
+            expert_tokens_meta,
+            new_topk_ids,
+            expert_probs,
+        )
 
     def finalize(
         self,
@@ -199,10 +214,6 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        # assert isinstance(
-        #     weight_and_reduce_impl, TopKWeightAndReduceDelegate
-        # ), f"Weight application and reduction happens in the combine kernel. {weight_and_reduce_impl}"
-
         # fused_expert_output can have 0 tokens - This happens when none of the
         # tokens from the all2all reach this EP rank.
         if False and fused_expert_output.numel() != 0:
@@ -231,10 +242,11 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         top_k = topk_ids.shape[1]
 
-        # Double check this
+        # TODO(bnell): Double check this
         combined_x = combined_x / top_k
 
-        #print(f"\nCOMBINE END({self.rank_expert_offset}) {combined_x.shape}/{combined_x.dtype}\n")
+        # print(f"\nCOMBINE END({self.rank_expert_offset}) "
+        #      f"{combined_x.shape}/{combined_x.dtype}\n")
 
         if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
             weight_and_reduce_impl = TopKWeightAndReduceContiguous()
@@ -244,4 +256,5 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             fused_expert_output=output,
             topk_weights=combined_probs,
             topk_ids=topk_ids,
-            apply_router_weight_on_input=apply_router_weight_on_input)
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )
