@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import heapq
 from abc import ABC, abstractmethod
 from collections import deque
@@ -43,7 +41,7 @@ class RequestQueue(ABC):
         pass
 
     @abstractmethod
-    def prepend_requests(self, requests: RequestQueue) -> None:
+    def prepend_requests(self, requests: "RequestQueue") -> None:
         """Prepend all requests from another queue to the front of this
         queue."""
         pass
