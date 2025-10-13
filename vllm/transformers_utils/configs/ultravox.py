@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_config.py
-from typing import Any, Optional
+from typing import Any
 
 import transformers
 
@@ -50,10 +50,10 @@ class UltravoxConfig(transformers.PretrainedConfig):
 
     def __init__(
         self,
-        audio_config: Optional[dict[str, Any]] = None,
-        text_config: Optional[dict[str, Any]] = None,
-        audio_model_id: Optional[str] = None,
-        text_model_id: Optional[str] = None,
+        audio_config: dict[str, Any] | None = None,
+        text_config: dict[str, Any] | None = None,
+        audio_model_id: str | None = None,
+        text_model_id: str | None = None,
         ignore_index: int = -100,
         audio_token_index: int = 32000,
         hidden_size: int = 4096,

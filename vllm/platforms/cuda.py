@@ -5,9 +5,10 @@ pynvml. However, it should not initialize cuda context.
 """
 
 import os
+from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, wraps
-from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, TypeVar
 
 import torch
 from torch.distributed import PrefixStore, ProcessGroup
@@ -85,7 +86,7 @@ class CudaPlatformBase(Platform):
         _ = torch.zeros(1, device=device)
 
     @classmethod
-    def get_device_capability(cls, device_id: int = 0) -> Optional[DeviceCapability]:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         raise NotImplementedError
 
     @classmethod
@@ -118,7 +119,15 @@ class CudaPlatformBase(Platform):
 
         # TODO(lucas): handle this more gracefully
         # Note: model_config may be None during testing
-        if model_config is not None and model_config.use_mla:
+        # Note: block_size is initialized in
+        # HybridAttentionMambaModelConfig.verify_and_update_config
+        # for models with both attention and mamba,
+        # and doesn't need to be reinitialized here
+        if (
+            model_config is not None
+            and model_config.use_mla
+            and cache_config.block_size is not None
+        ):
             use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
             # If `VLLM_ATTENTION_BACKEND` is not set and we are using MLA,
             # then we default to FlashMLA backend for non-blackwell GPUs,
@@ -151,18 +160,22 @@ class CudaPlatformBase(Platform):
             if (
                 use_flashmla
                 and is_flashmla_dense_supported()[0]
-                and cache_config.block_size != 64
+                and cache_config.block_size % 64 != 0
             ):
                 cache_config.block_size = 64
                 logger.info("Forcing kv cache block size to 64 for FlashMLA backend.")
 
-            if use_cutlass_mla and cache_config.block_size != 128:
+            if use_cutlass_mla and cache_config.block_size % 128 != 0:
                 cache_config.block_size = 128
                 logger.info(
                     "Forcing kv cache block size to 128 for CUTLASS_MLA backend."
                 )
 
-            if use_flashinfer_mla and cache_config.block_size not in [32, 64]:
+            if (
+                use_flashinfer_mla
+                and cache_config.block_size != 32
+                and cache_config.block_size % 64 != 0
+            ):
                 cache_config.block_size = 64
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashInferMLA backend."
@@ -198,7 +211,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_current_memory_usage(
-        cls, device: Optional[torch.types.Device] = None
+        cls, device: torch.types.Device | None = None
     ) -> float:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
@@ -269,12 +282,12 @@ class CudaPlatformBase(Platform):
             use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
                 selected_backend is None
                 and cls.is_device_capability(100)
-                and block_size == 128
+                and block_size % 128 == 0
             )
             use_flashinfermla = selected_backend == _Backend.FLASHINFER_MLA or (
                 selected_backend is None
                 and cls.is_device_capability(100)
-                and block_size in [32, 64]
+                and (block_size == 32 or block_size % 64 == 0)
             )
             use_flashmla = selected_backend == _Backend.FLASHMLA or (
                 selected_backend is None and is_flashmla_dense_supported()[0]
@@ -298,7 +311,7 @@ class CudaPlatformBase(Platform):
                     "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"
                 )
             if use_flashmla:
-                if block_size != 64:
+                if block_size % 64 != 0:
                     logger.warning(
                         "FlashMLA backend is not supported for block size %d"
                         " (currently only supports block size 64).",
@@ -631,7 +644,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @cache
     @with_nvml_context
-    def get_device_capability(cls, device_id: int = 0) -> Optional[DeviceCapability]:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         try:
             physical_device_id = cls.device_id_to_physical_device_id(device_id)
             handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
@@ -644,7 +657,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @with_nvml_context
     def has_device_capability(
         cls,
-        capability: Union[tuple[int, int], int],
+        capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
         try:

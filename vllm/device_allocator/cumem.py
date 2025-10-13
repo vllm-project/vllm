@@ -11,8 +11,9 @@
 import dataclasses
 import gc
 import os
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 import torch
 
@@ -22,7 +23,7 @@ from vllm.utils import is_pin_memory_available
 logger = init_logger(__name__)
 
 
-def find_loaded_library(lib_name) -> Optional[str]:
+def find_loaded_library(lib_name) -> str | None:
     """
     According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
     the file `/proc/self/maps` contains the memory maps of the process, which includes the
@@ -78,7 +79,7 @@ HandleType = tuple[int, int, int, int]
 class AllocationData:
     handle: HandleType
     tag: str
-    cpu_backup_tensor: Optional[torch.Tensor] = None
+    cpu_backup_tensor: torch.Tensor | None = None
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -198,7 +199,7 @@ class CuMemAllocator:
         )
         return data.handle
 
-    def sleep(self, offload_tags: Optional[Union[tuple[str, ...], str]] = None) -> None:
+    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
         """
         Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
@@ -248,7 +249,7 @@ class CuMemAllocator:
 
         gc.collect()
 
-    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+    def wake_up(self, tags: list[str] | None = None) -> None:
         """
         Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
@@ -273,7 +274,7 @@ class CuMemAllocator:
                         data.cpu_backup_tensor = None
 
     @contextmanager
-    def use_memory_pool(self, tag: Optional[str] = None):
+    def use_memory_pool(self, tag: str | None = None):
         """
         A context manager to use the memory pool.
         All memory allocation created inside the context will be allocated
