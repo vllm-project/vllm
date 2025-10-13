@@ -38,7 +38,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
             del self.input_layernorm
             self.input_layernorm = nn.Identity()
 
-    def get_quant_config(self, vllm_config: VllmConfig) -> Optional[QuantizationConfig]:
+    def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
         """Use drafter's quantization config instead of verifier's."""
         draft_model_config = vllm_config.speculative_config.draft_model_config
         draft_load_config = vllm_config.load_config
