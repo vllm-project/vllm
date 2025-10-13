@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from typing import Optional
 from unittest.mock import Mock
 
 import pytest
@@ -78,9 +77,7 @@ def test_get_num_unfinished_requests():
         (True, 5),
     ],
 )
-def test_schedule(
-    enable_prefix_caching: Optional[bool], prompt_logprobs: Optional[int]
-):
+def test_schedule(enable_prefix_caching: bool | None, prompt_logprobs: int | None):
     """Test scheduling.
     Two cases: default APC/no prompt logprobs; APC=True + prompt logprobs
     """
@@ -595,7 +592,7 @@ def test_check_stop_min_tokens():
     ],
 )
 def test_schedule_concurrent_batches(
-    enable_prefix_caching: Optional[bool], prompt_logprobs: Optional[int]
+    enable_prefix_caching: bool | None, prompt_logprobs: int | None
 ):
     scheduler = create_scheduler(
         max_num_batched_tokens=1024,
@@ -807,8 +804,10 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         engine_core_outputs[0].scheduler_stats if engine_core_outputs else None
     )
     if expected[0] == 0:
+        assert scheduler_stats is not None
         assert scheduler_stats.spec_decoding_stats is None
     else:
+        assert scheduler_stats is not None
         assert scheduler_stats.spec_decoding_stats is not None
         stats = scheduler_stats.spec_decoding_stats
         assert stats.num_drafts == expected[0]
@@ -1321,14 +1320,14 @@ def create_scheduler_with_priority(
     model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 8192,
-    enable_prefix_caching: Optional[bool] = None,
+    enable_prefix_caching: bool | None = None,
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
     use_kv_connector: bool = False,
     num_blocks: int = 10000,
     block_size: int = 16,
-    max_model_len: Optional[int] = None,
-    num_speculative_tokens: Optional[int] = None,
+    max_model_len: int | None = None,
+    num_speculative_tokens: int | None = None,
 ) -> Scheduler:
     """Create scheduler with priority policy enabled.
 
@@ -1383,7 +1382,7 @@ def create_scheduler_with_priority(
         else None
     )
 
-    speculative_config: Optional[SpeculativeConfig] = None
+    speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
         speculative_config = SpeculativeConfig(
             model="ngram", num_speculative_tokens=num_speculative_tokens
@@ -1411,18 +1410,19 @@ def create_scheduler_with_priority(
         kv_cache_config=kv_cache_config,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
+        block_size=block_size,
     )
 
 
 def create_requests_with_priority(
     num_requests: int,
     priorities: list[int],
-    arrival_times: Optional[list[float]] = None,
+    arrival_times: list[float] | None = None,
     num_tokens: int = 10,
-    mm_positions: Optional[list[list[PlaceholderRange]]] = None,
+    mm_positions: list[list[PlaceholderRange]] | None = None,
     max_tokens: int = 16,
-    stop_token_ids: Optional[list[int]] = None,
-    prompt_logprobs: Optional[int] = None,
+    stop_token_ids: list[int] | None = None,
+    prompt_logprobs: int | None = None,
     starting_idx: int = 0,
 ):
     """Create requests with specified priorities and arrival times."""
@@ -1950,7 +1950,7 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     assert len(scheduler.waiting) == 1
 
 
-def test_priority_scheduling_preemption_when_out_of_kv():
+def test_priority_scheduling_preemption_and_resumption_when_out_of_kv():
     """Test that priority scheduling preempts lower priority requests
     when out of KV cache space."""
     # Create scheduler with very limited memory to force preemption
@@ -1959,6 +1959,7 @@ def test_priority_scheduling_preemption_when_out_of_kv():
         max_num_batched_tokens=200,
         num_blocks=5,  # Can hold 64 tokens (first block is null)
         block_size=16,  # Standard block size
+        use_kv_connector=True,
     )
 
     # Create a request and schedule it
@@ -1970,12 +1971,13 @@ def test_priority_scheduling_preemption_when_out_of_kv():
         starting_idx=0,
     )[0]
     scheduler.add_request(request_low)
+    # 1st schedule
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == 1
     assert len(scheduler.waiting) == 0
     assert len(scheduler.running) == 1
 
-    # Simulate model execution
+    # Simulate model execution - 1st decode
     model_output = ModelRunnerOutput(
         req_ids=[request_low.request_id],
         req_id_to_index={request_low.request_id: 0},
@@ -1996,6 +1998,7 @@ def test_priority_scheduling_preemption_when_out_of_kv():
         starting_idx=1,
     )[0]
     scheduler.add_request(request_high)
+    # 2nd schedule
     output = scheduler.schedule()
     # KV cache should be full at this point
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == 0
@@ -2004,7 +2007,7 @@ def test_priority_scheduling_preemption_when_out_of_kv():
     assert len(scheduler.waiting) == 0
     assert len(scheduler.running) == 2
 
-    # Simulate model execution
+    # Simulate model execution - 2nd decode
     requests = [request_low, request_high]
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
@@ -2017,7 +2020,7 @@ def test_priority_scheduling_preemption_when_out_of_kv():
     )
     scheduler.update_from_output(output, model_output)
 
-    # Schedule again - this should trigger preemption
+    # 3rd schedule - this should trigger preemption
     # req_low needs 32 tokens = 2 blocks
     # req_high needs 33 tokens = 3 blocks
     # so doesn't fit in 4 blocks.
@@ -2027,8 +2030,43 @@ def test_priority_scheduling_preemption_when_out_of_kv():
     assert len(output.scheduled_new_reqs) == 0
     assert output.scheduled_cached_reqs.num_reqs == 1
     assert output.scheduled_cached_reqs.req_ids[0] == request_high.request_id
+    assert scheduler.requests[request_low.request_id].status == RequestStatus.PREEMPTED
     assert len(scheduler.waiting) == 1
     assert len(scheduler.running) == 1
+
+    # Simulate model execution - 3rd decode
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
+        sampled_token_ids=[[], [100]],
+        # spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    # Finish the requests to make room for the preempted requests to resume
+    scheduler.update_from_output(output, model_output)
+    scheduler.finish_requests(request_high.request_id, RequestStatus.FINISHED_STOPPED)
+
+    # 4th Schedule - this should trigger the resumption
+    output = scheduler.schedule()
+    scheduled_cached_reqs = output.scheduled_cached_reqs
+    resumed_from_preemption = scheduled_cached_reqs.resumed_from_preemption
+
+    assert len(output.scheduled_new_reqs) == 0
+    assert scheduled_cached_reqs.num_reqs == 1
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 1
+
+    # Preempted request resumed in scheduled_cached_reqs
+    assert len(resumed_from_preemption) == 1
+    assert len(scheduled_cached_reqs.resumed_req_token_ids) == 1
+    assert resumed_from_preemption[0]
+    assert scheduled_cached_reqs.req_ids[0] == request_low.request_id
+    assert scheduled_cached_reqs.resumed_req_token_ids[0] is not None
+    # Resumed tokens include 30 prompt tokens and 2 decoded tokens
+    assert len(scheduled_cached_reqs.resumed_req_token_ids[0]) == 32
+    assert scheduled_cached_reqs.resumed_req_token_ids[0][31] == 100
 
 
 @pytest.mark.parametrize(

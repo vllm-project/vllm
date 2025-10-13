@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from typing import Optional
 
 import torch
 
@@ -41,7 +40,7 @@ def remove_all(lst: list, items_to_remove: set) -> list:
 
 
 def check_stop(
-    request: Request, max_model_len: int, pooler_output: Optional[torch.Tensor] = None
+    request: Request, max_model_len: int, pooler_output: torch.Tensor | None = None
 ) -> bool:
     if (
         request.num_tokens >= max_model_len
@@ -59,8 +58,7 @@ def check_stop(
     sampling_params = request.sampling_params
     assert sampling_params is not None
 
-    min_tokens = sampling_params.min_tokens
-    if request.num_output_tokens < min_tokens:
+    if request.num_output_tokens < sampling_params.min_tokens:
         return False
 
     last_token_id = request.output_token_ids[-1]

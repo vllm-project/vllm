@@ -5,12 +5,11 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Optional, Union, cast
+from typing import cast
 
 import jinja2
 from fastapi import Request
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
@@ -44,10 +43,9 @@ class OpenAIServingCompletion(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
+        request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
@@ -55,7 +53,6 @@ class OpenAIServingCompletion(OpenAIServing):
     ):
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
@@ -76,8 +73,8 @@ class OpenAIServingCompletion(OpenAIServing):
     async def create_completion(
         self,
         request: CompletionRequest,
-        raw_request: Optional[Request] = None,
-    ) -> Union[AsyncGenerator[str, None], CompletionResponse, ErrorResponse]:
+        raw_request: Request | None = None,
+    ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/completions/create
@@ -169,7 +166,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     default_sampling_params=self.default_sampling_params,
                 )
 
-                sampling_params: Union[SamplingParams, BeamSearchParams]
+                sampling_params: SamplingParams | BeamSearchParams
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
                         max_tokens, self.default_sampling_params
@@ -199,9 +196,9 @@ class OpenAIServingCompletion(OpenAIServing):
                 # Mypy inconsistently requires this second cast in different
                 # environments. It shouldn't be necessary (redundant from above)
                 # but pre-commit in CI fails without it.
-                engine_prompt = cast(Union[EmbedsPrompt, TokensPrompt], engine_prompt)
+                engine_prompt = cast(EmbedsPrompt | TokensPrompt, engine_prompt)
                 if isinstance(sampling_params, BeamSearchParams):
-                    generator = self.engine_client.beam_search(
+                    generator = self.beam_search(
                         prompt=engine_prompt,
                         request_id=request_id,
                         params=sampling_params,
@@ -263,7 +260,7 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
         # Non-streaming response
-        final_res_batch: list[Optional[RequestOutput]] = [None] * num_prompts
+        final_res_batch: list[RequestOutput | None] = [None] * num_prompts
         try:
             async for i, res in result_generator:
                 final_res_batch[i] = res
@@ -315,7 +312,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
-        engine_prompts: list[Union[TokensPrompt, EmbedsPrompt]],
+        engine_prompts: list[TokensPrompt | EmbedsPrompt],
         result_generator: AsyncIterator[tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,
@@ -365,7 +362,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     num_prompt_tokens[prompt_idx] = len(prompt_token_ids)
 
                 delta_token_ids: GenericSequence[int]
-                out_logprobs: Optional[GenericSequence[Optional[dict[int, Logprob]]]]
+                out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
@@ -373,7 +370,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     # Useful when request.return_token_ids is True
                     # Returning prompt token IDs shares the same logic
                     # with the echo implementation.
-                    prompt_token_ids_to_return: Optional[list[int]] = None
+                    prompt_token_ids_to_return: list[int] | None = None
 
                     assert request.max_tokens is not None
                     if request.echo and not has_echoed[i]:
@@ -527,7 +524,7 @@ class OpenAIServingCompletion(OpenAIServing):
             prompt_text = final_res.prompt
 
             token_ids: GenericSequence[int]
-            out_logprobs: Optional[GenericSequence[Optional[dict[int, Logprob]]]]
+            out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
 
             for output in final_res.outputs:
                 assert request.max_tokens is not None
@@ -620,17 +617,17 @@ class OpenAIServingCompletion(OpenAIServing):
     def _create_completion_logprobs(
         self,
         token_ids: GenericSequence[int],
-        top_logprobs: GenericSequence[Optional[dict[int, Logprob]]],
+        top_logprobs: GenericSequence[dict[int, Logprob] | None],
         num_output_top_logprobs: int,
         tokenizer: AnyTokenizer,
         initial_text_offset: int = 0,
-        return_as_token_id: Optional[bool] = None,
+        return_as_token_id: bool | None = None,
     ) -> CompletionLogProbs:
         """Create logprobs for OpenAI Completion API."""
         out_text_offset: list[int] = []
-        out_token_logprobs: list[Optional[float]] = []
+        out_token_logprobs: list[float | None] = []
         out_tokens: list[str] = []
-        out_top_logprobs: list[Optional[dict[str, float]]] = []
+        out_top_logprobs: list[dict[str, float] | None] = []
 
         last_token_len = 0
 
@@ -698,7 +695,7 @@ class OpenAIServingCompletion(OpenAIServing):
     def _build_render_config(
         self,
         request: CompletionRequest,
-        max_input_length: Optional[int] = None,
+        max_input_length: int | None = None,
     ) -> RenderConfig:
         max_input_tokens_len = self.max_model_len - (request.max_tokens or 0)
         return RenderConfig(
