@@ -1144,7 +1144,7 @@ def find_nccl_library() -> str:
             so_file = "librccl.so.1"
         else:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
-        logger.info("Found nccl from library %s", so_file)
+        logger.debug_once("Found nccl from library %s", so_file)
     return so_file
 
 
