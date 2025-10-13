@@ -29,7 +29,6 @@ physical experts.
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -160,7 +159,7 @@ class EplbState:
     Interval for expert rearrangement steps.
     This is a constant and is taken from the config.
     """
-    policy: Optional[EplbPolicy] = None
+    policy: EplbPolicy | None = None
     """
     Selected instance of the EPLB algorithm class
     """
