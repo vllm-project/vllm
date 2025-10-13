@@ -89,13 +89,15 @@ class WorkspaceManager:
         self._cache_config = vllm_config.cache_config
         # Cache num ubatches at init based on configuration
         self._num_ubatches = 2 if vllm_config.parallel_config.enable_dbo else 1
-        self._reserved_workspaces: dict[str, WorkspaceSpec] = {}
-        self._current_workspaces: list[Optional[torch.Tensor]] = [None, None]
-        self._num_kv_cache_tokens: Optional[int] = None
+        # List of workspace groups, where each group is a tuple of specs
+        # that were reserved together (via reserve or reserve_multiple)
+        self._reserved_workspaces: list[tuple[WorkspaceSpec, ...]] = []
+        self._current_workspaces: list[torch.Tensor | None] = [None, None]
+        self._num_kv_cache_tokens: int | None = None
         self._locked: bool = False
 
     @staticmethod
-    def _workspace_size_bytes(workspace: Optional[torch.Tensor]) -> int:
+    def _workspace_size_bytes(workspace: torch.Tensor | None) -> int:
         """Get size of workspace in bytes."""
         if workspace is None:
             return 0
@@ -128,35 +130,60 @@ class WorkspaceManager:
             self._current_workspaces[dbo_current_ubatch_id()]
         )
 
-    def adjust_available_memory(
+    def adjust_available_kv_cache_memory(
         self,
         available_memory: int,
-        per_token_workspace_bytes: int,
-        estimated_max_kv_tokens: int,
+        page_size: int,
+        num_layers: int,
     ) -> int:
-        """Reserve workspace memory by shrinking available KV memory.
+        """Reserve workspace memory by shrinking available KV cache memory.
 
         Args:
             available_memory: Memory available for KV cache in bytes.
-            per_token_workspace_bytes: Workspace memory required per KV cache token.
-            estimated_max_kv_tokens: Estimated maximum number of KV cache tokens.
+            page_size: Size of each KV cache page in bytes.
+            num_layers: Number of layers in the model.
 
         Returns:
             Remaining memory for KV cache after reserving workspace.
         """
-        if per_token_workspace_bytes == 0:
-            return available_memory
+        # Estimate max KV cache tokens for scaling PerKVCacheTokenWorkspace specs
+        block_size = self._cache_config.block_size
+        estimated_max_kv_tokens = (
+            available_memory // (page_size * num_layers) * block_size
+        )
+
+        # Calculate max workspace bytes across all groups
+        # PerKVCacheTokenWorkspace specs are scaled by estimated_max_kv_tokens in-place
+        # Regular WorkspaceSpec specs are included as-is (fixed overhead)
+        max_workspace_bytes = 0
+        for group in self._reserved_workspaces:
+            group_bytes = 0
+            for spec in group:
+                if isinstance(spec, PerKVCacheTokenWorkspace):
+                    # Scale by number of KV cache tokens, then align the total buffer
+                    group_bytes += round_up(
+                        spec.num_bytes() * estimated_max_kv_tokens, 256
+                    )
+                else:
+                    # Fixed overhead, aligned
+                    group_bytes += round_up(spec.num_bytes(), 256)
+
+            max_workspace_bytes = max(max_workspace_bytes, group_bytes)
 
         already_allocated = self.current_allocated_size_bytes()
-        expected_workspace = per_token_workspace_bytes * estimated_max_kv_tokens
+        expected_workspace = max_workspace_bytes
 
-        if already_allocated > expected_workspace:
+        # If already allocated >= expected, no need to reserve more memory.
+        # This can happen if:
+        # 1. Workspace already sized appropriately from previous profiling
+        # 2. A .get() was called for a buffer not reserved during profiling,
+        #    causing the workspace to resize larger than expected. This is fine
+        #    since .get() acts as an implicit reserve in that case.
+        if already_allocated >= expected_workspace:
             return available_memory
 
         workspace_to_reserve = expected_workspace - already_allocated
-        adjusted_available_memory = max(available_memory - workspace_to_reserve, 0)
-
-        return adjusted_available_memory
+        return max(available_memory - workspace_to_reserve, 0)
 
     def reserve(self, spec: "WorkspaceSpec") -> None:
         """Reserve workspace memory for a given spec.
@@ -168,10 +195,8 @@ class WorkspaceManager:
         Args:
             spec: The workspace specification.
         """
-        # Store the spec by name
-        if spec.name in self._reserved_workspaces:
-            logger.warning("Workspace '%s' already reserved, overwriting", spec.name)
-        self._reserved_workspaces[spec.name] = spec
+        # Store as a single-spec group
+        self._reserved_workspaces.append((spec,))
 
         # PerKVCacheTokenWorkspace allocation is deferred until first use
         if isinstance(spec, PerKVCacheTokenWorkspace):
@@ -182,6 +207,38 @@ class WorkspaceManager:
         num_bytes = spec.num_bytes()
         if self._workspace_size_bytes(self._current_workspaces[0]) < num_bytes:
             self._increase_size(num_bytes, spec.name)
+
+    def reserve_multiple(self, *specs: "WorkspaceSpec") -> None:
+        """Reserve workspace memory for multiple specs efficiently.
+
+        For PerKVCacheTokenWorkspace specs, this just registers them.
+        For regular WorkspaceSpec specs, this registers them and allocates
+        a single workspace large enough for all if needed.
+
+        Args:
+            *specs: One or more workspace specifications.
+        """
+        # Store as a multi-spec group
+        self._reserved_workspaces.append(specs)
+
+        # Separate PerKVCacheTokenWorkspace from regular WorkspaceSpec
+        regular_specs = [
+            spec for spec in specs if not isinstance(spec, PerKVCacheTokenWorkspace)
+        ]
+
+        # PerKVCacheTokenWorkspace allocation is deferred until first use
+        if not regular_specs:
+            return
+
+        # Calculate total bytes needed for regular specs
+        spec_bytes = [spec.num_bytes() for spec in regular_specs]
+        aligned_bytes = [round_up(byte_count, 256) for byte_count in spec_bytes]
+        total_bytes = sum(aligned_bytes)
+
+        # Allocate if workspace needs resize
+        if self._workspace_size_bytes(self._current_workspaces[0]) < total_bytes:
+            workspace_names = ", ".join(spec.name for spec in regular_specs)
+            self._increase_size(total_bytes, f"[{workspace_names}]")
 
     def get(self, spec: "WorkspaceSpec") -> torch.Tensor:
         """Get a workspace tensor for the given spec.
@@ -239,17 +296,6 @@ class WorkspaceManager:
             .reshape(adjusted_shapes[i])
             for i in range(len(specs))
         ]
-
-    def per_kv_cache_token_workspace_size_bytes(self) -> int:
-        """Get the maximum per-KV-cache-token workspace size in bytes."""
-        return max(
-            (
-                spec.num_bytes()
-                for spec in self._reserved_workspaces.values()
-                if isinstance(spec, PerKVCacheTokenWorkspace)
-            ),
-            default=0,
-        )
 
     def _get_kv_cache_multiplier(self, spec_name: str) -> tuple[int, int]:
         """Get KV cache token count and multiplier for shape calculation.

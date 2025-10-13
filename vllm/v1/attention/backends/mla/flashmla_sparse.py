@@ -471,9 +471,23 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             shape=(head_size,), dtype=torch.bfloat16, name="prefill_bf16_workspace"
         )
 
-        # Small buffers allocated directly
-        self.prefill_seen_buffer: torch.Tensor | None = None
-        self.prefill_unique_output: torch.Tensor | None = None
+        # Workspace specs for prefill buffers
+        self.prefill_seen_workspace_spec = PerKVCacheTokenWorkspace(
+            shape=(), dtype=torch.int32, name="prefill_seen_buffer"
+        )
+        self.prefill_unique_output_workspace_spec = PerKVCacheTokenWorkspace(
+            shape=(), dtype=torch.int32, name="prefill_unique_output"
+        )
+
+        # Reserve all three workspace specs together to ensure they're live
+        # simultaneously
+        current_workspace_manager().reserve_multiple(
+            self.prefill_seen_workspace_spec,
+            self.prefill_unique_output_workspace_spec,
+            self.prefill_bf16_workspace_spec,
+        )
+
+        # Small buffer allocated directly
         self.prefill_unique_count: torch.Tensor | None = None
 
     def _forward_bf16_kv(
@@ -585,6 +599,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         prefill_seen: torch.Tensor | None = None
         prefill_unique_out: torch.Tensor | None = None
         prefill_unique_count: torch.Tensor | None = None
+        prefill_bf16_workspace: torch.Tensor | None = None
 
         if use_fp8_cache and attn_metadata.num_prefill_tokens > 0:
             if kv_cache.numel() == 0:
@@ -592,18 +607,10 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                     "Expected non-empty kv_cache for fp8_ds_mla prefill handling"
                 )
 
-            # Lazy allocation of small buffers on first use
-            # Use a conservative size of 65536 tokens (256KB per buffer)
+            # Lazy allocation of small buffer on first use
             if self.prefill_unique_count is None:
-                max_buffer_size = 65536
                 self.prefill_unique_count = torch.zeros(
                     (1,), dtype=torch.int32, device=q.device
-                )
-                self.prefill_seen_buffer = torch.zeros(
-                    (max_buffer_size,), dtype=torch.int32, device=q.device
-                )
-                self.prefill_unique_output = torch.zeros(
-                    (max_buffer_size,), dtype=torch.int32, device=q.device
                 )
 
             # Scheduler places decode tokens first, so the remaining suffix maps
@@ -613,13 +620,18 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             )
             prefill_token_mask[attn_metadata.num_decode_tokens :] = True
 
-            assert (
-                self.prefill_seen_buffer is not None
-                and self.prefill_unique_output is not None
-                and self.prefill_unique_count is not None
+            # Get all prefill buffers from workspace using get_multiple
+            # to ensure they are live simultaneously
+            (
+                prefill_seen,
+                prefill_unique_out,
+                prefill_bf16_workspace,
+            ) = current_workspace_manager().get_multiple(
+                self.prefill_seen_workspace_spec,
+                self.prefill_unique_output_workspace_spec,
+                self.prefill_bf16_workspace_spec,
             )
-            prefill_seen = self.prefill_seen_buffer
-            prefill_unique_out = self.prefill_unique_output
+            assert self.prefill_unique_count is not None
             prefill_unique_count = self.prefill_unique_count
 
             # TODO(lucas): zero on a seperate stream
@@ -682,11 +694,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                     unique_prefill_indices is not None
                     and unique_prefill_indices.numel() > 0
                 ):
-                    # Get workspace for prefill_bf16_workspace
-                    prefill_bf16_workspace = current_workspace_manager().get(
-                        self.prefill_bf16_workspace_spec
-                    )
-
+                    assert prefill_bf16_workspace is not None
                     indices_for_upconvert = unique_prefill_indices.to(
                         dtype=torch.int32, copy=False
                     )
@@ -696,10 +704,6 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                         indices_for_upconvert.contiguous(),
                         self.prefill_unique_count,
                     )
-                    # Zero the bitmap wholesale; cheaper than selectively
-                    # clearing the visited slots and keeps next call ready.
-                    assert self.prefill_seen_buffer is not None
-                    self.prefill_seen_buffer.zero_()
                     attn_out[prefill_start:] = self._forward_bf16_kv(
                         q[prefill_start:],
                         prefill_bf16_workspace,

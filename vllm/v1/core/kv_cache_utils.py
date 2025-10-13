@@ -791,27 +791,12 @@ def get_num_blocks(
         page_size: The page size of the KV cache.
     """
     # Account for per-KV-cache-token workspace memory (e.g., prefill_bf16_workspace)
-    per_token_workspace_bytes = (
-        current_workspace_manager().per_kv_cache_token_workspace_size_bytes()
+    # and reserve workspace memory by shrinking available_memory.
+    available_memory = current_workspace_manager().adjust_available_kv_cache_memory(
+        available_memory,
+        page_size,
+        num_layers,
     )
-
-    if per_token_workspace_bytes > 0:
-        block_size = vllm_config.cache_config.block_size
-
-        # Estimate max KV cache tokens using available memory before reserving
-        # additional workspace requirements.
-        estimated_max_kv_tokens = (
-            available_memory // (page_size * num_layers) * block_size
-        )
-
-        # Reserve workspace memory by shrinking available_memory.
-        adjusted_available_memory = current_workspace_manager().adjust_available_memory(
-            available_memory,
-            per_token_workspace_bytes,
-            estimated_max_kv_tokens,
-        )
-
-        available_memory = adjusted_available_memory
 
     num_blocks = int(available_memory // page_size // num_layers)
 
