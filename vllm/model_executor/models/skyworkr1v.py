@@ -691,7 +691,9 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             prefix=maybe_prefix(prefix, "language_model"),
         )
 
-        self.mlp1 = self._init_mlp1(config, quant_config, prefix=prefix)
+        self.mlp1 = self._init_mlp1(
+            config, quant_config, prefix=maybe_prefix(prefix, "mlp1")
+        )
 
         self.img_context_token_id = None
         self.visual_token_mask = None
