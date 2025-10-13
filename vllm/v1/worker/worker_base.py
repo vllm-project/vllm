@@ -41,10 +41,6 @@ class WorkerBase:
     communicate request metadata to other workers.
     """
 
-    local_rank: int
-    rank: int
-    distributed_init_method: str
-
     def __init__(
         self,
         vllm_config: VllmConfig,

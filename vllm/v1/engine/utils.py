@@ -131,7 +131,6 @@ class CoreEngineProcManager:
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
         try:
-            # for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
             for proc in self.processes:
                 proc.start()
         finally:
