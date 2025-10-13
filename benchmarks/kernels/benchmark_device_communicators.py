@@ -22,8 +22,8 @@ Example:
 import json
 import os
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
-from typing import Callable, Optional
 
 import torch
 import torch.distributed as dist
@@ -264,12 +264,12 @@ class CommunicatorBenchmark:
     def benchmark_allreduce_single(
         self,
         sequence_length: int,
-        allreduce_fn: Callable[[torch.Tensor], Optional[torch.Tensor]],
+        allreduce_fn: Callable[[torch.Tensor], torch.Tensor | None],
         should_use_fn: Callable[[torch.Tensor], bool],
         context,
         num_warmup: int,
         num_trials: int,
-    ) -> Optional[float]:
+    ) -> float | None:
         """Benchmark method with CUDA graph optimization."""
         try:
             # Create test tensor (2D: sequence_length x hidden_size)
