@@ -349,7 +349,7 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases, 
 @pytest.mark.parametrize("chunk_size", [8, 256])
 @pytest.mark.parametrize(
     "seqlens",
-    [(16, 2, 8, 13), (270, 88, 212, 203)],
+    [(16, 20), (270, 88, 212, 203)],
 )
 def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
     # This test verifies the correctness of the chunked prefill implementation
