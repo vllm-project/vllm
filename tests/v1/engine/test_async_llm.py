@@ -390,9 +390,7 @@ class MockLoggingStatLogger(LoggingStatLogger):
 
 
 class MockAggregatedStatLogger(AggregatedLoggingStatLogger):
-    def __init__(
-        self, vllm_config: VllmConfig, engine_indexes: Optional[list[int]] = None
-    ):
+    def __init__(self, vllm_config: VllmConfig, engine_indexes: list[int]):
         super().__init__(vllm_config, engine_indexes)
         self.log = MagicMock()
 

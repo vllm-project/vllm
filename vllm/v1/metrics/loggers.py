@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]
-StatLoggerFactory = Union[AggregateStatLoggerFactory, PerEngineStatLoggerFactory]
+StatLoggerFactory = AggregateStatLoggerFactory | PerEngineStatLoggerFactory
 
 
 class StatLoggerBase(ABC):
@@ -215,9 +215,9 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
 
     def record(
         self,
-        scheduler_stats: Optional[SchedulerStats],
-        iteration_stats: Optional[IterationStats],
-        mm_cache_stats: Optional[MultiModalCacheStats] = None,
+        scheduler_stats: SchedulerStats | None,
+        iteration_stats: IterationStats | None,
+        mm_cache_stats: MultiModalCacheStats | None = None,
         engine_idx: int = 0,
     ):
         if engine_idx not in self.engine_indexes:
@@ -279,9 +279,9 @@ class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
 
     def record(
         self,
-        scheduler_stats: Optional[SchedulerStats],
-        iteration_stats: Optional[IterationStats],
-        mm_cache_stats: Optional[MultiModalCacheStats] = None,
+        scheduler_stats: SchedulerStats | None,
+        iteration_stats: IterationStats | None,
+        mm_cache_stats: MultiModalCacheStats | None = None,
         engine_idx: int = 0,
     ):
         if engine_idx not in self.per_engine_stat_loggers:
@@ -312,6 +312,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     def __init__(
         self, vllm_config: VllmConfig, engine_indexes: list[int] | None = None
     ):
+        if engine_indexes is None:
+            engine_indexes = [0]
+
         self.engine_indexes = engine_indexes
 
         unregister_vllm_metrics()
