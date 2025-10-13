@@ -146,7 +146,11 @@ if TYPE_CHECKING:
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
-    VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
+    VLLM_DEEP_GEMM_WARMUP: Literal[
+        "skip",
+        "full",
+        "relax",
+    ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
@@ -1088,9 +1092,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # JIT all the required kernels before model execution so there is no
     # JIT'ing in the hot-path. However, this warmup increases the engine
     # startup time by a couple of minutes.
-    # Set `VLLM_SKIP_DEEP_GEMM_WARMUP` to disable the warmup.
-    "VLLM_SKIP_DEEP_GEMM_WARMUP": lambda: bool(
-        int(os.getenv("VLLM_SKIP_DEEP_GEMM_WARMUP", "0"))
+    # Available options:
+    #  - "skip"  : Skip warmup.
+    #  - "full"  : Warmup deepgemm by running all possible gemm shapes the
+    #   engine could encounter.
+    #  - "relax" : Select gemm shapes to run based on some heuristics. The
+    #   heuristic aims to have the same effect as running all possible gemm
+    #   shapes, but provides no guarantees.
+    "VLLM_DEEP_GEMM_WARMUP": env_with_choices(
+        "VLLM_DEEP_GEMM_WARMUP",
+        "relax",
+        [
+            "skip",
+            "full",
+            "relax",
+        ],
     ),
     # Whether to use fused grouped_topk used for MoE expert selection.
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(
