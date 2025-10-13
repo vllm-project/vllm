@@ -590,7 +590,7 @@ class FlashAttentionImpl(AttentionImpl):
                     learnable_sink=self.sinks,
                     softcap=self.logits_soft_cap,
                     return_lse=False,
-                    out=output,
+                    out=output[:num_actual_tokens],
                 )
             else:
                 flash_attn_varlen_func(
