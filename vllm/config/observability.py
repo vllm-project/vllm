@@ -3,7 +3,7 @@
 
 import hashlib
 from functools import cached_property
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 
 from pydantic import field_validator, model_validator
 from pydantic.dataclasses import dataclass
