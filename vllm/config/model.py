@@ -30,6 +30,7 @@ from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
     is_interleaved,
+    try_get_dense_modules,
     try_get_generation_config,
     try_get_safetensors_metadata,
     try_get_tokenizer_config,
@@ -1680,6 +1681,20 @@ class ModelConfig:
 
         logger.debug_once("head dtype: %s", head_dtype)
         return head_dtype
+
+    @property
+    def hidden_size(self):
+        if hasattr(self.hf_config, "hidden_size"):
+            return self.hf_config.hidden_size
+        text_config = self.hf_config.get_text_config()
+        return text_config.hidden_size
+
+    @property
+    def embedding_size(self):
+        dense_modules = try_get_dense_modules(self.model, revision=self.revision)
+        if dense_modules is not None:
+            return dense_modules[-1]["out_features"]
+        return self.hidden_size
 
     def get_and_verify_max_len(self, max_model_len: int):
         # Consider max_model_len in tokenizer_config only when
