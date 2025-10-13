@@ -138,7 +138,7 @@ def test_custom_quick_allreduce(
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
 
 
-def reproduce_hang(rank, world_size):
+def qr_variable_input(rank, world_size):
     """
     When the tensor parallelism is set to 4 or 8, frequent changes
     in the input shape can cause QuickReduce to hang (this issue
@@ -197,7 +197,7 @@ def reproduce_hang(rank, world_size):
 )
 @pytest.mark.parametrize("tp_size", [4, 8])
 @pytest.mark.parametrize("pipeline_parallel_size", [1])
-def test_custom_quick_allreduce_hang_error(tp_size, pipeline_parallel_size):
+def test_custom_quick_allreduce_variable_input(tp_size, pipeline_parallel_size):
     world_size = tp_size * pipeline_parallel_size
     if world_size > torch.cuda.device_count():
         pytest.skip("Not enough GPUs to run the test.")
@@ -207,7 +207,7 @@ def test_custom_quick_allreduce_hang_error(tp_size, pipeline_parallel_size):
     timeout = 60
     processes = []
     for rank in range(tp_size):
-        p = multiprocessing.Process(target=reproduce_hang, args=(rank, tp_size))
+        p = multiprocessing.Process(target=qr_variable_input, args=(rank, tp_size))
         p.start()
         processes.append((rank, p))
     for rank, p in processes:
@@ -221,4 +221,4 @@ def test_custom_quick_allreduce_hang_error(tp_size, pipeline_parallel_size):
 
 
 if __name__ == "__main__":
-    test_custom_quick_allreduce_hang_error(tp_size=4, pipeline_parallel_size=1)
+    test_custom_quick_allreduce_variable_input(tp_size=4, pipeline_parallel_size=1)
