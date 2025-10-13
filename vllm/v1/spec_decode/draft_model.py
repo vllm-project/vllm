@@ -7,6 +7,7 @@ import torch
 
 from vllm.attention.layer import Attention
 from vllm.config import ModelConfig, VllmConfig, get_layers_from_vllm_config
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
@@ -15,6 +16,8 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID, SpecDecodeBaseProposer
+
+logger = init_logger(__name__)
 
 
 class DraftModelProposer(SpecDecodeBaseProposer):
@@ -118,6 +121,8 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         draft_model_config: ModelConfig = (
             self.vllm_config.speculative_config.draft_model_config
         )
+        logger.info("Starting to load model %s...", draft_model_config.model)
+
         # Recompute quant_config, which is configured for the target model
         # But the draft model might not be quantized.
         vllm_config_draft: VllmConfig = self.vllm_config.replace(

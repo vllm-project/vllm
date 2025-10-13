@@ -359,7 +359,7 @@ def test_mtp_correctness(
 
 @dataclass
 class ArgsTest:
-    model: str
+    target_model: str
     draft_model: str
     sampling_config: SamplingParams
     num_speculative_tokens: int
@@ -376,7 +376,7 @@ class ArgsTest:
 cases = [
     # Same model for draft and target, greedy sampling.
     ArgsTest(
-        model="Qwen/Qwen3-0.6B",
+        target_model="Qwen/Qwen3-0.6B",
         draft_model="Qwen/Qwen3-0.6B",
         sampling_config=greedy_sampling(),
         num_speculative_tokens=3,  # K
@@ -386,7 +386,7 @@ cases = [
     ),
     # Smaller draft model, stochastic sampling.
     ArgsTest(
-        model="Qwen/Qwen3-1.7B",
+        target_model="Qwen/Qwen3-1.7B",
         draft_model="Qwen/Qwen3-0.6B",
         sampling_config=stochastic_sampling(),
         num_speculative_tokens=3,
@@ -416,15 +416,22 @@ def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
 def test_draft_model_quantization(models: tuple[str, str], enforce_eager: bool):
     tgt_model, draft_model = models
     sd_case = ArgsTest(
-        model=tgt_model,
+        target_model=tgt_model,
         draft_model=draft_model,
-        sampling_config=greedy_sampling(),
-        num_speculative_tokens=3,
-        expected_acceptance_len=2.95 + 1,
-        expected_acceptance_rate=0.95,
-        expected_same_output_fraction=0.95,
+        **some_high_acceptance_metrics(),
     )
     assert_draft_model_correctness(sd_case, enforce_eager)
+
+
+def test_draft_model_tensor_parallelism():
+    sd_case = ArgsTest(
+        target_model="Qwen/Qwen3-1.7B",
+        target_tensor_parallel_size=2,
+        draft_model="Qwen/Qwen3-0.6B",
+        draft_tensor_parallel_size=1,
+        **some_high_acceptance_metrics(),
+    )
+    assert_draft_model_correctness(sd_case, enforce_eager=True)
 
 
 def assert_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
@@ -433,7 +440,7 @@ def assert_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
     test_prompts = get_test_prompts(mm_enabled=False, quiet=True)
 
     spec_llm = LLM(
-        model=args.model,
+        model=args.target_model,
         speculative_config={
             "model": args.draft_model,
             "method": "draft_model",
@@ -462,7 +469,7 @@ def assert_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
     assert acceptance_len >= args.expected_acceptance_len
 
     ref_llm = LLM(
-        model=args.model,
+        model=args.target_model,
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         tensor_parallel_size=args.target_tensor_parallel_size,
@@ -480,7 +487,7 @@ def assert_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
     assert match_fraction >= args.expected_same_output_fraction
 
     print(
-        f"spec-decode: target={args.model}, draft={args.draft_model}, "
+        f"spec-decode: target={args.target_model}, draft={args.draft_model}, "
         f"temperature={args.sampling_config.temperature:.2f}, "
         f"acceptance_rate={acceptance_rate:.2f}, "
         f"acceptance_len={acceptance_len:.2f}, "
@@ -501,3 +508,13 @@ def compute_exact_matches(
             print(f"ref_output: {ref_output.outputs[0].text}")
             print(f"spec_output: {spec_output.outputs[0].text}")
     return matches / len(ref_outputs)
+
+
+def some_high_acceptance_metrics() -> dict:
+    return {
+        "sampling_config": greedy_sampling(),
+        "num_speculative_tokens": 3,
+        "expected_acceptance_len": 2.95 + 1,
+        "expected_acceptance_rate": 0.95,
+        "expected_same_output_fraction": 0.95,
+    }
