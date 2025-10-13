@@ -325,7 +325,6 @@ class VllmConfig:
         else:
             assert self.compilation_config.level >= CompilationLevel.NO_COMPILATION
             assert self.compilation_config.level <= CompilationLevel.PIECEWISE
-            assert self.compilation_config.level <= 3
 
         # If user does not set custom ops via none or all set it here based on
         # compilation level and backend.
@@ -334,7 +333,10 @@ class VllmConfig:
             + self.compilation_config.custom_ops.count("all")
             == 0
         ):
-            if self.compilation_config.backend == "inductor":
+            if (
+                self.compilation_config.backend != "eager"
+                and self.compilation_config.level > CompilationLevel.NO_COMPILATION
+            ):
                 self.compilation_config.custom_ops.append("none")
             else:
                 self.compilation_config.custom_ops.append("all")
