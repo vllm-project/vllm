@@ -54,6 +54,15 @@ _GiB = 1024**3
 _manager: Optional["WorkspaceManager"] = None
 
 
+def is_workspace_manager_initialized() -> bool:
+    """Check if workspace manager has been initialized.
+
+    Returns:
+        True if workspace manager is initialized, False otherwise.
+    """
+    return _manager is not None
+
+
 def current_workspace_manager() -> "WorkspaceManager":
     """Get the current workspace manager instance.
 

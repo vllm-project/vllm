@@ -1394,8 +1394,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
     # Debug workspace allocations. Set to "1", "true", "yes", or "all" to enable
     # logging of workspace resize operations.
-    "VLLM_DEBUG_WORKSPACE": lambda: os.environ.get("VLLM_DEBUG_WORKSPACE", "0").lower()
-    in ("1", "true", "yes"),
+    "VLLM_DEBUG_WORKSPACE": lambda: bool(int(os.getenv("VLLM_DEBUG_WORKSPACE", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
