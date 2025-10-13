@@ -3,7 +3,6 @@
 """Attention backend registry"""
 
 import enum
-from typing import Optional
 
 from vllm.utils import resolve_obj_by_qualname
 
@@ -21,6 +20,7 @@ class _Backend(enum.Enum):
     TRITON_MLA = enum.auto()
     CUTLASS_MLA = enum.auto()
     FLASHMLA = enum.auto()
+    FLASHMLA_SPARSE = enum.auto()
     FLASH_ATTN_MLA = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
@@ -43,6 +43,7 @@ BACKEND_MAP = {
     _Backend.TRITON_MLA: "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",  # noqa: E501
     _Backend.CUTLASS_MLA: "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",  # noqa: E501
     _Backend.FLASHMLA: "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend",  # noqa: E501
+    _Backend.FLASHMLA_SPARSE: "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseBackend",  # noqa: E501
     _Backend.FLASH_ATTN_MLA: "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",  # noqa: E501
     _Backend.PALLAS: "vllm.v1.attention.backends.pallas.PallasAttentionBackend",  # noqa: E501
     _Backend.FLEX_ATTENTION: "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",  # noqa: E501
@@ -51,7 +52,7 @@ BACKEND_MAP = {
 }
 
 
-def register_attn_backend(backend: _Backend, class_path: Optional[str] = None):
+def register_attn_backend(backend: _Backend, class_path: str | None = None):
     """
     Decorator: register a custom attention backend into BACKEND_MAPPING.
     - If class_path is provided, use it.
@@ -96,7 +97,7 @@ def backend_to_class(backend: _Backend) -> type:
     return resolve_obj_by_qualname(backend_class_name)
 
 
-def backend_name_to_enum(backend_name: str) -> Optional[_Backend]:
+def backend_name_to_enum(backend_name: str) -> _Backend | None:
     """
     Convert a string backend name to a _Backend enum value.
 

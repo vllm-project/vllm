@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from collections.abc import Sequence
-from typing import Optional, Union
-
+from typing import Optional
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.harmony_utils import parse_chat_output
@@ -97,7 +96,7 @@ class GptOssReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         prev_reasoning, prev_content, _ = parse_chat_output(list(previous_token_ids))
         cur_reasoning, cur_content, _ = parse_chat_output(list(current_token_ids))
         reasoning_delta = None
@@ -122,7 +121,7 @@ class GptOssReasoningParser(ReasoningParser):
         self,
         model_output: str,
         request: ChatCompletionRequest,
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         raise NotImplementedError(
             "gpt-oss has a special branch for parsing reasoning in non-streaming mode. This method shouldn't be used."  # noqa: E501
         )
