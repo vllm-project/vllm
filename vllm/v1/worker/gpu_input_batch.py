@@ -3,7 +3,7 @@
 # Datastructures defining a GPU input batch
 
 from dataclasses import dataclass
-from typing import Optional, cast
+from typing import cast
 
 import numpy as np
 import torch
@@ -29,21 +29,21 @@ from vllm.v1.worker.block_table import MultiGroupBlockTable
 @dataclass
 class CachedRequestState:
     req_id: str
-    prompt_token_ids: Optional[list[int]]
+    prompt_token_ids: list[int] | None
     mm_features: list[MultiModalFeatureSpec]
-    sampling_params: Optional[SamplingParams]
-    pooling_params: Optional[PoolingParams]
-    generator: Optional[torch.Generator]
+    sampling_params: SamplingParams | None
+    pooling_params: PoolingParams | None
+    generator: torch.Generator | None
 
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     output_token_ids: list[int]
 
-    mrope_positions: Optional[torch.Tensor] = None
-    mrope_position_delta: Optional[int] = None
+    mrope_positions: torch.Tensor | None = None
+    mrope_position_delta: int | None = None
 
-    lora_request: Optional[LoRARequest] = None
-    prompt_embeds: Optional[torch.Tensor] = None
+    lora_request: LoRARequest | None = None
+    prompt_embeds: torch.Tensor | None = None
 
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
@@ -78,7 +78,7 @@ class InputBatch:
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
         kernel_block_sizes: list[int],
-        logitsprocs: Optional[LogitsProcessors] = None,
+        logitsprocs: LogitsProcessors | None = None,
         logitsprocs_need_output_token_ids: bool = False,
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
@@ -93,7 +93,7 @@ class InputBatch:
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
 
-        self._req_ids: list[Optional[str]] = []
+        self._req_ids: list[str | None] = []
         self.req_id_to_index: dict[str, int] = {}
 
         # TODO(woosuk): This buffer could be too large if max_model_len is big.
@@ -228,15 +228,15 @@ class InputBatch:
         self.has_allowed_token_ids: set[str] = set()
         # NOTE(lufang): In the mask tensor, if the corresponding token allowed,
         # the value is False. Since we use masked_fill_ to set -inf.
-        self.allowed_token_ids_mask: Optional[torch.Tensor] = None
-        self.allowed_token_ids_mask_cpu_tensor: Optional[torch.Tensor] = None
+        self.allowed_token_ids_mask: torch.Tensor | None = None
+        self.allowed_token_ids_mask_cpu_tensor: torch.Tensor | None = None
 
         # req_index -> bad_words_token_ids
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
 
         self.logits_processing_needs_token_ids = np.zeros(max_num_reqs, dtype=bool)
 
-        self.req_output_token_ids: list[Optional[list[int]]] = []
+        self.req_output_token_ids: list[list[int] | None] = []
 
         # Store provided logitsprocs. If none are provided, initialize empty
         # data structure
@@ -244,7 +244,7 @@ class InputBatch:
         self.logitsprocs_need_output_token_ids = logitsprocs_need_output_token_ids
 
         # Store last speculative tokens for sampler.
-        self.spec_token_ids: list[Optional[list[int]]] = []
+        self.spec_token_ids: list[list[int] | None] = []
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
@@ -252,13 +252,13 @@ class InputBatch:
         self.pooling_params: dict[str, PoolingParams] = {}
 
         # Cached reference to the GPU tensor of previously sampled tokens
-        self.prev_sampled_token_ids: Optional[torch.Tensor] = None
-        self.prev_req_id_to_index: Optional[dict[str, int]] = None
+        self.prev_sampled_token_ids: torch.Tensor | None = None
+        self.prev_req_id_to_index: dict[str, int] | None = None
         # These are used to update output_token_ids with real sampled
         # ids from prior step, if required by current sampling params
         # (e.g. penalties).
-        self.sampled_token_ids_cpu: Optional[torch.Tensor] = None
-        self.async_copy_ready_event: Optional[torch.cuda.Event] = None
+        self.sampled_token_ids_cpu: torch.Tensor | None = None
+        self.async_copy_ready_event: torch.cuda.Event | None = None
 
     @property
     def req_ids(self) -> list[str]:
@@ -438,7 +438,7 @@ class InputBatch:
 
         return req_index
 
-    def remove_request(self, req_id: str) -> Optional[int]:
+    def remove_request(self, req_id: str) -> int | None:
         """This method must always be followed by a call to condense().
 
         Args:
@@ -796,7 +796,7 @@ class InputBatch:
             else []
         )
 
-        allowed_token_ids_mask: Optional[torch.Tensor] = None
+        allowed_token_ids_mask: torch.Tensor | None = None
         if not self.no_allowed_token_ids:
             assert self.allowed_token_ids_mask is not None
             copy_slice(
@@ -954,7 +954,7 @@ class InputBatch:
         )
 
     @property
-    def max_num_logprobs(self) -> Optional[int]:
+    def max_num_logprobs(self) -> int | None:
         return max(self.num_logprobs.values()) if self.num_logprobs else None
 
     @property

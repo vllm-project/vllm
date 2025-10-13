@@ -19,7 +19,7 @@ DetailedTraceModules = Literal["model", "worker", "all"]
 class ObservabilityConfig:
     """Configuration for observability - metrics and tracing."""
 
-    show_hidden_metrics_for_version: Optional[str] = None
+    show_hidden_metrics_for_version: str | None = None
     """Enable deprecated Prometheus metrics that have been hidden since the
     specified version. For example, if a previously deprecated metric has been
     hidden since the v0.7.0 release, you use
@@ -34,10 +34,10 @@ class ObservabilityConfig:
             return False
         return version._prev_minor_version_was(self.show_hidden_metrics_for_version)
 
-    otlp_traces_endpoint: Optional[str] = None
+    otlp_traces_endpoint: str | None = None
     """Target URL to which OpenTelemetry traces will be sent."""
 
-    collect_detailed_traces: Optional[list[DetailedTraceModules]] = None
+    collect_detailed_traces: list[DetailedTraceModules] | None = None
     """It makes sense to set this only if `--otlp-traces-endpoint` is set. If
     set, it will collect detailed traces for the specified modules. This
     involves use of possibly costly and or blocking operations and hence might
