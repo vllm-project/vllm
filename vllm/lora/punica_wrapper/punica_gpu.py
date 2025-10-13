@@ -297,7 +297,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         block_size: int,
         num_experts: int,
         max_loras: int,
-        expert_map: Optional[torch.Tensor] = None,
+        expert_map:torch.Tensor|None = None,
         pad_sorted_ids: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -360,7 +360,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         mul_routed_weight=False,
     ):
         """
-        Performs a fused forward computation for a Low-Rank Adaptation (LoRA) of Mixture-of-Experts (MoE) layer.
+        Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
         """
         fused_moe_lora(
             y,

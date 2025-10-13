@@ -58,13 +58,13 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         return type(source_layer) is ReplicatedLinear
 
     def slice_lora_a(
-        self, lora_a: Union[torch.Tensor, list[Union[torch.Tensor, None]]]
-    ) -> Union[torch.Tensor, list[Union[torch.Tensor, None]]]:
+        self, lora_a: torch.Tensor | list[torch.Tensor | None]
+    ) -> torch.Tensor | list[torch.Tensor | None]:
         """Slice lora a if splitting for tensor parallelism."""
         return lora_a
 
     def slice_lora_b(
-        self, lora_b: Union[torch.Tensor, list[Union[torch.Tensor, None]]]
-    ) -> Union[torch.Tensor, list[Union[torch.Tensor, None]]]:
+        self, lora_b: torch.Tensor | list[torch.Tensor | None]
+    ) -> torch.Tensor | list[torch.Tensor | None]:
         """Slice lora b if splitting with tensor parallelism."""
         return lora_b

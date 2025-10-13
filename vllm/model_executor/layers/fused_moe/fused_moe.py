@@ -2117,7 +2117,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 def modular_triton_fused_moe(
-    quant_config: FusedMoEQuantConfig, shared_experts: Optional[torch.nn.Module] = None
+    quant_config: FusedMoEQuantConfig, shared_experts: torch.nn.Module | None = None
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
