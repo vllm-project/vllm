@@ -9,13 +9,14 @@ from transformers import PreTrainedTokenizerBase
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage)
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning import ReasoningParserManager
+from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 logger = init_logger(__name__)
 
 
 @ReasoningParserManager.register_module("ernie45")
-class Ernie45ReasoningParser(ReasoningParser):
+class Ernie45ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for Ernie45 thinking model.
     The Ernie45 thinking model ouput format is
@@ -23,16 +24,19 @@ class Ernie45ReasoningParser(ReasoningParser):
     or  abc\n</think>\ndef
     """
 
-    think_start_token_id: int
-    think_end_token_id: int
-    response_start_token_id: int
-    response_end_token_id: int
-
-    think_start_token: str = "<think>"
-    think_end_token: str = "</think>"
     response_start_token: str = "<response>"
     response_end_token: str = "</response>"
     newline_token: str = "<0x0A>"
+
+    @property
+    def start_token(self) -> str:
+        """The token that starts reasoning content."""
+        return "<think>"
+
+    @property
+    def end_token(self) -> str:
+        """The token that ends reasoning content."""
+        return "</think>"
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
@@ -42,33 +46,19 @@ class Ernie45ReasoningParser(ReasoningParser):
                 "The model tokenizer must be passed to the ReasoningParser "
                 "constructor during construction.")
 
-        self.think_start_token_id = self.vocab.get(self.think_start_token)
-        self.think_end_token_id = self.vocab.get(self.think_end_token)
+        self.start_token_id = self.vocab.get(self.start_token)
+        self.end_token_id = self.vocab.get(self.end_token)
         self.response_start_token_id = self.vocab.get(
             self.response_start_token)
         self.response_end_token_id = self.vocab.get(self.response_end_token)
         self.newline_token_id = self.vocab.get(self.newline_token)
 
-        self.parser_token_ids = [
-            self.think_end_token_id, self.response_end_token_id
-        ]
+        self.parser_token_ids = [self.end_token_id, self.response_end_token_id]
 
-        if self.think_start_token_id is None or self.think_end_token_id is None:
+        if self.start_token_id is None or self.end_token_id is None:
             raise RuntimeError(
                 "Ernie45 reasoning parser could not locate think start/end "
                 "tokens in the tokenizer!")
-
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        return self.think_end_token_id in input_ids
-
-    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        """
-        Extract the content after the end tokens
-        """
-        if self.think_end_token_id not in input_ids[:-1]:
-            return []
-        else:
-            return input_ids[input_ids.index(self.think_end_token_id) + 1:]
 
     def extract_reasoning_content_streaming(
         self,
@@ -91,19 +81,19 @@ class Ernie45ReasoningParser(ReasoningParser):
         """
         # Skip single special tokens
         if len(delta_token_ids) == 1 and (delta_token_ids[0] in [
-                self.think_start_token_id, self.think_end_token_id,
+                self.start_token_id, self.end_token_id,
                 self.response_start_token_id, self.response_end_token_id
         ]):
             return None
 
         # No <think> in previous or delta, also need to check for </think>.
         # Because the model may have generated </think> without <think>
-        if self.think_end_token_id in delta_token_ids:
+        if self.end_token_id in delta_token_ids:
             # </think> in delta with more tokens,
             # extract reasoning content and content
-            think_end_index = delta_text.find(self.think_end_token)
+            think_end_index = delta_text.find(self.end_token)
             reasoning_content = delta_text[:think_end_index]
-            content = delta_text[think_end_index + len(self.think_end_token):]
+            content = delta_text[think_end_index + len(self.end_token):]
             content = content.lstrip("\n")
             response_start_idx = content.find(self.response_start_token)
             response_end_idx = content.rfind(self.response_end_token)
@@ -116,7 +106,7 @@ class Ernie45ReasoningParser(ReasoningParser):
                 reasoning_content=reasoning_content,
                 content=content if content else None,
             )
-        elif self.think_end_token_id in previous_token_ids:
+        elif self.end_token_id in previous_token_ids:
             # </think> in previous, thinking content ends
             content = delta_text
             if self.response_start_token_id in delta_token_ids:
@@ -138,7 +128,7 @@ class Ernie45ReasoningParser(ReasoningParser):
                 content = content.lstrip("\n")
             # remove \n after </think>\n
             if (len(previous_token_ids) > 1 and \
-                previous_token_ids[-2] == self.think_end_token_id) and \
+                previous_token_ids[-2] == self.end_token_id) and \
                 (len(delta_token_ids) > 0 and \
                     delta_token_ids[0] == self.newline_token_id):
                 content = content.lstrip("\n")
@@ -161,32 +151,15 @@ class Ernie45ReasoningParser(ReasoningParser):
         Returns:
             tuple[Optional[str], Optional[str]]: reasoning content and content
         """
+        reasoning_content, content = super().extract_reasoning_content(
+            model_output, request)
+        if content:
+            start_idx = content.find(self.response_start_token)
+            end_idx = content.rfind(self.response_end_token)
+            # Simultaneously existing and in the correct order
+            if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+                content = content[start_idx +
+                                  len(self.response_start_token):end_idx]
+        final_content = content or None
 
-        # Check if the start token is present in the model output, remove it
-        # if it is present.
-        model_output_parts = model_output.partition(self.think_start_token)
-        model_output = model_output_parts[2] if model_output_parts[
-            1] else model_output_parts[0]
-
-        # We assume the reasoning content is always at the start.
-        if self.think_end_token not in model_output:
-            return model_output, None
-        else:
-            reasoning_content, _, content = model_output.partition(
-                self.think_end_token)
-
-            if content:
-                start_idx = content.find(self.response_start_token)
-                end_idx = content.rfind(self.response_end_token)
-                # Simultaneously existing and in the correct order
-                if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
-                    content = content[start_idx +
-                                      len(self.response_start_token):end_idx]
-
-            # If the end token is not found, return the model output as is.
-            # It should not happen since we already checked for the presence
-            # of the end token.
-            # If generation stops right after end-of-think, return null content
-            final_content = content or None
-
-            return reasoning_content, final_content
+        return reasoning_content, final_content
