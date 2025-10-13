@@ -179,7 +179,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(f"{e} {e.__cause__}")
 
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
         try:

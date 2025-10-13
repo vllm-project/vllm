@@ -127,18 +127,10 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_embeds=request.prompt_embeds,
                 config=self._build_render_config(request),
             )
-        except ValueError as e:
+        except (ValueError, TypeError, RuntimeError,
+                jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
-        except TypeError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
-        except RuntimeError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
-        except jinja2.TemplateError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(f"{e} {e.__cause__}")
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []

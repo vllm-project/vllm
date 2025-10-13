@@ -163,7 +163,7 @@ class OpenAIServingPooling(OpenAIServing):
                 raise ValueError(f"Unsupported request of type {type(request)}")
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(f"{e} {e.__cause__}")
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []

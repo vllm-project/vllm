@@ -111,7 +111,7 @@ class EmbeddingMixin(OpenAIServing):
             return None
         except (ValueError, TypeError) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(f"{e} {e.__cause__}")
 
     def _build_render_config(self, request: EmbeddingCompletionRequest) -> RenderConfig:
         # Set max_length based on chunked processing capability
