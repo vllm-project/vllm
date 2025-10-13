@@ -45,8 +45,8 @@ benchmark:
 
 # Output
 output:
-  csv: "study1_cutlass_numsplits_results.csv"
-  json: "study1_cutlass_numsplits_results.json"
+  csv: "cutlass_numsplits_results.csv"
+  json: "cutlass_numsplits_results.json"
 
 # Expected outcome:
 # - Identify if auto-selection heuristic is optimal

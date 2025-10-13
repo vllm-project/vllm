@@ -45,8 +45,8 @@ benchmark:
 
 # Output
 output:
-  csv: "study3_flashinfer_vs_cutlass_results.csv"
-  json: "study3_flashinfer_vs_cutlass_results.json"
+  csv: "flashinfer_vs_cutlass_results.csv"
+  json: "flashinfer_vs_cutlass_results.json"
 
 # Expected outcome:
 # - Determine if FlashInfer-MLA is competitive with optimized CUTLASS

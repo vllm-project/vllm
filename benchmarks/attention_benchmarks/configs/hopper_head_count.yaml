@@ -36,14 +36,14 @@ benchmark:
 
 # Output
 output:
-  csv: "study2_hopper_head_count_results.csv"
-  json: "study2_hopper_head_count_results.json"
+  csv: "hopper_head_count_results.csv"
+  json: "hopper_head_count_results.json"
 
 # To test different head counts, run:
 # for heads in 16 32 64 128 256; do
-#   python benchmark.py --config configs/study2_hopper_head_count.yaml \
+#   python benchmark.py --config configs/hopper_head_count.yaml \
 #     --num-q-heads $heads \
-#     --output-csv study2_heads_${heads}.csv
+#     --output-csv hopper_heads_${heads}.csv
 # done
 
 # Expected outcome:
