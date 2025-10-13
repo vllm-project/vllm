@@ -6,8 +6,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
-from vllm.entrypoints.context import (HarmonyContext, StreamingHarmonyContext,
-                                      TurnMetrics)
+from vllm.entrypoints.context import (
+    HarmonyContext,
+    StreamingHarmonyContext,
+    TurnMetrics,
+)
 from vllm.outputs import CompletionOutput, RequestOutput
 
 
@@ -108,7 +111,6 @@ def test_single_turn_token_counting():
     assert previous_turn.output_tokens == 3
     assert previous_turn.cached_input_tokens == 2
     assert previous_turn.tool_output_tokens == 0
-    assert previous_turn.tool_call_latency_ms == 0
 
 
 @pytest.mark.asyncio
@@ -458,7 +460,8 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
     assert context.num_output_tokens == sum(num_output_tokens)  # All outputs
     assert context.num_reasoning_tokens == 3  # Unchanged from second turn
     assert context.num_cached_tokens == sum(
-        num_cached_tokens)  # Accumulated cached tokens
+        num_cached_tokens
+    )  # Accumulated cached tokens
 
     # Additional tool tokens from third turn
     # Formula: this turn prompt - last turn prompt - last turn output
@@ -556,11 +559,12 @@ async def test_streaming_message_synchronization(mock_parser):
 def test_turn_metrics_copy_and_reset():
     """Test TurnMetrics copy and reset methods work correctly."""
     # Create a TurnMetrics with specific values
-    original_metrics = TurnMetrics(input_tokens=10,
-                                   output_tokens=20,
-                                   cached_input_tokens=5,
-                                   tool_output_tokens=3,
-                                   tool_call_latency_ms=150)
+    original_metrics = TurnMetrics(
+        input_tokens=10,
+        output_tokens=20,
+        cached_input_tokens=5,
+        tool_output_tokens=3,
+    )
 
     # Test copy functionality
     copied_metrics = original_metrics.copy()
@@ -570,7 +574,6 @@ def test_turn_metrics_copy_and_reset():
     assert copied_metrics.output_tokens == 20
     assert copied_metrics.cached_input_tokens == 5
     assert copied_metrics.tool_output_tokens == 3
-    assert copied_metrics.tool_call_latency_ms == 150
 
     # Verify they are separate objects
     assert copied_metrics is not original_metrics
@@ -588,11 +591,9 @@ def test_turn_metrics_copy_and_reset():
     assert original_metrics.output_tokens == 0
     assert original_metrics.cached_input_tokens == 0
     assert original_metrics.tool_output_tokens == 0
-    assert original_metrics.tool_call_latency_ms == 0
 
     # Verify copied metrics are unaffected by reset
     assert copied_metrics.input_tokens == 999
     assert copied_metrics.output_tokens == 20
     assert copied_metrics.cached_input_tokens == 5
     assert copied_metrics.tool_output_tokens == 3
-    assert copied_metrics.tool_call_latency_ms == 150

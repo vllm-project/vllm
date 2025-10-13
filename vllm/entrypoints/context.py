@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import time
 from abc import ABC, abstractmethod
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Union
@@ -49,17 +48,17 @@ def _map_tool_name_to_tool_type(tool_name: str) -> str:
 class TurnMetrics:
     """Tracks token and toolcall details for a single conversation turn."""
 
-    def __init__(self,
-                 input_tokens=0,
-                 output_tokens=0,
-                 cached_input_tokens=0,
-                 tool_output_tokens=0,
-                 tool_call_latency_ms=0):
+    def __init__(
+        self,
+        input_tokens=0,
+        output_tokens=0,
+        cached_input_tokens=0,
+        tool_output_tokens=0,
+    ):
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self.cached_input_tokens = cached_input_tokens
         self.tool_output_tokens = tool_output_tokens
-        self.tool_call_latency_ms = tool_call_latency_ms
 
     def reset(self):
         """Reset counters for a new turn."""
@@ -70,9 +69,12 @@ class TurnMetrics:
 
     def copy(self):
         """Create a copy of this turn's token counts."""
-        return TurnMetrics(self.input_tokens, self.output_tokens,
-                           self.cached_input_tokens, self.tool_output_tokens,
-                           self.tool_call_latency_ms)
+        return TurnMetrics(
+            self.input_tokens,
+            self.output_tokens,
+            self.cached_input_tokens,
+            self.tool_output_tokens,
+        )
 
 
 class ConversationContext(ABC):
@@ -239,9 +241,11 @@ class HarmonyContext(ConversationContext):
             # start counting tool after first turn
             # tool tokens = this turn prefill - last turn prefill -
             # last turn decode
-            this_turn_tool_tokens = (self.current_turn_metrics.input_tokens -
-                                     previous_turn.input_tokens -
-                                     previous_turn.output_tokens)
+            this_turn_tool_tokens = (
+                self.current_turn_metrics.input_tokens
+                - previous_turn.input_tokens
+                - previous_turn.output_tokens
+            )
 
             # Handle negative tool token counts (shouldn't happen in normal
             # cases)
@@ -252,7 +256,9 @@ class HarmonyContext(ConversationContext):
                     "previous_output=%d). Setting to 0.",
                     this_turn_tool_tokens,
                     self.current_turn_metrics.input_tokens,
-                    previous_turn.input_tokens, previous_turn.output_tokens)
+                    previous_turn.input_tokens,
+                    previous_turn.output_tokens,
+                )
                 this_turn_tool_tokens = 0
 
             self.num_tool_output_tokens += this_turn_tool_tokens
@@ -287,8 +293,7 @@ class HarmonyContext(ConversationContext):
                 # only keep last round
                 updated_output_token_count += len(completion_output.token_ids)
             self.num_output_tokens += updated_output_token_count
-            self.current_turn_metrics.output_tokens \
-                += updated_output_token_count
+            self.current_turn_metrics.output_tokens += updated_output_token_count
         return updated_output_token_count
 
     @property
