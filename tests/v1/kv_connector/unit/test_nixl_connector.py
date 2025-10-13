@@ -803,7 +803,7 @@ def test_scheduler_kv_connector_stats_aggregation():
     # Scheduler stats with custom metric (needs dummy transfer to avoid being skipped)
     scheduler_stats = NixlKVConnectorStats()
     scheduler_stats.data.update(
-        {
+        {  # dummy transfer just for testing, to bypass is_empty() check
             "transfer_duration": [0],
             "post_duration": [0],
             "bytes_transferred": [0],
