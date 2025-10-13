@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Union
+from typing import ClassVar
 
 import torch
 
@@ -45,7 +45,7 @@ class FlashMLABackend(MLACommonBackend):
         return FlashMLAImpl
 
     @staticmethod
-    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
+    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
         return [64]
 
 
@@ -106,7 +106,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
-        dcp_tot_seq_lens_device: Optional[torch.Tensor],
+        dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = get_mla_metadata(
             seq_lens_device,
@@ -160,12 +160,12 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
         **mla_args,
     ) -> None:
@@ -203,11 +203,11 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
     def _forward_decode(
         self,
-        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLAMetadata,
         layer: AttentionLayer,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # TODO: (zyongye) decode function for mla here
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None

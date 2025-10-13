@@ -4,7 +4,7 @@ import ast
 import json
 import uuid
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any
 
 import regex as re
 
@@ -36,7 +36,7 @@ class Qwen3CoderToolParser(ToolParser):
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
         # Override base class type - we use string IDs for tool calls
-        self.current_tool_id: Optional[str] = None  # type: ignore
+        self.current_tool_id: str | None = None  # type: ignore
         self.streamed_args_for_tool: list[str] = []
 
         # Sentinel tokens for streaming mode
@@ -110,7 +110,7 @@ class Qwen3CoderToolParser(ToolParser):
         self.streaming_request = None
 
     def _get_arguments_config(
-        self, func_name: str, tools: Optional[list[ChatCompletionToolsParam]]
+        self, func_name: str, tools: list[ChatCompletionToolsParam] | None
     ) -> dict:
         """Extract argument configuration for a function."""
         if tools is None:
@@ -240,8 +240,8 @@ class Qwen3CoderToolParser(ToolParser):
             return param_value
 
     def _parse_xml_function_call(
-        self, function_call_str: str, tools: Optional[list[ChatCompletionToolsParam]]
-    ) -> Optional[ToolCall]:
+        self, function_call_str: str, tools: list[ChatCompletionToolsParam] | None
+    ) -> ToolCall | None:
         # Extract function name
         end_index = function_call_str.index(">")
         function_name = function_call_str[:end_index]
@@ -349,7 +349,7 @@ class Qwen3CoderToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         # Store request for type conversion
         if not previous_text:
             self._reset_streaming_state()

@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import ast
 import json
 from dataclasses import dataclass, field
@@ -34,7 +32,7 @@ else:
 @lru_cache
 def _cached_build_vllm_token_enforcer_tokenizer_data(
     tokenizer: PreTrainedTokenizerBase, vocab_size: int
-) -> lmfe_vllm.TokenEnforcerTokenizerData:
+) -> "lmfe_vllm.TokenEnforcerTokenizerData":
     return lmfe_vllm.build_vllm_token_enforcer_tokenizer_data(
         tokenizer, use_bitmask=True, vocab_size=vocab_size
     )
