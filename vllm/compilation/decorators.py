@@ -235,16 +235,20 @@ def _support_torch_compile(
 
     setattr(cls, IGNORE_COMPILE_KEY, False)
 
-    def __init__(self, **kwargs):
-        # NOTE: to support multimodal models (such as encoder),
-        # we may not have vllm_config so we only want to pass
-        # vllm_config when it is available.
-        sig = inspect.signature(old_init)
-        if "vllm_config" in sig.parameters:
-            vllm_config = kwargs["vllm_config"]
-        else:
+    def __init__(
+        self, *, vllm_config: VllmConfig | None = None, prefix: str = "", **kwargs
+    ):
+        if vllm_config is None:
             vllm_config = get_current_vllm_config()
 
+        # NOTE: to support multimodal models (such as encoder),
+        # we may not have vllm_config so we may need to patch
+        # it
+        sig = inspect.signature(old_init)
+        if "vllm_config" in sig.parameters:
+            kwargs["vllm_config"] = vllm_config
+        if "prefix" in sig.parameters:
+            kwargs["prefix"] = prefix
         old_init(self, **kwargs)
 
         self.vllm_config = vllm_config

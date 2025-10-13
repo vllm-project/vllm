@@ -31,10 +31,10 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache, partial
 from typing import Annotated, Any, Literal, TypeAlias
 
+import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
 from transformers import BatchFeature, PretrainedConfig
 from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
@@ -437,13 +437,13 @@ class Qwen2_5_VisionAttention(nn.Module):
                 k_i = k[:, start_idx:end_idx]
                 v_i = v[:, start_idx:end_idx]
                 q_i, k_i, v_i = (
-                    rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
+                    einops.rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
                 )
                 output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
-                output_i = rearrange(output_i, "b h s d -> b s h d ")
+                output_i = einops.rearrange(output_i, "b h s d -> b s h d ")
                 outputs.append(output_i)
             context_layer = torch.cat(outputs, dim=1)
-            context_layer = rearrange(
+            context_layer = einops.rearrange(
                 context_layer, "b s h d -> s b (h d)"
             ).contiguous()
         elif self.attn_backend == _Backend.XFORMERS:
