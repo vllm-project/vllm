@@ -651,10 +651,6 @@ class RandomDatasetForReranking(RandomDataset):
     - Inputs composed of pairs
     """
 
-    # Default values copied from benchmark_serving.py for the random dataset.
-    DEFAULT_RANGE_RATIO = 0.0
-    DEFAULT_INPUT_LEN = 1024
-
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
 
@@ -663,8 +659,8 @@ class RandomDatasetForReranking(RandomDataset):
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
         request_id_prefix: str = "",
-        range_ratio: float = DEFAULT_RANGE_RATIO,
-        input_len: int = DEFAULT_INPUT_LEN,
+        range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
+        input_len: int = RandomDataset.DEFAULT_INPUT_LEN,
         batchsize: int = 1,
         is_reranker: bool = True,
         **kwargs,

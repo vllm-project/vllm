@@ -911,8 +911,10 @@ vllm bench serve \
   --random-batch-size 5
 ```
 
-For reranker models, this will create 2 rerank requests with 5 "documents" each where each
-document has close to `random-input-len` tokens.
+For reranker models, this will create `num-prompts / random-batch-size` requests with
+`random-batch-size` "documents" where each one has close to `random-input-len` tokens. 
+In the example above, this results in 2 rerank requests with 5 "documents" each where
+each document has close to 512 tokens.
 
 Please note that the `/v1/rerank` is also supported by embedding models. So if you're running
 with an embedding model, also set `--no-reranker`. Because in this case the query is
