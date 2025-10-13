@@ -10,7 +10,7 @@ from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils.flashinfer import has_flashinfer_all2all
-from vllm.utils.import_utils import has_deep_ep, has_pplx
+from vllm.utils.import_utils import has_deep_ep, has_pplx, has_hybrid_deep_ep
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -326,6 +326,7 @@ class DeepEPHybridAll2AllManager(DeepEPAll2AllManagerBase):
     """
 
     def __init__(self, cpu_group):
+        assert has_hybrid_deep_ep(), "DeepEP Hybrid kernels not found."
         super().__init__(cpu_group)
 
     def _make_all2all_kwargs(self, **kwargs) -> dict[Any, Any]:
