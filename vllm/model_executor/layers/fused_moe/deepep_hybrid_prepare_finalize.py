@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, Optional, Union
 
 import deep_ep
 import torch
-import torch.nn.functional as F
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -13,16 +11,11 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 from vllm.utils import round_up
-from vllm.v1.worker.ubatching import (
-    dbo_current_ubatch_id, dbo_enabled, dbo_switch_to_comm,
-    dbo_switch_to_compute, dbo_switch_to_compute_sync,
-    dbo_yield_and_switch_from_comm_to_compute,
-    dbo_yield_and_switch_from_compute_to_comm)
 
 
 class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
-    Prepare/Finalize using DeepEP High-Throughput kernels.
+    Prepare/Finalize using DeepEP Hybrid kernels.
     """
 
     @staticmethod
@@ -52,6 +45,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.handle = None
         self.expert_probs = None
 
+        # TODO(bnell): make problem size filter or update HybridEP.config
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
 
@@ -65,24 +59,26 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    def max_num_tokens_per_rank(self) -> Optional[int]:
+    def max_num_tokens_per_rank(self) -> int | None:
         return None
 
-    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+    def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int64
 
-    def _get_dispatch_config(self) -> Optional[deep_ep.Config]:
+    # TODO(bnell): probably not valid
+    def _get_dispatch_config(self) -> deep_ep.Config | None:
         if self.num_dispatchers_ not in self.available_rank_configs:
             return None
         return deep_ep.Buffer.get_dispatch_config(self.num_dispatchers_)
 
-    def _get_combine_config(self) -> Optional[deep_ep.Config]:
+    # TODO(bnell): probably not valid
+    def _get_combine_config(self) -> deep_ep.Config | None:
         if self.num_dispatchers_ not in self.available_rank_configs:
             return None
         return deep_ep.Buffer.get_combine_config(self.num_dispatchers_)
 
     def supports_async(self) -> bool:
-        return False # combine async not supported
+        return False
 
     def prepare(
         self,
@@ -90,7 +86,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
-        expert_map: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
@@ -171,30 +167,6 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if topk == 1 and expert_probs.dim() == 1:
             expert_probs = expert_probs.view(expert_probs.shape(0), topk)
 
-
-        #num_of_tokens_for_experts = num_of_tokens_for_experts.cpu()
-
-        print(f"POST DISPATCH {self.rank_expert_offset} {topk} {expert_x.shape} {expert_probs.shape}")
-
-        if False:
-            print(f"STUFF\n"
-                  f"rank_exp_offset = {self.rank_expert_offset}\n"
-                  f"a={a1q.shape}/{a1q.dtype} -> {expert_x.shape}/{expert_x.dtype}\n"
-                  f"topk_ids={topk_ids.shape}\n"
-                  f"tok_for_exp={num_of_tokens_for_experts}\n"
-                  f"probs={expert_probs.shape}\n"
-                  f"lem shape={local_expert_routing_map.shape}, {local_expert_routing_map[:num_of_tokens_for_experts].shape}\n"
-                  f"lem numel={local_expert_routing_map.nonzero().numel()}\n"
-                  #f"lem={local_expert_routing_map}\n"
-                  f"lem sum={local_expert_routing_map.sum(dim=1).shape}\n"
-                  f"sparse_to_dense_map={sparse_to_dense_map.shape} {sparse_to_dense_map.dtype} {sparse_to_dense_map}\n"
-                  f"rdma_to_attn_map={rdma_to_attn_map.shape} {rdma_to_attn_map.dtype} {rdma_to_attn_map}\n"
-                  f"attn_to_rdma_map={attn_to_rdma_map.shape} {attn_to_rdma_map.dtype}\n"
-                  f"num_tokens={num_tokens}\n"
-                  )
-
-        #local_expert_routing_map = local_expert_routing_map[:num_of_tokens_for_experts.item()]
-
         # TBD
         new_topk_ids = None
 
@@ -244,9 +216,6 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
 
-        if False:
-            print(f"\nCOMBINE START({self.rank_expert_offset})\n")
-
         if True:
             combined_x, combined_probs = self.buffer.combine(
                 hidden=fused_expert_output,
@@ -262,11 +231,10 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         top_k = topk_ids.shape[1]
 
+        # Double check this
         combined_x = combined_x / top_k
 
-        # multiply by probs?
-        if False:
-            print(f"\nCOMBINE END({self.rank_expert_offset}) {combined_x.shape}/{combined_x.dtype}\n")
+        #print(f"\nCOMBINE END({self.rank_expert_offset}) {combined_x.shape}/{combined_x.dtype}\n")
 
         if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
             weight_and_reduce_impl = TopKWeightAndReduceContiguous()
@@ -277,8 +245,3 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk_weights=combined_probs,
             topk_ids=topk_ids,
             apply_router_weight_on_input=apply_router_weight_on_input)
-
-        # TODO(lucas): support this case with the refactored modular kernel
-        # Respect inplace outputs.
-        # apply weights???
-        #output.copy_(combined_x, non_blocking=True)
