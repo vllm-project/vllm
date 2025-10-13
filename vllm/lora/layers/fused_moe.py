@@ -92,11 +92,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 expert_map = moe_state_dict["expert_map"]
                 max_loras = moe_state_dict["max_loras"]
 
-                (token_lora_mapping, _, _, _, _, _) = (
-                    self.punica_wrapper.token_mapping_meta.meta_args(
-                        hidden_states.size(0)
-                    )
-                )
                 config_dtype = _get_config_dtype_str(
                     dtype=hidden_states.dtype,
                     use_fp8_w8a8=False,
@@ -114,6 +109,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     top_k,
                     config_dtype,
                     block_shape=layer.quant_method.moe_quant_config.block_shape,
+                )
+
+                (token_lora_mapping, _, _, _, _, _) = (
+                    self.punica_wrapper.token_mapping_meta.meta_args(
+                        hidden_states.size(0)
+                    )
                 )
 
                 config = get_config_func(M)

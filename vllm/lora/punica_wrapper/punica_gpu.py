@@ -293,7 +293,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     def moe_lora_align_block_size(
         self,
         topk_ids: torch.Tensor,
-        token_lora_mapping: torch.Tensor,
+        num_tokens: int,
         block_size: int,
         num_experts: int,
         max_loras: int,
@@ -324,6 +324,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         num_tokens_post_pad = torch.empty(
             (max_loras), dtype=torch.int32, device=topk_ids.device
         )
+
+        (token_lora_mapping, _, _, _, _, _) = self.token_mapping_meta.meta_args(
+            num_tokens
+        )
+
         ops.moe_lora_align_block_size(
             topk_ids,
             token_lora_mapping,
