@@ -3,7 +3,7 @@
 
 import hashlib
 from functools import cached_property
-from typing import Any, Literal, get_args
+from typing import Any, Literal, cast, get_args
 
 from pydantic import field_validator, model_validator
 from pydantic.dataclasses import dataclass
@@ -37,7 +37,7 @@ class ObservabilityConfig:
     otlp_traces_endpoint: str | None = None
     """Target URL to which OpenTelemetry traces will be sent."""
 
-    collect_detailed_traces: list[str] | None = None
+    collect_detailed_traces: list[DetailedTraceModules] | None = None
     """It makes sense to set this only if `--otlp-traces-endpoint` is set. If
     set, it will collect detailed traces for the specified modules. This
     involves use of possibly costly and or blocking operations and hence might
@@ -114,7 +114,7 @@ class ObservabilityConfig:
     @classmethod
     def _validate_collect_detailed_traces(
         cls, value: list[str] | None
-    ) -> list[str] | None:
+    ) -> list[DetailedTraceModules] | None:
         if not value:
             return None
 
@@ -139,7 +139,7 @@ class ObservabilityConfig:
                 f"collect_detailed_traces values must be one of: {sorted(allowed)}"
             )
 
-        return out
+        return cast(list[DetailedTraceModules], out)
 
     @model_validator(mode="after")
     def _validate_tracing_config(self):
