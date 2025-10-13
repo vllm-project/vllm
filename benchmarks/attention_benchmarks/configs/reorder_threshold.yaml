@@ -75,7 +75,7 @@ output:
 
 # Expected outcome (reproduces old benchmark_mla_threshold.py study):
 # - For each batch size, find the crossover point where prefill becomes faster than decode
-# - Show decode vs prefill performance across all query lengths (1-125)
+# - Show decode vs prefill performance across all query lengths
 # - Determine optimal reorder_batch_threshold based on last query length where decode is faster
 # - Understand how crossover point varies with batch size
 # - Provide data-driven guidance for default threshold value
@@ -85,7 +85,4 @@ output:
 #     * decode: threshold >= query_length (forces decode pipeline)
 #     * prefill: threshold < query_length (forces prefill pipeline)
 # - Compare which is faster to find crossover point
-# - Use multiple repeats (15) to handle variance
 #
-# Note: FlashMLA may have issues with speculative decode workloads
-# Use flash_attn_mla instead if you encounter errors with flashmla
