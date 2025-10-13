@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from math import prod
 
 import torch
@@ -325,5 +326,6 @@ def activation_without_mul(activation: str) -> str:
 # Torch custom ops can't deal with outputs aliasing inputs so we need to
 # disable inplace for torch >= 2.9.
 # See https://github.com/vllm-project/vllm/issues/26378
+@functools.cache
 def disable_inplace() -> bool:
     return is_torch_equal_or_newer("2.9")
