@@ -190,7 +190,6 @@ def _make_fake_nixl_pkg():
 # Copy of FakeNixlWrapper implementation for Ray workers
 import uuid
 from collections import defaultdict
-from typing import Optional
 
 {fake_nixl_source}
 
@@ -1168,7 +1167,7 @@ class FailingNixlWrapper(FakeNixlWrapper):
         local_block_descs_ids: list[int],
         remote_xfer_side_handle: int,
         remote_block_descs_ids: list[int],
-        notif_msg: Optional[bytes] = None,
+        notif_msg: bytes | None = None,
     ) -> int:
         if self.fail_transfer_setup:
             # classic RuntimeError to simulate failure
