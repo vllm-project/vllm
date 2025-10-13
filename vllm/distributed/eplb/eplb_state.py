@@ -29,6 +29,7 @@ physical experts.
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
