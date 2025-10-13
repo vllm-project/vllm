@@ -206,8 +206,9 @@ class StructuralTagResponseFormat(OpenAIBaseModel):
     format: Any
 
 
-AnyStructuralTagResponseFormat: TypeAlias = LegacyStructuralTagResponseFormat | StructuralTagResponseFormat
-
+AnyStructuralTagResponseFormat: TypeAlias = (
+    LegacyStructuralTagResponseFormat | StructuralTagResponseFormat
+)
 
 
 class ResponseFormat(OpenAIBaseModel):
@@ -216,7 +217,9 @@ class ResponseFormat(OpenAIBaseModel):
     json_schema: JsonSchemaResponseFormat | None = None
 
 
-AnyResponseFormat: TypeAlias = ResponseFormat | StructuralTagResponseFormat | LegacyStructuralTagResponseFormat
+AnyResponseFormat: TypeAlias = (
+    ResponseFormat | StructuralTagResponseFormat | LegacyStructuralTagResponseFormat
+)
 
 
 class StreamOptions(OpenAIBaseModel):

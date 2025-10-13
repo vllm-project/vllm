@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from collections.abc import Sequence
-from typing import Optional
+
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.harmony_utils import parse_chat_output
@@ -128,7 +128,7 @@ class GptOssReasoningParser(ReasoningParser):
 
     # This function prepares the structural tag to format reasoning output
     def prepare_structured_tag(
-        self, original_tag: Optional[str], tool_server: Optional[ToolServer]
+        self, original_tag: str | None, tool_server: ToolServer | None
     ) -> str:
         if original_tag is None:
             if tool_server is None:
