@@ -121,11 +121,8 @@ class Worker(WorkerBase):
             }
 
         allocator = CuMemAllocator.get_instance()
-        if level == 1:
-            offload_tags = ("weights", "graphs")
-        else:
-            offload_tags = tuple()
-        allocator.sleep(offload_tags=offload_tags)
+        tags = ("weights", "graphs") if level == 1 else tuple()
+        allocator.sleep(offload_tags=tags)
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
