@@ -430,6 +430,11 @@ class CudaPlatformBase(Platform):
         )
 
     @classmethod
+    def get_pass_manager_cls(cls) -> str:
+        """Get the pass manager class of a device."""
+        return "vllm.compilation.pass_manager.PostGradPassManager"
+    
+    @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 

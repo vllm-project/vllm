@@ -198,6 +198,11 @@ class Platform:
     ) -> str:
         """Get the attention backend class of a device."""
         return ""
+    
+    @classmethod
+    def get_pass_manager_cls(cls) -> str:
+        """Get the pass manager class of a device."""
+        return ""
 
     @classmethod
     def get_device_capability(
