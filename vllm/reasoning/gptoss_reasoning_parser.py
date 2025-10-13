@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from collections.abc import Sequence
-from typing import Optional, Union
 
 from transformers import PreTrainedTokenizerBase
 
@@ -97,7 +96,7 @@ class GptOssReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         prev_reasoning, prev_content, _ = parse_chat_output(list(previous_token_ids))
         cur_reasoning, cur_content, _ = parse_chat_output(list(current_token_ids))
         reasoning_delta = None
@@ -122,14 +121,14 @@ class GptOssReasoningParser(ReasoningParser):
         self,
         model_output: str,
         request: ChatCompletionRequest,
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         raise NotImplementedError(
             "gpt-oss has a special branch for parsing reasoning in non-streaming mode. This method shouldn't be used."  # noqa: E501
         )
 
     # This function prepares the structural tag to format reasoning output
     def prepare_structured_tag(
-        self, original_tag: Optional[str], tool_server: Optional[ToolServer]
+        self, original_tag: str | None, tool_server: ToolServer | None
     ) -> str:
         if original_tag is None:
             if tool_server is None:
