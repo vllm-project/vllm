@@ -127,7 +127,7 @@ def _run_simple_model(
 @torch.inference_mode()
 def test_simple_piecewise_compile(use_inductor):
     _run_simple_model(
-        splitting_ops=["silly.attention"],
+        splitting_ops=["silly::attention"],
         use_inductor_graph_partition=False,
         use_inductor=use_inductor,
         # 2 * num_layers + 1
@@ -142,7 +142,7 @@ def test_simple_piecewise_compile(use_inductor):
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("splitting_ops", [["silly.attention"], []])
+@pytest.mark.parametrize("splitting_ops", [["silly::attention"], []])
 def test_simple_inductor_graph_partition(splitting_ops, monkeypatch):
     if not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
