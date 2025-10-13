@@ -895,7 +895,7 @@ class ConnectorVllmConfig(VllmConfig):
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
         # Copy over all fields from vllm_config into the base class
         super().__init__(**vllm_config.__dict__)
-        self.kv_cache_config = kv_cache_config
+        self.kv_cache_config = copy.deepcopy(kv_cache_config)
 
     def __post_init__(self):
         # NOTE(Kuntai): bypass post init so that it copies the exact same thing
