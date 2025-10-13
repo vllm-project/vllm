@@ -113,9 +113,9 @@ class CustomOp(nn.Module):
         custom_ops = compilation_config.custom_ops
         if not hasattr(cls, "name"):
             logger.warning_once(
-                "Custom op %s was not registered, which means it won't appear\
-                 in the op registry. It will be enabled/disabled based on the\
-                 global settings.",  # noqa: E501
+                "Custom op %s was not registered, which means it won't appear "
+                "in the op registry. It will be enabled/disabled based on the "
+                "global settings.",
                 cls.__name__,
             )
             return CustomOp.default_on()
