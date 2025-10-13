@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -235,7 +234,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self,
         max_loras: int,
         lora_config: LoRAConfig,
-        model_config: Optional[PretrainedConfig] = None,
+        model_config: PretrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
         self.w1_lora_a_stacked = torch.zeros(
@@ -336,8 +335,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         index: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
+        embeddings_tensor: torch.Tensor | None,
+        bias: torch.Tensor | None = None,
     ):
         """Overwrites lora tensors at index."""
         for eid in range(len(lora_a) // 3):
@@ -385,7 +384,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: Optional[PretrainedConfig],
+        model_config: PretrainedConfig | None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
         # return type(source_layer) is FusedMoE

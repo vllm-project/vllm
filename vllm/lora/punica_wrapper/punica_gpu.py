@@ -7,7 +7,7 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import Optional, Union, final
+from typing import final
 
 import torch
 
@@ -40,7 +40,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self,
         max_num_batched_tokens: int,
         max_batches: int,
-        device: Union[torch.device, str],
+        device: torch.device | str,
         **kwargs,
     ):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
@@ -58,7 +58,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     def update_metadata(
         self,
         mapping: LoRAMapping,
-        lora_index_to_id: list[Optional[int]],
+        lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
         extra_vocab_size: int,
@@ -187,7 +187,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         scale: float,
         output_slices: tuple[int, ...],
         *,
-        buffer: Optional[torch.Tensor] = None,
+        buffer: torch.Tensor | None = None,
         **kwargs,
     ) -> None:
         """
@@ -246,7 +246,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         lora_b_stacked: torch.Tensor,
         scale,
         *,
-        buffer: Optional[torch.Tensor] = None,
+        buffer: torch.Tensor | None = None,
         **kwargs,
     ) -> None:
         """
