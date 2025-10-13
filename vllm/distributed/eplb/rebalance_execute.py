@@ -106,7 +106,7 @@ def move_to_buffer(
     new_indices: Sequence[int],
     expert_weights: Iterable[torch.Tensor],
     expert_weights_buffer: Sequence[torch.Tensor],
-    cuda_stream: Optional[torch.cuda.Stream],
+    cuda_stream: torch.cuda.Stream | None,
     ep_group: ProcessGroup,
 ) -> tuple[list[bool], list[bool], dict[int, int]]:
     """
@@ -279,8 +279,8 @@ async def transfer_layer(
     ep_group: ProcessGroup,
     is_profile: bool = False,
     layer: int = 0,
-    cuda_stream: Optional[torch.cuda.Stream] = None,
-    rank_mapping=None,
+    cuda_stream: torch.cuda.Stream | None = None,
+    rank_mapping: dict[int, int] | None = None,
 ) -> tuple[list[bool], list[bool], dict[int, int]]:
     """
     Rearranges the expert weights in place according to the new expert indices.

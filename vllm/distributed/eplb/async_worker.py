@@ -6,7 +6,7 @@ The async worker that transfers experts in the background.
 
 import asyncio
 import threading
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 from torch.distributed import ProcessGroup
@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 def start_async_worker(
     state: "EplbState",
     model,
-    rank_mapping: Optional[dict[int, int]] = None,
+    rank_mapping: dict[int, int] | None = None,
     is_profile: bool = False,
 ) -> threading.Thread:
     ep_group = get_ep_group().device_group
@@ -63,8 +63,8 @@ async def transfer_run_periodically(
     model,
     ep_group: ProcessGroup,
     is_profile: bool = False,
-    rank_mapping: Optional[dict[int, int]] = None,
-    device_index: Optional[int] = None,
+    rank_mapping: dict[int, int] | None = None,
+    device_index: int | None = None,
 ) -> None:
     experts_stream = (
         torch.cuda.Stream(device=device_index)

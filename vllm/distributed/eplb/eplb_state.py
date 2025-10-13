@@ -131,19 +131,19 @@ class EplbState:
     See:
     https://github.com/vllm-project/vllm/pull/22167#pullrequestreview-3086143856
     """
-    new_physical_to_logical_map: Optional[torch.Tensor] = None
+    new_physical_to_logical_map: torch.Tensor | None = None
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
 
     the size is same as physical_to_logical_map
     """
-    new_logical_to_physical_map: Optional[torch.Tensor] = None
+    new_logical_to_physical_map: torch.Tensor | None = None
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
 
     the size is same as logical_to_physical_map
     """
-    new_logical_replica_count: Optional[torch.Tensor] = None
+    new_logical_replica_count: torch.Tensor | None = None
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
 
@@ -224,7 +224,7 @@ class EplbState:
     """
     The flag indicates whether the EPLB is running in async mode.
     """
-    cuda_device_index: Optional[int] = None
+    cuda_device_index: int | None = None
     """
     CUDA device index for the async EPLB worker thread.
     """
@@ -399,7 +399,7 @@ class EplbState:
             logical_to_physical_map,
             logical_replica_count,
         )
-        device_index: Optional[int] = None
+        device_index: int | None = None
         if device.type == "cuda":
             device_index = device.index
             if device_index is None and torch.cuda.is_available():
@@ -682,7 +682,7 @@ class EplbState:
     def eplb_async_loop(
         self,
         model,
-        rank_mapping: Optional[dict[int, int]] = None,
+        rank_mapping: dict[int, int] | None = None,
         is_profile: bool = False,
     ):
         return start_async_worker(
