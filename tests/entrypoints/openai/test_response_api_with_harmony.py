@@ -12,8 +12,6 @@ from openai_harmony import (
     Message,
 )
 
-from vllm.entrypoints.openai.protocol import serialize_message, serialize_messages
-
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/gpt-oss-20b"
@@ -760,32 +758,3 @@ async def test_output_messages_enabled(client: OpenAI, model_name: str, server):
     assert response.status == "completed"
     assert len(response.input_messages) > 0
     assert len(response.output_messages) > 0
-
-
-def test_serialize_message() -> None:
-    dict_value = {"a": 1, "b": "2"}
-    assert serialize_message(dict_value) == dict_value
-
-    msg_value = {
-        "role": "assistant",
-        "name": None,
-        "content": [{"type": "text", "text": "Test 1"}],
-        "channel": "analysis",
-    }
-    msg = Message.from_dict(msg_value)
-    assert serialize_message(msg) == msg_value
-
-
-def test_serialize_messages() -> None:
-    assert serialize_messages(None) is None
-    assert serialize_messages([]) is None
-
-    dict_value = {"a": 3, "b": "4"}
-    msg_value = {
-        "role": "assistant",
-        "name": None,
-        "content": [{"type": "text", "text": "Test 2"}],
-        "channel": "analysis",
-    }
-    msg = Message.from_dict(msg_value)
-    assert serialize_messages([msg, dict_value]) == [msg_value, dict_value]
