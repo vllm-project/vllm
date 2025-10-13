@@ -116,28 +116,62 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1q_scale = torch.ones(1, device=a1.device, dtype=torch.float32) # hack
             a1_post_scale = quant_config.a1_scale
 
-        (
-            expert_x, expert_probs, expert_x_scale, handle
-        ) = self.buffer.dispatch(
-            tensor=a1q,
-            scaling_factor=a1q_scale,
-            topk_idx=topk_ids,
-            topk_weights=topk_weights,
-            routing_map=None, # None = generated dynamically
-            handle=None,
-            num_of_tokens_for_experts=-1, #??
-        )
-        self.handle = handle
-        self.expert_probs = expert_probs
+        # use dispatch_with_permute/combine_with_unpermute?
+        if True:
+            (
+                expert_x, expert_probs, expert_x_scale, handle
+            ) = self.buffer.dispatch(
+                hidden=a1q,
+                scaling_factor=a1q_scale,
+                topk_idx=topk_ids,
+                topk_weights=topk_weights,
+                routing_map=None, # None = generated dynamically
+                handle=None,
+                num_dispatched_tokens=-1, #??
+            )
 
-        (sparse_to_dense_map,
-         rdma_to_attn_map,
-         attn_to_rdma_map,
-         num_of_tokens_for_experts,
-         local_expert_routing_map,
-         num_tokens) = self.handle
+            self.handle = handle
+            self.expert_probs = expert_probs
+
+            (sparse_to_dense_map,
+             rdma_to_attn_map,
+             attn_to_rdma_map,
+             num_of_tokens_for_experts,
+             local_expert_routing_map, #
+             num_tokens) = self.handle
+
+        else:
+            (
+                expert_x, expert_probs, expert_x_scale, tokens_per_expert, handle
+            ) = self.buffer.dispatch_with_permute(
+                hidden=a1q,
+                scaling_factor=a1q_scale,
+                topk_idx=topk_ids,
+                topk_weights=topk_weights,
+                routing_map=None, # None = generated dynamically
+                handle=None,
+                num_dispatched_tokens=-1, #??
+            )
+
+            self.handle = handle
+            self.expert_probs = expert_probs
+
+            (sparse_to_dense_map,
+             rdma_to_attn_map,
+             attn_to_rdma_map,
+             num_dispatched_tokens_tensor,
+             local_expert_routing_map,
+             row_id_map,
+             num_tokens) = self.handle
+
+        topk = topk_ids.size(1)
+        if topk == 1 and expert_probs.dim() == 1:
+            expert_probs = expert_probs.view(expert_probs.shape(0), topk)
+
 
         #num_of_tokens_for_experts = num_of_tokens_for_experts.cpu()
+
+        print(f"POST DISPATCH {self.rank_expert_offset} {topk} {expert_x.shape} {expert_probs.shape}")
 
         if False:
             print(f"STUFF\n"
@@ -190,6 +224,10 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
+        # assert isinstance(
+        #     weight_and_reduce_impl, TopKWeightAndReduceDelegate
+        # ), f"Weight application and reduction happens in the combine kernel. {weight_and_reduce_impl}"
+
         # fused_expert_output can have 0 tokens - This happens when none of the
         # tokens from the all2all reach this EP rank.
         if False and fused_expert_output.numel() != 0:
@@ -206,16 +244,38 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if False:
             print(f"\nCOMBINE START({self.rank_expert_offset})\n")
 
-        combined_x, _ = self.buffer.combine(
-            tensor=fused_expert_output,
-            probs=self.expert_probs,  # None?
-            handle=self.handle,
-        )
+        if True:
+            combined_x, combined_probs = self.buffer.combine(
+                hidden=fused_expert_output,
+                probs=self.expert_probs,  # None?
+                handle=self.handle,
+            )
+        else:
+            combined_x, combined_probs = self.buffer.combine_with_unpermute(
+                hidden=fused_expert_output,
+                probs=self.expert_probs,  # None?
+                handle=self.handle,
+            )
 
+        top_k = topk_ids.shape[1]
+
+        combined_x = combined_x / top_k
+
+        # multiply by probs?
         if False:
             print(f"\nCOMBINE END({self.rank_expert_offset}) {combined_x.shape}/{combined_x.dtype}\n")
+
+        if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
+            weight_and_reduce_impl = TopKWeightAndReduceContiguous()
+
+        weight_and_reduce_impl.apply(
+            output=combined_x,
+            fused_expert_output=output,
+            topk_weights=combined_probs,
+            topk_ids=topk_ids,
+            apply_router_weight_on_input=apply_router_weight_on_input)
 
         # TODO(lucas): support this case with the refactored modular kernel
         # Respect inplace outputs.
         # apply weights???
-        output.copy_(combined_x, non_blocking=True)
+        #output.copy_(combined_x, non_blocking=True)
