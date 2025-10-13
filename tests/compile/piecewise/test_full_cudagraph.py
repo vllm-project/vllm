@@ -56,14 +56,12 @@ def llm_pair(request):
         use_inductor_graph_partition
     )
 
-    # TODO(luka/boyuan): fix Inductor assert
+    # FIXME: fix Inductor assert
+    # https://github.com/vllm-project/vllm/issues/26678
     if use_inductor_graph_partition:  # and not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("Inductor graph partition only supported in torch>=2.9")
-
-    # if use_inductor_graph_partition:
-    #     # TODO otherwise we reuse an unpartitioned graph
-    #     backend_config.comp_config["inductor_compile_config"] = \
-    #         {"force_disable_caches": True}
+        pytest.skip(
+            "Inductor graph partition only supported in torch>=2.9 and currently broken"
+        )
 
     # Dynamically skip test if GPU capability is not met
     if (
