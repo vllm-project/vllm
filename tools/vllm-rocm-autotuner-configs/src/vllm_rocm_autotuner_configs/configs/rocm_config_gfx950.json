@@ -1,0 +1,545 @@
+{
+  "default_config": {
+    "env_vars": {
+      "VLLM_DISABLE_COMPILE_CACHE": "1",
+      "VLLM_LOGGING_LEVEL": "INFO"
+    },
+    "cli_args": {
+      "dataset-name": "random",
+      "input-len": 1024,
+      "output-len": 1024,
+      "num-prompts": 32,
+      "swap-space": 16,
+      "async-scheduling": true,
+      "no-enable-prefix-caching": true,
+      "load-format": "dummy",
+      "tensor-parallel-size": 8
+    }
+  },
+  "model_configs": {
+    "amd/DeepSeek-R1-0528-MXFP4-Preview": {
+      "recipes": [
+        {
+          "name": "optimal",
+          "rank": 1,
+          "description": "Best performance configuration",
+          "env_vars": {},
+          "cli_args": {
+            "block-size": 1,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"]
+            },
+            "gpu-memory-utilization": 0.95,
+            "kv-cache-dtype": "fp8"
+          }
+        }
+      ],
+      "signature": "DeepseekV3ForCausalLM_61L_7168H_128A"
+    },
+    "deepseek-ai/DeepSeek-R1-0528": {
+      "recipes": [
+        {
+          "name": "optimal",
+          "rank": 1,
+          "description": "Best performance configuration",
+          "env_vars": {
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "TRITON_HIP_PRESHUFFLE_SCALES": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 1,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.95
+          }
+        },
+        {
+          "name": "alternative_1",
+          "rank": 2,
+          "description": "With unified attention and CK tile linear disabled",
+          "env_vars": {
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "TRITON_HIP_PRESHUFFLE_SCALES": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_CK_TILE_LINEAR": "0",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_USE_AITER_UNIFIED_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 1,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.95
+          }
+        },
+        {
+          "name": "alternative_2",
+          "rank": 3,
+          "description": "With MOE preshuffle scales disabled",
+          "env_vars": {
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "ROCM_TRITON_MOE_PRESHUFFLE_SCALES": "0",
+            "TRITON_HIP_PRESHUFFLE_SCALES": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0"
+          },
+          "cli_args": {
+            "block-size": 1,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.95
+          }
+        },
+        {
+          "name": "alternative_3",
+          "rank": 4,
+          "description": "With fused add RMSNORM pad disabled",
+          "env_vars": {
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "TRITON_HIP_PRESHUFFLE_SCALES": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_ROCM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD": "0"
+          },
+          "cli_args": {
+            "block-size": 1,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.95
+          }
+        },
+        {
+          "name": "alternative_4",
+          "rank": 5,
+          "description": "With triton linear enabled",
+          "env_vars": {
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "TRITON_HIP_PRESHUFFLE_SCALES": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_CK_TILE_LINEAR": "0",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_ROCM_USE_AITER_TRITON_LINEAR": "1",
+            "VLLM_USE_AITER_UNIFIED_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 1,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.95
+          }
+        }
+      ],
+      "signature": "DeepseekV3ForCausalLM_61L_7168H_128A"
+    },
+    "amd/Llama-3.1-405B-Instruct-MXFP4-Preview": {
+      "recipes": [
+        {
+          "name": "optimal",
+          "rank": 1,
+          "description": "Best performance configuration",
+          "env_vars": {
+            "AMDGCN_USE_BUFFER_OPS": "1",
+            "TRITON_HIP_USE_ASYNC_COPY": "1",
+            "TRITON_HIP_USE_BLOCK_PINGPONG": "1",
+            "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "1",
+            "VLLM_TRITON_FP4_GEMM_USE_ASM": "1",
+            "VLLM_USE_AITER_TRITON_ROPE": "1",
+            "VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 32,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.92,
+            "kv-cache-dtype": "fp8"
+          }
+        },
+        {
+          "name": "alternative_1",
+          "rank": 2,
+          "description": "With INT8 quantization instead of INT4",
+          "env_vars": {
+            "AMDGCN_USE_BUFFER_OPS": "1",
+            "TRITON_HIP_USE_ASYNC_COPY": "1",
+            "TRITON_HIP_USE_BLOCK_PINGPONG": "1",
+            "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT8",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "1",
+            "VLLM_TRITON_FP4_GEMM_USE_ASM": "1",
+            "VLLM_USE_AITER_TRITON_ROPE": "1",
+            "VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 32,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.92,
+            "kv-cache-dtype": "fp8"
+          }
+        },
+        {
+          "name": "alternative_2",
+          "rank": 3,
+          "description": "Without quick reduce quantization",
+          "env_vars": {
+            "AMDGCN_USE_BUFFER_OPS": "1",
+            "TRITON_HIP_USE_ASYNC_COPY": "1",
+            "TRITON_HIP_USE_BLOCK_PINGPONG": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "1",
+            "VLLM_TRITON_FP4_GEMM_USE_ASM": "1",
+            "VLLM_USE_AITER_TRITON_ROPE": "1",
+            "VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 32,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.92,
+            "kv-cache-dtype": "fp8"
+          }
+        }
+      ],
+      "signature": "LlamaForCausalLM_126L_16384H_128A"
+    },
+    "amd/Llama-3.3-70B-Instruct-FP8-KV": {
+      "recipes": [
+        {
+          "name": "optimal",
+          "rank": 1,
+          "description": "Best performance configuration",
+          "env_vars": {
+            "AMDGCN_USE_BUFFER_OPS": "1",
+            "TRITON_HIP_PRESHUFFLE_SCALES": "1",
+            "TRITON_HIP_USE_ASYNC_COPY": "1",
+            "TRITON_HIP_USE_BLOCK_PINGPONG": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "1",
+            "VLLM_USE_AITER_TRITON_ROPE": "1"
+          },
+          "cli_args": {
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.92,
+            "kv-cache-dtype": "fp8"
+          }
+        },
+        {
+          "name": "alternative_1",
+          "rank": 2,
+          "description": "With scratch reclaim and RMSNORM disabled",
+          "env_vars": {
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "TRITON_HIP_PRESHUFFLE_SCALES": "1",
+            "TRITON_HIP_USE_ASYNC_COPY": "1",
+            "TRITON_HIP_USE_BLOCK_PINGPONG": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "0"
+          },
+          "cli_args": {
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.92,
+            "kv-cache-dtype": "fp8"
+          }
+        },
+        {
+          "name": "alternative_2",
+          "rank": 3,
+          "description": "With custom paged attention",
+          "env_vars": {
+            "TRITON_HIP_USE_ASYNC_COPY": "1",
+            "TRITON_HIP_USE_BLOCK_PINGPONG": "1",
+            "VLLM_ROCM_CUSTOM_PAGED_ATTN": "1",
+            "VLLM_ROCM_USE_AITER_PAGED_ATTN": "0"
+          },
+          "cli_args": {
+            "block-size": 32,
+            "gpu-memory-utilization": 0.92,
+            "kv-cache-dtype": "fp8"
+          }
+        }
+      ],
+      "signature": "LlamaForCausalLM_80L_8192H_64A"
+    },
+    "Qwen/Qwen3-235B-A22B-FP8": {
+      "recipes": [
+        {
+          "name": "optimal",
+          "rank": 1,
+          "description": "Best performance configuration",
+          "env_vars": {
+            "HIP_VISIBLE_DEVICES": "0,1,2,3",
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "ROCM_TRITON_MOE_PRESHUFFLE_SCALES": "0",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "1",
+            "VLLM_ROCM_USE_AITER_TRITON_BF16_GEMM": "0",
+            "VLLM_ROCM_USE_AITER_TRITON_FP8_BMM": "0",
+            "VLLM_ROCM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD": "0",
+            "VLLM_ROCM_USE_AITER_TRITON_FUSED_MUL_ADD": "0",
+            "VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT": "0",
+            "VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE": "0",
+            "VLLM_ROCM_USE_AITER_TRITON_SILU_MUL_FP8_QUANT": "0",
+            "VLLM_USE_AITER_UNIFIED_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 64,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.95,
+            "kv-cache-dtype": "fp8"
+          }
+        },
+        {
+          "name": "alternative_1",
+          "rank": 2,
+          "description": "With unified attention and simpler AITER config",
+          "env_vars": {
+            "HIP_VISIBLE_DEVICES": "0,1,2,3",
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "1",
+            "VLLM_USE_AITER_UNIFIED_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 64,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.95,
+            "kv-cache-dtype": "fp8"
+          }
+        },
+        {
+          "name": "alternative_2",
+          "rank": 3,
+          "description": "With AITER linear disabled",
+          "env_vars": {
+            "HIP_VISIBLE_DEVICES": "0,1,2,3",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_LINEAR": "0",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "1"
+          },
+          "cli_args": {
+            "block-size": 64,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.95,
+            "kv-cache-dtype": "fp8"
+          }
+        }
+      ],
+      "signature": "Qwen3MoeForCausalLM_94L_4096H_64A"
+    },
+    "openai/gpt-oss-120b": {
+      "recipes": [
+        {
+          "name": "optimal",
+          "rank": 1,
+          "description": "Best performance configuration",
+          "env_vars": {
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_LINEAR": "0",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_ROCM_USE_AITER_TRITON_LINEAR": "1",
+            "VLLM_USE_AITER_UNIFIED_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 64,
+            "compilation-config": {
+              "compile_sizes": [1, 2, 4, 8, 16, 24, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
+              "cudagraph_capture_sizes": [8192, 4096, 2048, 1024, 1008, 992, 976, 960, 944, 928, 912, 896, 880, 864, 848, 832, 816, 800, 784, 768, 752, 736, 720, 704, 688, 672, 656, 640, 624, 608, 592, 576, 560, 544, 528, 512, 496, 480, 464, 448, 432, 416, 400, 384, 368, 352, 336, 320, 304, 288, 272, 256, 248, 240, 232, 224, 216, 208, 200, 192, 184, 176, 168, 160, 152, 144, 136, 128, 120, 112, 104, 96, 88, 80, 72, 64, 56, 48, 40, 32, 24, 16, 8, 4, 2, 1],
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.92
+          }
+        },
+        {
+          "name": "alternative_1",
+          "rank": 2,
+          "description": "With fused RMSNORM FP8 quant disabled",
+          "env_vars": {
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT": "0",
+            "VLLM_USE_AITER_UNIFIED_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 64,
+            "compilation-config": {
+              "compile_sizes": [1, 2, 4, 8, 16, 24, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
+              "cudagraph_capture_sizes": [8192, 4096, 2048, 1024, 1008, 992, 976, 960, 944, 928, 912, 896, 880, 864, 848, 832, 816, 800, 784, 768, 752, 736, 720, 704, 688, 672, 656, 640, 624, 608, 592, 576, 560, 544, 528, 512, 496, 480, 464, 448, 432, 416, 400, 384, 368, 352, 336, 320, 304, 288, 272, 256, 248, 240, 232, 224, 216, 208, 200, 192, 184, 176, 168, 160, 152, 144, 136, 128, 120, 112, 104, 96, 88, 80, 72, 64, 56, 48, 40, 32, 24, 16, 8, 4, 2, 1],
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.92
+          }
+        },
+        {
+          "name": "alternative_2",
+          "rank": 3,
+          "description": "With selective AITER components disabled",
+          "env_vars": {
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_LINEAR": "0",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "0",
+            "VLLM_USE_AITER_UNIFIED_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 64,
+            "compilation-config": {
+              "compile_sizes": [1, 2, 4, 8, 16, 24, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
+              "cudagraph_capture_sizes": [8192, 4096, 2048, 1024, 1008, 992, 976, 960, 944, 928, 912, 896, 880, 864, 848, 832, 816, 800, 784, 768, 752, 736, 720, 704, 688, 672, 656, 640, 624, 608, 592, 576, 560, 544, 528, 512, 496, 480, 464, 448, 432, 416, 400, 384, 368, 352, 336, 320, 304, 288, 272, 256, 248, 240, 232, 224, 216, 208, 200, 192, 184, 176, 168, 160, 152, 144, 136, 128, 120, 112, 104, 96, 88, 80, 72, 64, 56, 48, 40, 32, 24, 16, 8, 4, 2, 1],
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.92
+          }
+        }
+      ],
+      "signature": "GptOssForCausalLM_36L_2880H_64A"
+    }
+  }
+}

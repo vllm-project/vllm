@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=79.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-rocm-autotuner-configs"
+version = "0.2.1"
+description = "ROCm tuned environment variable configurations for vLLM on AMD GPUs"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+vllm-rocm-detect = "vllm_rocm_autotuner_configs.utils:main"
+
+[project.optional-dependencies]
+gpu-detect = [
+    "amdsmi>=6.4.4",
+]
+dev = [
+    "pytest>=8.4.2",
+    "pytest-cov>=6.0.0",
+    "amdsmi>=6.4.4",
+    "huggingface-hub>=0.35.3",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+vllm_rocm_autotuner_configs = ["configs/*.json", "py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "requires_vllm: marks tests that require vLLM installed",
+    "requires_gpu: marks tests that require actual GPU",
+]
+addopts = [
+    "--verbose",
+    "--strict-markers",
+    "-ra",
+    "--tb=short",
+    "-m", "not slow and not e2e and not requires_gpu",
+]
+log_cli = true
+log_cli_level = "INFO"

@@ -1,0 +1,333 @@
+{
+  "default_config": {
+    "env_vars": {
+      "VLLM_DISABLE_COMPILE_CACHE": "1",
+      "VLLM_LOGGING_LEVEL": "INFO"
+    },
+    "cli_args": {
+      "dataset-name": "random",
+      "input-len": 1024,
+      "output-len": 1024,
+      "num-prompts": 32,
+      "swap-space": 16,
+      "async-scheduling": true,
+      "no-enable-prefix-caching": true,
+      "load-format": "dummy",
+      "tensor-parallel-size": 8
+    }
+  },
+  "model_configs": {
+    "deepseek-ai/DeepSeek-R1-0528": {
+      "recipes": [
+        {
+          "name": "optimal",
+          "rank": 1,
+          "description": "Best performance configuration",
+          "env_vars": {
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "TRITON_HIP_PRESHUFFLE_SCALES": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 1,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.95
+          }
+        },
+        {
+          "name": "alternative_1",
+          "rank": 2,
+          "description": "Alternative with unified attention",
+          "env_vars": {
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "TRITON_HIP_PRESHUFFLE_SCALES": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_USE_AITER_UNIFIED_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 1,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.95
+          }
+        },
+        {
+          "name": "alternative_2",
+          "rank": 3,
+          "description": "With MOE padding disabled",
+          "env_vars": {
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "TRITON_HIP_PRESHUFFLE_SCALES": "1",
+            "VLLM_ROCM_MOE_PADDING": "0",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_USE_AITER_UNIFIED_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 1,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.95
+          }
+        }
+      ],
+      "signature": "DeepseekV3ForCausalLM_61L_7168H_128A"
+    },
+    "amd/Llama-3.1-405B-Instruct-FP8-KV": {
+      "recipes": [
+        {
+          "name": "optimal",
+          "rank": 1,
+          "description": "Best performance configuration",
+          "env_vars": {
+            "TRITON_HIP_USE_BLOCK_PINGPONG": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_LINEAR": "0",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_ROCM_USE_AITER_MOE": "0",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "1",
+            "VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 64,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.92,
+            "kv-cache-dtype": "fp8"
+          }
+        },
+        {
+          "name": "alternative_1",
+          "rank": 2,
+          "description": "With INT4 quantization",
+          "env_vars": {
+            "TRITON_HIP_USE_BLOCK_PINGPONG": "1",
+            "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_LINEAR": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_ROCM_USE_AITER_MOE": "0",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "0",
+            "VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 64,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.92,
+            "kv-cache-dtype": "fp8"
+          }
+        },
+        {
+          "name": "alternative_2",
+          "rank": 3,
+          "description": "With custom paged attention",
+          "env_vars": {
+            "TRITON_HIP_USE_ASYNC_COPY": "1",
+            "TRITON_HIP_USE_BLOCK_PINGPONG": "1",
+            "VLLM_ROCM_CUSTOM_PAGED_ATTN": "1",
+            "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": "INT4",
+            "VLLM_ROCM_USE_AITER_PAGED_ATTN": "0"
+          },
+          "cli_args": {
+            "block-size": 32,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.92,
+            "kv-cache-dtype": "fp8"
+          }
+        }
+      ],
+      "signature": "LlamaForCausalLM_126L_16384H_128A"
+    },
+    "amd/Llama-3.3-70B-Instruct-FP8-KV": {
+      "recipes": [
+        {
+          "name": "optimal",
+          "rank": 1,
+          "description": "Best performance configuration",
+          "env_vars": {
+            "TRITON_HIP_USE_ASYNC_COPY": "1",
+            "TRITON_HIP_USE_BLOCK_PINGPONG": "1",
+            "VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 64,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.92,
+            "kv-cache-dtype": "fp8"
+          }
+        },
+        {
+          "name": "alternative_1",
+          "rank": 2,
+          "description": "With AITER enabled and scratch reclaim",
+          "env_vars": {
+            "HSA_NO_SCRATCH_RECLAIM": "1",
+            "TRITON_HIP_PRESHUFFLE_SCALES": "1",
+            "TRITON_HIP_USE_ASYNC_COPY": "1",
+            "TRITON_HIP_USE_BLOCK_PINGPONG": "1",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "0"
+          },
+          "cli_args": {
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.92,
+            "kv-cache-dtype": "fp8"
+          }
+        },
+        {
+          "name": "alternative_2",
+          "rank": 3,
+          "description": "With AITER and RMSNORM",
+          "env_vars": {
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_LINEAR": "0",
+            "VLLM_ROCM_USE_AITER_MHA": "0",
+            "VLLM_ROCM_USE_AITER_MOE": "0",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "1",
+            "VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 64,
+            "gpu-memory-utilization": 0.92,
+            "kv-cache-dtype": "fp8"
+          }
+        }
+      ],
+      "signature": "LlamaForCausalLM_80L_8192H_64A"
+    },
+    "Qwen/Qwen3-235B-A22B-FP8": {
+      "recipes": [
+        {
+          "name": "optimal",
+          "rank": 1,
+          "description": "Best performance configuration",
+          "env_vars": {
+            "HIP_VISIBLE_DEVICES": "0,1,2,3",
+            "VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"
+          },
+          "cli_args": {
+            "block-size": 32,
+            "compilation-config": {
+              "pass_config": {
+                "enable_attn_fusion": true,
+                "enable_noop": true,
+                "enable_fusion": true
+              },
+              "cudagraph_mode": "FULL",
+              "custom_ops": ["+silu_and_mul", "+quant_fp8"],
+              "splitting_ops": []
+            },
+            "gpu-memory-utilization": 0.95,
+            "kv-cache-dtype": "fp8"
+          }
+        },
+        {
+          "name": "alternative_1",
+          "rank": 2,
+          "description": "With AITER enabled",
+          "env_vars": {
+            "HIP_VISIBLE_DEVICES": "0,1,2,3",
+            "VLLM_ROCM_USE_AITER": "1"
+          },
+          "cli_args": {
+            "block-size": 64,
+            "gpu-memory-utilization": 0.95,
+            "kv-cache-dtype": "fp8"
+          }
+        },
+        {
+          "name": "alternative_2",
+          "rank": 3,
+          "description": "With selective AITER components",
+          "env_vars": {
+            "HIP_VISIBLE_DEVICES": "0,1,2,3",
+            "VLLM_ROCM_USE_AITER": "1",
+            "VLLM_ROCM_USE_AITER_LINEAR": "0",
+            "VLLM_ROCM_USE_AITER_MHA": "1",
+            "VLLM_ROCM_USE_AITER_MOE": "0",
+            "VLLM_ROCM_USE_AITER_RMSNORM": "0"
+          },
+          "cli_args": {
+            "block-size": 64,
+            "gpu-memory-utilization": 0.95,
+            "kv-cache-dtype": "fp8",
+            "no-enable-prefix-caching": true
+          }
+        }
+      ],
+      "signature": "Qwen3MoeForCausalLM_94L_4096H_64A"
+    }
+  }
+}
