@@ -467,6 +467,9 @@ class Gemma3nMultimodalEmbedder(nn.Module):
             emb_norm = self.hard_embedding_norm(hard_emb)
 
         emb_norm_proj, _ = self.embedding_projection(emb_norm)
+        if emb_norm_proj.ndim == 2:
+            # One-element batch squeezing when lora is enabled
+            emb_norm_proj = emb_norm_proj.unsqueeze(0)
         return self.embedding_post_projection_norm(emb_norm_proj)
 
 
