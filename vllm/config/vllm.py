@@ -328,11 +328,7 @@ class VllmConfig:
 
         # If user does not set custom ops via none or all set it here based on
         # compilation level and backend.
-        if (
-            self.compilation_config.custom_ops.count("none")
-            + self.compilation_config.custom_ops.count("all")
-            == 0
-        ):
+        if none(s in self.compilation_config.custom_ops for s in ("all", "none")):
             if (
                 self.compilation_config.backend == "inductor"
                 and self.compilation_config.level > CompilationLevel.NO_COMPILATION
