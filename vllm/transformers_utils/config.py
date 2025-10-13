@@ -1051,9 +1051,9 @@ def try_get_tokenizer_config(
 
 @cache
 def try_get_dense_modules(
-    model: Union[str, Path],
-    revision: Optional[str] = None,
-) -> Optional[list[dict[str, Any]]]:
+    model: str | Path,
+    revision: str | None = None,
+) -> list[dict[str, Any]] | None:
     try:
         modules = get_hf_file_to_dict("modules.json", model, revision)
         if not modules:
