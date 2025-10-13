@@ -1046,11 +1046,11 @@ def try_get_optimal_moe_config(
 
 
 def vllm_topk_softmax(
-        topk_weights: torch.Tensor,
-        topk_indices: torch.Tensor,
-        token_expert_indices: torch.Tensor,
-        gating_output: torch.Tensor,
-        renormalize: bool,
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_softmax(
         topk_weights,
@@ -1095,11 +1095,9 @@ def fused_topk(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
 
-    # gating_output_float = gating_output.float()  # TODO(woosuk): Optimize this.
-
     topk_func = dispatch_topk_func()
     topk_weights, topk_ids = topk_func(
-        topk_weights, topk_ids, token_expert_indices, gating_output_float, renormalize
+        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
     )
 
     return topk_weights, topk_ids, token_expert_indices

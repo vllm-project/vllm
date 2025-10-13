@@ -1835,8 +1835,7 @@ def topk_softmax(
     renormalize: bool = False,
 ) -> None:
     torch.ops._moe_C.topk_softmax(
-        topk_weights, topk_ids, token_expert_indices, gating_output,
-        renormalize
+        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
     )
 
 
