@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-import re
+import regex as re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
