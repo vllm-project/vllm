@@ -445,13 +445,12 @@ class GraniteMoeHybridModel(nn.Module):
             #  to vLLM (experts_w13({e}.w1, {e}.w2), experts_w3({e}.w3), gate)
             # The renaming and parameter loading logic is the same for weight
             # and weight_scale tensors so we can reuse them without issues.
-            if n.endswith("weight_shape"):
-                continue
 
             if (
                 n.endswith(".block_sparse_moe.input_linear.weight")
                 or n.endswith(".block_sparse_moe.input_linear.weight_scale")
                 or n.endswith(".block_sparse_moe.input_linear.weight_packed")
+                or n.endswith(".block_sparse_moe.input_linear.weight_shape")
             ):
                 for e in range(p.size(0)):
                     w1_name = n.replace(
@@ -462,7 +461,17 @@ class GraniteMoeHybridModel(nn.Module):
                         ".block_sparse_moe.input_linear.weight",
                         f".block_sparse_moe.experts.{e}.w3.weight",
                     )
-                    w1_param, w3_param = p[e].chunk(2, dim=0)
+                    if n.endswith(".weight_shape"):
+                        # e.g., .weight_packed of shape tensor([  64, 1024, 1536])
+                        # has 64 expert shape of tensor([  1024, 1536]).
+                        # This param would be chunked into w1_param and w3_param
+                        # of shape tensor([  512, 1536]) and tensor([  512, 1536]).
+                        w1_param, w3_param = p[1:], p[1:]
+                        w1_param[0] = w1_param[0] // 2
+                        w3_param[0] = w3_param[0] // 2
+                    else:
+                        w1_param, w3_param = p[e].chunk(2, dim=0)
+
                     _load_expert(
                         n.replace(".input_linear.", ".experts.w13_"),
                         w1_param,
@@ -481,13 +490,14 @@ class GraniteMoeHybridModel(nn.Module):
                 n.endswith(".block_sparse_moe.output_linear.weight")
                 or n.endswith(".block_sparse_moe.output_linear.weight_scale")
                 or n.endswith(".block_sparse_moe.output_linear.weight_packed")
+                or n.endswith(".block_sparse_moe.output_linear.weight_shape")
             ):
                 for e in range(p.size(0)):
                     w2_name = n.replace(
                         ".block_sparse_moe.output_linear.weight",
                         f".block_sparse_moe.experts.{e}.w2.weight",
                     )
-                    w2_param = p[e]
+                    w2_param = p[e] if not n.endswith(".weight_shape") else p[1:]
                     _load_expert(
                         n.replace(".output_linear.", ".experts.w2_"),
                         w2_param,
