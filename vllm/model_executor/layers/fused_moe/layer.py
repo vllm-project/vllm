@@ -57,7 +57,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.utils.import_utils import has_deep_ep, has_pplx
+from vllm.utils.import_utils import has_deep_ep, has_pplx, has_hybrid_deep_ep
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -73,11 +73,12 @@ if current_platform.is_cuda_alike():
         )
     if has_deep_ep():
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
-        from .deepep_hybrid_prepare_finalize import DeepEPHybridPrepareAndFinalize
         from .deepep_ll_prepare_finalize import (
             DEEPEP_QUANT_BLOCK_SHAPE,
             DeepEPLLPrepareAndFinalize,
         )
+    if has_hybrid_deep_ep():
+        from .deepep_hybrid_prepare_finalize import DeepEPHybridPrepareAndFinalize
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = object  # type: ignore
