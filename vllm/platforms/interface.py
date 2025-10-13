@@ -171,7 +171,11 @@ class Platform:
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     def is_sleep_mode_available(self) -> bool:
-        return self._enum == PlatformEnum.CUDA
+        # TODO: Actually only mi3xx has the sleep mode support now
+        # for ROCm, but currently we don't have a way to detect the
+        # exact GPU model statelessly here. So we return True for
+        # all ROCm platforms for now.
+        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
