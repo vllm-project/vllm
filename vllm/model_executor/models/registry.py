@@ -402,7 +402,7 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "PaliGemmaForConditionalGeneration": (
         "transformers",
         "TransformersForMultimodalLM",
-    ),  # noqa: E501
+    ),
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
