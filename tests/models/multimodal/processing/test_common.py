@@ -222,7 +222,6 @@ def _test_processing_correctness(
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
     "ovis": False,
     "ovis2_5": False,
-    "paligemma": False,
     "ultravox": False,
     "whisper": False,
 }
