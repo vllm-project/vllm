@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Literal, Optional, overload
+from typing import Literal, overload
 
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
@@ -49,12 +49,12 @@ class KVCacheBlocks:
     def get_block_ids(
         self,
         allow_none: Literal[True] = True,
-    ) -> Optional[tuple[list[int], ...]]: ...
+    ) -> tuple[list[int], ...] | None: ...
 
     def get_block_ids(
         self,
         allow_none: bool = False,
-    ) -> Optional[tuple[list[int], ...]]:
+    ) -> tuple[list[int], ...] | None:
         """
         Converts the KVCacheBlocks instance to block_ids.
 
@@ -97,7 +97,7 @@ class KVCacheManager:
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
-        self.block_size: Optional[int] = None
+        self.block_size: int | None = None
         if self.enable_caching:
             assert (
                 len(
@@ -140,7 +140,7 @@ class KVCacheManager:
         """
         return self.block_pool.get_usage()
 
-    def make_prefix_cache_stats(self) -> Optional[PrefixCacheStats]:
+    def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.
 
         Returns:
@@ -205,11 +205,11 @@ class KVCacheManager:
         request: Request,
         num_new_tokens: int,
         num_new_computed_tokens: int = 0,
-        new_computed_blocks: Optional[KVCacheBlocks] = None,
+        new_computed_blocks: KVCacheBlocks | None = None,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
-    ) -> Optional[KVCacheBlocks]:
+    ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
         Args:

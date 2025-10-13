@@ -32,7 +32,6 @@ import dataclasses
 import json
 import random
 import time
-from typing import Optional
 
 from transformers import PreTrainedTokenizerBase
 
@@ -80,7 +79,7 @@ def sample_requests_from_dataset(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     input_length_range: tuple[int, int],
-    fixed_output_len: Optional[int],
+    fixed_output_len: int | None,
 ) -> list[Request]:
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
@@ -128,7 +127,7 @@ def sample_requests_from_random(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     input_length_range: tuple[int, int],
-    fixed_output_len: Optional[int],
+    fixed_output_len: int | None,
     prefix_len: int,
 ) -> list[Request]:
     requests = []

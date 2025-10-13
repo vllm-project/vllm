@@ -13,7 +13,7 @@ from datetime import datetime
 from enum import Enum
 from http import HTTPStatus
 from statistics import mean
-from typing import NamedTuple, Union
+from typing import NamedTuple
 
 import aiohttp  # type: ignore
 import numpy as np  # type: ignore
@@ -169,7 +169,7 @@ class MovingAverage:
 class DebugStats:
     def __init__(self, logger: logging.Logger, window_size: int) -> None:
         self.logger = logger
-        self.metrics: dict[str, Union[MovingAverage, MetricStats]] = {
+        self.metrics: dict[str, MovingAverage | MetricStats] = {
             "moving_avg_ttft_ms": MovingAverage(window_size),
             "moving_avg_tpot_ms": MovingAverage(window_size),
             "ttft_ms": MetricStats(),
@@ -636,7 +636,7 @@ async def client_main(
 
             if args.verbose:
                 curr_time_sec: float = time.perf_counter()
-                time_since_last_turn: Union[str, float] = "N/A"
+                time_since_last_turn: str | float = "N/A"
                 if conv_id in time_of_last_turn:
                     time_since_last_turn = round(
                         curr_time_sec - time_of_last_turn[conv_id], 3
@@ -928,13 +928,13 @@ async def main_mp(
                     f"{num_clients_finished} out of {bench_args.num_clients} clients finished, collected {len(client_metrics)} measurements, runtime {runtime_sec:.3f} sec{Color.RESET}"  # noqa: E501
                 )
 
-                rps: Union[str, float] = round(len(client_metrics) / runtime_sec, 3)
+                rps: str | float = round(len(client_metrics) / runtime_sec, 3)
                 if len(client_metrics) < (5 * bench_args.num_clients):
                     # Do not estimate the RPS if the number of samples is very low
                     # (threshold can be tuned if needed)
                     rps = "N/A"
 
-                runtime_left_sec: Union[str, float] = round(
+                runtime_left_sec: str | float = round(
                     (runtime_sec / finished_convs) * (total_convs - finished_convs), 3
                 )
                 if percent < 0.05:
