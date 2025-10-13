@@ -236,6 +236,7 @@ if False and has_pplx():
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize,
     )
+
     register_prepare_and_finalize(
         PplxPrepareAndFinalize,
         batched_format,
@@ -332,8 +333,8 @@ if False and cutlass_fp8_supported():
     )
 
 if False and cutlass_fp4_supported():
-    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-        CutlassExpertsFp4)
+    from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp4
+
     register_experts(
         CutlassExpertsFp4,
         standard_format,
