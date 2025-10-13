@@ -1416,14 +1416,14 @@ class OpenAIServingResponses(OpenAIServing):
         current_output_index = 0
         current_item_id: str = ""
         sent_output_item_added = False
-        sent_function_call_item_added = False
+        is_first_function_call_delta = False
         async for ctx in result_generator:
             assert isinstance(ctx, StreamingHarmonyContext)
 
             if ctx.is_expecting_start():
                 current_output_index += 1
                 sent_output_item_added = False
-                sent_function_call_item_added = False
+                is_first_function_call_delta = False
                 if len(ctx.parser.messages) > 0:
                     previous_item = ctx.parser.messages[-1]
                     if previous_item.recipient is not None:
@@ -1829,8 +1829,8 @@ class OpenAIServingResponses(OpenAIServing):
                     arguments="",
                     status="in_progress",
                 )
-                if sent_function_call_item_added is False:
-                    sent_function_call_item_added = True
+                if is_first_function_call_delta is False:
+                    is_first_function_call_delta = True
                     current_item_id = f"fc_{random_uuid()}"
                     yield _increment_sequence_number_and_return(
                         ResponseOutputItemAddedEvent(
