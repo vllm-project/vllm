@@ -70,7 +70,7 @@ from vllm.multimodal.evs import (
 )
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.processing import InputProcessingContext, PromptReplacement, PromptUpdate
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -972,6 +972,12 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
             use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
+    
+    def __init__(self, ctx: InputProcessingContext) -> None:
+        super().__init__(ctx)
+        mm_config = ctx.get_mm_config()
+        if getattr(mm_config, "mm_processor_dynamic_kwargs", None) is None:
+            mm_config.mm_processor_dynamic_kwargs = ["fps"]
 
 
 class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
