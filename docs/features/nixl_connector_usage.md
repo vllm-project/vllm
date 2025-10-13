@@ -160,7 +160,11 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
 
 ### Heterogenuous KV Layout support
 
- - Prefill with 'HND' and decode with 'NHD': supported with setting --kv-transfer-config '{..., "enable_permute_local_kv":"True"}'
+Support use case: Prefill with 'HND' and decode with 'NHD' with experimental configuration
+
+```bash
+--kv-transfer-config '{..., "enable_permute_local_kv":"True"}'
+```
 
 ## Example Scripts/Code
 

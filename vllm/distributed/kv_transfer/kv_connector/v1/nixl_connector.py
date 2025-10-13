@@ -1068,7 +1068,8 @@ class NixlConnectorWorker:
         remote_block_len = nixl_agent_meta.block_lens[0]
         if nixl_agent_meta.kv_cache_layout != self.kv_cache_layout:
             if (
-                self.vllm_config.kv_transfer_config.enable_permute_local_kv
+                self.vllm_config.kv_transfer_config is not None
+                and self.vllm_config.kv_transfer_config.enable_permute_local_kv
                 and nixl_agent_meta.kv_cache_layout == "HND"
             ):
                 logger.info(
