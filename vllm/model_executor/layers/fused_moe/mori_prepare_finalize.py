@@ -5,7 +5,7 @@ mori prepare and finalize module for expert parallelism.
 Migration from DeepEP to mori for AMD GPU support.
 """
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -57,10 +57,10 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    def max_num_tokens_per_rank(self) -> Optional[int]:
+    def max_num_tokens_per_rank(self) -> int | None:
         return self.max_num_tokens
 
-    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+    def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int32
 
     def num_dispatchers(self) -> int:
@@ -75,7 +75,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
-        expert_map: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
@@ -152,7 +152,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-        extra_finalize_args: Optional[dict] = None,
+        extra_finalize_args: dict | None = None,
     ) -> None:
         """
         Finalize expert outputs using mori combine operation.

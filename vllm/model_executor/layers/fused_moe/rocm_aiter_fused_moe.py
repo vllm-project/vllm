@@ -209,12 +209,12 @@ def rocm_aiter_fused_moe_impl(
     activation_method: int = ActivationMethod.SILU.value,
     quant_method: int = QuantMethod.NO.value,
     doweight_stage1: bool = False,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
-    expert_num_tokens: Optional[torch.Tensor] = None,
-    output_dtype: Optional[torch.dtype] = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    expert_num_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -257,12 +257,12 @@ def rocm_aiter_fused_moe_fake(
     activation_method: int = ActivationMethod.SILU.value,
     quant_method: int = QuantMethod.NO.value,
     doweight_stage1: bool = False,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
-    expert_num_tokens: Optional[torch.Tensor] = None,
-    output_dtype: Optional[torch.dtype] = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    expert_num_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -353,11 +353,11 @@ def rocm_aiter_fused_experts(
     topk_ids: torch.Tensor,
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
-    expert_map: Optional[torch.Tensor] = None,
-    expert_num_tokens: Optional[torch.Tensor] = None,
-    output_dtype: Optional[torch.dtype] = None,
-    quant_config: Optional[FusedMoEQuantConfig] = None,
-    a1q_scale: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
+    expert_num_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
+    quant_config: FusedMoEQuantConfig | None = None,
+    a1q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
