@@ -15,7 +15,7 @@ python examples/online_serving/pooling/jinaai_rerank_client.py
 ## Named Entity Recognition (NER) usage
 
 ```bash
-python examples/online_serving/pooling/ner.py
+python examples/online_serving/pooling/ner_client.py
 ```
 
 ## Openai chat embedding for multimodal usage
