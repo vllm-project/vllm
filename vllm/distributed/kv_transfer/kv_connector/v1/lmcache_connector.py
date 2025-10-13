@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
 
-from vllm.config import VllmConfig
+from vllm.config import ConnectorVllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorHMAMixin,
     KVConnectorMetadata,
     KVConnectorRole,
-    SupportsHMA,
 )
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+class LMCacheConnectorV1(KVConnectorHMAMixin, KVConnectorBase_V1):
+    def __init__(self, vllm_config: ConnectorVllmConfig, role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
         self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config, role, self)
 
@@ -158,10 +158,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
         """
         return self._lmcache_engine.build_connector_meta(scheduler_output)
 
-    def request_finished(
+    def request_finished(  # type: ignore[override]
         self,
         request: "Request",
-        block_ids: Union[list[int], tuple[list[int], ...]],
+        block_ids: tuple[list[int], ...],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.
@@ -172,5 +172,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
             get_finished().
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
+
+        Note:
+            This method intentionally uses tuple[list[int], ...] from
+            KVConnectorHMAMixin interface instead of list[int] from
+            KVConnectorBase_V1 to support hybrid memory allocation.
         """
         return self._lmcache_engine.request_finished(request, block_ids)

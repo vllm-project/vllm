@@ -38,7 +38,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 import torch
 
@@ -70,18 +70,36 @@ CopyBlocksOp = Callable[
 logger = init_logger(__name__)
 
 
-class SupportsHMA:
+class KVConnectorHMAMixin:
     """
-    Inherent this interface if the connector supports hybrid memory
-    allocator (HMA). This is required to use the connector together
-    with hybrid memory allocator.
+    Mixin class for connectors that support hybrid memory allocator (HMA).
+    This is required to use the connector together with hybrid memory allocator.
     """
 
-    pass
+    def request_finished(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        """
+        Called exactly once when a request has finished, before its blocks are
+        freed.
+
+        The connector may assumes responsibility for freeing the the blocks
+        asynchronously by returning True.
+
+        Returns:
+            True if the request is being saved/sent asynchronously and blocks
+            should not be freed until the request_id is returned from
+            get_finished().
+            Optional KVTransferParams to be included in the request outputs
+            returned by the engine.
+        """
+        return False, None
 
 
-def supports_hma(cls: type) -> bool:
-    return isinstance(cls, SupportsHMA)
+def supports_hma(connector: Any) -> bool:
+    return isinstance(connector, KVConnectorHMAMixin)
 
 
 class KVConnectorRole(enum.Enum):
@@ -374,7 +392,7 @@ class KVConnectorBase_V1(ABC):
     def request_finished(
         self,
         request: "Request",
-        block_ids: Union[list[int], tuple[list[int], ...]],
+        block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called exactly once when a request has finished, before its blocks are
