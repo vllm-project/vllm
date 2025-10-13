@@ -398,6 +398,11 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
     "SmolLM3ForCausalLM": ("transformers", "TransformersForCausalLM"),
     # Multimodal models
     "Emu3ForConditionalGeneration": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
+    "Gemma3ForConditionalGeneration": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
+    "PaliGemmaForConditionalGeneration": (
+        "transformers",
+        "TransformersForMultimodalLM",
+    ),  # noqa: E501
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
