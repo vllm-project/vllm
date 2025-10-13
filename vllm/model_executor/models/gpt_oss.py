@@ -630,7 +630,7 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
     packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"]}
 
     embedding_modules = {
-        "embed_tokens": "input_embeddings",
+        "embedding": "input_embeddings",
         "lm_head": "output_embeddings",
     }
     embedding_padding_modules = ["lm_head"]
