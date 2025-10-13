@@ -466,7 +466,8 @@ class GraniteMoeHybridModel(nn.Module):
                         # has 64 expert shape of tensor([  1024, 1536]).
                         # This param would be chunked into w1_param and w3_param
                         # of shape tensor([  512, 1536]) and tensor([  512, 1536]).
-                        w1_param, w3_param = p[1:], p[1:]
+                        w1_param = p[1:].clone()
+                        w3_param = p[1:].clone()
                         w1_param[0] = w1_param[0] // 2
                         w3_param[0] = w3_param[0] // 2
                     else:
@@ -497,7 +498,9 @@ class GraniteMoeHybridModel(nn.Module):
                         ".block_sparse_moe.output_linear.weight",
                         f".block_sparse_moe.experts.{e}.w2.weight",
                     )
-                    w2_param = p[e] if not n.endswith(".weight_shape") else p[1:]
+                    w2_param = (
+                        p[e] if not n.endswith(".weight_shape") else p[1:].clone()
+                    )
                     _load_expert(
                         n.replace(".output_linear.", ".experts.w2_"),
                         w2_param,
