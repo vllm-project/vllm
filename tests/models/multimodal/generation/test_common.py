@@ -185,6 +185,7 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.5, 1.0)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
+            "mm_processor_kwargs": {"do_pan_and_scan": True},
         },
         marks=[pytest.mark.core_model],
     ),
@@ -349,24 +350,6 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[large_gpu_mark(min_gb=32)],
-    ),
-    "gemma3": VLMTestInfo(
-        models=["google/gemma-3-4b-it"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<bos><start_of_turn>user\n{img_prompt}<end_of_turn>\n<start_of_turn>model\n",  # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts(
-            {
-                "stop_sign": "<start_of_image>What's the content in the center of the image?",  # noqa: E501
-                "cherry_blossom": "<start_of_image>What is the season?",
-            }
-        ),
-        multi_image_prompt="<start_of_image><start_of_image>Describe the two images in detail.",  # noqa: E501
-        max_model_len=4096,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
-        patch_hf_runner=model_utils.gemma3_patch_hf_runner,
-        num_logprobs=10,
     ),
     "glm4v": VLMTestInfo(
         models=["zai-org/glm-4v-9b"],
