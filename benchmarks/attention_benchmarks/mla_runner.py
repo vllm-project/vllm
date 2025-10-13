@@ -247,45 +247,54 @@ def build_mla_metadata_cutlass(
     return metadata, kv_cache, layer
 
 
-# Backend configuration mapping for unified runner
-_BACKEND_CONFIG = {
-    "flash_attn_mla": {
-        "module": "vllm.v1.attention.backends.mla.flashattn_mla",
-        "impl_class": "FlashAttnMLAImpl",
-        "metadata_class": "FlashAttnMLAMetadata",
-        "decode_metadata_class": "FlashAttnMLADecodeMetadata",
-        "builder_class": "FlashAttnMLAMetadataBuilder",
-        "query_format": "tuple",  # (q_nope, q_pe)
-        "block_size": None,  # Use config block_size
-    },
+# Backend name to class name prefix mapping
+_BACKEND_NAME_MAP = {
+    "flash_attn_mla": "FlashAttnMLA",
+    "flashmla": "FlashMLA",
+    "flashinfer_mla": "FlashInferMLA",
+    "cutlass_mla": "CutlassMLA",
+}
+
+# Special properties that differ from defaults
+_BACKEND_PROPERTIES = {
     "flashmla": {
-        "module": "vllm.v1.attention.backends.mla.flashmla",
-        "impl_class": "FlashMLAImpl",
-        "metadata_class": "FlashMLAMetadata",
-        "decode_metadata_class": "FlashMLADecodeMetadata",
-        "builder_class": None,
-        "query_format": "concat",  # Single concatenated tensor
+        "query_format": "concat",  # Single concatenated tensor (vs tuple)
         "block_size": 64,  # FlashMLA uses fixed block size
     },
-    "flashinfer_mla": {
-        "module": "vllm.v1.attention.backends.mla.flashinfer_mla",
-        "impl_class": "FlashInferMLAImpl",
-        "metadata_class": "MLACommonMetadata",
-        "decode_metadata_class": "MLACommonDecodeMetadata",
-        "builder_class": None,
-        "query_format": "tuple",
-        "block_size": None,
-    },
-    "cutlass_mla": {
-        "module": "vllm.v1.attention.backends.mla.cutlass_mla",
-        "impl_class": "CutlassMLAImpl",
-        "metadata_class": "MLACommonMetadata",
-        "decode_metadata_class": "MLACommonDecodeMetadata",
-        "builder_class": None,
-        "query_format": "tuple",
-        "block_size": None,
-    },
 }
+
+
+def _get_backend_config(backend: str) -> dict:
+    """
+    Get backend configuration using naming conventions.
+
+    All MLA backends follow the pattern:
+    - Module: vllm.v1.attention.backends.mla.{backend}
+    - Impl: {Name}Impl
+    - Metadata: {Name}Metadata (or MLACommonMetadata)
+    - DecodeMetadata: {Name}DecodeMetadata (or MLACommonDecodeMetadata)
+    - MetadataBuilder: {Name}MetadataBuilder
+    """
+    if backend not in _BACKEND_NAME_MAP:
+        raise ValueError(f"Unknown backend: {backend}")
+
+    name = _BACKEND_NAME_MAP[backend]
+    props = _BACKEND_PROPERTIES.get(backend, {})
+
+    # Check if backend uses common metadata (FlashInfer, CUTLASS)
+    uses_common = backend in ("flashinfer_mla", "cutlass_mla")
+
+    return {
+        "module": f"vllm.v1.attention.backends.mla.{backend}",
+        "impl_class": f"{name}Impl",
+        "metadata_class": "MLACommonMetadata" if uses_common else f"{name}Metadata",
+        "decode_metadata_class": "MLACommonDecodeMetadata"
+        if uses_common
+        else f"{name}DecodeMetadata",
+        "builder_class": f"{name}MetadataBuilder",
+        "query_format": props.get("query_format", "tuple"),
+        "block_size": props.get("block_size", None),
+    }
 
 
 def _run_mla_benchmark_batched(
@@ -312,10 +321,7 @@ def _run_mla_benchmark_batched(
     if not configs_with_params:
         return []
 
-    if backend not in _BACKEND_CONFIG:
-        raise ValueError(f"Unknown backend: {backend}")
-
-    backend_cfg = _BACKEND_CONFIG[backend]
+    backend_cfg = _get_backend_config(backend)
     device = torch.device(configs_with_params[0][0].device)
     torch.cuda.set_device(device)
 
@@ -336,24 +342,33 @@ def _run_mla_benchmark_batched(
 
     backend_module = importlib.import_module(backend_cfg["module"])
     impl_class = getattr(backend_module, backend_cfg["impl_class"])
-    metadata_class = getattr(backend_module, backend_cfg["metadata_class"])
-    decode_metadata_class = getattr(
-        backend_module, backend_cfg["decode_metadata_class"]
-    )
 
     # Import builder class if needed (for threshold setting)
     builder_class = None
+    builder_instance = None
     if backend_cfg["builder_class"]:
         builder_class = getattr(backend_module, backend_cfg["builder_class"])
 
+        # Create a builder instance to use build() method
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        kv_cache_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,  # MLA uses 1 KV head
+            head_size=576,  # MLA head dim
+            dtype=torch.float16,
+        )
+
+        builder_instance = builder_class(
+            kv_cache_spec=kv_cache_spec,
+            layer_names=["layer_0"],  # Dummy layer name for benchmark
+            vllm_config=vllm_config,
+            device=device,
+        )
+
     # Import common metadata for backends that use it
     if backend_cfg["metadata_class"] == "MLACommonMetadata":
-        from vllm.v1.attention.backends.mla.common import (
-            MLACommonDecodeMetadata as decode_metadata_class,
-        )
-        from vllm.v1.attention.backends.mla.common import (
-            MLACommonMetadata as metadata_class,
-        )
+        pass
 
     with set_current_vllm_config(vllm_config):
         # Setup MLA dimensions (reused)
@@ -462,55 +477,28 @@ def _run_mla_benchmark_batched(
                     slot_mapping_list, dtype=torch.int64, device=device
                 )
 
-                # Create decode metadata
-                decode_metadata_kwargs = {
-                    "block_table": block_table_gpu,
-                    "seq_lens": seq_lens_gpu,
-                    "dcp_tot_seq_lens": None,
-                }
+                # Create CommonAttentionMetadata and use builder.build()
+                from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-                # FlashAttn MLA needs extra fields
-                if backend == "flash_attn_mla":
-                    decode_metadata_kwargs.update(
-                        {
-                            "query_start_loc": q_start_gpu,
-                            "max_query_len": max(q_lens),
-                            "max_seq_len": max_kv,
-                        }
-                    )
-
-                # FlashMLA needs tile_scheduler_metadata and num_splits
-                if backend == "flashmla":
-                    from vllm.attention.ops.flashmla import get_mla_metadata
-
-                    tile_scheduler_metadata, num_splits_auto = get_mla_metadata(
-                        seq_lens_gpu,
-                        mla_dims["num_q_heads"],
-                        1,  # MQA for decode
-                    )
-                    decode_metadata_kwargs.update(
-                        {
-                            "tile_scheduler_metadata": tile_scheduler_metadata,
-                            "num_splits": num_splits_auto,
-                        }
-                    )
-
-                decode_metadata = decode_metadata_class(**decode_metadata_kwargs)
-
-                # Create metadata
-                metadata = metadata_class(
+                common_attn_metadata = CommonAttentionMetadata(
                     num_reqs=len(requests),
                     max_query_len=max(q_lens),
                     max_seq_len=max_kv,
                     num_actual_tokens=total_q,
                     query_start_loc=q_start_gpu,
+                    query_start_loc_cpu=q_start_cpu,
+                    seq_lens=seq_lens_gpu,
+                    seq_lens_cpu=seq_lens_cpu,
                     slot_mapping=slot_mapping,
-                    num_decodes=len(requests),
-                    num_decode_tokens=total_q,
-                    num_prefills=0,
-                    head_dim=mla_dims["head_dim"],
-                    decode=decode_metadata,
-                    prefill=None,
+                    block_table_tensor=block_table_gpu,
+                    dcp_local_seq_lens=None,
+                )
+
+                # Use the production build() method!
+                metadata = builder_instance.build(
+                    common_prefix_len=0,
+                    common_attn_metadata=common_attn_metadata,
+                    fast_build=False,
                 )
 
                 # Create KV cache
