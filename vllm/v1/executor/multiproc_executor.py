@@ -102,7 +102,7 @@ class MultiprocExecutor(Executor):
                 unready_workers.append(
                     WorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
-                        local_rank=self.vllm_config.parallel_config.data_parallel_rank_local,
+                        local_rank=rank,
                         rank=rank,
                         distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,

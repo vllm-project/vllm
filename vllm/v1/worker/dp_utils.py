@@ -48,7 +48,6 @@ def _run_ar(
     tensor[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
-    print("current device: ", torch.cuda.current_device())
     dist.all_reduce(tensor, group=group)
     return tensor
 

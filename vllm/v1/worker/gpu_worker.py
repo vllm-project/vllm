@@ -167,7 +167,13 @@ class Worker(WorkerBase):
         if self.device_config.device.type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-            print(f"DEBUG: local_rank={self.local_rank}")
+            if self.vllm_config.parallel_config.data_parallel_size > 1:
+                self.local_rank = (
+                    self.parallel_config.data_parallel_rank_local
+                    * self.parallel_config.world_size
+                    + self.local_rank
+                )
+
             self.device = torch.device(f"cuda:{self.local_rank}")
             current_platform.set_device(self.device)
 

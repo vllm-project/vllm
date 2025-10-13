@@ -766,7 +766,6 @@ class EngineCoreProc(EngineCore):
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
                 parallel_config.data_parallel_rank_local = local_dp_rank
-                print(f"DEBUG: dp_rank={dp_rank}, local_dp_rank={local_dp_rank}")
                 engine_core = DPEngineCoreProc(*args, **kwargs)
             else:
                 set_process_title("EngineCore")
