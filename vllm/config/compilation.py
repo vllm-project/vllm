@@ -4,9 +4,10 @@
 import enum
 import hashlib
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
@@ -50,11 +51,14 @@ class CUDAGraphMode(enum.Enum):
     def mixed_mode(self) -> "CUDAGraphMode":
         return CUDAGraphMode(self.value[1]) if self.separate_routine() else self
 
+    def has_mode(self, mode: "CUDAGraphMode") -> bool:
+        assert not mode.separate_routine()
+        if self.separate_routine():
+            return mode.value in self.value
+        return self == mode
+
     def requires_piecewise_compilation(self) -> bool:
-        return (
-            self.decode_mode() == CUDAGraphMode.PIECEWISE
-            or self.mixed_mode() == CUDAGraphMode.PIECEWISE
-        )
+        return self.has_mode(CUDAGraphMode.PIECEWISE)
 
     def max_cudagraph_mode(self) -> "CUDAGraphMode":
         return CUDAGraphMode(max(self.value)) if self.separate_routine() else self
@@ -167,7 +171,7 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    level: Optional[int] = None
+    level: int | None = None
     """The level of compilation:
 
     - None: If None, we will select the default compilation level.
@@ -176,17 +180,16 @@ class CompilationConfig:
     - 1: dynamo as is.
     - 2: dynamo once.
     - 3: piecewise compilation."""
-    debug_dump_path: Optional[Path] = None
+    debug_dump_path: Path | None = None
     """The path to dump the debug information."""
     cache_dir: str = ""
     """The directory to store the compiled graph, to accelerate Inductor
     compilation. By default, it will use model-related information to generate
     a cache directory."""
-    backend: str = "inductor"
+    backend: str = ""
     """The backend for compilation. It needs to be a string:
 
-    - "" (empty string): use the default backend ("inductor" on CUDA-alike
-    platforms).
+    - "" (empty string): use the default backend.
     - "eager"/"openxla"/...: use the specified backend registered in PyTorch.
     - "full.module.name": a qualified name which can be used to import the
 
@@ -195,11 +198,7 @@ class CompilationConfig:
     distributed setting. When the compilation level is 1 or 2, the backend is
     used for the compilation directly (it sees the whole graph). When the
     compilation level is 3, the backend is used for the piecewise compilation
-    (it sees a part of the graph). The backend can not be custom for compilation
-    level 3. Furthermore, compilation is only piecewise if splitting ops is set
-    accordingly and use_inductor_cudagraphs_partition is off. Note that the
-    default options for splitting ops are sufficient for piecewise compilation.
-    """
+    (it sees a part of the graph)."""
     custom_ops: list[str] = field(default_factory=list)
     """Fine-grained control over which custom ops to enable/disable. Use 'all'
     to enable all, 'none' to disable all. Also specify a list of custom op
@@ -212,17 +211,28 @@ class CompilationConfig:
     By default, all custom ops are enabled when running without Inductor and
     disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
-    splitting_ops: Optional[list[str]] = None
-    """A list of ops to split the full graph into subgraphs, used in piecewise
-    compilation."""
+    splitting_ops: list[str] | None = None
+    """A list of ops to exclude from cudagraphs, used in piecewise compilation.
+
+    The behavior depends on use_inductor_graph_partition:
+
+    - When use_inductor_graph_partition=False (default):
+        These ops are used for Dynamo FX-level graph splitting. The graph is
+        split at these ops before Inductor compilation, creating separate
+        subgraphs for cudagraph capture.
+
+    - When use_inductor_graph_partition=True:
+        These ops are used to register Inductor partition rules. The graph
+        partitioning happens at Inductor codegen time after all passes and
+        fusions are finished, allowing compilation and custom passes to operate
+        on the full graph while still excluding these ops from cudagraphs.
+
+    If None, defaults to attention ops for piecewise cudagraphs.
+    If empty list [], no ops are excluded (suitable for full cudagraphs)."""
 
     # Inductor capture
-    use_inductor: Optional[bool] = None
-    """
-    Whether to use inductor compilation.
-
-    This flag is deprecated and will be removed.
-    Please use the 'backend' option instead.
+    use_inductor: bool = True
+    """Whether to use inductor compilation:
 
     - False: inductor compilation is not used. graph runs in eager
         (custom_ops enabled by default).
@@ -230,12 +240,8 @@ class CompilationConfig:
         One graph for symbolic shape and one graph per size in compile_sizes
         are compiled using configurations in inductor_compile_config.
 
-    This setting is ignored if level<PIECEWISE.
-
-    For future compatibility:
-    If use_inductor is True, backend="inductor" otherwise backend="eager".
-    """
-    compile_sizes: Optional[list[Union[int, str]]] = None
+    This setting is ignored if level<PIECEWISE."""
+    compile_sizes: list[int | str] | None = None
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
@@ -250,7 +256,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: Optional[CUDAGraphMode] = None
+    cudagraph_mode: CUDAGraphMode | None = None
     """
     The mode of the cudagraph:
 
@@ -307,10 +313,9 @@ class CompilationConfig:
     It means the first several runs will be treated as warmup runs.
     Only after that, the execution will be recorded, and the recorded
     cudagraph will be used for subsequent runs."""
-    cudagraph_capture_sizes: Optional[list[int]] = None
-    """Sizes to capture cudagraph:
-
-    - None (default): capture sizes are inferred from vllm config.\n
+    cudagraph_capture_sizes: list[int] | None = None
+    """Sizes to capture cudagraph.
+    - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for
@@ -320,7 +325,7 @@ class CompilationConfig:
     internally managed buffer. Default is False. 
     Note that this flag is only effective when cudagraph_mode is PIECEWISE.
     """
-    full_cuda_graph: Optional[bool] = False
+    full_cuda_graph: bool | None = False
     """whether to use a full cuda graph for the entire forward pass rather than
     splitting certain operations such as attention into subgraphs. Thus this
     flag cannot be used together with splitting_ops. This may provide
@@ -396,18 +401,19 @@ class CompilationConfig:
     model code, e.g., Attention, FusedMOE when dp_size>1."""
 
     # Attention ops; used for piecewise cudagraphs
+    # Use PyTorch operator format: "namespace::name"
     _attention_ops: ClassVar[list[str]] = [
-        "vllm.unified_attention",
-        "vllm.unified_attention_with_output",
-        "vllm.unified_mla_attention",
-        "vllm.unified_mla_attention_with_output",
-        "vllm.mamba_mixer2",
-        "vllm.mamba_mixer",
-        "vllm.short_conv",
-        "vllm.linear_attention",
-        "vllm.plamo2_mamba_mixer",
-        "vllm.gdn_attention",
-        "vllm.sparse_attn_indexer",
+        "vllm::unified_attention",
+        "vllm::unified_attention_with_output",
+        "vllm::unified_mla_attention",
+        "vllm::unified_mla_attention_with_output",
+        "vllm::mamba_mixer2",
+        "vllm::mamba_mixer",
+        "vllm::short_conv",
+        "vllm::linear_attention",
+        "vllm::plamo2_mamba_mixer",
+        "vllm::gdn_attention",
+        "vllm::sparse_attn_indexer",
     ]
 
     def compute_hash(self) -> str:
@@ -557,43 +563,7 @@ class CompilationConfig:
                     "(where 'op' is the registered op name)"
                 )
 
-        # Currently only eager and inductor backend are supported.
-        # for piecewise compilation. Custom backends are not suppported for
-        # piecewise compilation. Update when more backends are supported.
-        if self.level == CompilationLevel.PIECEWISE and self.backend not in [
-            "",
-            "eager",
-            "inductor",
-        ]:
-            raise ValueError(
-                f"Invalid backend for piecewise compilation: {self.backend}"
-            )
-
-        if self.use_inductor is not None:
-            logger.warning_once(
-                "The 'use_inductor' flag is deprecated and will be\
-                    removed in a future release."
-                "Please use the 'backend' option instead.",
-            )
-            self.backend = "inductor" if self.use_inductor else "eager"
-
-        if self.backend == "":
-            self.backend = "inductor"
-
-    def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
-        """
-        Initialize the backend for the compilation config from a vllm config.
-        Arguments:
-            vllm_config: The vllm config to initialize the backend from.
-        Returns:
-            The backend for the compilation config.
-        """
-        if self.level is None:
-            raise ValueError(
-                "No compilation level is set. This method should only be \
-                called via vllm config where the level is set if none is \
-                provided."
-            )
+    def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
@@ -601,15 +571,15 @@ class CompilationConfig:
 
         torch_backends = list_backends(exclude_tags=tuple())
         if self.level in [CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE]:
+            if self.backend == "":
+                return "eager"
             if self.backend in torch_backends:
                 return self.backend
             return resolve_obj_by_qualname(self.backend)
 
+        # TODO: pass user-specified backend to piecewise compilation
+        # merge with the config use_inductor
         assert self.level == CompilationLevel.PIECEWISE
-        if self.backend not in ["eager", "inductor"]:
-            raise ValueError(
-                f"Invalid backend for piecewise compilation: {self.backend}"
-            )
 
         from vllm.compilation.backends import VllmBackend
 
@@ -729,31 +699,25 @@ class CompilationConfig:
 
     def set_splitting_ops_for_inductor_graph_partition(self):
         assert self.use_inductor_graph_partition
-        use_inductor_graph_partition_msg = (
-            "When use_inductor_graph_partition=True, splitting_ops "
-            "are ignored and set to an empty list. Instead, "
-            '"tags=(torch._C.Tag.cudagraph_unsafe, )," is '
-            "used to annotate custom ops for graph partition."
-        )
-        if self.splitting_ops is not None and len(self.splitting_ops) > 0:
-            logger.warning_once(use_inductor_graph_partition_msg)
-        self.splitting_ops = []
+        if self.splitting_ops is None:
+            self.splitting_ops = list(self._attention_ops)
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.enable_attn_fusion
-        if self.splitting_ops is None:
-            self.splitting_ops = []
-            if self.cudagraph_mode.has_piecewise_cudagraphs():
-                logger.warning_once(
-                    "enable_attn_fusion is incompatible with piecewise "
-                    "cudagraph when use_inductor_graph_partition is off."
-                    "In this case, splitting_ops will be set to empty "
-                    "list, and cudagraph_mode will be set to FULL. "
-                    "Please ensure you are using attention backends that "
-                    "support cudagraph or set cudagraph_mode to NONE "
-                    "explicitly if encountering any problems."
-                )
-                self.cudagraph_mode = CUDAGraphMode.FULL
+        # For dynamo-partition (non-inductor) attention fusion,
+        # set splitting_ops to empty to avoid splitting at attention ops
+        self.splitting_ops = []
+        if self.cudagraph_mode.has_piecewise_cudagraphs():
+            logger.warning_once(
+                "enable_attn_fusion is incompatible with piecewise "
+                "cudagraph when use_inductor_graph_partition is off. "
+                "In this case, splitting_ops will be set to empty "
+                "list, and cudagraph_mode will be set to FULL. "
+                "Please ensure you are using attention backends that "
+                "support cudagraph or set cudagraph_mode to NONE "
+                "explicitly if encountering any problems."
+            )
+            self.cudagraph_mode = CUDAGraphMode.FULL
 
         assert not self.splitting_ops_contain_attention(), (
             "attention ops should not be in splitting_ops "
@@ -766,23 +730,15 @@ class CompilationConfig:
         )
 
     def is_attention_compiled_piecewise(self) -> bool:
-        use_fx_graph_piecewise_compilation = (
-            self.level == CompilationLevel.PIECEWISE
-            and self.splitting_ops_contain_attention()
-        )
+        if not self.splitting_ops_contain_attention():
+            return False
 
-        inductor_used = (
-            self.level == CompilationLevel.PIECEWISE and self.backend == "inductor"
-        ) or (
-            self.level >= CompilationLevel.DYNAMO_AS_IS and self.backend == "inductor"
-        )
-        use_inductor_piecewise_compilation = (
-            inductor_used
-            and self.use_inductor_graph_partition
-            and not self.splitting_ops_contain_attention()
-        )
+        if not self.use_inductor_graph_partition:
+            # Dynamo-level FX split case
+            return self.level == CompilationLevel.PIECEWISE
 
-        return use_fx_graph_piecewise_compilation or use_inductor_piecewise_compilation
+        # Inductor partition case
+        return self.level > CompilationLevel.NO_COMPILATION and self.use_inductor
 
     def custom_op_log_check(self):
         """

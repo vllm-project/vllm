@@ -3,7 +3,7 @@
 import bisect
 import gc
 import time
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -140,7 +140,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         vllm_config: VllmConfig,
         device: torch.device,
-        original_parallel_config: Optional[ParallelConfig] = None,
+        original_parallel_config: ParallelConfig | None = None,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -259,6 +259,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.block_size],
+            kernel_block_sizes=[self.cache_config.block_size],
         )
 
         # Cached torch/numpy tensor
@@ -369,6 +370,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
         else:
             self.sample_from_logits_func = self.sample_from_logits
+
+    def reset_mm_cache(self) -> None:
+        if self.mm_budget:
+            self.mm_budget.reset_cache()
 
     def _update_num_xla_graphs(self, case_str):
         check_comp = self.check_recompilation and not self.enforce_eager
@@ -1045,7 +1050,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_model_inputs(
         self,
         input_ids: torch.Tensor,
-        mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]],
+        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
     ):
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
@@ -1071,7 +1076,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput:
         # Update cached state
         self._update_states(scheduler_output)
@@ -1215,7 +1220,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ), "req_ids contains None"
         req_ids = cast(list[str], self.input_batch.req_ids[:num_reqs])
 
-        prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
+        prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
         for req_id in self.input_batch.req_ids[:num_reqs]:
             prompt_logprobs_dict[req_id] = None
 
@@ -1788,6 +1793,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 block_sizes=[
                     kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
                 ],
+                kernel_block_sizes=[
+                    kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+                ],
             )
         # Verify dtype compatibility between block_table_cpu and input_batch
         assert (
@@ -2119,8 +2127,8 @@ def replace_set_lora(model):
         index: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-        embeddings_tensor: Optional[torch.Tensor],
-        bias: Optional[torch.Tensor] = None,
+        embeddings_tensor: torch.Tensor | None,
+        bias: torch.Tensor | None = None,
     ):
         # TODO: The integer index leads to a recompilation, but converting it
         # to a tensor doesn't seem to work anymore. This might be fixed with a
