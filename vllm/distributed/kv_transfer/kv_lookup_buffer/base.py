@@ -14,7 +14,6 @@ These classes above are abstracted behind class `KVCacheBufferBase`.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import torch
 
@@ -98,8 +97,8 @@ class KVLookupBufferBase(KVCacheBufferBase):
 
     @abstractmethod
     def drop_select(
-        self, input_tokens: Optional[torch.Tensor], roi: Optional[torch.Tensor]
-    ) -> list[Optional[torch.Tensor]]:
+        self, input_tokens: torch.Tensor | None, roi: torch.Tensor | None
+    ) -> list[torch.Tensor | None]:
         """Select and *drop* KV cache entries from the lookup buffer.
 
         The functionality is similar to the following python statements
@@ -143,7 +142,7 @@ class KVStoreBufferBase(KVCacheBufferBase):
     def put(
         self,
         key: str,
-        value: Optional[torch.Tensor],
+        value: torch.Tensor | None,
     ) -> None:
         """Store a key-value pair in the buffer.
 
@@ -163,7 +162,7 @@ class KVStoreBufferBase(KVCacheBufferBase):
     def get(
         self,
         key: str,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         """Retrieve a value from the buffer by key.
 
         Args:

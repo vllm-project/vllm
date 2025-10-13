@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import Optional
 
 import torch
 
@@ -48,7 +47,7 @@ class TPUSupportedSamplingMetadata:
 
     min_tokens = None  # impl is not vectorized
 
-    logit_bias: list[Optional[dict[int, float]]] = field(default_factory=lambda: list())
+    logit_bias: list[dict[int, float] | None] = field(default_factory=lambda: list())
 
     allowed_token_ids_mask = None
     bad_words_token_ids = None

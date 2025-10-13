@@ -4,7 +4,7 @@
 import os
 import time
 from collections import defaultdict
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Union
 
 import msgspec
 
@@ -72,7 +72,7 @@ try:
 
         def execute_model_spmd(
             self,
-            req_or_tuple: Union[bytes, tuple[bytes, Optional[IntermediateTensors]]],
+            req_or_tuple: bytes | tuple[bytes, IntermediateTensors | None],
         ) -> bytes:
             """Execute model in SPMD fashion: used only when SPMD worker and
             compiled DAG are both enabled.
@@ -300,7 +300,7 @@ def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
 
 def initialize_ray_cluster(
     parallel_config: ParallelConfig,
-    ray_address: Optional[str] = None,
+    ray_address: str | None = None,
 ):
     """Initialize the distributed cluster with Ray.
 

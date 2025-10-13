@@ -198,13 +198,24 @@ else()
 endif()
 
 if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
-    FetchContent_Declare(
-        oneDNN
-        GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-        GIT_TAG v3.9
-        GIT_PROGRESS TRUE
-        GIT_SHALLOW TRUE
-    )
+    set(FETCHCONTENT_SOURCE_DIR_ONEDNN "$ENV{FETCHCONTENT_SOURCE_DIR_ONEDNN}" CACHE PATH "Path to a local oneDNN source directory.")
+
+    if(FETCHCONTENT_SOURCE_DIR_ONEDNN)
+        message(STATUS "Using oneDNN from specified source directory: ${FETCHCONTENT_SOURCE_DIR_ONEDNN}")
+        FetchContent_Declare(
+            oneDNN
+            SOURCE_DIR ${FETCHCONTENT_SOURCE_DIR_ONEDNN}
+        )
+    else()
+        message(STATUS "Downloading oneDNN from GitHub")
+        FetchContent_Declare(
+            oneDNN
+            GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
+            GIT_TAG v3.9
+            GIT_PROGRESS TRUE
+            GIT_SHALLOW TRUE
+        )
+    endif()
 
     if(USE_ACL)
         find_library(ARM_COMPUTE_LIBRARY NAMES arm_compute PATHS $ENV{ACL_ROOT_DIR}/build/)
@@ -227,7 +238,7 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON
     set(ONEDNN_ENABLE_ITT_TASKS "OFF")
     set(ONEDNN_ENABLE_MAX_CPU_ISA "OFF")
     set(ONEDNN_ENABLE_CPU_ISA_HINTS "OFF")
-    set(ONEDNN_VERBOSE "ON")
+    set(ONEDNN_VERBOSE "OFF")
     set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
     FetchContent_MakeAvailable(oneDNN)

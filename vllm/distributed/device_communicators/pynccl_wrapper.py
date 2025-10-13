@@ -25,7 +25,7 @@
 import ctypes
 import platform
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch.distributed import ReduceOp
@@ -305,7 +305,7 @@ class NCCLLibrary:
     #  to the corresponding dictionary
     path_to_dict_mapping: dict[str, dict[str, Any]] = {}
 
-    def __init__(self, so_file: Optional[str] = None):
+    def __init__(self, so_file: str | None = None):
         so_file = so_file or find_nccl_library()
 
         try:

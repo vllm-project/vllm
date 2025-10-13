@@ -13,8 +13,6 @@ Covers:
 5) Multiple stop conditions
 """
 
-from typing import Optional, Union
-
 import pytest
 
 from vllm import LLM, SamplingParams
@@ -33,9 +31,9 @@ class MinTokensTestCase:
         name: str,
         min_tokens: int,
         max_tokens: int,
-        stop: Optional[Union[str, list[str]]] = None,
-        expected_min_len: Optional[int] = None,
-        expected_exact_len: Optional[int] = None,
+        stop: str | list[str] | None = None,
+        expected_min_len: int | None = None,
+        expected_exact_len: int | None = None,
     ):
         self.name = name
         self.min_tokens = min_tokens

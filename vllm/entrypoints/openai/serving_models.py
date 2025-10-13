@@ -5,7 +5,6 @@ from asyncio import Lock
 from collections import defaultdict
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Optional, Union
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.protocol import (
@@ -35,7 +34,7 @@ class BaseModelPath:
 class LoRAModulePath:
     name: str
     path: str
-    base_model_name: Optional[str] = None
+    base_model_name: str | None = None
 
 
 class OpenAIServingModels:
@@ -52,7 +51,7 @@ class OpenAIServingModels:
         engine_client: EngineClient,
         base_model_paths: list[BaseModelPath],
         *,
-        lora_modules: Optional[list[LoRAModulePath]] = None,
+        lora_modules: list[LoRAModulePath] | None = None,
     ):
         super().__init__()
 
@@ -93,7 +92,7 @@ class OpenAIServingModels:
     def is_base_model(self, model_name) -> bool:
         return any(model.name == model_name for model in self.base_model_paths)
 
-    def model_name(self, lora_request: Optional[LoRARequest] = None) -> str:
+    def model_name(self, lora_request: LoRARequest | None = None) -> str:
         """Returns the appropriate model name depending on the availability
         and support of the LoRA or base model.
         Parameters:
@@ -132,8 +131,8 @@ class OpenAIServingModels:
         return ModelList(data=model_cards)
 
     async def load_lora_adapter(
-        self, request: LoadLoRAAdapterRequest, base_model_name: Optional[str] = None
-    ) -> Union[ErrorResponse, str]:
+        self, request: LoadLoRAAdapterRequest, base_model_name: str | None = None
+    ) -> ErrorResponse | str:
         lora_name = request.lora_name
 
         # Ensure atomicity based on the lora name
@@ -173,7 +172,7 @@ class OpenAIServingModels:
 
     async def unload_lora_adapter(
         self, request: UnloadLoRAAdapterRequest
-    ) -> Union[ErrorResponse, str]:
+    ) -> ErrorResponse | str:
         lora_name = request.lora_name
 
         # Ensure atomicity based on the lora name
@@ -189,7 +188,7 @@ class OpenAIServingModels:
 
     async def _check_load_lora_adapter_request(
         self, request: LoadLoRAAdapterRequest
-    ) -> Optional[ErrorResponse]:
+    ) -> ErrorResponse | None:
         # Check if both 'lora_name' and 'lora_path' are provided
         if not request.lora_name or not request.lora_path:
             return create_error_response(
@@ -211,7 +210,7 @@ class OpenAIServingModels:
 
     async def _check_unload_lora_adapter_request(
         self, request: UnloadLoRAAdapterRequest
-    ) -> Optional[ErrorResponse]:
+    ) -> ErrorResponse | None:
         # Check if 'lora_name' is not provided return an error
         if not request.lora_name:
             return create_error_response(
@@ -230,7 +229,7 @@ class OpenAIServingModels:
 
         return None
 
-    async def resolve_lora(self, lora_name: str) -> Union[LoRARequest, ErrorResponse]:
+    async def resolve_lora(self, lora_name: str) -> LoRARequest | ErrorResponse:
         """Attempt to resolve a LoRA adapter using available resolvers.
 
         Args:

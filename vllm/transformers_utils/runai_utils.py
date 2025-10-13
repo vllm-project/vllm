@@ -5,7 +5,6 @@ import hashlib
 import os
 import shutil
 import signal
-from typing import Optional
 
 from vllm import envs
 from vllm.assets.base import get_cache_dir
@@ -88,8 +87,8 @@ class ObjectStorageModel:
     def pull_files(
         self,
         model_path: str = "",
-        allow_pattern: Optional[list[str]] = None,
-        ignore_pattern: Optional[list[str]] = None,
+        allow_pattern: list[str] | None = None,
+        ignore_pattern: list[str] | None = None,
     ) -> None:
         """
         Pull files from object storage into the temporary directory.

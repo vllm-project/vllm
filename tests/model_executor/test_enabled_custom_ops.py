@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import pytest
 import torch
@@ -76,7 +75,7 @@ class Relu3(ReLUSquaredActivation):
     ],
 )
 def test_enabled_ops(
-    env: Optional[str],
+    env: str | None,
     torch_level: int,
     use_inductor: bool,
     ops_enabled: list[int],

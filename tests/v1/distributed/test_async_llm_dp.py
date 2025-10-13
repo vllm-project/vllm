@@ -5,7 +5,6 @@ import asyncio
 import os
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Optional
 
 import pytest
 
@@ -35,8 +34,8 @@ async def generate(
     prompt: PromptType,
     output_kind: RequestOutputKind,
     max_tokens: int,
-    prompt_logprobs: Optional[int] = None,
-    data_parallel_rank: Optional[int] = None,
+    prompt_logprobs: int | None = None,
+    data_parallel_rank: int | None = None,
 ) -> tuple[int, str]:
     # Ensure generate doesn't complete too fast for cancellation test.
     await asyncio.sleep(0.2)
@@ -91,9 +90,9 @@ async def test_load(
 
         def record(
             self,
-            scheduler_stats: Optional[SchedulerStats],
-            iteration_stats: Optional[IterationStats],
-            mm_cache_stats: Optional[MultiModalCacheStats] = None,
+            scheduler_stats: SchedulerStats | None,
+            iteration_stats: IterationStats | None,
+            mm_cache_stats: MultiModalCacheStats | None = None,
             engine_idx: int = 0,
         ):
             if iteration_stats:

@@ -71,7 +71,7 @@ class GPTQBitBLASConfig(QuantizationConfig):
         group_size: int,
         desc_act: bool,
         is_sym: bool,
-        quant_method: Optional[str],
+        quant_method: str | None,
         lm_head_quantized: bool,
     ) -> None:
         try:
@@ -180,7 +180,7 @@ class GPTQBitBLASConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
-    ) -> Optional[QuantizationMethods]:
+    ) -> QuantizationMethods | None:
         can_convert = cls.is_gptq_bitblas_compatible(hf_quant_cfg)
 
         is_valid_user_quant = (
@@ -474,7 +474,7 @@ class GPTQBitBLASLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         out = self.kernel.apply_gptq_bitblas_linear(layer, x)
         if bias is not None:

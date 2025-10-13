@@ -6,8 +6,7 @@ import copy
 import itertools
 import pickle as pkl
 import time
-from collections.abc import Iterable
-from typing import Callable
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.utils.benchmark as TBenchmark

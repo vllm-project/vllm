@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -28,7 +27,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         vllm_config: VllmConfig,
         disable_input_layernorm: bool,
         prefix: str = "",
-        config: Optional[LlamaConfig] = None,
+        config: LlamaConfig | None = None,
     ) -> None:
         super().__init__(vllm_config, prefix=prefix, config=config)
 
@@ -155,7 +154,7 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if inputs_embeds is not None:
             raise NotImplementedError(

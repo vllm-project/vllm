@@ -4,8 +4,7 @@
 import multiprocessing as mp
 import os
 import tempfile
-from multiprocessing import Queue
-from typing import Optional
+from multiprocessing.queues import Queue
 from unittest.mock import patch
 
 import pytest
@@ -16,7 +15,7 @@ from vllm.utils import MemorySnapshot
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 
 # Global queue to track operation order across processes
-_QUEUE: Optional[Queue] = None
+_QUEUE: Queue | None = None
 
 
 def track_operation(operation: str, rank: int):

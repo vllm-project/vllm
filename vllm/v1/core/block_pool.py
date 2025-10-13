@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from typing import Any
 
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
@@ -51,10 +51,10 @@ class BlockHashToBlockMap:
 
     def __init__(self):
         self._cache: dict[
-            BlockHashWithGroupId, Union[KVCacheBlock, dict[int, KVCacheBlock]]
+            BlockHashWithGroupId, KVCacheBlock | dict[int, KVCacheBlock]
         ] = {}
 
-    def get_one_block(self, key: BlockHashWithGroupId) -> Optional[KVCacheBlock]:
+    def get_one_block(self, key: BlockHashWithGroupId) -> KVCacheBlock | None:
         """
         Gets any block with the given block hash key.
         """
@@ -85,7 +85,7 @@ class BlockHashToBlockMap:
         else:
             self._unexpected_blocks_type(blocks)
 
-    def pop(self, key: BlockHashWithGroupId, block_id: int) -> Optional[KVCacheBlock]:
+    def pop(self, key: BlockHashWithGroupId, block_id: int) -> KVCacheBlock | None:
         """
         Checks if block_hash exists and pop block_id from the cache
         """
@@ -168,7 +168,7 @@ class BlockPool:
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
-    ) -> Optional[list[KVCacheBlock]]:
+    ) -> list[KVCacheBlock] | None:
         """Get the cached block by the block hash for each group in
         `kv_cache_group_ids`, or None if cache miss for any group.
         If there are duplicated blocks, we return the first block in the cache.
@@ -225,7 +225,7 @@ class BlockPool:
         assert len(request.block_hashes) >= num_full_blocks
         new_block_hashes = request.block_hashes[num_cached_blocks:]
 
-        new_hashes: Optional[list[ExternalBlockHash]] = (
+        new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
         for i, blk in enumerate(new_full_blocks):
@@ -243,7 +243,7 @@ class BlockPool:
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
-                parent_block_hash: Optional[ExternalBlockHash] = None
+                parent_block_hash: ExternalBlockHash | None = None
             else:
                 parent_block = blocks[num_cached_blocks - 1]
                 assert parent_block.block_hash is not None

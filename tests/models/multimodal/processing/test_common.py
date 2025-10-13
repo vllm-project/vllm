@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import partial
-from typing import Optional, Union
 
 import numpy as np
 import pytest
@@ -247,7 +246,7 @@ MM_DATA_PATCHES = {
 def _test_processing_correctness_one(
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
-    prompt: Union[str, list[int]],
+    prompt: str | list[int],
     mm_data: MultiModalDataDict,
     baseline_processor: BaseMultiModalProcessor,
     cached_processor: BaseMultiModalProcessor,
@@ -384,6 +383,7 @@ def _test_processing_correctness_one(
         "Qwen/Qwen2.5-Omni-3B",
         "Qwen/Qwen3-VL-4B-Instruct",
         "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         "YannQi/R-4B",
         "Skywork/Skywork-R1V-38B",
         "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
@@ -440,7 +440,7 @@ def _assert_inputs_equal(
     a: MultiModalInputs,
     b: MultiModalInputs,
     *,
-    ignore_mm_keys: Optional[set[str]] = None,
+    ignore_mm_keys: set[str] | None = None,
     msg: str = "",
 ):
     if ignore_mm_keys is None:

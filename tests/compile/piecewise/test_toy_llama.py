@@ -10,7 +10,7 @@ initialized randomly with a fixed seed.
 """
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 import torch
@@ -162,7 +162,7 @@ class LlamaDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         For tractable computation:
@@ -217,7 +217,7 @@ class LlamaModel(nn.Module):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states = self.embedding_tokens(input_ids)
@@ -268,7 +268,7 @@ def run_model(
             cudagraph_capture_sizes=[1, 2],
         )
         if split_attn:
-            compilation_config.splitting_ops = ["silly.attention"]
+            compilation_config.splitting_ops = ["silly::attention"]
         cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
     else:
         compilation_config = CompilationConfig(
@@ -438,7 +438,7 @@ def benchmark():
             compilation_config = CompilationConfig(
                 level=CompilationLevel.PIECEWISE,
                 use_cudagraph=True,
-                splitting_ops=["silly.attention"],
+                splitting_ops=["silly::attention"],
                 cudagraph_capture_sizes=cudagraph_sizes,
             )
         else:

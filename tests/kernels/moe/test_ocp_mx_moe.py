@@ -4,7 +4,6 @@
 import importlib.metadata
 from dataclasses import dataclass
 from importlib.util import find_spec
-from typing import Optional
 
 import pytest
 import torch
@@ -103,7 +102,7 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         assert output
 
 
-def swiglu(x, alpha: float = 1.702, beta: float = 1.0, limit: Optional[float] = None):
+def swiglu(x, alpha: float = 1.702, beta: float = 1.0, limit: float | None = None):
     # Note we add an extra bias of 1 to the linear layer
     x_glu, x_linear = torch.chunk(x, 2, dim=-1)
     if limit is not None:
@@ -510,7 +509,7 @@ def test_trtllm_gen_mxfp4_fused_moe(
     hidden_size: int,
     alpha: float,
     beta: float,
-    limit: Optional[float],
+    limit: float | None,
     act_type: str,
     transpose_optimized: bool,
 ):
@@ -660,7 +659,7 @@ def test_flashinfer_cutlass_mxfp4_fused_moe(
     hidden_size: int,
     alpha: float,
     beta: float,
-    limit: Optional[float],
+    limit: float | None,
 ):
     torch.manual_seed(42)
     device = "cuda:0"
@@ -811,9 +810,9 @@ def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
     num_tokens: int,
     intermediate_size: int,
     hidden_size: int,
-    alpha: Optional[float],
-    beta: Optional[float],
-    limit: Optional[float],
+    alpha: float | None,
+    beta: float | None,
+    limit: float | None,
 ):
     torch.manual_seed(42)
     device = "cuda:0"

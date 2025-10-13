@@ -4,7 +4,6 @@
 import json
 import os
 from dataclasses import dataclass
-from typing import Optional, Union
 
 import torch
 from safetensors.torch import save_file
@@ -81,7 +80,7 @@ class DummyLoRAManager:
         module_name: str,
         input_dim: int,
         output_dims: list[int],
-        noop_lora_index: Optional[list[int]] = None,
+        noop_lora_index: list[int] | None = None,
         rank: int = 8,
     ):
         base_loras: list[LoRALayerWeights] = []
@@ -113,7 +112,7 @@ def assert_close(a, b):
 @dataclass
 class PunicaTensors:
     inputs_tensor: torch.Tensor
-    lora_weights: Union[torch.Tensor, list[torch.Tensor]]
+    lora_weights: torch.Tensor | list[torch.Tensor]
     our_out_tensor: torch.Tensor
     ref_out_tensor: torch.Tensor
     b_seq_start_loc: torch.Tensor

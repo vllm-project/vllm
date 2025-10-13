@@ -198,7 +198,7 @@ def test_multi_graph_piecewise_compile_outputs_equal():
         compilation_config=CompilationConfig(
             level=CompilationLevel.PIECEWISE,
             use_cudagraph=True,
-            splitting_ops=["silly.attention"],
+            splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
         )
     )
@@ -267,7 +267,7 @@ def test_multi_graph_piecewise_compile_outputs_equal():
         compilation_config=CompilationConfig(
             level=CompilationLevel.PIECEWISE,
             use_cudagraph=False,
-            splitting_ops=["silly.attention"],
+            splitting_ops=["silly::attention"],
         )
     )
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE

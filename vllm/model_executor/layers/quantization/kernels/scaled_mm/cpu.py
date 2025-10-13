@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -24,7 +23,7 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
         return 75
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
+    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_cpu():
             return False, "CPUScaledMM requires running on CPU."
 
@@ -173,7 +172,7 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.linear_method(
             layer,
@@ -185,7 +184,7 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         w_q, w_s, i_s, i_zp, azp_adj = self._get_weight_params(layer)
 
@@ -207,7 +206,7 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         w_q, w_s, _, _, _ = self._get_weight_params(layer)
         return torch.ops._C.int8_scaled_mm_with_quant(

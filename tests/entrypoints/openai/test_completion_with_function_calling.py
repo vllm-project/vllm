@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import datetime
-from typing import Union
 
 import openai  # use the official client for correctness check
 import pytest
@@ -166,7 +165,7 @@ async def test_function_tool_use(
     client: openai.AsyncOpenAI,
     model_name: str,
     stream: bool,
-    tool_choice: Union[str, dict],
+    tool_choice: str | dict,
     enable_thinking: bool,
 ):
     if not stream:

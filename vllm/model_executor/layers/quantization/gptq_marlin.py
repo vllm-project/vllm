@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, Callable, Optional, Union
+from typing import Any, Optional
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
@@ -103,9 +104,9 @@ class GPTQMarlinConfig(QuantizationConfig):
         desc_act: bool,
         is_sym: bool,
         lm_head_quantized: bool,
-        dynamic: dict[str, dict[str, Union[int, bool]]],
+        dynamic: dict[str, dict[str, int | bool]],
         full_config: dict[str, Any],
-        modules_in_block_to_quantize: Optional[list[str]] = None,
+        modules_in_block_to_quantize: list[str] | None = None,
     ) -> None:
         super().__init__()
         if desc_act and group_size == -1:
@@ -211,7 +212,7 @@ class GPTQMarlinConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
-    ) -> Optional[QuantizationMethods]:
+    ) -> QuantizationMethods | None:
         can_convert = cls.is_gptq_marlin_compatible(hf_quant_cfg)
 
         is_valid_user_quant = (
@@ -283,7 +284,7 @@ class GPTQMarlinConfig(QuantizationConfig):
                 self.modules_in_block_to_quantize
             )
 
-    def maybe_update_config(self, model_name: str, revision: Optional[str] = None):
+    def maybe_update_config(self, model_name: str, revision: str | None = None):
         if self.modules_in_block_to_quantize:
             if is_list_of(self.modules_in_block_to_quantize, list):
                 # original modules_in_block_to_quantize: list[list[str]]
@@ -459,7 +460,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer, x, bias)
 
@@ -714,7 +715,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
-    ) -> Optional[FusedMoEQuantConfig]:
+    ) -> FusedMoEQuantConfig | None:
         return None
 
     def apply(
@@ -725,21 +726,21 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         top_k: int,
         renormalize: bool,
         use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+        e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        expert_load_view: torch.Tensor | None = None,
+        logical_to_physical_map: torch.Tensor | None = None,
+        logical_replica_count: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.fused_experts is None
 
         if enable_eplb:

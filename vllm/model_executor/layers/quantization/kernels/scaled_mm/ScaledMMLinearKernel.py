@@ -3,7 +3,6 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
@@ -23,7 +22,7 @@ class ScaledMMLinearKernel(ABC):
 
     @classmethod
     @abstractmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
+    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         raise NotImplementedError
 
     def __init__(
@@ -52,7 +51,7 @@ class ScaledMMLinearKernel(ABC):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -61,9 +60,9 @@ class ScaledMMLinearKernel(ABC):
     ) -> tuple[
         torch.Tensor,  # weight
         torch.Tensor,  # weight_scale
-        Optional[torch.Tensor],  # input_scale,
-        Optional[torch.Tensor],  # input_zp
-        Optional[torch.Tensor],  # azp_adj
+        torch.Tensor | None,  # input_scale,
+        torch.Tensor | None,  # input_zp
+        torch.Tensor | None,  # azp_adj
     ]:
         return (
             getattr(layer, self.w_q_name),
