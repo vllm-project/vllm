@@ -356,9 +356,9 @@ class Attention(nn.Module, AttentionLayerBase):
             hidden_size = output_shape[-1]
 
             # Use torch.empty to avoid initializing tensor with zero.
-            output_numel = output_shape.numel()
-            output_shape = torch.Size((output_numel//(self.num_heads * self.head_size), self.num_heads, self.head_size))
-            output = allocate_tensor(output_shape, device=query.device, dtype=output_dtype)
+            num_tokens = output_shape.numel() // hidden_size
+            reshaped_output_shape = torch.Size((num_tokens, self.num_heads, self.head_size))
+            output = allocate_tensor(reshaped_output_shape, device=query.device, dtype=output_dtype)
 
             # Reshape the query, key, and value tensors.
             # NOTE(woosuk): We do this outside the custom op to minimize the
