@@ -11,7 +11,7 @@ import copy
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, TypeAlias, TypedDict, TypeVar
+from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
 import numpy.typing as npt
 import torch
@@ -40,7 +40,6 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
 from vllm.model_executor.models.radio import RadioModel
 from vllm.model_executor.models.utils import (
-    flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -96,31 +95,35 @@ MAX_FRAMES = 16
 DEFAULT_NUM_TILES = 12
 
 
-class NanoNemotronVLImagePixelInputs(TypedDict):
+class NanoNemotronVLImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - bnp: Batch size * number of images * (1 + num_patches)
+        - c: Number of channels (3)
+        - h: Height of each image patch
+        - w: Width of each image patch
+    """
+
     type: Literal["pixel_values"]
-    pixel_values_flat: torch.Tensor
+    pixel_values_flat: Annotated[torch.Tensor, TensorShape("bnp", 3, "h", "w")]
+    num_patches: Annotated[torch.Tensor, TensorShape("bn")]
+
+
+class NanoNemotronVLImageEmbeddingInputs(TensorSchema):
     """
-    Shape:
-    `(batch_size * num_images * (1 + num_patches), num_channels, height, width)`
+    Dimensions:
+        - n: Number of images
+        - f: Total image feature size
+        - h: Hidden size (must match the hidden size of language model backbone)
     """
 
-    num_patches: torch.Tensor
-    """Shape: `(batch_size * num_images)`"""
-
-
-class NanoNemotronVLImageEmbeddinInputs(TypedDict):
     type: Literal["image_embeds"]
-    data: torch.Tensor | list[torch.Tensor]
-    """ 
-    A tensor of shape `(num_images, total_image_feature_size, hidden_size)`
-    or a list of tensors of shape `(total_image_feature_size, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
-    """
+    data: Annotated[torch.Tensor | list[torch.Tensor], TensorShape("n", "f", "h")]
 
 
 NanoNemotronVLImageInputs: TypeAlias = (
-    NanoNemotronVLImagePixelInputs | NanoNemotronVLImageEmbeddinInputs
+    NanoNemotronVLImagePixelInputs | NanoNemotronVLImageEmbeddingInputs
 )
 
 
@@ -999,6 +1002,8 @@ class NanoNemotronVLDummyInputsBuilder(
 class NemotronH_Nano_VL_V2(
     nn.Module, HasInnerState, IsHybrid, SupportsMultiModal, SupportsMultiModalPruning
 ):
+    merge_by_field_config = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
@@ -1106,37 +1111,18 @@ class NemotronH_Nano_VL_V2(
             return None
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError(
-                    "Incorrect type of image embeddings. "
-                    f"Got type: {type(image_embeds)}"
-                )
-
-            return NanoNemotronVLImageEmbeddinInputs(
+            return NanoNemotronVLImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds),
+                data=image_embeds,
             )
 
-        image_token_id = kwargs["image_token_id"]
-        assert isinstance(image_token_id, torch.Tensor)
-        self.img_context_token_id = image_token_id.flatten().unique().item()
+        image_token_id = kwargs.pop("image_token_id", None)
+        if isinstance(image_token_id, torch.Tensor):
+            image_token_id = image_token_id.item()
+
+        self.img_context_token_id = image_token_id
 
         if pixel_values_flat is not None:
-            if not isinstance(pixel_values_flat, (torch.Tensor, list)):
-                raise ValueError(
-                    "Incorrect type of pixel values. "
-                    f"Got type: {type(pixel_values_flat)}"
-                )
-
-            if not isinstance(image_num_patches, (torch.Tensor, list)):
-                raise ValueError(
-                    "Incorrect type of image_num_patches. "
-                    f"Got type: {type(image_num_patches)}"
-                )
-
-            pixel_values_flat = flatten_bn(pixel_values_flat, concat=True)
-            image_num_patches = flatten_bn(image_num_patches, concat=True)
-
             return NanoNemotronVLImagePixelInputs(
                 type="pixel_values",
                 pixel_values_flat=pixel_values_flat,
@@ -1285,28 +1271,17 @@ class NemotronH_Nano_VL_V2(
         if video_embeds is not None:
             return NanoNemotronVLVideoEmbeddingInputs(
                 type="video_embeds",
-                data=flatten_bn(video_embeds),
+                data=video_embeds,
             )
 
         video_token_id = kwargs["video_token_id"]
-        assert isinstance(video_token_id, torch.Tensor)
-        self.video_context_token_id = video_token_id.flatten().unique().item()
+        if isinstance(video_token_id, torch.Tensor):
+            video_token_id = video_token_id.flatten().unique().item()
+
+        assert isinstance(video_token_id, int)
+        self.video_context_token_id = video_token_id
 
         if pixel_values_flat_video is not None:
-            if not isinstance(pixel_values_flat_video, (torch.Tensor, list)):
-                raise ValueError(
-                    "Incorrect type of pixel values. "
-                    f"Got type: {type(pixel_values_flat_video)}"
-                )
-
-            if not isinstance(video_num_patches, (torch.Tensor, list)):
-                raise ValueError(
-                    "Incorrect type of image_num_patches. "
-                    f"Got type: {type(video_num_patches)}"
-                )
-
-            pixel_values_flat_video = flatten_bn(pixel_values_flat_video, concat=True)
-            video_num_patches = flatten_bn(video_num_patches, concat=True)
             expected_h = expected_w = self.config.force_image_size
             resolve_bindings = {"h": expected_h, "w": expected_w}
 
