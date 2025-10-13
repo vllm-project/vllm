@@ -8,7 +8,6 @@ import atexit
 import multiprocessing
 import os
 import time
-from contextlib import suppress
 from types import TracebackType
 from typing import TextIO
 
@@ -30,7 +29,6 @@ def _should_log_results() -> bool:
 
 # Cache for log file handle
 _log_file: TextIO | None = None
-log_results = _should_log_results()
 
 
 def _write_log_entry(name: str, elapsed_us: int) -> None:
@@ -46,7 +44,7 @@ def _write_log_entry(name: str, elapsed_us: int) -> None:
     global _log_file
     _LOG_PATH = envs.VLLM_LITE_PROFILER_LOG_PATH
 
-    if not log_results or _LOG_PATH is None:
+    if not _should_log_results() or _LOG_PATH is None:
         return
 
     # Handle case where file handle was opened in parent but we're in the
@@ -66,7 +64,7 @@ def _write_log_entry(name: str, elapsed_us: int) -> None:
         if directory:
             os.makedirs(directory, exist_ok=True)
         # ruff: noqa: SIM115 - intentionally keeping file handle cached globally
-        _log_file = open(_LOG_PATH, "a", buffering=50000)
+        _log_file = open(_LOG_PATH, "w", buffering=50000)
         atexit.register(_log_file.close)
 
     _log_file.write(log_line)
@@ -92,13 +90,12 @@ class LiteScope:
         exc_type: type[BaseException] | None,
         exc_value: BaseException | None,
         traceback: TracebackType | None,
-    ) -> bool:
+    ) -> None:
         if self._start_time is not None and exc_type is None:
             elapsed_ns = time.perf_counter_ns() - self._start_time
             # Use integer microseconds for better performance
             elapsed_us = elapsed_ns // 1000
             _write_log_entry(self._name, elapsed_us)
-        return False
 
 
 def maybe_emit_lite_profiler_report() -> None:
@@ -121,24 +118,12 @@ def maybe_emit_lite_profiler_report() -> None:
         )
         return
 
-    try:
-        from vllm.utils import lite_profiler_report
-    except Exception as exc:  # pragma: no cover - import error should not crash
-        logger.error("Failed to import lite profiler report helper: %s", exc)
-        return
+    from vllm.utils import lite_profiler_report
 
     logger.info("")
     logger.info("Lite profiler summary (%s):", log_path)
     try:
         # Generate and display the summary report
         lite_profiler_report.summarize_log(log_path)
-
-        # Clear the log file to avoid accumulating data from multiple runs
-        with suppress(OSError):
-            directory = os.path.dirname(log_path)
-            if directory:
-                os.makedirs(directory, exist_ok=True)
-            with open(log_path, "w"):
-                pass
     except Exception as exc:  # pragma: no cover - avoid crashing benchmarks
         logger.error("Failed to summarize lite profiler log %s: %s", log_path, exc)

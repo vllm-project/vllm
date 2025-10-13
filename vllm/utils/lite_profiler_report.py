@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 
 
 def _extract_event_us(filename: str) -> dict[str, list[int]]:
-    """Collect the microsecond timings for every scope in ``filenames``."""
+    """Collect the microsecond timings for every scope in ``filename``."""
 
     all_event_us: dict[str, list[int]] = defaultdict(list)
     try:
@@ -49,7 +49,7 @@ def _format_duration_us(value_us: int, total_us: int) -> str:
     # Convert microseconds to seconds
     seconds = value_us / 1e6 if value_us else 0.0
     percent = (value_us * 100.0 / total_us) if total_us else 0.0
-    return f"{seconds:.2f}s ({percent:.2f}%)"
+    return f"{seconds:.3f}s ({percent:.2f}%)"
 
 
 def _render_table(
@@ -101,7 +101,7 @@ def _compute_table_rows(
         cells.append(_format_duration_us(event_us_sum.get(event, 0), total_us))
     # Convert microseconds to seconds
     total_seconds = total_us / 1_000_000 if total_us else 0.0
-    cells.append(f"{total_seconds:.2f}s")
+    cells.append(f"{total_seconds:.3f}s")
     return cells
 
 

@@ -1394,7 +1394,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
     # Log path for the lightweight timing profiler.
     # If this path is set (not None), lightweight profiling will be enabled,
-    # providing detailed analysis of the execution time for each function call.
+    # providing detailed execution latency breakdown by segment.
     "VLLM_LITE_PROFILER_LOG_PATH": lambda: os.getenv(
         "VLLM_LITE_PROFILER_LOG_PATH", None
     ),
