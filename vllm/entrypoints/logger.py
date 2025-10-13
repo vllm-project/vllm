@@ -17,6 +17,9 @@ class RequestLogger:
     def __init__(self, *, max_log_len: int | None) -> None:
         self.max_log_len = max_log_len
 
+    def log_arrival(self, request_id: str) -> None:
+        logger.info("Arrived request %s", request_id)
+
     def log_inputs(
         self,
         request_id: str,

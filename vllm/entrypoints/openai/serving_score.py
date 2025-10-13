@@ -351,6 +351,8 @@ class ServingScores(OpenAIServing):
             return error_check_ret
 
         request_id = f"score-{self._base_request_id(raw_request)}"
+        self._log_arrival(request_id)
+
         created_time = int(time.time())
 
         try:
@@ -393,6 +395,8 @@ class ServingScores(OpenAIServing):
             return error_check_ret
 
         request_id = f"rerank-{self._base_request_id(raw_request)}"
+        self._log_arrival(request_id)
+
         documents = request.documents
         top_n = (
             request.top_n

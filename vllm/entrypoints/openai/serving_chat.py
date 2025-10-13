@@ -179,6 +179,15 @@ class OpenAIServingChat(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
+        request_id = (
+            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
+        )
+        self._log_arrival(request_id)
+
+        request_metadata = RequestResponseMetadata(request_id=request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
+
         try:
             lora_request = self._maybe_get_adapters(
                 request, supports_default_mm_loras=True
@@ -256,14 +265,6 @@ class OpenAIServingChat(OpenAIServing):
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
-
-        request_id = (
-            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
-        )
-
-        request_metadata = RequestResponseMetadata(request_id=request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []

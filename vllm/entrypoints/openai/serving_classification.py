@@ -146,6 +146,7 @@ class ServingClassification(ClassificationMixin):
     ) -> ClassificationResponse | ErrorResponse:
         model_name = self.models.model_name()
         request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
+        self._log_arrival(request_id)
 
         ctx = ClassificationServeContext(
             request=request,

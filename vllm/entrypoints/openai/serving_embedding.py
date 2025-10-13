@@ -629,6 +629,7 @@ class OpenAIServingEmbedding(EmbeddingMixin):
             f"{self.request_id_prefix}-"
             f"{self._base_request_id(raw_request, request.request_id)}"
         )
+        self._log_arrival(request_id)
 
         ctx = EmbeddingServeContext(
             request=request,

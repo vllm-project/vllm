@@ -1255,6 +1255,11 @@ class OpenAIServing:
 
         return get_prompt_components(prompt)  # type: ignore[arg-type]
 
+    def _log_arrival(self, request_id: str) -> None:
+        if self.request_logger is None:
+            return
+        self.request_logger.log_arrival(request_id)
+
     def _log_inputs(
         self,
         request_id: str,
