@@ -145,7 +145,7 @@ class AutoRoundConfig(QuantizationConfig):
                     continue
 
                 try:
-                    if re.fullmatch(pattern, name):
+                    if re.search(pattern, name):
                         return (
                             cfg.get("bits",
                                     self.weight_bits if quantized else 16),
