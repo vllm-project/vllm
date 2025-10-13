@@ -7,7 +7,7 @@ name = "vllm-rocm-autotuner-configs"
 version = "0.2.1"
 description = "ROCm tuned environment variable configurations for vLLM on AMD GPUs"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]

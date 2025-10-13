@@ -5,10 +5,12 @@
 import pytest
 
 try:
-    from vllm_rocm_autotuner_configs.utils import (_normalize_arch_name,
-                                                   check_amdsmi_available,
-                                                   get_amd_gpu_info,
-                                                   get_amd_gpu_info_safe)
+    from vllm_rocm_autotuner_configs.utils import (
+        _normalize_arch_name,
+        check_amdsmi_available,
+        get_amd_gpu_info,
+        get_amd_gpu_info_safe,
+    )
 
     _UTILS_AVAILABLE = True
 except ImportError:

@@ -5,7 +5,6 @@
 import json
 import sys
 from pathlib import Path
-from typing import Optional
 
 
 def get_signature(config: dict) -> str:
@@ -17,7 +16,7 @@ def get_signature(config: dict) -> str:
     return f"{arch}_{layers}L_{hidden}H_{heads}A"
 
 
-def fetch_hf_config(model_id: str) -> Optional[dict]:
+def fetch_hf_config(model_id: str) -> dict | None:
     """Fetch config.json from HuggingFace."""
     try:
         import json
@@ -53,8 +52,7 @@ def add_signatures_to_config(config_path: Path, dry_run: bool = False) -> None:
 
     for model_id, model_data in model_configs.items():
         if "signature" in model_data:
-            print(f"  {model_id}: already has signature "
-                  f"({model_data['signature']})")
+            print(f"  {model_id}: already has signature ({model_data['signature']})")
             continue
 
         if "/" not in model_id:
@@ -93,7 +91,8 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Add signatures to HuggingFace models in config files")
+        description="Add signatures to HuggingFace models in config files"
+    )
     parser.add_argument(
         "--config",
         type=Path,
@@ -110,8 +109,12 @@ def main():
     if args.config:
         config_files = [args.config]
     else:
-        configs_dir = (Path(__file__).parent.parent / "src" /
-                       "vllm_rocm_autotuner_configs" / "configs")
+        configs_dir = (
+            Path(__file__).parent.parent
+            / "src"
+            / "vllm_rocm_autotuner_configs"
+            / "configs"
+        )
         if not configs_dir.exists():
             print(f"Error: configs directory not found: {configs_dir}")
             return 1

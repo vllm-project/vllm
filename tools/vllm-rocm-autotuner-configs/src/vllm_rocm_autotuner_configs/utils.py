@@ -12,9 +12,13 @@ from functools import lru_cache
 _logger = logging.getLogger("vllm_rocm_autotuner_configs")
 
 try:
-    from amdsmi import (AmdSmiException, amdsmi_get_gpu_asic_info,
-                        amdsmi_get_processor_handles, amdsmi_init,
-                        amdsmi_shut_down)
+    from amdsmi import (
+        AmdSmiException,
+        amdsmi_get_gpu_asic_info,
+        amdsmi_get_processor_handles,
+        amdsmi_init,
+        amdsmi_shut_down,
+    )
 
     _HAS_AMDSMI = True
 except (ImportError, KeyError, OSError) as e:
@@ -22,7 +26,8 @@ except (ImportError, KeyError, OSError) as e:
     _logger.debug(
         f"amdsmi not available ({type(e).__name__}). "  # noqa: G004
         "GPU auto-detection unavailable. "
-        "Install with: pip install vllm-rocm-autotuner-configs[gpu-detect]")
+        "Install with: pip install vllm-rocm-autotuner-configs[gpu-detect]"
+    )
 
 
 class GPUDetectionError(Exception):
@@ -69,25 +74,27 @@ def get_amd_gpu_info() -> tuple[str, int]:
                 info = amdsmi_get_gpu_asic_info(dev)
                 all_info.append(info)
             except AmdSmiException as e:
-                _logger.warning(
-                    f"Failed to get info for device {dev}: {e}")  # noqa: G004
+                _logger.warning(f"Failed to get info for device {dev}: {e}")  # noqa: G004
                 continue
 
         if not all_info:
             raise GPUDetectionError("Failed to get info for any GPU")
 
         num_gpus = len(all_info)
-        unique_device_ids = {info.get("device_id") for info in all_info}
-        if len(unique_device_ids) == 1:
-            gfx_version = all_info[0].get("target_graphics_version", "unknown")
-            arch = _normalize_arch_name(gfx_version)
-            _logger.debug("Detected %s GPU(s) with architecture %s", num_gpus,
-                          arch)
+        unique_archs = {
+            _normalize_arch_name(info.get("target_graphics_version", "unknown"))
+            for info in all_info
+        }
+        if len(unique_archs) == 1:
+            arch = unique_archs.pop()
+            _logger.debug("Detected %s GPU(s) with architecture %s", num_gpus, arch)
             return arch, num_gpus
         else:
             _logger.warning(
-                f"Detected mixed GPU architectures: {unique_device_ids}. "  # noqa: G004
-                "Using 'mixed' as architecture name.")
+                "Detected mixed GPU architectures: %s. "
+                "Using 'mixed' as architecture name.",
+                unique_archs,
+            )
             return "mixed", num_gpus
 
     except AmdSmiException as e:
@@ -108,16 +115,15 @@ def _normalize_arch_name(gfx_version: str) -> str:
         Normalized architecture name (e.g., 'gfx942')
 
     Examples:
-        >>> _normalize_arch_name('gfx942:sramecc+:xnack-')
+        >>> _normalize_arch_name("gfx942:sramecc+:xnack-")
         'gfx942'
-        >>> _normalize_arch_name('gfx90a')
+        >>> _normalize_arch_name("gfx90a")
         'gfx90a'
     """
     if not gfx_version or gfx_version == "unknown":
         return "unknown"
 
-    base_arch = gfx_version.split(
-        ":")[0] if ":" in gfx_version else gfx_version
+    base_arch = gfx_version.split(":")[0] if ":" in gfx_version else gfx_version
     base_arch = base_arch.strip().lower()
 
     return base_arch
@@ -145,8 +151,7 @@ def get_amd_gpu_info_safe() -> tuple[str | None, int]:
         _logger.debug(f"GPU detection failed: {e}")  # noqa: G004
         return None, 0
     except Exception as e:
-        _logger.warning(
-            f"Unexpected error during GPU detection: {e}")  # noqa: G004
+        _logger.warning(f"Unexpected error during GPU detection: {e}")  # noqa: G004
         return None, 0
 
 
@@ -191,20 +196,17 @@ def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Detect AMD GPU architecture and count")
-    parser.add_argument("-v",
-                        "--verbose",
-                        action="store_true",
-                        help="Enable verbose output")
-    parser.add_argument("--json",
-                        action="store_true",
-                        help="Output in JSON format")
+        description="Detect AMD GPU architecture and count"
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable verbose output"
+    )
+    parser.add_argument("--json", action="store_true", help="Output in JSON format")
 
     args = parser.parse_args()
 
     if args.verbose:
-        logging.basicConfig(level=logging.DEBUG,
-                            format="%(levelname)s: %(message)s")
+        logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
     else:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
 

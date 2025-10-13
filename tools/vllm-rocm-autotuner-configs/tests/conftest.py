@@ -12,8 +12,9 @@ import pytest
 @pytest.fixture
 def configs_dir():
     """Get the configs directory."""
-    return (Path(__file__).parent.parent / "src" /
-            "vllm_rocm_autotuner_configs" / "configs")
+    return (
+        Path(__file__).parent.parent / "src" / "vllm_rocm_autotuner_configs" / "configs"
+    )
 
 
 @pytest.fixture
@@ -47,27 +48,20 @@ def sample_config(tmp_path):
     """Create a sample config file for testing."""
     config = {
         "default_config": {
-            "env_vars": {
-                "TEST_VAR": "test"
-            },
-            "cli_args": {
-                "test-arg": 123
-            },
+            "env_vars": {"TEST_VAR": "test"},
+            "cli_args": {"test-arg": 123},
         },
         "model_configs": {
             "test/model": {
-                "signature":
-                "GptOssForCausalLM_36L_2880H_64A",
-                "recipes": [{
-                    "name": "optimal",
-                    "rank": 1,
-                    "env_vars": {
-                        "VLLM_TEST": "1"
-                    },
-                    "cli_args": {
-                        "block-size": 64
-                    },
-                }],
+                "signature": "GptOssForCausalLM_36L_2880H_64A",
+                "recipes": [
+                    {
+                        "name": "optimal",
+                        "rank": 1,
+                        "env_vars": {"VLLM_TEST": "1"},
+                        "cli_args": {"block-size": 64},
+                    }
+                ],
             }
         },
     }

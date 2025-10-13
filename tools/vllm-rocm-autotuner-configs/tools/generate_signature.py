@@ -28,8 +28,7 @@ def get_signature_from_local(model_path: Path) -> str:
 def main():
     if len(sys.argv) != 2:
         print("Usage: python generate_signature.py <model_path>")
-        print("Example: python generate_signature.py "
-              "openai/gpt-oss-120b")
+        print("Example: python generate_signature.py openai/gpt-oss-120b")
         return 1
 
     model_path = Path(sys.argv[1])

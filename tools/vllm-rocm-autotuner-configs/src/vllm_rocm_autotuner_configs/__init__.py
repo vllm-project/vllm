@@ -19,8 +19,7 @@ class GPUDetectionError(Exception):
 
 try:
     from .utils import GPUDetectionError as _GPUDetectionError
-    from .utils import (check_amdsmi_available, get_amd_gpu_info,
-                        get_amd_gpu_info_safe)
+    from .utils import check_amdsmi_available, get_amd_gpu_info, get_amd_gpu_info_safe
 
     # Use the imported version if available
     GPUDetectionError = _GPUDetectionError  # type: ignore[misc]
@@ -91,10 +90,10 @@ def get_config_path(
         >>> path = get_config_path()
         >>>
         >>> # Specific architecture
-        >>> path = get_config_path(arch='gfx942')
+        >>> path = get_config_path(arch="gfx942")
         >>>
         >>> # Explicit config file
-        >>> path = get_config_path(config_file='/path/to/config.json')
+        >>> path = get_config_path(config_file="/path/to/config.json")
     """
     # 1. Explicit config file takes precedence
     if config_file is not None:
@@ -111,7 +110,8 @@ def get_config_path(
                 detected_arch, gpu_count = get_amd_gpu_info()
                 if gpu_count == 0:
                     raise ConfigNotFoundError(
-                        "No AMD GPUs detected. ROCm tuner requires AMD GPUs.")
+                        "No AMD GPUs detected. ROCm tuner requires AMD GPUs."
+                    )
                 if detected_arch and detected_arch != "unknown":
                     arch = detected_arch
                     _logger.info(
@@ -123,11 +123,11 @@ def get_config_path(
             raise ConfigNotFoundError(
                 "Cannot auto-detect GPU architecture. "
                 "Install with: pip install "
-                "vllm-rocm-autotuner-configs[gpu-detect]")
+                "vllm-rocm-autotuner-configs[gpu-detect]"
+            )
 
     if arch is None:
-        raise ConfigNotFoundError(
-            "No architecture specified and auto-detection failed")
+        raise ConfigNotFoundError("No architecture specified and auto-detection failed")
 
     # 3. Apply architecture mappings for older GPUs
     original_arch = arch
@@ -140,16 +140,17 @@ def get_config_path(
     if arch not in SUPPORTED_ARCHITECTURES:
         raise UnsupportedArchitectureError(
             f"GPU architecture '{original_arch}' is not supported. "
-            f"Supported: {', '.join(sorted(SUPPORTED_ARCHITECTURES))}")
+            f"Supported: {', '.join(sorted(SUPPORTED_ARCHITECTURES))}"
+        )
 
     # 5. Look for config in package
     config_file_path = _CONFIG_DIR / f"rocm_config_{arch}.json"
     if not config_file_path.exists():
         raise ConfigNotFoundError(
-            f"Config file for architecture '{arch}' not found in package")
+            f"Config file for architecture '{arch}' not found in package"
+        )
 
-    _logger.info(
-        f"Using package config: {config_file_path.name}")  # noqa: G004
+    _logger.info(f"Using package config: {config_file_path.name}")  # noqa: G004
     return config_file_path
 
 

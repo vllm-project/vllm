@@ -24,8 +24,11 @@ class TestConfigStructure:
     @pytest.mark.parametrize(
         "config_name,config_data",
         load_all_configs(
-            Path(__file__).parent.parent / "src" /
-            "vllm_rocm_autotuner_configs" / "configs"),
+            Path(__file__).parent.parent
+            / "src"
+            / "vllm_rocm_autotuner_configs"
+            / "configs"
+        ),
     )
     def test_valid_json(self, config_name, config_data):
         """Test that configs are valid JSON."""
@@ -35,8 +38,11 @@ class TestConfigStructure:
     @pytest.mark.parametrize(
         "config_name,config_data",
         load_all_configs(
-            Path(__file__).parent.parent / "src" /
-            "vllm_rocm_autotuner_configs" / "configs"),
+            Path(__file__).parent.parent
+            / "src"
+            / "vllm_rocm_autotuner_configs"
+            / "configs"
+        ),
     )
     def test_model_configs_structure(self, config_name, config_data):
         """Test model_configs section structure."""
@@ -61,8 +67,11 @@ class TestConfigStructure:
     @pytest.mark.parametrize(
         "config_name,config_data",
         load_all_configs(
-            Path(__file__).parent.parent / "src" /
-            "vllm_rocm_autotuner_configs" / "configs"),
+            Path(__file__).parent.parent
+            / "src"
+            / "vllm_rocm_autotuner_configs"
+            / "configs"
+        ),
     )
     def test_signature_format(self, config_name, config_data):
         """Test signature format is correct."""
@@ -87,8 +96,11 @@ class TestConfigStructure:
     @pytest.mark.parametrize(
         "config_name,config_data",
         load_all_configs(
-            Path(__file__).parent.parent / "src" /
-            "vllm_rocm_autotuner_configs" / "configs"),
+            Path(__file__).parent.parent
+            / "src"
+            / "vllm_rocm_autotuner_configs"
+            / "configs"
+        ),
     )
     def test_recipes_ranked(self, config_name, config_data):
         """Test that recipes are properly ranked."""
@@ -98,16 +110,18 @@ class TestConfigStructure:
             if len(recipes) > 1:
                 ranks = [r["rank"] for r in recipes]
                 # Ranks should be unique
-                assert len(ranks) == len(
-                    set(ranks)), f"{model_id}: duplicate ranks"
+                assert len(ranks) == len(set(ranks)), f"{model_id}: duplicate ranks"
                 # Should have rank 1
                 assert 1 in ranks, f"{model_id}: missing rank 1 recipe"
 
     @pytest.mark.parametrize(
         "config_name,config_data",
         load_all_configs(
-            Path(__file__).parent.parent / "src" /
-            "vllm_rocm_autotuner_configs" / "configs"),
+            Path(__file__).parent.parent
+            / "src"
+            / "vllm_rocm_autotuner_configs"
+            / "configs"
+        ),
     )
     def test_env_vars_valid(self, config_name, config_data):
         """Test that env vars are valid."""
@@ -119,19 +133,22 @@ class TestConfigStructure:
                     # Keys should be uppercase
                     assert key.isupper() or key.startswith("VLLM_"), (
                         f"{model_id}/{recipe['name']}: "
-                        f"env var {key} should be uppercase")
+                        f"env var {key} should be uppercase"
+                    )
 
                     # Values should be strings or convertible
-                    assert isinstance(
-                        value,
-                        (str, int, float)), (f"{model_id}/{recipe['name']}: "
-                                             f"env var {key} has invalid type")
+                    assert isinstance(value, (str, int, float)), (
+                        f"{model_id}/{recipe['name']}: env var {key} has invalid type"
+                    )
 
     @pytest.mark.parametrize(
         "config_name,config_data",
         load_all_configs(
-            Path(__file__).parent.parent / "src" /
-            "vllm_rocm_autotuner_configs" / "configs"),
+            Path(__file__).parent.parent
+            / "src"
+            / "vllm_rocm_autotuner_configs"
+            / "configs"
+        ),
     )
     def test_cli_args_valid(self, config_name, config_data):
         """Test that CLI args are valid."""
@@ -142,11 +159,10 @@ class TestConfigStructure:
                 for key, value in cli_args.items():
                     # Keys should use hyphens, not underscores
                     assert "_" not in key or key.startswith("_"), (
-                        f"{model_id}/{recipe['name']}: "
-                        f"CLI arg {key} should use hyphens")
+                        f"{model_id}/{recipe['name']}: CLI arg {key} should use hyphens"
+                    )
 
                     # Values should be valid types
-                    assert isinstance(
-                        value, (str, int, float, bool,
-                                dict)), (f"{model_id}/{recipe['name']}: "
-                                         f"CLI arg {key} has invalid type")
+                    assert isinstance(value, (str, int, float, bool, dict)), (
+                        f"{model_id}/{recipe['name']}: CLI arg {key} has invalid type"
+                    )

@@ -13,18 +13,15 @@ class TestGenerateSignature:
     """Test generate_signature.py script."""
 
     def test_script_exists(self):
-        script = Path(
-            __file__).parent.parent / "tools" / "generate_signature.py"
+        script = Path(__file__).parent.parent / "tools" / "generate_signature.py"
         assert script.exists()
 
     def test_generate_signature(self, mock_model_dir):
         """Test signature generation."""
-        script = Path(
-            __file__).parent.parent / "tools" / "generate_signature.py"
+        script = Path(__file__).parent.parent / "tools" / "generate_signature.py"
 
         result = subprocess.run(
-            [sys.executable, str(script),
-             str(mock_model_dir)],
+            [sys.executable, str(script), str(mock_model_dir)],
             capture_output=True,
             text=True,
         )
@@ -35,8 +32,7 @@ class TestGenerateSignature:
 
     def test_missing_model_path(self):
         """Test handling of missing model."""
-        script = Path(
-            __file__).parent.parent / "tools" / "generate_signature.py"
+        script = Path(__file__).parent.parent / "tools" / "generate_signature.py"
 
         result = subprocess.run(
             [sys.executable, str(script), "/nonexistent/path"],
