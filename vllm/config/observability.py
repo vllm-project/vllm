@@ -82,7 +82,7 @@ class ObservabilityConfig:
 
     @field_validator("show_hidden_metrics_for_version", mode="before")
     @classmethod
-    def _normalize_version(cls, value: str | None) -> str | None:
+    def _validate_version(cls, value: str | None) -> str | None:
         if value is None:
             return value
         value = value.lstrip("v")
