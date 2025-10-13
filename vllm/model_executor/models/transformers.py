@@ -19,7 +19,7 @@
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal, Optional, Union
+from typing import Literal
 
 import regex as re
 import torch
@@ -103,9 +103,9 @@ def vllm_flash_attention_forward(
     value: torch.Tensor,
     attention_mask: torch.Tensor,
     # Transformers kwargs
-    scaling: Optional[float] = None,
+    scaling: float | None = None,
     # vLLM kwargs
-    attention_instances: Optional[dict[Attention]] = None,
+    attention_instances: dict[Attention] | None = None,
     **kwargs,
 ):
     self_attn = attention_instances[module.layer_idx]
@@ -147,10 +147,10 @@ Style = Literal["colwise", "colwise_rep", "rowwise", "rowwise_rep", "replicate"]
 def replace_linear_class(
     linear: nn.Linear,
     style: Style = "replicate",
-    quant_config: Optional[QuantizationConfig] = None,
+    quant_config: QuantizationConfig | None = None,
     *,
     prefix: str = "",
-) -> Union[ColumnParallelLinear, RowParallelLinear, ReplicatedLinear]:
+) -> ColumnParallelLinear | RowParallelLinear | ReplicatedLinear:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
 
@@ -312,7 +312,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -388,11 +388,11 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
     def apply(
         self,
-        prompt: Union[str, list[int]],
+        prompt: str | list[int],
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        tokenization_kwargs: Mapping[str, object] | None = None,
+        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -498,7 +498,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         self.device_config: DeviceConfig = vllm_config.device_config
         self.model_config: ModelConfig = vllm_config.model_config
         self.parallel_config: ParallelConfig = vllm_config.parallel_config
-        self.quant_config: Optional[QuantizationConfig] = vllm_config.quant_config
+        self.quant_config: QuantizationConfig | None = vllm_config.quant_config
 
         self.pp_group = get_pp_group()
         self.tp_group = get_tp_group()
@@ -714,7 +714,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             )
         return attention_instances
 
-    def init_parameters(self, module: nn.Module, dtype: Optional[torch.dtype] = None):
+    def init_parameters(self, module: nn.Module, dtype: torch.dtype | None = None):
         """
         If a `parameter` is on the `meta` device, then its parent
         `module` is the original module created by:
@@ -725,7 +725,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         ```
         """
 
-        def _init_parameters(module: nn.Module, dtype: Optional[torch.dtype]):
+        def _init_parameters(module: nn.Module, dtype: torch.dtype | None):
             for name, param in module.named_parameters(recurse=False):
                 if param.device == torch.device("meta"):
                     new_param = nn.Parameter(
@@ -743,12 +743,12 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if not self.pp_group.is_first_rank:
             assert intermediate_tensors is not None
             input_ids = None
@@ -841,7 +841,7 @@ class TransformersForCausalLM(TransformersBase):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -895,12 +895,12 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         # Gemma3 and PaliGemma needs `token_type_ids` to work correctly
         # Other models will not have `token_type_ids` in kwargs
         kwargs = {k: v for k, v in kwargs.items() if k == "token_type_ids"}
@@ -924,8 +924,8 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
         return LanguageModelWrapper(self)
 
     def get_multimodal_embeddings(self, **kwargs):
-        pixel_values: Optional[torch.Tensor] = kwargs.pop("pixel_values", None)
-        image_embeds: Optional[torch.Tensor] = kwargs.pop("image_embeds", None)
+        pixel_values: torch.Tensor | None = kwargs.pop("pixel_values", None)
+        image_embeds: torch.Tensor | None = kwargs.pop("image_embeds", None)
         # Model might use `image_patches` instead of `pixel_values`
         if pixel_values is None:
             pixel_values = kwargs.pop("image_patches", None)
