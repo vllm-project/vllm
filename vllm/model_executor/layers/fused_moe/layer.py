@@ -7,6 +7,7 @@ from enum import Enum
 from functools import partial
 from typing import Literal, get_args, overload
 
+import functools
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
@@ -534,6 +535,8 @@ class FusedMoE(CustomOp):
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
         )
+
+        logger.debug("FusedMoE config=%s", self.moe_config)
 
         self.quant_config = quant_config
 
@@ -1254,6 +1257,7 @@ class FusedMoE(CustomOp):
         self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
         self.logical_replica_count = logical_replica_count[moe_layer_idx]
 
+    @functools.cache
     def ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:
             # Note: the moe_quant_config can't be constructed until after
@@ -1261,6 +1265,7 @@ class FusedMoE(CustomOp):
             self.quant_method.moe_quant_config = (
                 self.quant_method.get_fused_moe_quant_config(self)
             )
+        logger.debug("FusedMoE quant_config=%s", self.quant_method.moe_quant_config)
 
     @property
     def moe_quant_config(self) -> FusedMoEQuantConfig | None:
