@@ -9,12 +9,12 @@ backend: cutlass_mla
 
 # Test various decode batch sizes with different KV cache lengths
 batch_specs:
-  - "32q1kv1k"     # 32 decode requests, 1k KV cache
-  - "64q1kv1k"     # 64 decode requests, 1k KV cache
-  - "64q1kv4k"     # 64 decode requests, 4k KV cache
-  - "64q1kv16k"    # 64 decode requests, 16k KV cache
-  - "128q1kv1k"    # 128 decode requests, 1k KV cache
-  - "128q1kv4k"    # 128 decode requests, 4k KV cache
+  - "32q1s1k"     # 32 decode requests, 1k KV cache
+  - "64q1s1k"     # 64 decode requests, 1k KV cache
+  - "64q1s4k"     # 64 decode requests, 4k KV cache
+  - "64q1s16k"    # 64 decode requests, 16k KV cache
+  - "128q1s1k"    # 128 decode requests, 1k KV cache
+  - "128q1s4k"    # 128 decode requests, 4k KV cache
 
 # Sweep num_kv_splits values
 num_splits:

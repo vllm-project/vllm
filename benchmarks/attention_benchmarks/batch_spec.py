@@ -5,25 +5,25 @@
 Simplified batch specification grammar for attention benchmarks.
 
 Grammar (underscore-separated segments):
-  Format: (<count>?) q<q_len>(k?) (kv<kv_len>(k?))?
+  Format: (<count>?) q<q_len>(k?) (s<seq_len>(k?))?
 
   - count: Number of identical requests (optional, default=1)
   - q_len: Query length (number of new tokens)
-  - kv_len: Total KV cache length (optional, defaults to q_len for prefill)
+  - seq_len: Total sequence length (optional, defaults to q_len for prefill)
   - 'k' suffix: Multiplies value by 1024
 
 Common patterns:
-  - Prefill:  q_len == kv_len  (e.g., "q2k" → 2048 new tokens, 2048 KV)
-  - Decode:   q_len == 1        (e.g., "q1kv1k" → 1 token, 1024 KV cache)
-  - Extend:   q_len < kv_len    (e.g., "q4kv1k" → 4 tokens, 1024 KV cache)
+  - Prefill:  q_len == seq_len  (e.g., "q2k" → 2048 new tokens, 2048 seq)
+  - Decode:   q_len == 1        (e.g., "q1s1k" → 1 token, 1024 seq length)
+  - Extend:   q_len < seq_len   (e.g., "q4s1k" → 4 tokens, 1024 seq length)
 
 Examples:
   q2k              -> [(2048, 2048)]           # Prefill: 2048 tokens
-  q1kv1k           -> [(1, 1024)]              # Decode: 1 token, 1K KV cache
-  8q1kv1k          -> [(1, 1024)] * 8          # 8 decode requests
-  q4kv1k           -> [(4, 1024)]              # 4-token extend (spec decode)
-  2q1k_32q1kv1k    -> [(1024, 1024)] * 2 + [(1, 1024)] * 32  # Mixed batch
-  16q4kv1k         -> [(4, 1024)] * 16         # 16 spec decode requests
+  q1s1k            -> [(1, 1024)]              # Decode: 1 token, 1K sequence
+  8q1s1k           -> [(1, 1024)] * 8          # 8 decode requests
+  q4s1k            -> [(4, 1024)]              # 4-token extend (spec decode)
+  2q1k_32q1s1k     -> [(1024, 1024)] * 2 + [(1, 1024)] * 32  # Mixed batch
+  16q4s1k          -> [(4, 1024)] * 16         # 16 spec decode requests
 """
 
 from collections import Counter
@@ -100,7 +100,7 @@ def parse_batch_spec(spec: str) -> list[BatchRequest]:
     """
     Parse batch specification string into list of BatchRequest objects.
 
-    Grammar: (<count>?) q<q_len>(k?) (kv<kv_len>(k?))?
+    Grammar: (<count>?) q<q_len>(k?) (s<seq_len>(k?))?
 
     Args:
         spec: Batch specification string (see module docstring for grammar)
@@ -114,8 +114,8 @@ def parse_batch_spec(spec: str) -> list[BatchRequest]:
     requests = []
 
     for seg in spec.split("_"):
-        # Unified pattern: (<count>?) q<q_len>(k?) (kv<kv_len>(k?))?
-        m = re.match(r"^(?:(\d+))?q(\d+)(k?)(?:kv(\d+)(k?))?$", seg)
+        # Unified pattern: (<count>?) q<q_len>(k?) (s<seq_len>(k?))?
+        m = re.match(r"^(?:(\d+))?q(\d+)(k?)(?:s(\d+)(k?))?$", seg)
         if m:
             cnt = int(m.group(1)) if m.group(1) else 1
             q_len = _parse_size(m.group(2), m.group(3))

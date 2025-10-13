@@ -39,7 +39,7 @@ def test_basic_patterns():
     print("  ✓ 8s1k -> 8 x [(1, 1024)]")
 
     # Context extension
-    result = parse_batch_spec("q1ks2k")
+    result = parse_batch_spec("q1s2k")
     assert len(result) == 1
     assert result[0].q_len == 1024
     assert result[0].kv_len == 2048
@@ -162,9 +162,9 @@ def test_range_generation_simple():
     """Test simple range generation."""
     print("\nTesting range generation (simple)...")
 
-    ranges = [{"template": "q{q_len}kv1k", "q_len": {"start": 1, "stop": 5, "step": 1}}]
+    ranges = [{"template": "q{q_len}s1k", "q_len": {"start": 1, "stop": 5, "step": 1}}]
     specs = generate_batch_specs_from_ranges(ranges)
-    expected = ["q1kv1k", "q2kv1k", "q3kv1k", "q4kv1k", "q5kv1k"]
+    expected = ["q1s1k", "q2s1k", "q3s1k", "q4s1k", "q5s1k"]
     assert specs == expected, f"Expected {expected}, got {specs}"
     print(f"  ✓ Simple range: {len(specs)} specs generated")
 
@@ -174,11 +174,11 @@ def test_range_generation_multiple():
     print("\nTesting range generation (multiple ranges)...")
 
     ranges = [
-        {"template": "q{q_len}kv1k", "q_len": {"start": 1, "stop": 3, "step": 1}},
-        {"template": "q{q_len}kv1k", "q_len": {"start": 10, "stop": 20, "step": 5}},
+        {"template": "q{q_len}s1k", "q_len": {"start": 1, "stop": 3, "step": 1}},
+        {"template": "q{q_len}s1k", "q_len": {"start": 10, "stop": 20, "step": 5}},
     ]
     specs = generate_batch_specs_from_ranges(ranges)
-    expected = ["q1kv1k", "q2kv1k", "q3kv1k", "q10kv1k", "q15kv1k", "q20kv1k"]
+    expected = ["q1s1k", "q2s1k", "q3s1k", "q10s1k", "q15s1k", "q20s1k"]
     assert specs == expected, f"Expected {expected}, got {specs}"
     print(f"  ✓ Multiple ranges: {len(specs)} specs generated")
 
@@ -188,9 +188,9 @@ def test_range_generation_large():
     print("\nTesting range generation (large range)...")
 
     ranges = [
-        {"template": "q{q_len}kv1k", "q_len": {"start": 1, "stop": 16, "step": 1}},
-        {"template": "q{q_len}kv1k", "q_len": {"start": 17, "stop": 64, "step": 2}},
-        {"template": "q{q_len}kv1k", "q_len": {"start": 65, "stop": 128, "step": 4}},
+        {"template": "q{q_len}s1k", "q_len": {"start": 1, "stop": 16, "step": 1}},
+        {"template": "q{q_len}s1k", "q_len": {"start": 17, "stop": 64, "step": 2}},
+        {"template": "q{q_len}s1k", "q_len": {"start": 65, "stop": 128, "step": 4}},
     ]
     specs = generate_batch_specs_from_ranges(ranges)
     expected_count = 16 + 24 + 16  # (1-16) + (17,19,21...63) + (65,69,73...125)
@@ -206,14 +206,14 @@ def test_range_generation_cartesian():
 
     ranges = [
         {
-            "template": "q{q_len}kv{kv_len}k",
+            "template": "q{q_len}s{kv_len}k",
             "q_len": {"start": 1, "stop": 2, "step": 1},
             "kv_len": {"start": 1, "stop": 2, "step": 1},
         }
     ]
     specs = generate_batch_specs_from_ranges(ranges)
     # Should generate Cartesian product: (1,1), (1,2), (2,1), (2,2)
-    expected = ["q1kv1k", "q1kv2k", "q2kv1k", "q2kv2k"]
+    expected = ["q1s1k", "q1s2k", "q2s1k", "q2s2k"]
     assert specs == expected, f"Expected {expected}, got {specs}"
     print(f"  ✓ Cartesian product: {len(specs)} specs generated")
 
@@ -224,34 +224,34 @@ def test_range_generation_end_inclusive():
 
     # Test inclusive (default)
     ranges_inclusive = [
-        {"template": "q{q_len}kv1k", "q_len": {"start": 1, "stop": 3, "step": 1}}
+        {"template": "q{q_len}s1k", "q_len": {"start": 1, "stop": 3, "step": 1}}
     ]
     specs = generate_batch_specs_from_ranges(ranges_inclusive)
-    expected = ["q1kv1k", "q2kv1k", "q3kv1k"]
+    expected = ["q1s1k", "q2s1k", "q3s1k"]
     assert specs == expected, f"Expected {expected}, got {specs}"
     print(f"  ✓ end_inclusive default (true): {specs}")
 
     # Test explicit inclusive
     ranges_explicit_inclusive = [
         {
-            "template": "q{q_len}kv1k",
+            "template": "q{q_len}s1k",
             "q_len": {"start": 1, "stop": 5, "step": 1, "end_inclusive": True},
         }
     ]
     specs = generate_batch_specs_from_ranges(ranges_explicit_inclusive)
-    expected = ["q1kv1k", "q2kv1k", "q3kv1k", "q4kv1k", "q5kv1k"]
+    expected = ["q1s1k", "q2s1k", "q3s1k", "q4s1k", "q5s1k"]
     assert specs == expected, f"Expected {expected}, got {specs}"
     print("  ✓ end_inclusive=true: includes stop value")
 
     # Test exclusive
     ranges_exclusive = [
         {
-            "template": "q{q_len}kv1k",
+            "template": "q{q_len}s1k",
             "q_len": {"start": 1, "stop": 5, "step": 1, "end_inclusive": False},
         }
     ]
     specs = generate_batch_specs_from_ranges(ranges_exclusive)
-    expected = ["q1kv1k", "q2kv1k", "q3kv1k", "q4kv1k"]
+    expected = ["q1s1k", "q2s1k", "q3s1k", "q4s1k"]
     assert specs == expected, f"Expected {expected}, got {specs}"
     print("  ✓ end_inclusive=false: excludes stop value")
 

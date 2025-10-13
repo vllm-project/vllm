@@ -20,34 +20,34 @@ python benchmark.py --config configs/reorder_threshold.yaml
 # Or run custom benchmarks
 python benchmark.py \
     --backends flash flashinfer \
-    --batch-specs "q2k" "8q1kv1k" "2q2k_32q1kv1k" \
+    --batch-specs "q2k" "8q1s1k" "2q2k_32q1s1k" \
     --output-csv results.csv
 ```
 
 ## Simplified Batch Specification Grammar
 
-Express workloads concisely using query length and KV cache size:
+Express workloads concisely using query length and sequence length:
 
 ```python
-"q2k"              # 2048-token prefill (q_len=2048, kv_len=2048)
-"q1kv1k"           # Decode: 1 token with 1K KV cache
-"8q1kv1k"          # 8 decode requests
-"q4kv1k"           # 4-token extend (e.g., spec decode)
-"2q2k_32q1kv1k"    # Mixed: 2 prefills + 32 decodes
-"16q4kv1k"         # 16 spec decode (4 tokens each)
+"q2k"              # 2048-token prefill (q_len=2048, seq_len=2048)
+"q1s1k"            # Decode: 1 token with 1K sequence
+"8q1s1k"           # 8 decode requests
+"q4s1k"            # 4-token extend (e.g., spec decode)
+"2q2k_32q1s1k"     # Mixed: 2 prefills + 32 decodes
+"16q4s1k"          # 16 spec decode (4 tokens each)
 ```
 
 ### Grammar Rule
 
 ```
-Format: (<count>?) q<q_len>(k?) (kv<kv_len>(k?))?
+Format: (<count>?) q<q_len>(k?) (s<seq_len>(k?))?
 
-- count:  Number of identical requests (optional, default=1)
-- q_len:  Query length (number of new tokens)
-- kv_len: Total KV cache length (optional, defaults to q_len for prefill)
-- 'k':    Multiplies value by 1024
+- count:   Number of identical requests (optional, default=1)
+- q_len:   Query length (number of new tokens)
+- seq_len: Total sequence length (optional, defaults to q_len for prefill)
+- 'k':     Multiplies value by 1024
 
-Mixed batches: Use _ to combine (e.g., "2q2k_32q1kv1k")
+Mixed batches: Use _ to combine (e.g., "2q2k_32q1s1k")
 ```
 
 **Note**: Decode, prefill, and spec decode are just different query lengths - no special syntax needed!
@@ -124,7 +124,7 @@ The `benchmark.py` script handles **all** backends - both standard attention and
 ```bash
 python benchmark.py \
     --backends flash triton flashinfer \
-    --batch-specs "q2k" "8q1kv1k" "2q2k_32q1kv1k" \
+    --batch-specs "q2k" "8q1s1k" "2q2k_32q1s1k" \
     --num-layers 10 \
     --repeats 5 \
     --output-csv results.csv
@@ -136,7 +136,7 @@ python benchmark.py \
 # Compare all MLA backends
 python benchmark.py \
     --backends cutlass_mla flashinfer_mla flash_attn_mla flashmla \
-    --batch-specs "64q1kv1k" "64q1kv4k" \
+    --batch-specs "64q1s1k" "64q1s4k" \
     --output-csv mla_results.csv
 ```
 
@@ -147,7 +147,7 @@ python benchmark.py \
 ```bash
 python benchmark.py \
     --backend cutlass_mla \
-    --batch-specs "64q1kv1k" "64q1kv4k" "64q1kv16k" \
+    --batch-specs "64q1s1k" "64q1s4k" "64q1s16k" \
     --num-splits 1 2 4 8 16 \
     --compare-auto \
     --output-json optimal_splits.json
@@ -160,7 +160,7 @@ python benchmark.py \
 ```bash
 python benchmark.py \
     --backend flashmla \
-    --batch-specs "q4kv1k" "q8kv2k" \
+    --batch-specs "q4s1k" "q8s2k" \
     --thresholds 1 4 16 64 256 512 \
     --output-csv threshold_sweep.csv
 ```
@@ -173,7 +173,7 @@ python benchmark.py \
 --backends BACKEND [BACKEND ...]    # flash, triton, flashinfer, cutlass_mla,
                                     # flashinfer_mla, flash_attn_mla, flashmla
 --backend BACKEND                   # Single backend (alternative to --backends)
---batch-specs SPEC [SPEC ...]       # Batch specifications (default: ["q2k", "8q1kv1k"])
+--batch-specs SPEC [SPEC ...]       # Batch specifications (default: ["q2k", "8q1s1k"])
 
 # Model configuration
 --num-layers N                      # Number of layers (default: 10)
@@ -223,7 +223,7 @@ from common import BenchmarkConfig
 
 config = BenchmarkConfig(
     backend="cutlass_mla",
-    batch_spec="64q1kv4k",
+    batch_spec="64q1s4k",
     num_layers=10,
     head_dim=576,
     num_q_heads=128,
@@ -255,9 +255,9 @@ from batch_spec import parse_batch_spec, format_batch_spec, get_batch_stats
 from common import BenchmarkConfig, BenchmarkResult, ResultsFormatter
 
 # Parse batch specs
-requests = parse_batch_spec("2q2k_q4kv1k_32s1k")
+requests = parse_batch_spec("2q2k_q4s1k_32s1k")
 print(format_batch_spec(requests))
-# "2 prefill (2x2k), 1 specdecode (1xq4s1k), 32 decode (32x1k)"
+# "2 prefill (2x2k), 1 extend (1xq4s1k), 32 decode (32x1k)"
 
 # Get batch statistics
 stats = get_batch_stats(requests)
@@ -318,7 +318,7 @@ source /path/to/vllm/.venv/bin/activate
 
 **OOM?**
 - Reduce batch size: `"32s1k"` → `"16s1k"`
-- Reduce sequence length: `"64q1kv16k"` → `"64q1kv4k"`
+- Reduce sequence length: `"64q1s16k"` → `"64q1s4k"`
 
 ## What's Included
 
