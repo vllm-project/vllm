@@ -1199,8 +1199,7 @@ class CompletionRequest(OpenAIBaseModel):
     )
     structural_tag: str | None = Field(
         default=None,
-        description=(
-            "If specified, the output will follow the structural tag schema."),
+        description=("If specified, the output will follow the structural tag schema."),
     )
     guided_decoding_backend: str | None = Field(
         default=None,
@@ -1373,7 +1372,8 @@ class CompletionRequest(OpenAIBaseModel):
             elif self.response_format.type == "structural_tag":
                 structural_tag = self.response_format
                 assert structural_tag is not None and isinstance(
-                    structural_tag, StructuralTagResponseFormat)
+                    structural_tag, StructuralTagResponseFormat
+                )
                 s_tag_obj = structural_tag.model_dump(by_alias=True)
                 self.structural_tag = json.dumps(s_tag_obj)
 
@@ -1390,13 +1390,6 @@ class CompletionRequest(OpenAIBaseModel):
             kwargs = {k: v for k, v in kwargs.items() if v is not None}
             if len(kwargs) > 0:
                 self.structured_outputs = StructuredOutputsParams(**kwargs)
-
-        if (
-            self.structured_outputs is not None
-            and self.response_format is not None
-            and self.response_format.type == "json_object"
-        ):
-            self.structured_outputs.json_object = True
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
