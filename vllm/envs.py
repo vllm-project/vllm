@@ -1387,8 +1387,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Log path for the lightweight timing profiler.
     # If this path is set (not None), lightweight profiling will be enabled,
-    # providing detailed analysis of the execution time for each function call.
-    "VLLM_LITE_PROFILER_LOG_PATH": lambda: os.getenv("VLLM_LITE_PROFILER_LOG_PATH"),
+    # providing detailed execution latency breakdown by segment.
+    "VLLM_LITE_PROFILER_LOG_PATH": lambda: os.getenv(
+        "VLLM_LITE_PROFILER_LOG_PATH", None
+    ),
 }
 
 # --8<-- [end:env-vars-definition]
