@@ -90,11 +90,10 @@ class SharedStorageConnector(KVConnectorBase_V1):
         super().__init__(vllm_config=vllm_config, role=role)
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}
-        transfer_config = vllm_config.kv_transfer_config
-        self._storage_path = transfer_config.get_from_extra_config(
+        self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
         )
-        logger.info(vllm_config.kv_transfer_config)
+        logger.info(self._kv_transfer_config)
         logger.info("Shared storage path is %s", self._storage_path)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
@@ -277,9 +276,8 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         # Now, first num_tokens_to_check tokens are hit, we need to prepare
         # the metadata for the worker connector to correctly load the KV
-        num_tokens_to_check = align_to_block_size(
-            len(request.prompt_token_ids) - 1, self._block_size
-        )
+        token_ids = request.prompt_token_ids or []
+        num_tokens_to_check = align_to_block_size(len(token_ids) - 1, self._block_size)
 
         return num_tokens_to_check - num_computed_tokens, False
 
@@ -311,13 +309,15 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         total_need_load = 0
         for new_req in scheduler_output.scheduled_new_reqs:
+            token_ids = new_req.prompt_token_ids or []
+            mm_hashes = [f.identifier for f in new_req.mm_features]
             if new_req.req_id in self._requests_need_load:
                 meta.add_request(
-                    token_ids=new_req.prompt_token_ids,
+                    token_ids=token_ids,
                     block_ids=new_req.block_ids[0],
                     block_size=self._block_size,
                     is_store=False,
-                    mm_hashes=[f.identifier for f in new_req.mm_features],
+                    mm_hashes=mm_hashes,
                 )
                 total_need_load += 1
             else:
@@ -325,13 +325,13 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 # but a single request can have both store and load.
                 # NOTE(rob): for this debug implementation, we only cache
                 # the original prompt tokens.
-                if not self._found_match_for_request(new_req):
+                if not self._found_match_for_prompt(token_ids, mm_hashes):
                     meta.add_request(
-                        token_ids=new_req.prompt_token_ids,
+                        token_ids=token_ids,
                         block_ids=new_req.block_ids[0],
                         block_size=self._block_size,
                         is_store=True,
-                        mm_hashes=[f.identifier for f in new_req.mm_features],
+                        mm_hashes=mm_hashes,
                     )
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -355,6 +355,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
                 # NOTE(rob): For resumed req, new_block_ids is all
                 # of the block_ids for the request.
+                assert new_block_ids is not None
                 block_ids = new_block_ids[0]
 
                 meta.add_request(
@@ -379,12 +380,22 @@ class SharedStorageConnector(KVConnectorBase_V1):
         request: "Request",
     ) -> bool:
         """Check if the cache is hit for the request."""
+        return self._found_match_for_prompt(
+            list(request.prompt_token_ids or []),
+            [f.identifier for f in request.mm_features],
+        )
+
+    def _found_match_for_prompt(
+        self,
+        prompt_token_ids: list[int],
+        mm_hashes: list[str],
+    ) -> bool:
         num_tokens_to_check = align_to_block_size(
-            len(request.prompt_token_ids) - 1, self._block_size
+            len(prompt_token_ids) - 1, self._block_size
         )
         foldername = self._generate_foldername_debug(
-            torch.tensor(request.prompt_token_ids)[:num_tokens_to_check],
-            [f.identifier for f in request.mm_features],
+            torch.tensor(prompt_token_ids)[:num_tokens_to_check],
+            mm_hashes,
             create_folder=False,
         )
         return os.path.exists(foldername)

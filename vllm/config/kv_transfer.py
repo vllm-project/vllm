@@ -27,7 +27,7 @@ class KVTransferConfig:
     engine_id: str | None = None
     """The engine id for KV transfers."""
 
-    kv_buffer_device: str | None = "cuda"
+    kv_buffer_device: str = "cuda"
     """The device used by kv connector to buffer the KV cache. Choices are 
     'cuda' and 'cpu'."""
 

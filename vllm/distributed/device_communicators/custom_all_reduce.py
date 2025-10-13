@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -118,15 +119,18 @@ class CustomAllreduce:
         # now `device` is a `torch.device` object
         assert isinstance(device, torch.device)
         self.device = device
-        device_capability = current_platform.get_device_capability().as_version_str()
+        device_capability = current_platform.get_device_capability()
         if (
             current_platform.is_cuda()
             and symm_mem_enabled
-            and device_capability in CUSTOM_ALL_REDUCE_MAX_SIZES
+            and device_capability is not None
         ):
-            max_size = min(
-                CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability][world_size], max_size
-            )
+            device_capability_str = device_capability.as_version_str()
+            if device_capability_str in CUSTOM_ALL_REDUCE_MAX_SIZES:
+                max_size = min(
+                    CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability_str][world_size],
+                    max_size,
+                )
         cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
         if cuda_visible_devices:
             device_ids = list(map(int, cuda_visible_devices.split(",")))
@@ -213,6 +217,7 @@ class CustomAllreduce:
         # We cannot directly use `dist.all_gather_object` here
         # because it is incompatible with `gloo` backend under inference mode.
         # see https://github.com/pytorch/pytorch/issues/126032 for details.
+        all_data: list[list[list[int] | None]]
         all_data = [[None, None] for _ in range(dist.get_world_size(group=self.group))]
         all_data[self.rank] = [handle, offset]
         ranks = sorted(dist.get_process_group_ranks(group=self.group))
@@ -221,8 +226,8 @@ class CustomAllreduce:
                 all_data[i], src=rank, group=self.group, device="cpu"
             )
         # Unpack list of tuples to tuple of lists.
-        handles = [d[0] for d in all_data]  # type: ignore
-        offsets = [d[1] for d in all_data]  # type: ignore
+        handles = cast(list[list[int]], [d[0] for d in all_data])
+        offsets = cast(list[list[int]], [d[1] for d in all_data])
         ops.register_graph_buffers(self._ptr, handles, offsets)
 
     def should_custom_ar(self, inp: torch.Tensor):
