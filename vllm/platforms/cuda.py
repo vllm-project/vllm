@@ -374,14 +374,11 @@ class CudaPlatformBase(Platform):
             # Default backends for V1 engine
             # Prefer FlashInfer for Blackwell GPUs if installed
             if cls.is_device_capability(100):
-                if envs.VLLM_FLASH_ATTN_VERSION == 4:
-                    if is_default_backend_supported := is_attn_backend_supported(
-                        FLASH_ATTN_V1, head_size, dtype, allow_import_error=False
-                    ):
-                        logger.info_once(
-                            "Using Flash Attention 4 backend on V1 engine."
-                        )
-                        return FLASH_ATTN_V1
+                if envs.VLLM_FLASH_ATTN_VERSION == 4 and is_attn_backend_supported(
+                    FLASH_ATTN_V1, head_size, dtype, allow_import_error=False
+                ):
+                    logger.info_once("Using Flash Attention 4 backend on V1 engine.")
+                    return FLASH_ATTN_V1
 
                 if is_default_backend_supported := is_attn_backend_supported(
                     FLASHINFER_V1, head_size, dtype
