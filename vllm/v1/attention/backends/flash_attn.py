@@ -570,7 +570,11 @@ class FlashAttentionImpl(AttentionImpl):
             if envs.VLLM_FLASH_ATTN_VERSION == 4:
                 from flash_attn.cute.interface import flash_attn_varlen_func
 
-                output, lse, *rest = flash_attn_varlen_func(
+                window_size = (
+                    None if self.sliding_window[0] == -1 else self.sliding_window[0],
+                    None if self.sliding_window[1] == -1 else self.sliding_window[1],
+                )
+                out, lse, *rest = flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
                     k=key_cache,
                     v=value_cache,
@@ -579,10 +583,11 @@ class FlashAttentionImpl(AttentionImpl):
                     softmax_scale=self.scale,
                     cu_seqlens_q=cu_seqlens_q,
                     causal=attn_metadata.causal,
-                    window_size=self.sliding_window,
+                    window_size=window_size,
                     learnable_sink=self.sinks,
                     softcap=self.logits_soft_cap,
                 )
+                output.copy_(out)
             else:
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
