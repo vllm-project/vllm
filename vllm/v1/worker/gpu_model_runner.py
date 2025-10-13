@@ -3622,8 +3622,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         hidden_states: torch.Tensor,
     ) -> PoolerOutput:
         # Find the task that has the largest output for subsequent steps
+        supported_pooling_tasks = self.get_supported_pooling_tasks()
+
+        if not supported_pooling_tasks:
+            if self.scheduler_config.chunked_prefill_enabled:
+                raise RuntimeError(
+                    f"Model {self.model_config.model} does not support "
+                    "any pooling tasks with chunked prefill enabled. "
+                    "Please add --no-enable-chunked-prefill to your "
+                    "config or CLI args. See "
+                    "https://docs.vllm.ai/en/latest/models/pooling_models.html "
+                    "to learn more."
+                )
+            else:
+                raise RuntimeError(
+                    f"Model {self.model_config.model} does not support "
+                    "any pooling tasks. See "
+                    "https://docs.vllm.ai/en/latest/models/pooling_models.html "
+                    "to learn more."
+                )
+
         output_size = dict[PoolingTask, float]()
-        for task in self.get_supported_pooling_tasks():
+        for task in supported_pooling_tasks:
             # Run a full batch with each task to ensure none of them OOMs
             output = self._dummy_pooler_run_task(hidden_states, task)
             output_size[task] = sum(o.nbytes for o in output)
