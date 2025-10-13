@@ -4,7 +4,7 @@
 import hashlib
 import os
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from pydantic import Field, model_validator
