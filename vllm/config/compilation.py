@@ -574,8 +574,8 @@ class CompilationConfig:
 
         if self.use_inductor is not None:
             logger.warning_once(
-                "The 'use_inductor' flag is deprecated and will be\
-                    removed in a future release."
+                "The 'use_inductor' flag is deprecated and will be "
+                "removed in the next release (v0.12.0). "
                 "Please use the 'backend' option instead.",
             )
             self.backend = "inductor" if self.use_inductor else "eager"
