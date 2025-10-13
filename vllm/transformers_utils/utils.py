@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import struct
 from functools import cache
 from os import PathLike
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from vllm.envs import VLLM_MODEL_REDIRECT_PATH
 from vllm.logger import init_logger
@@ -14,7 +15,7 @@ logger = init_logger(__name__)
 
 
 def is_s3(model_or_path: str) -> bool:
-    return model_or_path.lower().startswith('s3://')
+    return model_or_path.lower().startswith("s3://")
 
 
 def check_gguf_file(model: Union[str, PathLike]) -> bool:
@@ -42,13 +43,16 @@ def modelscope_list_repo_files(
 ) -> list[str]:
     """List files in a modelscope repo."""
     from modelscope.hub.api import HubApi
+
     api = HubApi()
     api.login(token)
     # same as huggingface_hub.list_repo_files
     files = [
-        file['Path'] for file in api.get_model_files(
-            model_id=repo_id, revision=revision, recursive=True)
-        if file['Type'] == 'blob'
+        file["Path"]
+        for file in api.get_model_files(
+            model_id=repo_id, revision=revision, recursive=True
+        )
+        if file["Type"] == "blob"
     ]
     return files
 
@@ -90,10 +94,18 @@ def maybe_model_redirect(model: str) -> str:
     if not Path(model_redirect_path).exists():
         return model
 
-    redirect_dict = (_maybe_json_dict(model_redirect_path)
-                     or _maybe_space_split_dict(model_redirect_path))
-    if (redirect_model := redirect_dict.get(model)):
+    redirect_dict = _maybe_json_dict(model_redirect_path) or _maybe_space_split_dict(
+        model_redirect_path
+    )
+    if redirect_model := redirect_dict.get(model):
         logger.info("model redirect: [ %s ] -> [ %s ]", model, redirect_model)
         return redirect_model
 
     return model
+
+
+def parse_safetensors_file_metadata(path: Union[str, PathLike]) -> dict[str, Any]:
+    with open(path, "rb") as f:
+        length_of_metadata = struct.unpack("<Q", f.read(8))[0]
+        metadata = json.loads(f.read(length_of_metadata).decode("utf-8"))
+        return metadata

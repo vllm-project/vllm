@@ -35,18 +35,18 @@ class MultiModalBudget:
         self.model_config = model_config
         self.scheduler_config = scheduler_config
         self.mm_registry = mm_registry
-        self.cache = cache = processor_only_cache_from_config(
-            model_config, mm_registry)
+        self.cache = cache = processor_only_cache_from_config(model_config, mm_registry)
 
         self.max_model_len = model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
 
-        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config,
-                                                              cache=cache)
+        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config, cache=cache)
 
-        max_tokens_by_modality = mm_registry \
-            .get_max_tokens_per_item_by_nonzero_modality(model_config,
-                                                         cache=cache)
+        max_tokens_by_modality = (
+            mm_registry.get_max_tokens_per_item_by_nonzero_modality(
+                model_config, cache=cache
+            )
+        )
 
         encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
             scheduler_config,
@@ -126,6 +126,10 @@ class MultiModalBudget:
 
         return max_items_per_prompt, max_items_per_batch
 
+    def reset_cache(self) -> None:
+        if self.cache is not None:
+            self.cache.clear_cache()
+
 
 @dataclass
 class AttentionGroup:
@@ -145,17 +149,14 @@ class AttentionGroup:
         vllm_config: VllmConfig,
         device: torch.device,
         num_metadata_builders: int = 1,
-    ) -> 'AttentionGroup':
+    ) -> "AttentionGroup":
         metadata_builders = [
-            backend.get_builder_cls()(kv_cache_spec, layer_names, vllm_config,
-                                      device)
+            backend.get_builder_cls()(kv_cache_spec, layer_names, vllm_config, device)
             for _ in range(num_metadata_builders)
         ]
-        return AttentionGroup(backend, metadata_builders, layer_names,
-                              kv_cache_spec)
+        return AttentionGroup(backend, metadata_builders, layer_names, kv_cache_spec)
 
-    def get_metadata_builder(self,
-                             ubatch_id: int = 0) -> AttentionMetadataBuilder:
+    def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
 
@@ -172,19 +173,22 @@ def sanity_check_mm_encoder_outputs(
         "Expected multimodal embeddings to be a list/tuple of 2D tensors, "
         f"or a single 3D tensor, but got {type(mm_embeddings)} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method.")
+        "of the model's `get_multimodal_embeddings` method."
+    )
 
     assert len(mm_embeddings) == expected_num_items, (
         "Expected number of multimodal embeddings to match number of "
         f"input items: {expected_num_items}, but got {len(mm_embeddings)=} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method.")
+        "of the model's `get_multimodal_embeddings` method."
+    )
 
     assert all(e.ndim == 2 for e in mm_embeddings), (
         "Expected multimodal embeddings to be a sequence of 2D tensors, "
         f"but got tensors with shapes {[e.shape for e in mm_embeddings]} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method.")
+        "of the model's `get_multimodal_embeddings` method."
+    )
 
 
 def scatter_mm_placeholders(
@@ -266,6 +270,7 @@ def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
     forward_context: dict[str, "Attention"],
     runner_kv_caches: list[torch.Tensor],
+    num_attn_module: Optional[int] = 1,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -289,7 +294,7 @@ def bind_kv_cache(
     # Convert kv_caches dict to a list of tensors in the order of layer_index.
     index2name = defaultdict(list)
     for layer_name in kv_caches:
-        index2name[extract_layer_index(layer_name)].append(layer_name)
+        index2name[extract_layer_index(layer_name, num_attn_module)].append(layer_name)
 
     for layer_index in sorted(index2name.keys()):
         layer_names = index2name[layer_index]
@@ -317,16 +322,16 @@ def bind_kv_cache(
         forward_context[layer_name].kv_cache = [kv_cache]
 
 
-def is_residual_scattered_for_sp(vllm_config: VllmConfig,
-                                 num_input_tokens: int) -> bool:
+def is_residual_scattered_for_sp(
+    vllm_config: VllmConfig, num_input_tokens: int
+) -> bool:
     """Check if the residual tensor is scattered for sequence parallelism.
 
     The residual tensor is scattered across tensor parallel ranks when sequence
     parallelism and tensor parallelism is enabled, and the number of
     input tokens is one of the compilation sizes.
     """
-    if not vllm_config.compilation_config.pass_config.\
-        enable_sequence_parallelism:
+    if not vllm_config.compilation_config.pass_config.enable_sequence_parallelism:
         return False
 
     tp = vllm_config.parallel_config.tensor_parallel_size
@@ -339,4 +344,4 @@ def is_residual_scattered_for_sp(vllm_config: VllmConfig,
     assert num_input_tokens % tp == 0
 
     # Currently, SP is only enabled for static size fx graphs.
-    return (num_input_tokens in vllm_config.compilation_config.compile_sizes)
+    return num_input_tokens in vllm_config.compilation_config.compile_sizes
