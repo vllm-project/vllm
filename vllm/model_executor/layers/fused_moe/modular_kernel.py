@@ -984,7 +984,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             assert num_chunks == 0
             workspace13 = None
             workspace2 = None
-            fused_out = torch.empty_like(a1q)
+            fused_out = torch.empty_like(a1q, dtype=in_dtype)
         else:
             assert num_chunks > 0
             workspace13, workspace2, fused_out = self._allocate_buffers(
