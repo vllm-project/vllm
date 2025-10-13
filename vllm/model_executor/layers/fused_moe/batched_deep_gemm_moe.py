@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from math import log2
-from typing import Optional
 
 import torch
 
@@ -94,7 +92,7 @@ def _silu_mul_fp8_quant_deep_gemm(
         tl.store(y_s_ptr + base_ys_offset + t * stride_ys_t, y_s)
 
 
-def silu_mul_fp8_quant_deep_gemm_cuda(
+def persistent_masked_m_silu_mul_quant(
     y: torch.Tensor,  # (E, T, 2*H)
     tokens_per_expert: torch.Tensor,  # (E,) number of valid tokens per expert
     num_parallel_tokens=16,
@@ -103,9 +101,41 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
     y has shape (E, T, 2*H). The first half of the last dimension is
     silu-activated, multiplied by the second half, then quantized into FP8.
+    We launch a fixed grid of threads to accommodate CUDA graphs. Let `P2`
+    be a parallelization factor for persistent_masked_m_silu_mul_quant over the
+    hidden dimension.
+
+    Let `expert_offsets = [0] + [num_tokens.cumsum()]` and
+    `total_tokens = expert_offsets[-1]`.
+    persistent_masked_m_silu_mul_quant launches `total_tokens x P2` number of
+    thread blocks. Each thread block contains `NUM_WARPS` warps.
+
+    Every thread block needs to find it's corresponding expert by warp-parallel scanning
+    over the `expert_offsets` array.
+
+    The i-th warp in the first thread block processes
+    `[i * warp_chunk_size, (i + 1) * warp_chunk_size]` groups
+    sequentially, where `warp_chunk_size = ((H / GROUP_SIZE) / P2) / NUM_WARPS`,
+    pipelining loads and computes.
+
+    The shared memory layout for 4 warps with a 2-stage pipeline for SiLU V2
+    can is visualized like so:
+
+                         stage0                              stage1
+    ┌─────┬───┬─────┬───┬─────┬───┬─────┬───┬─────┬───┬─────┬───┬─────┬───┬─────┬───┐
+    │gate0│up0│gate1│up1│gate2│up2│gate3│up3│gate0│up0│gate1│up1│gate2│up2│gate3│up3│
+    └─────┴───┴─────┴───┴─────┴───┴─────┴───┴─────┴───┴─────┴───┴─────┴───┴─────┴───┘
+
+    with the main difference between V1 and V2 being the global load
+    stride between warps, and between half-warps. Regarding the latter stride,
+    we assign the first half warp of every warp for `gate` loads and the second
+    half-warp to `up` loads.
+
     Returns `(y_q, y_s)` where
     * `y_q`: FP8 tensor, shape (E, T, H), same layout as y[..., :H]
     * `y_s`: FP32 tensor, shape (E, T, H // group_size), strides (T*G, 1, T)
+    Let NUM_WARPS be the number of warps in a single thread block and
+    `GROUP_SIZE = 128` be the size of the quantization group.
     """
     assert y.ndim == 3, "y must be (E, T, 2*H)"
     E, T, H2 = y.shape
@@ -133,30 +163,15 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
 
     use_ue8m0 = is_deep_gemm_e8m0_used()
 
-    if E <= 16:
-        max_empirical_parallelism = 64
-    elif E <= 32:
-        max_empirical_parallelism = 16
-    else:
-        max_empirical_parallelism = 4
-
-    # We never want to launch more than Tx number of threads
-    # This computes the clip.
-    num_parallel_tokens = max(
-        1, min(max_empirical_parallelism, 2 ** int(log2(min(num_parallel_tokens, T))))
-    )
     cuda_arch = current_platform.get_device_capability(
         device_id=y.device.index
     ).to_int()
 
     if cuda_arch >= 80:
-        torch.ops._C.silu_mul_fp8_quant_deep_gemm_cuda(
-            y, tokens_per_expert, y_q, y_s, group_size, use_ue8m0, num_parallel_tokens
+        torch.ops._C.persistent_masked_m_silu_mul_quant(
+            y, tokens_per_expert, y_q, y_s, use_ue8m0
         )
     else:
-        # Default to triton if not on cuda or if arch is too old
-        y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
-
         stride_cnt_e = tokens_per_expert.stride()[0]
 
         # Static grid over experts and H-groups.
@@ -166,16 +181,6 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
         stride_i_e, stride_i_t, stride_i_h = y.stride()
         stride_yq_e, stride_yq_t, stride_yq_h = y_q.stride()
 
-        # desired scale strides (elements): (T*G, 1, T)
-        stride_ys_e = T * G
-        stride_ys_t = 1
-        stride_ys_g = T
-        y_s = torch.empty_strided(
-            (E, T, G),
-            (stride_ys_e, stride_ys_t, stride_ys_g),
-            dtype=torch.float32,
-            device=y.device,
-        )
         f_info = torch.finfo(fp8_dtype)
         fp8_max = f_info.max
         fp8_min = f_info.min
@@ -247,29 +252,24 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
         M: int,
         N: int,
         K: int,
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
-        expert_tokens_metadata: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-        assert a.dim() == 2
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # FIXME (varun): We should be able to dispatch only from the leader
         # DP ranks in the case of TP > 1. At the moment, all the Ranks
         # end up sending their tokens. This needs to be fixed.
         num_dispatchers = self.num_dispatchers
         num_experts = local_num_experts
-        max_num_tokens = (
-            a.size(0) if self.max_num_tokens is None else self.max_num_tokens
-        )
+        max_num_tokens = M if self.max_num_tokens is None else self.max_num_tokens
         workspace13 = (num_experts, max_num_tokens * num_dispatchers, max(K, N))
         workspace2 = (num_experts, max_num_tokens * num_dispatchers, (N // 2))
         output = (num_experts, max_num_tokens * num_dispatchers, K)
-        return (workspace13, workspace2, output, a.dtype)
+        return (workspace13, workspace2, output)
 
     def apply(
         self,
@@ -281,12 +281,12 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
         assert expert_tokens_meta is not None
@@ -300,7 +300,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         assert w2.size(1) == K
 
-        E, max_num_tokens, N, K, top_k_num = self.moe_problem_size(
+        E, max_num_tokens, N, K, _ = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids
         )
 
@@ -318,7 +318,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             expected_m,
         )
 
-        a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm_cuda(
+        a2q, a2q_scale = persistent_masked_m_silu_mul_quant(
             workspace1, expert_num_tokens
         )
 
