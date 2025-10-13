@@ -11,7 +11,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.utils import next_power_of_2
 
 
 class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -64,7 +63,6 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2 = (0,)
         output = (M, K)
         return (workspace1, workspace2, output)
-
 
     def apply(
         self,

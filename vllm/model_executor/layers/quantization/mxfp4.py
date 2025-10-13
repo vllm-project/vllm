@@ -49,7 +49,6 @@ from vllm.scalar_type import scalar_types
 from vllm.utils import (
     has_triton_kernels,
     is_torch_equal_or_newer,
-    next_power_of_2,
     round_up,
 )
 from vllm.utils.flashinfer import has_flashinfer
@@ -233,7 +232,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             #    k = hidden_size
             # In down_proj
             #    n = hidden_size
-            
+
             #    k = intermediate_size_per_partition_after_pad
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 128
@@ -734,7 +733,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             torch.cuda.empty_cache()
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
-
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

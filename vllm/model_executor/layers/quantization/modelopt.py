@@ -72,7 +72,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.model_executor.parameter import ModelWeightParameter, PerTensorScaleParameter
 from vllm.scalar_type import scalar_types
-from vllm.utils import next_power_of_2
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
@@ -1119,7 +1118,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         if bias is not None:
             out = out + bias
         return out.view(*output_shape)
-
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
