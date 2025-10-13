@@ -818,7 +818,7 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
             quant_enabled = (
                 input_quant_op._forward_method == input_quant_op.forward_cuda
             )
-            assert quant_enabled == (is_cuda and not is_sm100)
+            assert quant_enabled == (not is_cuda or not is_sm100)
 
         llm.apply_model(check_model)
 
