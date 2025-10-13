@@ -103,7 +103,6 @@ def test_reasoning(
     param_dict: dict,
     ernie45_tokenizer,
 ):
-
     output = ernie45_tokenizer.tokenize(param_dict["output"])
     output_tokens: list[str] = []
     for token in output:
@@ -111,12 +110,13 @@ def test_reasoning(
         if one_token:
             output_tokens.append(one_token)
 
-    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
-        parser_name)(ernie45_tokenizer)
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        ernie45_tokenizer
+    )
 
-    reasoning, content = run_reasoning_extraction(parser,
-                                                  output_tokens,
-                                                  streaming=streaming)
+    reasoning, content = run_reasoning_extraction(
+        parser, output_tokens, streaming=streaming
+    )
 
     print()
 
