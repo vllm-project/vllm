@@ -140,7 +140,7 @@ def test_ngram_correctness(
                 reason="Skipping due to its head_dim not being a a multiple of 32"
             ),
         ),
-        (
+        pytest.param(
             (
                 "eagle",
                 "meta-llama/Llama-3.1-8B-Instruct",
@@ -149,7 +149,8 @@ def test_ngram_correctness(
             ),
             False,
             True,
-        ),
+            marks=large_gpu_mark(min_gb=40),
+        ),  # works on 4x H100
         (
             (
                 "eagle3",
