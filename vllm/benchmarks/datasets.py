@@ -677,8 +677,8 @@ class RandomDatasetForReranking(RandomDataset):
 
         if not is_reranker:
             assert num_requests > 1 and batchsize > 1
-            num_requests = num_requests - 1
-            batchsize = batchsize - 1
+            num_requests -= 1
+            batchsize -= 1
             doc_len_param = input_len
         else:
             doc_len_param = input_len - query_len - n_sep_tokens
@@ -733,14 +733,13 @@ class RandomDatasetForReranking(RandomDataset):
             )
 
         if token_mismatch_total != 0:
-            sign = "more" if token_mismatch_total > 0 else "fewer"
             logger.warning(
                 "Across all generated prompts, there were %d %s tokens "
                 "than expected after decoding and re-encoding. This is "
                 "expected due to the imperfect nature of the sampling "
                 "procedure.",
                 abs(token_mismatch_total),
-                sign,
+                "more" if token_mismatch_total > 0 else "fewer",
             )
 
         return batch_requests
