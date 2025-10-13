@@ -6,6 +6,12 @@
 python examples/online_serving/pooling/cohere_rerank_client.py
 ```
 
+## Embedding embed_dtype usage
+
+```bash
+python examples/online_serving/pooling/embedding_embed_dtype_client.py
+```
+
 ## Jinaai rerank usage
 
 ```bash
