@@ -112,8 +112,10 @@ def maybe_get_vit_flash_attn_backend(
     return attn_backend, flash_attn_varlen_func
 
 
-def allocate_tensor(shape: torch.Size, device: torch.device, dtype: torch.dtype):
-    if get_current_vllm_config().model_config.init_attn_out:
+def allocate_tensor(
+    shape: torch.Size, device: torch.device, dtype: torch.dtype, init_attn_out: bool
+):
+    if init_attn_out:
         # Use torch.zeros at the cost of ~1 us latency. This is useful
         # when the attention backend requires initialized output tensors.
         return torch.zeros(shape, device=device, dtype=dtype)
@@ -269,10 +271,12 @@ class Attention(nn.Module, AttentionLayerBase):
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         self.use_output = self.attn_backend.accept_output_buffer
-        compilation_config = get_current_vllm_config().compilation_config
+        vllm_config = get_current_vllm_config()
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+        self.init_attn_out = vllm_config.model_config.init_attn_out
         self.layer_name = prefix
         self.attn_type = attn_type
 
@@ -289,9 +293,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # this variable will not be accessed if use_direct_call is True
         self.kv_cache = [
             torch.tensor([])
-            for _ in range(
-                get_current_vllm_config().parallel_config.pipeline_parallel_size
-            )
+            for _ in range(vllm_config.parallel_config.pipeline_parallel_size)
         ]
 
         try:
@@ -363,7 +365,10 @@ class Attention(nn.Module, AttentionLayerBase):
                 (num_tokens, self.num_heads, self.head_size)
             )
             output = allocate_tensor(
-                reshaped_output_shape, device=query.device, dtype=output_dtype
+                reshaped_output_shape,
+                device=query.device,
+                dtype=output_dtype,
+                init_attn_out=self.init_attn_out,
             )
 
             # Reshape the query, key, and value tensors.
@@ -664,17 +669,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.use_direct_call = not current_platform.opaque_attention_op()
 
-        compilation_config = get_current_vllm_config().compilation_config
+        vllm_config = get_current_vllm_config()
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
         self.kv_cache = [
             torch.tensor([])
-            for _ in range(
-                get_current_vllm_config().parallel_config.pipeline_parallel_size
-            )
+            for _ in range(vllm_config.parallel_config.pipeline_parallel_size)
         ]
+
+        self.init_attn_out = vllm_config.model_config.init_attn_out
 
         # Align with Attention's scale attributes for MLA backends.
 
@@ -722,7 +728,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.calc_kv_scales(q, kv_c_normed, k_pe)
 
             if self.attn_backend.accept_output_buffer:
-                output = allocate_tensor(output_shape, dtype=q.dtype, device=q.device)
+                output = allocate_tensor(
+                    output_shape,
+                    dtype=q.dtype,
+                    device=q.device,
+                    init_attn_out=self.init_attn_out,
+                )
                 self.impl.forward(
                     self,
                     q,
@@ -739,7 +750,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
         else:
             if self.attn_backend.accept_output_buffer:
-                output = allocate_tensor(output_shape, dtype=q.dtype, device=q.device)
+                output = allocate_tensor(
+                    output_shape,
+                    dtype=q.dtype,
+                    device=q.device,
+                    init_attn_out=self.init_attn_out,
+                )
                 torch.ops.vllm.unified_mla_attention_with_output(
                     q,
                     kv_c_normed,
