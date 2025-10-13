@@ -542,8 +542,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             )
 
         quant_config = getattr(model_config.hf_config, "quantization_config", None)
-        if quant_config is not None:
-            quant_method = quant_config.get("quant_method")
+        if quant_config and (quant_method := quant_config.get("quant_method")):
             if quant_method == "bitsandbytes":
                 self.pre_quant = True
             else:
@@ -558,7 +557,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 "Prequant BitsAndBytes models with tensor parallelism is not "
                 "supported. Please try with pipeline parallelism."
             )
-        if self.pre_quant:
+        if quant_config and self.pre_quant:
             self.load_8bit = quant_config.get("load_in_8bit", False)
 
     def _initialize_loader_state(

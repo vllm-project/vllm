@@ -9,7 +9,8 @@ from typing import Any, Union
 import numpy as np
 import pytest
 import torch.nn as nn
-from mistral_common.protocol.instruct.messages import ImageChunk, TextChunk, UserMessage
+from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
+from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 

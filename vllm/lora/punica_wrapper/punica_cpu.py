@@ -199,38 +199,30 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         y: torch.Tensor,
         x: Union[tuple[torch.Tensor, ...], torch.Tensor],
         lora_b_stacked: tuple[torch.Tensor, ...],
-        lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
         output_slices: tuple[int, ...],
         offset_start: int = 0,
         add_inputs=True,
         **kwargs,
     ) -> None:
         """
-        Performs GEMM and bias addition for multiple slices of lora_b.
+        Performs GEMM for multiple slices of lora_b.
 
         Semantics:
             for i in range(len(lora_b_stacked)):
                 slice = output_slices[i]
-                y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i] +
-                    lora_bias_stacked[i]
+                y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i]
                 offset += slice
 
         Args:
             y (torch.Tensor): Output tensor.
             x (Union[tuple[torch.Tensor, ...], torch.Tensor]): Input tensors
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight
-            lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]):
-                bias's weight
             output_slices (tuple[int, ...]): Every slice's size
             add_inputs (bool):  Defaults to True.
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
         offset_left = offset_start
-        if lora_bias_stacked is not None:
-            self._apply_bias(
-                self.token_lora_indices, y, output_slices, lora_bias_stacked
-            )
         for slice_idx in range(len(lora_b_stacked)):
             self._apply_expand(
                 y,
@@ -276,7 +268,6 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         x: torch.Tensor,
         lora_a_stacked: tuple[torch.Tensor, ...],
         lora_b_stacked: tuple[torch.Tensor, ...],
-        lora_bias_stacked: Optional[tuple[torch.Tensor, ...]],
         scale: float,
         output_slices: tuple[int, ...],
         *,
@@ -293,25 +284,19 @@ class PunicaWrapperCPU(PunicaWrapperBase):
                     @ lora_a_stacked[indices[i], layer_idx, :, :]
                     @ lora_b_stacked[indices[i], layer_idx, :, :]
                     * scale
-                    ).squeeze(0)+lora_bias_stacked[i]
+                    ).squeeze(0)
 
         Args:
             y (torch.Tensor): Output tensor. Will be changed in-place.
             x (torch.Tensor): Input tensor
             lora_a_stacked (tuple[torch.Tensor, ...]): lora_a's weight.
             lora_b_stacked (tuple[torch.Tensor, ...]): lora_b's weight.
-            lora_bias_stacked (Optional[tuple[torch.Tensor, ...]]): lora's bias.
             scale (float): Scaling factor.
             output_slices (tuple[int, ...]): Every slice's size.
             buffer (Optional[tuple[torch.Tensor, ...]]): Defaults to None.
         """
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
-        if lora_bias_stacked is not None:
-            assert len(lora_bias_stacked) == len(output_slices)
-            y = self._apply_bias(
-                self.token_lora_indices, y, output_slices, lora_bias_stacked
-            )
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
@@ -323,7 +308,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
             )
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
         self.add_expand(
-            y, buffer, lora_b_stacked, None, output_slices, add_inputs=True, **kwargs
+            y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs
         )
 
     def add_lora_logits(

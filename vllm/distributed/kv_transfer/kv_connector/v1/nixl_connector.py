@@ -21,8 +21,8 @@ import torch
 import zmq
 
 from vllm import envs
-from vllm.attention.backends.registry import _Backend
-from vllm.attention.selector import backend_name_to_enum, get_attn_backend
+from vllm.attention.backends.registry import _Backend, backend_name_to_enum
+from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
@@ -1345,6 +1345,8 @@ class NixlConnectorWorker:
         # Remove all requests that are not to be processed (eg aborted).
         for req_id in metadata.reqs_not_processed:
             self._reqs_to_process.discard(req_id)
+            # We should never get an abort after setting an expiry timer
+            assert req_id not in self._reqs_to_send
 
         # Add to requests that are waiting to be read and track expiration.
         for req_id, expiration_time in metadata.reqs_to_send.items():

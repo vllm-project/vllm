@@ -45,6 +45,7 @@ class Scheduler(SchedulerInterface):
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
+        block_size: int,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
@@ -101,15 +102,8 @@ class Scheduler(SchedulerInterface):
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
 
-        self.block_size = self.cache_config.block_size
-
+        self.block_size = block_size
         self.dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        # Note(hc): The scheduler’s block_size must be multiplied
-        # by dcp_world_size, since block hashes are computed on the
-        # original full token sequence at a granularity of
-        # original_block_size × dcp_world_size.
-        if self.dcp_world_size > 1:
-            self.block_size *= self.dcp_world_size
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
@@ -709,10 +703,15 @@ class Scheduler(SchedulerInterface):
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
         new_block_ids: list[tuple[list[int], ...] | None] = []
+        resumed_req_token_ids: list[list[int] | None] = []
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
 
-        for req in itertools.chain(running_reqs, resumed_reqs):
+        # Because resumed_reqs is usually empty, it is more efficient to do
+        # in-place appending so that we don't need to allocate a new list.
+        resumed_from_preemption = [False] * len(running_reqs)
+        resumed_from_preemption += [True] * len(resumed_reqs)
+        for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
             req_id = req.request_id
             req_ids.append(req_id)
             num_tokens = num_scheduled_tokens[req_id] - len(
@@ -728,20 +727,23 @@ class Scheduler(SchedulerInterface):
                     req.num_computed_tokens : req.num_computed_tokens + num_tokens
                 ]
                 new_token_ids.append(token_ids)
+            resumed_token_ids = None
+            if resumed_from_preemption[idx]:
+                resumed_token_ids = req.all_token_ids[
+                    : req.num_computed_tokens + num_tokens
+                ]
+            resumed_req_token_ids.append(resumed_token_ids)
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
             num_computed_tokens.append(req.num_computed_tokens)
             num_output_tokens.append(req.num_output_tokens)
-        # Because resumed_reqs is usually empty, it is more efficient to do
-        # in-place appending so that we don't need to allocate a new list.
-        resumed_from_preemption = [False] * len(running_reqs)
-        resumed_from_preemption += [True] * len(resumed_reqs)
 
         return CachedRequestData(
             req_ids=req_ids,
             resumed_from_preemption=resumed_from_preemption,
             new_token_ids=new_token_ids,
+            resumed_req_token_ids=resumed_req_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
@@ -1185,7 +1187,7 @@ class Scheduler(SchedulerInterface):
         # First pass: collect requests to remove from queues
         for req_id in request_ids:
             request = self.requests.get(req_id)
-            if request is None:
+            if request is None or request.is_finished():
                 # Invalid request ID.
                 continue
 
@@ -1363,14 +1365,8 @@ class Scheduler(SchedulerInterface):
             self.finished_recving_kv_req_ids.add(req_id)
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            if req_id not in self.requests:
-                logger.warning(
-                    "Got finished sending KV transfer for request %s,"
-                    "but the request is already freed.",
-                    req_id,
-                )
-            else:
-                self._free_blocks(self.requests[req_id])
+            assert req_id in self.requests
+            self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
         self, requests: Iterable[Request], invalid_block_ids: set[int]
@@ -1466,7 +1462,7 @@ class Scheduler(SchedulerInterface):
 
                 affected_req_ids.add(request.request_id)
 
-        return (affected_req_ids, total_affected_tokens)
+        return affected_req_ids, total_affected_tokens
 
     def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
         total_requests_to_reschedule = 0
