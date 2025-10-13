@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _mutated_arg_names(op_overload):
+def _mutated_arg_names(op_overload: torch._ops.OpOverload) -> list[str]:
     """Extract names of arguments that are mutated by this operator.
 
     Args:
