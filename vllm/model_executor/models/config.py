@@ -7,7 +7,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
-from vllm.triton_utils import triton
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
@@ -75,8 +74,8 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
             # To deal with this, we increase max_position to multiple of n_warps,
             # so that triton kernel won't hit out-of-bound index in RoPE cache.
             if current_platform.is_cuda_alike() and not model_config.enforce_eager:
-                n_warps = getattr(triton.Config, "num_warps", 4)
-                max_position = cdiv(max_position, n_warps) * n_warps
+                n_warps_pad = 8
+                max_position = cdiv(max_position, n_warps_pad) * n_warps_pad
 
             config.rotary_kwargs = {
                 "head_size": head_dim,
