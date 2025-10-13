@@ -17,68 +17,29 @@ mode: "decode_vs_prefill"
 #   - decode: threshold >= query_length (forces decode pipeline)
 #   - prefill: threshold < query_length (forces prefill pipeline)
 #
-# We use spec<N>s1k format which creates q_len=N, kv_len=1024 requests
+# We use q<N>kv1k format which creates q_len=N, kv_len=1024 requests
 # This tests different query lengths with fixed KV cache context
-batch_specs:
-  # Fine-grained: 1-16 (decode range, step 1)
-  - "q1kv1k"         # q_len=1 (regular decode, not spec)
-  - "q2kv1k"    # q_len=2
-  - "q3kv1k"    # q_len=3
-  - "q4kv1k"    # q_len=4
-  - "q5kv1k"    # q_len=5
-  - "q6kv1k"    # q_len=6
-  - "q7kv1k"    # q_len=7
-  - "q8kv1k"    # q_len=8
-  - "q9kv1k"    # q_len=9
-  - "q10kv1k"   # q_len=10
-  - "q11kv1k"   # q_len=11
-  - "q12kv1k"   # q_len=12
-  - "q13kv1k"   # q_len=13
-  - "q14kv1k"   # q_len=14
-  - "q15kv1k"   # q_len=15
-  - "q16kv1k"   # q_len=16
-  # Transition zone: 17-64 (step 2)
-  - "q17kv1k"
-  - "q19kv1k"
-  - "q21kv1k"
-  - "q23kv1k"
-  - "q25kv1k"
-  - "q27kv1k"
-  - "q29kv1k"
-  - "q31kv1k"
-  - "q33kv1k"
-  - "q35kv1k"
-  - "q37kv1k"
-  - "q39kv1k"
-  - "q41kv1k"
-  - "q43kv1k"
-  - "q45kv1k"
-  - "q47kv1k"
-  - "q49kv1k"
-  - "q51kv1k"
-  - "q53kv1k"
-  - "q55kv1k"
-  - "q57kv1k"
-  - "q59kv1k"
-  - "q61kv1k"
-  - "q63kv1k"
-  # Prefill range: 65-128 (step 4)
-  - "q65kv1k"
-  - "q69kv1k"
-  - "q73kv1k"
-  - "q77kv1k"
-  - "q81kv1k"
-  - "q85kv1k"
-  - "q89kv1k"
-  - "q93kv1k"
-  - "q97kv1k"
-  - "q101kv1k"
-  - "q105kv1k"
-  - "q109kv1k"
-  - "q113kv1k"
-  - "q117kv1k"
-  - "q121kv1k"
-  - "q125kv1k"
+#
+# Using batch_spec_ranges for automatic generation:
+batch_spec_ranges:
+  - template: "q{q_len}kv1k"
+    q_len:
+      start: 1
+      stop: 16
+      step: 1
+      end_inclusive: false
+  - template: "q{q_len}kv1k"
+    q_len:
+      start: 16
+      stop: 64
+      step: 2
+      end_inclusive: false
+  - template: "q{q_len}kv1k"
+    q_len:
+      start: 64
+      stop: 1024
+      step: 4
+      end_inclusive: true
 
 # Batch sizes to test (from old script)
 batch_sizes:
