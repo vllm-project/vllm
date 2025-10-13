@@ -5,7 +5,7 @@
 
 description: "Decode vs Prefill pipeline crossover analysis"
 
-# Test FlashAttn MLA (recommended - FlashMLA has known issues with speculative decode)
+# Test FlashAttn MLA
 backend: flash_attn_mla
 
 # Mode: decode_vs_prefill comparison (special sweep mode)
@@ -70,8 +70,8 @@ benchmark:
 
 # Output
 output:
-  csv: "study4_reorder_threshold_results.csv"
-  json: "study4_reorder_threshold_results.json"
+  csv: "reorder_threshold_results.csv"
+  json: "reorder_threshold_results.json"
 
 # Expected outcome (reproduces old benchmark_mla_threshold.py study):
 # - For each batch size, find the crossover point where prefill becomes faster than decode

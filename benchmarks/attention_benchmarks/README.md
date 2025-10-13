@@ -12,10 +12,10 @@ python test_batch_spec.py
 # ✓ All tests pass
 
 # Run one of the 4 research studies
-python benchmark.py --config configs/study1_cutlass_numsplits.yaml
-python benchmark.py --config configs/study2_hopper_head_count.yaml
-python benchmark.py --config configs/study3_flashinfer_vs_cutlass.yaml
-python benchmark.py --config configs/study4_reorder_threshold.yaml
+python benchmark.py --config configs/cutlass_numsplits.yaml
+python benchmark.py --config configs/hopper_head_count.yaml
+python benchmark.py --config configs/flashinfer_vs_cutlass.yaml
+python benchmark.py --config configs/reorder_threshold.yaml
 
 # Or run custom benchmarks
 python benchmark.py \
@@ -61,7 +61,7 @@ The suite includes 4 pre-configured studies to answer key MLA optimization quest
 **Question:** Should we revert the CUTLASS MLA num-splits heuristic (PRs #24966, #25509)?
 
 ```bash
-python benchmark.py --config configs/study1_cutlass_numsplits.yaml
+python benchmark.py --config configs/cutlass_numsplits.yaml
 ```
 
 Tests CUTLASS MLA with different `num_kv_splits` values (1, 2, 4, 8, 16, 32) across various batch sizes and compares against auto-selection.
@@ -72,13 +72,13 @@ Tests CUTLASS MLA with different `num_kv_splits` values (1, 2, 4, 8, 16, 32) acr
 
 ```bash
 # Test with default head count (128)
-python benchmark.py --config configs/study2_hopper_head_count.yaml
+python benchmark.py --config configs/hopper_head_count.yaml
 
 # Test with different head counts
 for heads in 16 32 64 128 256; do
-    python benchmark.py --config configs/study2_hopper_head_count.yaml \
+    python benchmark.py --config configs/hopper_head_count.yaml \
         --num-q-heads $heads \
-        --output-csv study2_heads_${heads}.csv
+        --output-csv hopper_heads_${heads}.csv
 done
 ```
 
@@ -89,7 +89,7 @@ Compares FlashAttn MLA and FlashMLA performance with varying attention head coun
 **Question:** Is FlashInfer-MLA better than CUTLASS MLA after num-splits optimization?
 
 ```bash
-python benchmark.py --config configs/study3_flashinfer_vs_cutlass.yaml
+python benchmark.py --config configs/flashinfer_vs_cutlass.yaml
 ```
 
 Compares FlashInfer-MLA against CUTLASS MLA with optimized `num_kv_splits` values.
@@ -99,15 +99,15 @@ Compares FlashInfer-MLA against CUTLASS MLA with optimized `num_kv_splits` value
 **Question:** At what query length does the prefill pipeline become faster than the decode pipeline?
 
 **Methodology:** Reproduces the original `benchmark_mla_threshold.py` study using the new interface:
-- For each query length (1-125), test BOTH decode and prefill pipelines
+- For each query length (1-2048), test BOTH decode and prefill pipelines
 - Find the crossover point where prefill becomes faster
 - Analyze how this varies across batch sizes (1-256)
 
 ```bash
-python benchmark.py --config configs/study4_reorder_threshold.yaml
+python benchmark.py --config configs/reorder_threshold.yaml
 ```
 
-Tests query lengths from 1-125 (fine-grained 1-16, step 2 for 17-64, step 4 for 65-125) across 9 batch sizes. For each query length, compares:
+Tests query lengths from 1-2048 (fine-grained steps at low values, coarser at high values) across 9 batch sizes. For each query length, compares:
 - **Decode pipeline**: `threshold >= query_length`
 - **Prefill pipeline**: `threshold < query_length`
 
@@ -285,10 +285,10 @@ attention_benchmarks/
 ├── benchmark.py                   # Universal benchmark script
 │
 └── configs/                       # Pre-configured studies
-    ├── study1_cutlass_numsplits.yaml      # CUTLASS num-splits optimization
-    ├── study2_hopper_head_count.yaml      # FlashAttn vs FlashMLA head count
-    ├── study3_flashinfer_vs_cutlass.yaml  # FlashInfer vs optimized CUTLASS
-    └── study4_reorder_threshold.yaml      # Reorder threshold optimization
+    ├── cutlass_numsplits.yaml         # CUTLASS num-splits optimization
+    ├── hopper_head_count.yaml         # FlashAttn vs FlashMLA head count
+    ├── flashinfer_vs_cutlass.yaml     # FlashInfer vs optimized CUTLASS
+    └── reorder_threshold.yaml         # Reorder threshold optimization
 ```
 
 ## Tips
