@@ -45,7 +45,7 @@ def _mamba_chunk_scan_combined_fwd(
     dt_softplus=False,
     dt_limit=(0.0, float("inf")),
     state_dtype=None,
-    fused=False,
+    use_fused_kernel=False,
 ):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     seqlen, nheads, headdim = x.shape
@@ -80,8 +80,8 @@ def _mamba_chunk_scan_combined_fwd(
     if initial_states is not None:
         assert initial_states.shape == (len(cu_seqlens) - 1, nheads, headdim, dstate)
 
-    if fused:  # all 5 kernels fused
-        _, states, _, dA_cumsum, dt = _fused5_ssd(
+    if use_fused_kernel:  # all 5 kernels fused
+        _, states, dA_cumsum, dt = _fused5_ssd(
             x,
             dt,
             A,
@@ -201,6 +201,7 @@ def mamba_chunk_scan_combined_varlen(
     dt_limit=(0.0, float("inf")),
     return_intermediate_states=False,
     state_dtype=None,
+    use_fused_kernel=False,
 ):
     """
     Argument:
@@ -249,6 +250,7 @@ def mamba_chunk_scan_combined_varlen(
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,
         state_dtype=state_dtype,
+        use_fused_kernel=use_fused_kernel,
     )
 
     return varlen_states

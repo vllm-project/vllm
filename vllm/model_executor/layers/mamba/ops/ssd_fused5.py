@@ -1051,9 +1051,4 @@ def _fused5_ssd(
         CB_COMP_FP32=cb_comp_fp32,
     )
 
-    # states_G holds both states and final states
-    # TODO: can skip this copy if copied outside of function
-    final_states = states_G[nchunks].to(
-        states_G.dtype, copy=True
-    )  # copy and convert to expected dtype
-    return out_x, states_G[1:], final_states, dA_cumsum, dt_out
+    return out_x, states_G[1:], dA_cumsum, dt_out
