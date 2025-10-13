@@ -127,7 +127,7 @@ def test_compile_correctness(
             CompilationLevel.PIECEWISE,
         ]:
             for level in [CompilationLevel.NO_COMPILATION, comp_level]:
-                all_args.append(final_args + [f"-O{level}", "-O.backend=inductor"])
+                all_args.append(final_args + [f"-O.{level}", "-O.backend=inductor"])
                 all_envs.append({})
 
             # inductor will change the output, so we only compare if the output
@@ -147,7 +147,7 @@ def test_compile_correctness(
             CompilationLevel.DYNAMO_ONCE,
             CompilationLevel.PIECEWISE,
         ]:
-            all_args.append(final_args + [f"-O{level}", "-O.backend=eager"])
+            all_args.append(final_args + [f"-O.{level}", "-O.backend=eager"])
             all_envs.append({})
             all_envs.append({})
 
