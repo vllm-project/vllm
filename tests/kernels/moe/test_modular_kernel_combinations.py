@@ -287,6 +287,10 @@ def test_modular_kernel_combinations_multigpu(
         world_size=world_size,
     )
     verbosity = pytestconfig.getoption("verbose")
+
+    if verbosity > 0:
+        print(f"\nTesting {config}\n")
+
     run(config, verbosity > 0)
 
 
