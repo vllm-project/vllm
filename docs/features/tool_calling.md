@@ -386,8 +386,7 @@ Apertus models generate tool calls enclosed between `<|tools_prefix|>` and `<|to
 
 `<|tools_prefix|>[{"function_name": {"arg1": "value1", "arg2": "value2"}}, ...]<|tools_suffix|>`
 
-
-**Features:** 
+**Features:**
 
 * Supports both single and parallel tool calls
 * Streaming support with incremental argument updates
