@@ -482,6 +482,7 @@ class ResponsesRequest(OpenAIBaseModel):
                     # Let Pydantic handle validation for malformed function calls
                     logger.debug(
                         "Failed to parse function_call dict to ResponseFunctionToolCall"
+                        
                         "leaving for Pydantic validation"
                     )
                     processed_input.append(item)
