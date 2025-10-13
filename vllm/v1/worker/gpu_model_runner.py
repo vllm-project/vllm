@@ -3321,6 +3321,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups
             ):
+                if (
+                    force_attention == ForceAttention.SEPARATE_KV_UPDATE_ONLY
+                    and isinstance(
+                        kv_cache_group_spec.kv_cache_spec, EncoderOnlyAttentionSpec
+                    )
+                ):
+                    continue
                 common_attn_metadata = CommonAttentionMetadata(
                     query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
                     query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
@@ -3854,36 +3861,34 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
             )
 
-            # # Force attention for all cudagraph modes when the backend forward
-            # # op doesn't include KV cache update. This is required
-            # # for KV cache update to be captured correctly in cases where
-            # # the KV cache update and attention are two separate custom ops.
-            # # Keep in mind that when we use `FULL` cudagraph mode, we capture
-            # # all attention regardless of the `force_attention_*` variables.
-            # has_separate_kv_update = not all(
-            #     all(g.backend.forward_includes_kv_cache for g in gs)
-            #     for gs in self.attn_groups
-            # )
-            # force_attention_dummy = (
-            #     ForceAttention.SEPARATE_KV_UPDATE_ONLY
-            #     if has_separate_kv_update
-            #     else ForceAttention.NONE
-            # )
-            # force_attention_warmup = (
-            #     ForceAttention.ALL
-            #     if (cudagraph_runtime_mode == CUDAGraphMode.FULL)
-            #     else (
-            #         ForceAttention.SEPARATE_KV_UPDATE_ONLY
-            #         if (
-            #             has_separate_kv_update
-            #             and cudagraph_runtime_mode != CUDAGraphMode.NONE
-            #         )
-            #         else ForceAttention.NONE
-            #     )
-            # )
-
-            force_attention_dummy = ForceAttention.ALL
-            force_attention_warmup = ForceAttention.ALL
+            # Force attention for all cudagraph modes when the backend forward
+            # op doesn't include KV cache update. This is required
+            # for KV cache update to be captured correctly in cases where
+            # the KV cache update and attention are two separate custom ops.
+            # Keep in mind that when we use `FULL` cudagraph mode, we capture
+            # all attention regardless of the `force_attention_*` variables.
+            has_separate_kv_update = not all(
+                all(g.backend.forward_includes_kv_cache for g in self.attn_groups[id])
+                for id, spec in enumerate(self.kv_cache_config.kv_cache_groups)
+                if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
+            )
+            force_attention_dummy = (
+                ForceAttention.SEPARATE_KV_UPDATE_ONLY
+                if has_separate_kv_update
+                else ForceAttention.NONE
+            )
+            force_attention_warmup = (
+                ForceAttention.ALL
+                if (cudagraph_runtime_mode == CUDAGraphMode.FULL)
+                else (
+                    ForceAttention.SEPARATE_KV_UPDATE_ONLY
+                    if (
+                        has_separate_kv_update
+                        and cudagraph_runtime_mode != CUDAGraphMode.NONE
+                    )
+                    else ForceAttention.NONE
+                )
+            )
 
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
                 # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
@@ -4215,8 +4220,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         block_sizes = [
             kv_cache_group.kv_cache_spec.block_size
             for kv_cache_group in kv_cache_config.kv_cache_groups
-            # TODO figure out if this can be safely removed
-            # if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec)
+            if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec)
         ]
 
         # Generate kernel_block_sizes that matches each block_size
@@ -4313,9 +4317,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # All layers in the UniformTypeKVCacheSpecs have the same type,
                 # Pick an arbitrary one to dispatch.
                 kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
-            # TODO figure out if this can be safely removed
-            # if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
-            #     continue
+            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+                continue
             elif isinstance(kv_cache_spec, AttentionSpec):
                 # This is an attention backend that supports virtual
                 # block splitting. Get the supported block sizes from
