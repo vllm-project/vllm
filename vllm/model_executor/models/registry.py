@@ -14,11 +14,11 @@ import subprocess
 import sys
 import tempfile
 from abc import ABC, abstractmethod
-from collections.abc import Set
+from collections.abc import Callable, Set
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Optional, TypeVar, Union
+from typing import TypeVar
 
 import torch.nn as nn
 import transformers
@@ -90,6 +90,7 @@ _TEXT_GENERATION_MODELS = {
     "Exaone4ForCausalLM": ("exaone4", "Exaone4ForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
+    "FlexOlmoForCausalLM": ("flex_olmo", "FlexOlmoForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
@@ -119,6 +120,7 @@ _TEXT_GENERATION_MODELS = {
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
     "Lfm2ForCausalLM": ("lfm2", "Lfm2ForCausalLM"),
+    "Lfm2MoeForCausalLM": ("lfm2_moe", "Lfm2MoeForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     "Llama4ForCausalLM": ("llama4", "Llama4ForCausalLM"),
     # For decapoda-research/llama-*
@@ -170,6 +172,7 @@ _TEXT_GENERATION_MODELS = {
 _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
+    "BertSpladeSparseEmbeddingModel": ("bert", "BertSpladeSparseEmbeddingModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3TextModel": ("gemma3", "Gemma3Model"),
@@ -224,6 +227,10 @@ _CROSS_ENCODER_MODELS = {
     "ModernBertForSequenceClassification": (
         "modernbert",
         "ModernBertForSequenceClassification",
+    ),
+    "ModernBertForTokenClassification": (
+        "modernbert",
+        "ModernBertForTokenClassification",
     ),
     "RobertaForSequenceClassification": ("roberta", "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": (
@@ -348,6 +355,10 @@ _MULTIMODAL_MODELS = {
     "Qwen2_5OmniForConditionalGeneration": (
         "qwen2_5_omni_thinker",
         "Qwen2_5OmniThinkerForConditionalGeneration",
+    ),
+    "Qwen3OmniMoeForConditionalGeneration": (
+        "qwen3_omni_moe_thinker",
+        "Qwen3OmniMoeThinkerForConditionalGeneration",
     ),
     "Qwen3VLForConditionalGeneration": ("qwen3_vl", "Qwen3VLForConditionalGeneration"),  # noqa: E501
     "Qwen3VLMoeForConditionalGeneration": (
@@ -604,7 +615,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 
         if model_path.exists():
             with open(model_path, "rb") as f:
-                module_hash = hashlib.md5(f.read()).hexdigest()
+                module_hash = hashlib.md5(f.read(), usedforsecurity=False).hexdigest()
 
             mi = self._load_modelinfo_from_cache(module_hash)
             if mi is not None:
@@ -644,7 +655,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
 def _try_load_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
-) -> Optional[type[nn.Module]]:
+) -> type[nn.Module] | None:
     from vllm.platforms import current_platform
 
     current_platform.verify_model_arch(model_arch)
@@ -659,7 +670,7 @@ def _try_load_model_cls(
 def _try_inspect_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
-) -> Optional[_ModelInfo]:
+) -> _ModelInfo | None:
     try:
         return model.inspect_model_cls()
     except Exception:
@@ -678,7 +689,7 @@ class _ModelRegistry:
     def register_model(
         self,
         model_arch: str,
-        model_cls: Union[type[nn.Module], str],
+        model_cls: type[nn.Module] | str,
     ) -> None:
         """
         Register an external model to be used in vLLM.
@@ -746,13 +757,13 @@ class _ModelRegistry:
             f"Supported architectures: {all_supported_archs}"
         )
 
-    def _try_load_model_cls(self, model_arch: str) -> Optional[type[nn.Module]]:
+    def _try_load_model_cls(self, model_arch: str) -> type[nn.Module] | None:
         if model_arch not in self.models:
             return None
 
         return _try_load_model_cls(model_arch, self.models[model_arch])
 
-    def _try_inspect_model_cls(self, model_arch: str) -> Optional[_ModelInfo]:
+    def _try_inspect_model_cls(self, model_arch: str) -> _ModelInfo | None:
         if model_arch not in self.models:
             return None
 
@@ -762,7 +773,7 @@ class _ModelRegistry:
         self,
         architecture: str,
         model_config: ModelConfig,
-    ) -> Optional[str]:
+    ) -> str | None:
         if architecture in _TRANSFORMERS_BACKEND_MODELS:
             return architecture
 
@@ -852,7 +863,7 @@ class _ModelRegistry:
 
     def inspect_model_cls(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> tuple[_ModelInfo, str]:
         if isinstance(architectures, str):
@@ -904,7 +915,7 @@ class _ModelRegistry:
 
     def resolve_model_cls(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> tuple[type[nn.Module], str]:
         if isinstance(architectures, str):
@@ -958,7 +969,7 @@ class _ModelRegistry:
 
     def is_text_generation_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -966,7 +977,7 @@ class _ModelRegistry:
 
     def is_pooling_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -974,7 +985,7 @@ class _ModelRegistry:
 
     def is_cross_encoder_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -982,7 +993,7 @@ class _ModelRegistry:
 
     def is_multimodal_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -990,7 +1001,7 @@ class _ModelRegistry:
 
     def is_multimodal_raw_input_only_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -998,7 +1009,7 @@ class _ModelRegistry:
 
     def is_pp_supported_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1006,7 +1017,7 @@ class _ModelRegistry:
 
     def model_has_inner_state(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1014,7 +1025,7 @@ class _ModelRegistry:
 
     def is_attention_free_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1022,7 +1033,7 @@ class _ModelRegistry:
 
     def is_hybrid_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1030,7 +1041,7 @@ class _ModelRegistry:
 
     def is_noops_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1038,7 +1049,7 @@ class _ModelRegistry:
 
     def is_transcription_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1046,7 +1057,7 @@ class _ModelRegistry:
 
     def is_transcription_only_model(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
@@ -1054,7 +1065,7 @@ class _ModelRegistry:
 
     def is_v1_compatible(
         self,
-        architectures: Union[str, list[str]],
+        architectures: str | list[str],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)

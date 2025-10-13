@@ -24,7 +24,7 @@
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -78,7 +78,7 @@ class Qwen2AudioFeatureInputs(TensorSchema):
 
     type: Literal["audio_features"]
     input_features: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("na", "nmb", 3000),
     ]
 
@@ -105,7 +105,7 @@ class Qwen2AudioEmbeddingInputs(TensorSchema):
     ]
 
 
-Qwen2AudioInputs = Union[Qwen2AudioFeatureInputs, Qwen2AudioEmbeddingInputs]
+Qwen2AudioInputs: TypeAlias = Qwen2AudioFeatureInputs | Qwen2AudioEmbeddingInputs
 
 # === Audio Encoder === #
 
@@ -140,7 +140,7 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
 
 
@@ -157,7 +157,7 @@ class Qwen2AudioDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2AudioProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
@@ -185,8 +185,8 @@ def _qwen2audio_field_config(hf_inputs: Mapping[str, torch.Tensor]):
 class Qwen2AudioMultiModalDataParser(MultiModalDataParser):
     def _parse_audio_data(
         self,
-        data: Union[dict[str, torch.Tensor], ModalityData[AudioItem]],
-    ) -> Optional[ModalityDataItems[Any, Any]]:
+        data: dict[str, torch.Tensor] | ModalityData[AudioItem],
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
@@ -314,7 +314,7 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
 )
 class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
             return f"Audio {i}: <|audio_bos|><|AUDIO|><|audio_eos|>"
 
@@ -358,7 +358,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
-    ) -> Optional[Qwen2AudioInputs]:
+    ) -> Qwen2AudioInputs | None:
         input_features = kwargs.pop("input_features", None)
         audio_embeds = kwargs.pop("audio_embeds", None)
         feature_attention_mask = kwargs.pop("feature_attention_mask", None)
@@ -395,7 +395,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
 
     def _process_audio_input(
         self, audio_input: Qwen2AudioInputs
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         if audio_input["type"] == "audio_embeds":
             audio_embeds = audio_input["audio_embeds"]
             return tuple(audio_embeds)
@@ -471,10 +471,10 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -486,7 +486,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
