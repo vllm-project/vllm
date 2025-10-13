@@ -163,6 +163,10 @@ class EngineCore:
 
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)
+        additional_config = vllm_config.additional_config
+        self.step_num = int(additional_config.get("multi_step", 1))
+        if self.step_num > 1:
+            logger.info(f"multi step is enabled. step num is {self.step_num}")
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -285,11 +289,16 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
+        scheduler_output.step_num = self.step_num
         model_output = self.execute_model_with_error_logging(
             self.model_executor.execute_model,  # type: ignore
             scheduler_output)
+        for req_id, num_scheduled_token in 
+            scheduler_output.num_scheduled_tokens.items():
+            self.scheduler.requests[req_id].num_computed_tokens += \
+                num_scheduled_token * (model_output.step_num - 1)
         engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output)  # type: ignore
+            scheduler_output, model_output, model_output.step_num)  # type: ignore
 
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)

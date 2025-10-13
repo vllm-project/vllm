@@ -862,6 +862,7 @@ class Scheduler(SchedulerInterface):
         self,
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
+        num_steps: int = 1,
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
@@ -894,8 +895,8 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
-                num_draft_tokens = len(scheduled_spec_token_ids)
-                num_accepted = len(generated_token_ids) - 1
+                num_draft_tokens = len(scheduled_spec_token_ids)*num_steps
+                num_accepted = len(generated_token_ids)*num_steps - num_steps
                 num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
@@ -1196,7 +1197,7 @@ class Scheduler(SchedulerInterface):
         if not self.log_stats:
             return None
         if spec_decoding_stats is None:
-            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
+            spec_decoding_stats = SpecDecodingStats.new(num_draft_tokens)
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens,
             num_accepted_tokens=num_accepted_tokens)
