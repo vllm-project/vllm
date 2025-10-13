@@ -199,9 +199,7 @@ class AttentionImpl(ABC, Generic[T]):
         """
         return False
 
-    def supports_quant_query_input(
-        self, attn_metadata: "AttentionMetadata | None" = None
-    ) -> bool:
+    def supports_quant_query_input(self) -> bool:
         return False
 
 

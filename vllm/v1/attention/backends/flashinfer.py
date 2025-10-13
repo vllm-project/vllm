@@ -807,16 +807,11 @@ class FlashInferImpl(AttentionImpl):
             and quant_key in (kFp8StaticTensorSym, kNvfp4Quant)
         )
 
-    def supports_quant_query_input(
-        self, attn_metadata: FlashInferMetadata | None = None
-    ) -> bool:
+    def supports_quant_query_input(self) -> bool:
         if flashinfer_disable_q_quantization():
             return False
 
-        if attn_metadata is None:
-            return self.support_trtllm_attn
-
-        return attn_metadata.prefill_use_trtllm and attn_metadata.decode_use_trtllm
+        return self.support_trtllm_attn
 
     def forward(
         self,
@@ -888,8 +883,6 @@ class FlashInferImpl(AttentionImpl):
                     self.bmm2_scale = self.bmm2_scale / layer._o_scale_float
                 elif output.dtype == FP4_DTYPE:
                     self.o_sf_scale = layer._o_scale_float
-
-        # Query quantization is now handled in the attention layer
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in

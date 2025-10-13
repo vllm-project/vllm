@@ -149,11 +149,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 class TritonAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
-    # Skip Q quantization on ROCm and XPU, enable this on cuda
-    # only, since dequantizing back to f32 in the attention kernel
-    # is not supported.
-    supports_quant_query_input: bool = current_platform.is_cuda()
-
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
         return [torch.float16, torch.bfloat16, torch.float32]
@@ -210,9 +205,7 @@ class TritonAttentionImpl(AttentionImpl):
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
 
-    def supports_quant_query_input(
-        self, attn_metadata: TritonAttentionMetadata | None = None
-    ) -> bool:
+    def supports_quant_query_input(self) -> bool:
         return current_platform.is_cuda()
 
     def __init__(

@@ -344,11 +344,7 @@ class Attention(nn.Module, AttentionLayerBase):
             assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
 
             # check if query quantization is supported
-            attn_metadata = forward_context.attn_metadata
-            if isinstance(attn_metadata, dict):
-                attn_metadata = attn_metadata.get(self.layer_name)
-
-            if self.impl.supports_quant_query_input(attn_metadata):
+            if self.impl.supports_quant_query_input():
                 query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
