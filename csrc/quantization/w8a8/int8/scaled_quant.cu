@@ -1,15 +1,11 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/all.h>
 
-#ifndef USE_ROCM
-  #include "../per_token_group_quant_8bit.h"
-#endif
-
 #include <cmath>
 
-#include "../../cub_helpers.h"
-#include "../../dispatch_utils.h"
-#include "../vectorization_utils.cuh"
+#include "dispatch_utils.h"
+#include "quantization/vectorization_utils.cuh"
+#include "cub_helpers.h"
 
 static inline __device__ int8_t float_to_int8_rn(float x) {
 #ifdef USE_ROCM
@@ -25,7 +21,6 @@ static inline __device__ int8_t float_to_int8_rn(float x) {
   float dst = std::nearbyint(x);
 
   // saturate
-
   // See https://github.com/pytorch/pytorch/issues/127666
   // See https://github.com/llvm/llvm-project/issues/95183
   // hip-clang std::clamp __glibcxx_assert_fail host function when building on
@@ -84,7 +79,6 @@ static inline __device__ int8_t int32_to_int8(int32_t x) {
       static_cast<int32_t>(std::numeric_limits<int8_t>::max());
 
   // saturate
-
   // See https://github.com/pytorch/pytorch/issues/127666
   // See https://github.com/llvm/llvm-project/issues/95183
   // hip-clang std::clamp __glibcxx_assert_fail host function when building on
@@ -176,7 +170,6 @@ __global__ void dynamic_scaled_int8_quant_kernel(
 
   float inv_s = (absmax == 0.f) ? 0.f : 127.f / absmax;
 
-  // 2. quantize
   vectorize_with_alignment<16>(
       row_in, row_out, hidden_size, tid, stride,
       [=] __device__(int8_t& dst, const scalar_t& src) {
@@ -194,7 +187,6 @@ struct MinMax {
 
   __host__ __device__ explicit MinMax(float v) : min(v), max(v) {}
 
-  // add a value to the MinMax
   __host__ __device__ MinMax& operator+=(float v) {
     min = fminf(min, v);
     max = fmaxf(max, v);
@@ -228,7 +220,6 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
   const scalar_t* row_in = input + token_idx * hidden_size;
   int8_t* row_out = output + token_idx * hidden_size;
 
-  // 1. calculate min & max
   MinMax thread_mm;
   vectorize_read_with_alignment<16>(row_in, hidden_size, tid, stride,
                                     [&] __device__(const scalar_t& src) {
@@ -261,7 +252,6 @@ __global__ void dynamic_scaled_int8_azp_quant_kernel(
   const float inv_s = 1.f / scale_sh;
   const azp_t azp = azp_sh;
 
-  // 2. quantize
   vectorize_with_alignment<16>(
       row_in, row_out, hidden_size, tid, stride,
       [=] __device__(int8_t& dst, const scalar_t& src) {
@@ -333,13 +323,3 @@ void dynamic_scaled_int8_quant(
         }
       });
 }
-
-#ifndef USE_ROCM
-void per_token_group_quant_int8(const torch::Tensor& input,
-                                torch::Tensor& output_q,
-                                torch::Tensor& output_s, int64_t group_size,
-                                double eps, double int8_min, double int8_max) {
-  per_token_group_quant_8bit(input, output_q, output_s, group_size, eps,
-                             int8_min, int8_max);
-}
-#endif

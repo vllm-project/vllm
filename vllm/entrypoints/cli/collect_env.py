@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import argparse
 import typing
 
@@ -11,6 +9,8 @@ from vllm.entrypoints.cli.types import CLISubcommand
 
 if typing.TYPE_CHECKING:
     from vllm.utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = argparse.ArgumentParser
 
 
 class CollectEnvSubcommand(CLISubcommand):

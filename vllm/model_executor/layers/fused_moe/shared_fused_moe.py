@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
@@ -18,16 +17,24 @@ class SharedFusedMoE(FusedMoE):
 
     def __init__(
         self,
-        shared_experts: torch.nn.Module,
+        shared_experts: torch.nn.Module | None,
         use_overlapped: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._shared_experts = shared_experts
-        self.use_overlapped = use_overlapped
+        # Disable shared expert overlap if EP is disabled or we are not using
+        # flashinfer + DP since there is nothing to be gained in this case.
+        # Disabling the overlap optimization also prevents the shared experts
+        # from being hidden from torch.compile.
+        self.use_overlapped = (
+            use_overlapped
+            and not (self.use_ep or self.use_flashinfer_cutlass_kernels)
+            and self._shared_experts is not None
+        )
 
     @property
-    def shared_experts(self) -> Optional[torch.nn.Module]:
+    def shared_experts(self) -> torch.nn.Module | None:
         return self._shared_experts if self.use_overlapped else None
 
     def forward(
@@ -36,16 +43,19 @@ class SharedFusedMoE(FusedMoE):
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.use_overlapped:
-            shared_out = self._shared_experts(hidden_states)
+            if self._shared_experts is not None:
+                shared_out = self._shared_experts(hidden_states)
 
-            # Reduce outputs if necessary, since the MLP should
-            # have been created with reduce_results=False.
-            if (
-                self.reduce_results
-                and self.tp_size > 1
-                and self.must_reduce_shared_expert_outputs()
-            ):
-                shared_out = tensor_model_parallel_all_reduce(shared_out)
+                # Reduce shared expert outputs if necessary, since the MLP
+                # should have been created with reduce_results=False.
+                if (
+                    self.reduce_results
+                    and self.tp_size > 1
+                    and self.must_reduce_shared_expert_outputs()
+                ):
+                    shared_out = tensor_model_parallel_all_reduce(shared_out)
+            else:
+                shared_out = None
 
             fused_out = super().forward(
                 hidden_states=hidden_states,
