@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import multiprocessing
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
@@ -27,6 +25,9 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 else:
     torch = LazyLoader("torch", globals(), "torch")
+
+    ReasoningParser = object
+    Request = object
 
 logger = init_logger(__name__)
 
@@ -168,7 +169,7 @@ class StructuredOutputManager:
         requests: dict[str, Request],
         structured_output_request_ids: dict[str, int],
         scheduled_spec_decode_tokens: dict[str, list[int]],
-    ) -> npt.NDArray[np.int32] | None:
+    ) -> "npt.NDArray[np.int32] | None":
         # Prepare the structured output bitmask for this batch.
         if not structured_output_request_ids:
             return None

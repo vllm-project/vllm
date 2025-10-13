@@ -5,7 +5,7 @@
 """PyTorch Ultravox model."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 from torch import nn
@@ -68,7 +68,7 @@ class UltravoxAudioFeatureInputs(TensorSchema):
 
     type: Literal["audio_features"]
     data: Annotated[
-        Union[torch.Tensor, list[torch.Tensor], list[list[torch.Tensor]]],
+        torch.Tensor | list[torch.Tensor] | list[list[torch.Tensor]],
         TensorShape("bn", "nmb", "t"),
     ]
     lens: Annotated[torch.Tensor, TensorShape("bn")]
@@ -92,11 +92,13 @@ class UltravoxAudioEmbeddingInputs(TensorSchema):
 
     type: Literal["audio_embeds"]
     data: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]], TensorShape("b", "na", "afs", "hs")
+        torch.Tensor | list[torch.Tensor], TensorShape("b", "na", "afs", "hs")
     ]
 
 
-UltravoxAudioInputs = Union[UltravoxAudioFeatureInputs, UltravoxAudioEmbeddingInputs]
+UltravoxAudioInputs: TypeAlias = (
+    UltravoxAudioFeatureInputs | UltravoxAudioEmbeddingInputs
+)
 
 
 class UltravoxProcessingInfo(BaseProcessingInfo):
@@ -119,7 +121,7 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
 
 
@@ -133,7 +135,7 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
@@ -346,7 +348,7 @@ class ModifiedWhisperEncoder(WhisperEncoder):
         )
 
     def get_attention_mask_by_audio_len(
-        self, audio_lens: Optional[torch.Tensor], hidden_states: torch.Tensor
+        self, audio_lens: torch.Tensor | None, hidden_states: torch.Tensor
     ):
         """
         Create attention mask based on audio lengths to mask out padding tokens
@@ -376,7 +378,7 @@ class ModifiedWhisperEncoder(WhisperEncoder):
     def forward(
         self,
         input_features: torch.Tensor,
-        audio_lens: Optional[torch.Tensor] = None,
+        audio_lens: torch.Tensor | None = None,
     ):
         expected_seq_length = self.max_context_length
         if input_features.shape[-1] > expected_seq_length:
@@ -431,7 +433,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
             return "<|audio|>"
 
@@ -514,7 +516,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
-    ) -> Optional[UltravoxAudioInputs]:
+    ) -> UltravoxAudioInputs | None:
         audio_features = kwargs.pop("audio_features", None)
         audio_embeds = kwargs.pop("audio_embeds", None)
         audio_lens = kwargs.pop("audio_lens", None)
@@ -541,7 +543,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     def _process_audio_input(
         self,
         audio_input: UltravoxAudioInputs,
-    ) -> Union[NestedTensors, tuple[torch.Tensor, ...]]:
+    ) -> NestedTensors | tuple[torch.Tensor, ...]:
         if audio_input["type"] == "audio_embeds":
             return audio_input["data"]
 
@@ -587,9 +589,9 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
-        is_multimodal: Optional[torch.Tensor] = None,
+        is_multimodal: torch.Tensor | None = None,
         # Multi-modal token ID may exceed vocab size
         handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
@@ -608,10 +610,10 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for Ultravox
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -651,7 +653,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
 
 def pad_and_concat_to_dim3(
-    features: Union[torch.Tensor, list[torch.Tensor], list[list[torch.Tensor]]],
+    features: torch.Tensor | list[torch.Tensor] | list[list[torch.Tensor]],
 ) -> torch.Tensor:
     """
     Pad and concatenate a list of tensors.
