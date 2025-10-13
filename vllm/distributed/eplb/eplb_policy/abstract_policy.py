@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
 import torch
 
@@ -16,7 +15,7 @@ class EplbPolicy(ABC):
         num_groups: int,
         num_nodes: int,
         num_ranks: int,
-        old_global_expert_indices: Optional[torch.Tensor],
+        old_global_expert_indices: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Entry point for expert-parallelism load balancer.
