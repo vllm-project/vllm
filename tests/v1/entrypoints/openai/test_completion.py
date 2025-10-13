@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import openai  # use the official client for correctness check
 import pytest
@@ -195,7 +194,7 @@ async def test_too_many_completion_logprobs(
     [(MODEL_NAME, -1), (MODEL_NAME, 0), (MODEL_NAME, 1), (MODEL_NAME, None)],
 )
 async def test_prompt_logprobs_completion(
-    client: openai.AsyncOpenAI, model_name: str, prompt_logprobs: Optional[int]
+    client: openai.AsyncOpenAI, model_name: str, prompt_logprobs: int | None
 ):
     params: dict = {
         "prompt": ["A robot may not injure another robot", "My name is"],
@@ -420,7 +419,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name:
             assert chunk.usage is None
         else:
             assert chunk.usage is None
-            final_chunk = await stream.__anext__()
+            final_chunk = await anext(stream)
             assert final_chunk.usage is not None
             assert final_chunk.usage.prompt_tokens > 0
             assert final_chunk.usage.completion_tokens > 0
@@ -450,7 +449,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI, model_name:
             chunk.usage.prompt_tokens + chunk.usage.completion_tokens
         )
         if chunk.choices[0].finish_reason is not None:
-            final_chunk = await stream.__anext__()
+            final_chunk = await anext(stream)
             assert final_chunk.usage is not None
             assert final_chunk.usage.prompt_tokens > 0
             assert final_chunk.usage.completion_tokens > 0

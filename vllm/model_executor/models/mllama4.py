@@ -19,7 +19,7 @@
 import math
 from collections.abc import Iterable, Mapping
 from itertools import tee
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal
 
 import torch
 from torch import nn
@@ -116,7 +116,7 @@ class Llama4VisionMLP(nn.Module):
         output_size: int,
         bias: bool,
         output_activation: bool,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -153,7 +153,7 @@ class Llama4MultiModalProjector(nn.Module):
     def __init__(
         self,
         config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -200,7 +200,7 @@ class Llama4VisionPixelShuffleMLP(nn.Module):
     def __init__(
         self,
         config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -230,7 +230,7 @@ class Llama4VisionAttention(nn.Module):
     def __init__(
         self,
         config: Llama4VisionConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -324,7 +324,7 @@ class Llama4VisionEncoderLayer(nn.Module):
     def __init__(
         self,
         config: Llama4VisionConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -377,7 +377,7 @@ class Llama4VisionEncoder(nn.Module):
     def __init__(
         self,
         config: Llama4VisionConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -420,7 +420,7 @@ class Llama4UnfoldConvolution(nn.Module):
     def __init__(
         self,
         config: Llama4VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -450,7 +450,7 @@ class Llama4VisionModel(nn.Module):
     def __init__(
         self,
         config: Llama4VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -548,7 +548,7 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
             Llama4Processor, use_fast=kwargs.pop("use_fast", True), **kwargs
         )
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # Although vLLM can support more images from an infra capability
         # perspective, we do not recommend using >10 images in practice.
         return {"image": None}
@@ -700,7 +700,7 @@ class Mllama4DummyInputsBuilder(BaseDummyInputsBuilder[Mllama4ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -734,7 +734,7 @@ class Llama4ForConditionalGeneration(
     supports_encoder_tp_data = True
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|image|>"
 
@@ -822,7 +822,7 @@ class Llama4ForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[Llama4ImagePatchInputs]:
+    ) -> Llama4ImagePatchInputs | None:
         # num_images, 1, num_chunks, channel, image_size, image_size
         pixel_values = kwargs.pop("pixel_values", None)
         if pixel_values is None:
@@ -879,10 +879,10 @@ class Llama4ForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -893,7 +893,7 @@ class Llama4ForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def separate_weights(

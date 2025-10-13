@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Union
+from typing import ClassVar
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionLayer, AttentionType
+from vllm.attention.backends.abstract import AttentionLayer, AttentionType, MultipleOf
 from vllm.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
-    is_flashmla_supported,
+    is_flashmla_dense_supported,
 )
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -43,6 +43,10 @@ class FlashMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["FlashMLAImpl"]:
         return FlashMLAImpl
+
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
+        return [64]
 
 
 @dataclass
@@ -102,6 +106,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = get_mla_metadata(
             seq_lens_device,
@@ -142,6 +147,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             seq_lens=seq_lens_device,
             tile_scheduler_metadata=tile_scheduler_metadata,
             num_splits=num_splits,
+            dcp_tot_seq_lens=dcp_tot_seq_lens_device,
         )
 
 
@@ -154,12 +160,12 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
         **mla_args,
     ) -> None:
@@ -177,7 +183,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             **mla_args,
         )
 
-        is_supported, reason = is_flashmla_supported()
+        is_supported, reason = is_flashmla_dense_supported()
         assert is_supported, reason
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
@@ -197,11 +203,11 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
     def _forward_decode(
         self,
-        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLAMetadata,
         layer: AttentionLayer,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # TODO: (zyongye) decode function for mla here
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None

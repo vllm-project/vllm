@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import vllm.envs as envs
 
@@ -15,12 +16,7 @@ plugins_loaded = False
 
 
 def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
-    import sys
-
-    if sys.version_info < (3, 10):
-        from importlib_metadata import entry_points
-    else:
-        from importlib.metadata import entry_points
+    from importlib.metadata import entry_points
 
     allowed_plugins = envs.VLLM_PLUGINS
 

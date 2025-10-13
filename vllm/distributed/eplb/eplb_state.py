@@ -29,7 +29,6 @@ physical experts.
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -232,9 +231,9 @@ class EplbState:
         self,
         model: MixtureOfExperts,
         model_config: ModelConfig,
-        global_expert_load: Optional[torch.Tensor] = None,
-        old_global_expert_indices: Optional[list[torch.Tensor]] = None,
-        rank_mapping: Optional[dict[int, int]] = None,
+        global_expert_load: torch.Tensor | None = None,
+        old_global_expert_indices: torch.Tensor | None = None,
+        rank_mapping: dict[int, int] | None = None,
     ):
         """
         Build the initial EPLB state.
@@ -498,9 +497,9 @@ class EplbState:
         self,
         is_profile: bool = False,
         execute_shuffle: bool = True,
-        global_expert_loads: Optional[list[torch.Tensor]] = None,
-        rank_mapping: Optional[dict[int, int]] = None,
-    ) -> Optional[list[torch.Tensor]]:
+        global_expert_loads: list[torch.Tensor] | None = None,
+        rank_mapping: dict[int, int] | None = None,
+    ) -> torch.Tensor | None:
         """
         Rearrange the experts according to the current load.
         """
@@ -711,9 +710,9 @@ class EplbState:
     def get_eep_state(
         cls, parallel_config: ParallelConfig, eep_scale_up: bool = False
     ) -> tuple[
-        Optional[list[torch.Tensor]],
-        Optional[list[torch.Tensor]],
-        Optional[dict[int, int]],
+        list[torch.Tensor] | None,
+        list[torch.Tensor] | None,
+        dict[int, int] | None,
     ]:
         if not eep_scale_up:
             return None, None, None
@@ -751,7 +750,7 @@ class EplbState:
 
 
 def _node_count_with_rank_mapping(
-    pg: Union[ProcessGroup, StatelessProcessGroup],
+    pg: ProcessGroup | StatelessProcessGroup,
     rank_mapping: dict[int, int],
 ) -> int:
     if isinstance(pg, ProcessGroup):
