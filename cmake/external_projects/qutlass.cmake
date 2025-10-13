@@ -13,7 +13,6 @@ if(QUTLASS_SRC_DIR)
     CONFIGURE_COMMAND ""
     BUILD_COMMAND ""
   )
-  set(qutlass_SOURCE_DIR "${QUTLASS_SRC_DIR}")
 else()
   FetchContent_Declare(
     qutlass
@@ -23,10 +22,9 @@ else()
     CONFIGURE_COMMAND ""
     BUILD_COMMAND ""
   )
-  FetchContent_Populate(qutlass)
-  set(qutlass_SOURCE_DIR "${qutlass_SOURCE_DIR}")
 endif()
 
+FetchContent_Populate(qutlass)
 if(NOT qutlass_SOURCE_DIR)
   message(FATAL_ERROR "[QUTLASS] source directory could not be resolved.")
 endif()
