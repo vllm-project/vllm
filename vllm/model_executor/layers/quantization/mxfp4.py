@@ -232,7 +232,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             #    k = hidden_size
             # In down_proj
             #    n = hidden_size
-
             #    k = intermediate_size_per_partition_after_pad
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 128
