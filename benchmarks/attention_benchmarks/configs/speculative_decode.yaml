@@ -14,30 +14,30 @@ model:
 
 batch_specs:
   # Pure speculative decode (K-token verification)
-  - "q2kv1k"      # 2-token spec, 1k KV
-  - "q4kv1k"      # 4-token spec, 1k KV
-  - "q8kv1k"      # 8-token spec, 1k KV
-  - "q16kv1k"     # 16-token spec, 1k KV
+  - "q2s1k"      # 2-token spec, 1k KV
+  - "q4s1k"      # 4-token spec, 1k KV
+  - "q8s1k"      # 8-token spec, 1k KV
+  - "q16s1k"     # 16-token spec, 1k KV
 
   # Speculative with different context lengths
-  - "q4kv2k"      # 4-token spec, 2k KV
-  - "q4kv4k"      # 4-token spec, 4k KV
-  - "q8kv2k"      # 8-token spec, 2k KV
-  - "q8kv4k"      # 8-token spec, 4k KV
+  - "q4s2k"      # 4-token spec, 2k KV
+  - "q4s4k"      # 4-token spec, 4k KV
+  - "q8s2k"      # 8-token spec, 2k KV
+  - "q8s4k"      # 8-token spec, 4k KV
 
   # Mixed: speculative + regular decode
-  - "32q4kv1k"                    # 32 spec requests
-  - "16q4kv1k_16q1kv1k"              # 16 spec + 16 regular
-  - "8q8kv2k_24q1kv2k"               # 8 spec (8-tok) + 24 regular
+  - "32q4s1k"                    # 32 spec requests
+  - "16q4s1k_16q1s1k"              # 16 spec + 16 regular
+  - "8q8s2k_24q1s2k"               # 8 spec (8-tok) + 24 regular
 
   # Mixed: speculative + prefill + decode
-  - "2q1k_16q4kv1k_16q1kv1k"         # 2 prefill + 16 spec + 16 decode
-  - "4q2k_32q4kv2k_32q1kv2k"         # 4 prefill + 32 spec + 32 decode
+  - "2q1k_16q4s1k_16q1s1k"         # 2 prefill + 16 spec + 16 decode
+  - "4q2k_32q4s2k_32q1s2k"         # 4 prefill + 32 spec + 32 decode
 
   # Large batches with speculation
-  - "64q4kv1k"                    # 64 spec requests
-  - "32q8kv2k"                    # 32 spec (8-token)
-  - "16q16kv4k"                   # 16 spec (16-token)
+  - "64q4s1k"                    # 64 spec requests
+  - "32q8s2k"                    # 32 spec (8-token)
+  - "16q16s4k"                   # 16 spec (16-token)
 
 # Backends that support query length > 1
 backends:
