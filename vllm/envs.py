@@ -1416,6 +1416,18 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def reset_envs_cache() -> None:
+    """Resets the cache of vllm environment variables."""
+    __getattr__.cache_clear()
+
+
+def refresh_envs_cache() -> None:
+    """Refreshes the cache of vllm environment variables."""
+    reset_envs_cache()
+    for key in environment_variables:
+        __getattr__(key)
+
+
 def __dir__():
     return list(environment_variables.keys())
 
