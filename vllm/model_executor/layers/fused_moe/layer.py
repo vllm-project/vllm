@@ -7,7 +7,6 @@ from contextlib import nullcontext
 from enum import Enum
 from typing import Literal, get_args, overload
 
-import functools
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
@@ -50,7 +49,14 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import cdiv, direct_register_custom_op, has_deep_ep, has_pplx, round_up, has_hybrid_deep_ep
+from vllm.utils import (
+    cdiv,
+    direct_register_custom_op,
+    has_deep_ep,
+    has_hybrid_deep_ep,
+    has_pplx,
+    round_up,
+)
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
@@ -247,8 +253,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 handle,
                 num_dispatchers=all2all_manager.world_size,
                 dp_size=all2all_manager.dp_world_size,
-                rank_expert_offset=all2all_manager.rank *
-                moe.num_local_experts,
+                rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
             )
 
         return prepare_finalize
@@ -270,6 +275,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         # completely initialized, i.e. all weights loaded and post
         # processed.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        logger.debug("FusedMoE quant_config=%s", self.moe_quant_config)
 
         prepare_finalize = self.maybe_make_prepare_finalize()
 
@@ -1869,13 +1875,12 @@ class FusedMoE(CustomOp):
         self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
         self.logical_replica_count = logical_replica_count[moe_layer_idx]
 
-    @functools.cache
     def ensure_moe_quant_config(self):
         if self.quant_method.moe_quant_config is None:
             self.quant_method.moe_quant_config = (
                 self.quant_method.get_fused_moe_quant_config(self)
             )
-        logger.debug("FusedMoE quant_config=%s", self.quant_method.moe_quant_config)
+            logger.debug("FusedMoE quant_config=%s", self.quant_method.moe_quant_config)
 
     @staticmethod
     def select_experts(

@@ -35,7 +35,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_fp8_supported,
 )
 from vllm.platforms import current_platform
-from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx, has_hybrid_deep_ep
+from vllm.utils import has_deep_ep, has_deep_gemm, has_hybrid_deep_ep, has_pplx
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
@@ -196,12 +196,7 @@ register_experts(
 
 # Disable on blackwell for now
 if has_deep_ep() and not current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
-        DeepEPHTPrepareAndFinalize,
-    )
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
-        DeepEPLLPrepareAndFinalize,
-    )
+    pass
 
     # register_prepare_and_finalize(
     #     DeepEPHTPrepareAndFinalize,
@@ -245,8 +240,9 @@ if False and has_pplx():
         backend="pplx",
     )
 
-if False and (has_flashinfer_cutlass_fused_moe()
-        and current_platform.has_device_capability(100)):
+if False and (
+    has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100)
+):
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
