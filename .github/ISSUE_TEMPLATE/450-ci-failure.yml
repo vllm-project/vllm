@@ -69,5 +69,6 @@ body:
       Thanks for reporting 🙏!
 - type: checkboxes
   attributes:
+    id: plan-to-implement
     options:
       - label: Are you planning to fix this CI Failure?

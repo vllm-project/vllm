@@ -33,6 +33,7 @@ body:
       Thanks for contributing 🎉!
 - type: checkboxes
   attributes:
+    id: plan-to-implement
     options:
       - label: Are you planning to implement this new model?
 - type: checkboxes

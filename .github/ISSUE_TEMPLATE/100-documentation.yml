@@ -22,6 +22,7 @@ body:
       Thanks for contributing 🎉!
 - type: checkboxes
   attributes:
+    id: plan-to-implement
     options:
       - label: Are you planning to implement the proposed documentation improvements?
 - type: checkboxes
