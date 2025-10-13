@@ -2,18 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import base64
 import time
 from collections.abc import AsyncGenerator
 from typing import Final, Literal, Optional, Union, cast
 
 import jinja2
+import numpy as np
+import torch
 from fastapi import Request
+from typing_extensions import assert_never
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
-    EMBED_DTYPE_TO_TORCH_DTYPE,
     ErrorResponse,
     IOProcessorRequest,
     IOProcessorResponse,
@@ -26,14 +29,29 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.utils import encoding_pooling_output
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
-from vllm.outputs import PoolingRequestOutput
+from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.utils import merge_async_iterators
 
 logger = init_logger(__name__)
+
+
+def _get_data(
+    output: PoolingOutput,
+    encoding_format: Literal["float", "base64"],
+) -> Union[list[float], str]:
+    if encoding_format == "float":
+        return output.data.tolist()
+    elif encoding_format == "base64":
+        # Force to use float32 for base64 encoding
+        # to match the OpenAI python client behavior
+        pt_float32 = output.data.to(dtype=torch.float32)
+        pooling_bytes = np.array(pt_float32, dtype="float32").tobytes()
+        return base64.b64encode(pooling_bytes).decode("utf-8")
+
+    assert_never(encoding_format)
 
 
 class OpenAIServingPooling(OpenAIServing):
@@ -71,12 +89,6 @@ class OpenAIServingPooling(OpenAIServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-
-        if request.embed_dtype not in EMBED_DTYPE_TO_TORCH_DTYPE:
-            return self.create_error_response(
-                f"embed_dtype={request.embed_dtype!r} is not supported. "
-                f"Supported types: {EMBED_DTYPE_TO_TORCH_DTYPE.keys()}"
-            )
 
         model_name = self.models.model_name()
 
@@ -223,7 +235,6 @@ class OpenAIServingPooling(OpenAIServing):
                 created_time,
                 model_name,
                 request.encoding_format,
-                request.embed_dtype,
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
@@ -240,7 +251,6 @@ class OpenAIServingPooling(OpenAIServing):
         created_time: int,
         model_name: str,
         encoding_format: Literal["float", "base64"],
-        embed_dtype: str,
     ) -> PoolingResponse:
         items: list[PoolingResponseData] = []
         num_prompt_tokens = 0
@@ -248,7 +258,7 @@ class OpenAIServingPooling(OpenAIServing):
         for idx, final_res in enumerate(final_res_batch):
             item = PoolingResponseData(
                 index=idx,
-                data=encoding_pooling_output(final_res, encoding_format, embed_dtype),
+                data=_get_data(final_res.outputs, encoding_format),
             )
             prompt_token_ids = final_res.prompt_token_ids
 
