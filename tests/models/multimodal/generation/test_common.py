@@ -178,7 +178,14 @@ VLM_TEST_SETTINGS = {
     "gemma3-transformers": VLMTestInfo(
         models=["google/gemma-3-4b-it"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda vid_prompt: f"<'<bos><start_of_turn>user\n{vid_prompt}<start_of_image><end_of_turn>\n<start_of_turn>model\n",  # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<bos><start_of_turn>user\n{img_prompt}<end_of_turn>\n<start_of_turn>model\n",  # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<start_of_image>What's the content in the center of the image?",  # noqa: E501
+                "cherry_blossom": "<start_of_image>What is the season?",
+            }
+        ),
+        multi_image_prompt="<start_of_image><start_of_image>Describe the two images in detail.",  # noqa: E501
         max_model_len=8192,
         auto_cls=AutoModelForImageTextToText,
         # FIXME: `do_pan_and_scan` does not work yet
