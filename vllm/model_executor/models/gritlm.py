@@ -149,6 +149,37 @@ class GritLMMeanPool(nn.Module):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return PoolingParamsUpdate(requires_token_ids=True)
 
+    def forward_one(
+        self,
+        hidden_states: torch.Tensor,
+        prompt_len: Optional[torch.Tensor] = None,
+        instr_len: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        assert prompt_len is None or prompt_len == hidden_states.shape[0], (
+            "partial prefill not supported with MEAN pooling"
+        )
+
+        return hidden_states[instr_len:].mean(dim=0, dtype=torch.float32)
+
+    def forward_all(
+        self,
+        hidden_states: torch.Tensor,
+        prompt_lens: torch.Tensor,
+        instr_lens: torch.Tensor,
+    ) -> Union[list[torch.Tensor], torch.Tensor]:
+        offset = 0
+        pooled_data = list[torch.Tensor]()
+
+        for prompt_len, instr_len in zip(prompt_lens, instr_lens):
+            pooled_data.append(
+                hidden_states[offset + instr_len : offset + prompt_len].mean(
+                    dim=0, dtype=torch.float32
+                )
+            )
+            offset += prompt_len
+
+        return pooled_data
+
     def forward(
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
@@ -160,20 +191,18 @@ class GritLMMeanPool(nn.Module):
                 self._get_instruction_len(token_ids.cpu().numpy())
                 for token_ids in get_prompt_token_ids(pooling_metadata)
             ],
-            device="cpu",
+            device=prompt_lens.device,
         )
 
-        offset = 0
-        pooled_data = list[torch.Tensor]()
-        for prompt_len, instr_len in zip(prompt_lens, instr_lens):
-            pooled_data.append(
-                hidden_states[offset + instr_len : offset + prompt_len].mean(
-                    dim=0, dtype=torch.float32
+        if isinstance(hidden_states, list):
+            return [
+                self.forward_one(h, prompt_len, instr_len)
+                for h, prompt_len, instr_len in zip(
+                    hidden_states, prompt_lens, instr_lens
                 )
-            )
-            offset += prompt_len
+            ]
 
-        return pooled_data
+        return self.forward_all(hidden_states, prompt_lens, instr_lens)
 
 
 class GritLMPooler(Pooler):
