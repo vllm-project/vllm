@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 
+from benchmark_utils import TimeCollector
 from tabulate import tabulate
 
-from benchmark_utils import TimeCollector
 from vllm.utils import FlexibleArgumentParser
 from vllm.v1.core.block_pool import BlockPool
 
@@ -57,7 +57,7 @@ def invoke_main() -> None:
         "--num-iteration",
         type=int,
         default=1000,
-        help="Number of iterations to run to stablize final data readings",
+        help="Number of iterations to run to stabilize final data readings",
     )
     parser.add_argument(
         "--allocate-blocks",

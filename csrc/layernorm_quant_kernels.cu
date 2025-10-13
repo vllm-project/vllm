@@ -6,17 +6,13 @@
  */
 
 #include "type_convert.cuh"
-#include "quantization/fp8/common.cuh"
+#include "quantization/w8a8/fp8/common.cuh"
 #include "dispatch_utils.h"
+#include "cub_helpers.h"
+#include "core/batch_invariant.hpp"
 
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
-
-#ifndef USE_ROCM
-  #include <cub/cub.cuh>
-#else
-  #include <hipcub/hipcub.hpp>
-#endif
 
 namespace vllm {
 
@@ -39,7 +35,7 @@ __global__ void rms_norm_static_fp8_quant_kernel(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+  variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
@@ -100,7 +96,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+  variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
@@ -149,7 +145,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+  variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
@@ -245,7 +241,9 @@ void fused_add_rms_norm_static_fp8_quant(
   auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight.data_ptr());
   bool ptrs_are_aligned =
       inp_ptr % 16 == 0 && res_ptr % 16 == 0 && wt_ptr % 16 == 0;
-  if (ptrs_are_aligned && hidden_size % 8 == 0 && input_stride % 8 == 0) {
+  bool batch_invariant_launch = vllm::vllm_kernel_override_batch_invariant();
+  if (ptrs_are_aligned && hidden_size % 8 == 0 && input_stride % 8 == 0 &&
+      !batch_invariant_launch) {
     LAUNCH_FUSED_ADD_RMS_NORM(8);
   } else {
     LAUNCH_FUSED_ADD_RMS_NORM(0);
