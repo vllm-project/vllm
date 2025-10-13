@@ -15,7 +15,7 @@ from vllm.executor.uniproc_executor import (  # noqa
 )
 from vllm.executor.uniproc_executor import UniProcExecutor as UniProcExecutorV0  # noqa
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
@@ -104,9 +104,19 @@ class Executor(ExecutorBase):
         self,
         scheduler_output: SchedulerOutput,
         non_block: bool = False,
-    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         output = self.collective_rpc(
             "execute_model", args=(scheduler_output,), non_block=non_block
+        )
+        return output[0]
+
+    def sample_tokens(
+        self,
+        grammar_output: GrammarOutput | None,
+        non_block: bool = False,
+    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+        output = self.collective_rpc(
+            "sample_tokens", args=(grammar_output,), non_block=non_block
         )
         return output[0]
 

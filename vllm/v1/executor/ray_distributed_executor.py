@@ -61,7 +61,7 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
             return 2
         return self.parallel_config.pipeline_parallel_size
 
-    def execute_model(
+    def execute_model(  # type:ignore
         self,
         scheduler_output: SchedulerOutput,
         non_block: bool = False,

@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -114,6 +115,7 @@ from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
     DraftTokenIds,
+    KVConnectorOutput,
     LogprobsLists,
     LogprobsTensors,
     ModelRunnerOutput,
@@ -155,7 +157,7 @@ from .utils import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 logger = init_logger(__name__)
 
@@ -209,6 +211,18 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
         return output
+
+
+@dataclass
+class ExecuteModelState:
+    scheduler_output: "SchedulerOutput"
+    logits: torch.Tensor
+    spec_decode_metadata: SpecDecodeMetadata | None
+    spec_decode_common_attn_metadata: CommonAttentionMetadata | None
+    hidden_states: torch.Tensor
+    sample_hidden_states: torch.Tensor
+    aux_hidden_states: list[torch.Tensor] | None
+    kv_connector_output: KVConnectorOutput | None
 
 
 class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
@@ -505,6 +519,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device="cpu",
             pin_memory=self.pin_memory,
         )
+
+        # Ephemeral state transferred between execute_model_only() and sample_tokens().
+        self.execute_model_state: ExecuteModelState | None = None
 
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
@@ -2088,7 +2105,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_input_tokens: int,  # Padded
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> tuple[
-        int,
         torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor,
@@ -2182,7 +2198,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             model_kwargs.update(encoder_inputs)
 
         return (
-            num_scheduled_tokens,
             input_ids,
             inputs_embeds,
             positions,
@@ -2407,13 +2422,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+    ) -> ModelRunnerOutput | IntermediateTensors | None:
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("Preprocess"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 
-                if not scheduler_output.total_num_scheduled_tokens:
+                if not num_scheduled_tokens:
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -2453,7 +2469,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
 
             (
-                num_scheduled_tokens,
                 input_ids,
                 inputs_embeds,
                 positions,
@@ -2565,9 +2580,44 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 assert model_output_broadcast_data is not None
                 logits = model_output_broadcast_data["logits"]
 
-            # Apply structured output bitmasks if present
-            if scheduler_output.structured_output_request_ids:
-                apply_grammar_bitmask(scheduler_output, self.input_batch, logits)
+        self.execute_model_state = ExecuteModelState(
+            scheduler_output,
+            logits,
+            spec_decode_metadata,
+            spec_decode_common_attn_metadata,
+            hidden_states,
+            sample_hidden_states,
+            aux_hidden_states,
+            kv_connector_output,
+        )
+        return None
+
+    @torch.inference_mode
+    def sample_tokens(
+        self, grammar_output: "GrammarOutput | None"
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        execute_model_state = self.execute_model_state
+        if execute_model_state is None:
+            raise RuntimeError(
+                "State error: sample_tokens() must be called after execute_model_only()"
+            )
+        self.execute_model_state = None
+        scheduler_output = execute_model_state.scheduler_output
+        logits = execute_model_state.logits
+        spec_decode_metadata = execute_model_state.spec_decode_metadata
+        spec_decode_common_attn_metadata = (
+            execute_model_state.spec_decode_common_attn_metadata
+        )
+        hidden_states = execute_model_state.hidden_states
+        aux_hidden_states = execute_model_state.aux_hidden_states
+        sample_hidden_states = execute_model_state.sample_hidden_states
+        kv_connector_output = execute_model_state.kv_connector_output
+
+        # Apply structured output bitmasks if present.
+        if grammar_output is not None:
+            apply_grammar_bitmask(
+                scheduler_output, grammar_output, self.input_batch, logits
+            )
 
         with record_function_or_nullcontext("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
@@ -2626,7 +2676,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampler_output,
                 logits,
                 hidden_states,
-                num_scheduled_tokens,
+                scheduler_output.total_num_scheduled_tokens,
             )
 
         if (

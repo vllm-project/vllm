@@ -44,7 +44,7 @@ from vllm.utils import (
     get_open_port,
     set_process_title,
 )
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
@@ -130,15 +130,12 @@ class MultiprocExecutor(Executor):
                         uw.death_writer.close()
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
-        # For pipeline parallel, we use a thread pool for asynchronous
-        # execute_model.
-        if self.max_concurrent_batches > 1:
-            # Note: must use only 1 IO thread to keep dequeue sequence
-            # from the response queue
-            # _async_aggregate_workers_output also assumes a single IO thread
-            self.io_thread_pool = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="mp_exec_io"
-            )
+        # Note: must use only 1 IO thread to keep dequeue sequence
+        # from the response queue.
+        # _async_aggregate_workers_output also assumes a single IO thread.
+        self.io_thread_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="mp_exec_io"
+        )
 
         self.output_rank = self._get_output_rank()
         self.has_connector = self.vllm_config.kv_transfer_config is not None
@@ -181,12 +178,31 @@ class MultiprocExecutor(Executor):
         self,
         scheduler_output: SchedulerOutput,
         non_block: bool = False,
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        return self.do_execute_model(
+            "execute_model", scheduler_output, non_block=non_block
+        )
+
+    def sample_tokens(
+        self,
+        grammar_output: GrammarOutput | None,
+        non_block: bool = False,
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+        return self.do_execute_model(  # type: ignore[return-value]
+            "sample_tokens", grammar_output, non_block=non_block
+        )
+
+    def do_execute_model(
+        self,
+        method: str,
+        *args,
+        non_block: bool = False,
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         if not self.has_connector:
             # get output only from a single worker (output_rank)
             (output,) = self.collective_rpc(
-                "execute_model",
-                args=(scheduler_output,),
+                method,
+                args=args,
                 unique_reply_rank=self.output_rank,
                 non_block=non_block,
                 timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
@@ -195,8 +211,8 @@ class MultiprocExecutor(Executor):
 
         # get output from all workers
         outputs = self.collective_rpc(
-            "execute_model",
-            args=(scheduler_output,),
+            method,
+            args=args,
             non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
         )

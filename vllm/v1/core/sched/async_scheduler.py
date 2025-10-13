@@ -15,8 +15,12 @@ class AsyncScheduler(Scheduler):
         scheduler_output: SchedulerOutput,
     ) -> None:
         super()._update_after_schedule(scheduler_output)
+        needs_structured_output_tokens = False
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
+            needs_structured_output_tokens |= (
+                request.use_structured_output and request.num_output_placeholders > 0
+            )
             if (
                 request.num_computed_tokens
                 == request.num_tokens + request.num_output_placeholders
@@ -24,6 +28,8 @@ class AsyncScheduler(Scheduler):
                 # The request will generate a new token in this scheduling step.
                 # TODO(woosuk): Support speculative decoding.
                 request.num_output_placeholders += 1
+
+        scheduler_output.needs_structured_output_tokens = needs_structured_output_tokens
 
     def _update_request_with_output(
         self,

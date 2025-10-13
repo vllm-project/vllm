@@ -12,7 +12,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import msgspec
 import zmq
@@ -292,9 +292,9 @@ class EngineCore:
 
     def execute_model_with_error_logging(
         self,
-        model_fn: Callable[[SchedulerOutput], ModelRunnerOutput],
+        model_fn: Callable[[SchedulerOutput], ModelRunnerOutput | None],
         scheduler_output: SchedulerOutput,
-    ) -> ModelRunnerOutput:
+    ) -> ModelRunnerOutput | None:
         """Execute the model and log detailed info on failure."""
         try:
             return model_fn(scheduler_output)
@@ -321,15 +321,21 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
+        future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         model_output = self.execute_model_with_error_logging(
-            self.model_executor.execute_model,  # type: ignore
+            lambda _: cast(Future[ModelRunnerOutput | None], future).result(),
             scheduler_output,
         )
+        if model_output is None:
+            model_output = self.model_executor.sample_tokens(grammar_output)  # type: ignore[assignment]
+
+        assert model_output is not None
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
 
-        return (engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0)
+        return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
         if self.use_spec_decode and model_executed:
@@ -363,20 +369,48 @@ class EngineCore:
         assert len(batch_queue) < self.batch_queue_size
 
         model_executed = False
+        deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
-            future = self.model_executor.execute_model(scheduler_output, non_block=True)
-            batch_queue.appendleft((future, scheduler_output))  # type: ignore[arg-type]
+            exec_future = self.model_executor.execute_model(
+                scheduler_output, non_block=True
+            )
 
+            if scheduler_output.needs_structured_output_tokens:
+                deferred_scheduler_output = scheduler_output
+                grammar_output = None
+            else:
+                # We aren't waiting for any tokens, get the grammar output immediately.
+                grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+
+            # Block-wait for execute to return (continues running async on the GPU).
             model_executed = scheduler_output.total_num_scheduled_tokens > 0
-            if (
-                model_executed
-                and len(batch_queue) < self.batch_queue_size
-                and not batch_queue[-1][0].done()
-            ):
-                # Don't block on next worker response unless the queue is full
-                # or there are no more requests to schedule.
-                return None, True
+            model_output = self.execute_model_with_error_logging(
+                lambda _: cast(Future[ModelRunnerOutput | None], exec_future).result(),
+                scheduler_output,
+            )
+
+            if deferred_scheduler_output:
+                assert model_output is None
+            else:
+                if model_output is not None:
+                    # No sampling required (e.g. all requests finished).
+                    future = cast(Future[ModelRunnerOutput], exec_future)
+                else:
+                    # No pending output tokens needed, sample immediately.
+                    sample_future = self.model_executor.sample_tokens(
+                        grammar_output, non_block=True
+                    )
+                    future = cast(Future[ModelRunnerOutput], sample_future)
+                batch_queue.appendleft((future, scheduler_output))
+                if (
+                    model_executed
+                    and len(batch_queue) < self.batch_queue_size
+                    and not batch_queue[-1][0].done()
+                ):
+                    # Don't block on next worker response unless the queue is full
+                    # or there are no more requests to schedule.
+                    return None, True
 
         elif not batch_queue:
             # Queue is empty. We should not reach here since this method should
@@ -389,10 +423,24 @@ class EngineCore:
         model_output = self.execute_model_with_error_logging(
             lambda _: future.result(), scheduler_output
         )
-
+        assert model_output is not None
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+
+        # TODO TBD return outputs here first?
+
+        if deferred_scheduler_output:
+            # We now have the tokens needed to compute the bitmask for the
+            # deferred request. Get the bitmask and dispatch sample request.
+            grammar_output = self.scheduler.get_grammar_bitmask(
+                deferred_scheduler_output
+            )
+            sample_future = self.model_executor.sample_tokens(
+                grammar_output, non_block=True
+            )
+            future = cast(Future[ModelRunnerOutput], sample_future)
+            batch_queue.appendleft((future, deferred_scheduler_output))
 
         return engine_core_outputs, model_executed
 

@@ -1130,9 +1130,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             tpu_sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
                 self.input_batch, padded_num_reqs, self.device
             )
-            if scheduler_output.grammar_bitmask is not None:
+            if scheduler_output.grammar_bitmask is not None:  # type:ignore
                 require_struct_decoding, grammar_bitmask_padded, arange = (
-                    self.prepare_structured_decoding_input(logits, scheduler_output)
+                    self.prepare_structured_decoding_input(logits, scheduler_output)  # type:ignore
                 )
                 logits = self.structured_decode(
                     require_struct_decoding, grammar_bitmask_padded, logits, arange
@@ -1955,7 +1955,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def prepare_structured_decoding_input(
         self, logits: torch.Tensor, scheduler_output: "SchedulerOutput"
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        grammar_bitmask = scheduler_output.grammar_bitmask
+        grammar_bitmask = scheduler_output.grammar_bitmask  # type:ignore
         assert grammar_bitmask is not None
         num_reqs, _ = logits.shape
 
@@ -1964,7 +1964,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.require_structured_out_cpu.zero_()
 
         cumulative_mask_idx = 0
-        for req_id in scheduler_output.structured_output_request_ids:
+        for req_id in scheduler_output.structured_output_request_ids:  # type: ignore
             if req_id not in self.input_batch.req_id_to_index:
                 continue
             batch_index = self.input_batch.req_id_to_index[req_id]
