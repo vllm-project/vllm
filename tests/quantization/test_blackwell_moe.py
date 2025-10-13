@@ -24,9 +24,12 @@ def set_test_environment():
     os.environ["FLASHINFER_NVCC_THREADS"] = "16"
 
 
-# dummy_hf_overrides = {"num_layers": 4, "num_hidden_layers": 4,
-# "text_config": {"num_layers": 4, "num_hidden_layers": 4}}
-dummy_hf_overrides = {"num_layers": 4, "num_hidden_layers": 4}
+# Overide the backbone layers to 4 for faster startup
+dummy_hf_overrides = {
+    "num_layers": 4,
+    "num_hidden_layers": 4,
+    "text_config": {"num_layers": 4, "num_hidden_layers": 4},
+}
 
 
 def can_initialize(model: str, extra_args: list[str] | None = None):
@@ -80,14 +83,12 @@ def test_llama4_fp8_tensor_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatc
     can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8")
 
 
-@pytest.mark.skip(reason="Works, but takes too long to run")
 def test_llama4_fp8_tensor_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "latency")
     can_initialize("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8")
 
 
-@pytest.mark.skip(reason="Works, but takes too long to run")
 def test_llama4_nvfp4_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
