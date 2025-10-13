@@ -61,7 +61,6 @@ class EagleProposer:
 
         self.runner = runner
         self.device = device
-
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size

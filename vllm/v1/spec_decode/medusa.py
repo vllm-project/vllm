@@ -33,7 +33,6 @@ class MedusaProposer:
             vllm_config.speculative_config.draft_model_config.get_hidden_size()
         )
         self.dtype = vllm_config.model_config.dtype
-        self.device = device
 
     def propose(
         self,
@@ -50,7 +49,7 @@ class MedusaProposer:
         draft_tokens = [logit.argmax(dim=-1).tolist() for logit in logits]
         return [list(row) for row in zip(*draft_tokens)]
 
-    def load_model(self, target_model: nn.Module, eep_scale_up: bool = False) -> None:
+    def load_model(self, target_model: nn.Module) -> None:
         from vllm.compilation.backends import set_model_tag
 
         with set_model_tag("medusa_head"):
@@ -58,7 +57,10 @@ class MedusaProposer:
                 vllm_config=self.vllm_config,
                 model_config=self.vllm_config.speculative_config.draft_model_config,
             )
-        assert not is_mixture_of_experts(self.model)
+        assert not (
+            is_mixture_of_experts(self.model)
+            and self.vllm_config.parallel_config.enable_eplb
+        ), "EPLB for Medusa is not supported"
 
     @torch.inference_mode()
     def dummy_run(self, num_tokens: int) -> None:

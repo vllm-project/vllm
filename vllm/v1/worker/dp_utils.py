@@ -178,7 +178,6 @@ def coordinate_batch_across_dp(
     Returns: tuple[
         ubatch_slices: if this is set then all DP ranks have agreed to
         microbatch
-
         num_tokens_after_padding: A tensor containing the total number of
         tokens per-microbatch for each DP rank including padding. Will be
         padded up to the max value across all DP ranks when allow_dp_padding
