@@ -12,9 +12,11 @@ from torch._inductor.pattern_matcher import (
 )
 from torch._ops import OpOverload
 
-from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    check_aiter_fp8_linear_support,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -76,15 +78,7 @@ class ActivationQuantPattern(ABC):
         raise NotImplementedError
 
 
-def is_rocm_aiter_linear_enabled() -> bool:
-    return (
-        current_platform.is_rocm()
-        and envs.VLLM_ROCM_USE_AITER
-        and envs.VLLM_ROCM_USE_AITER_LINEAR
-    )
-
-
-if is_rocm_aiter_linear_enabled():
+if check_aiter_fp8_linear_support():
     import aiter as rocm_aiter
     from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
 
@@ -286,7 +280,7 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
 
-        if is_rocm_aiter_linear_enabled():
+        if check_aiter_fp8_linear_support():
             pattern_silu_mul_aiter_block_fp8 = AiterSiluMulFp8BlockQuantPattern()
             pattern_silu_mul_aiter_block_fp8.register(self.patterns)
 
@@ -303,6 +297,6 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             SiluMulFp8StaticQuantPattern,
             SiluMulNvfp4QuantPattern,
         ]
-        if is_rocm_aiter_linear_enabled():
+        if check_aiter_fp8_linear_support():
             fusion_patterns.append(AiterSiluMulFp8BlockQuantPattern)
         return VllmInductorPass.hash_source(self, *fusion_patterns)
