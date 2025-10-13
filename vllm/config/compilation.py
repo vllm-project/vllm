@@ -15,6 +15,7 @@ from pydantic.dataclasses import dataclass
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
 
 if TYPE_CHECKING:
@@ -184,7 +185,7 @@ class CompilationConfig:
     """The directory to store the compiled graph, to accelerate Inductor
     compilation. By default, it will use model-related information to generate
     a cache directory."""
-    backend: str = "inductor"
+    backend: str = ""
     """The backend for compilation. It needs to be a string:
 
     - "" (empty string): use the default backend ("inductor" on CUDA-alike
@@ -579,7 +580,7 @@ class CompilationConfig:
             self.backend = "inductor" if self.use_inductor else "eager"
 
         if self.backend == "":
-            self.backend = "inductor"
+            self.backend = current_platform.simple_compile_backend
 
     def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
         """
