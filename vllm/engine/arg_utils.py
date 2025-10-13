@@ -38,6 +38,7 @@ from vllm.config import (
     ConfigType,
     DeviceConfig,
     EPLBConfig,
+    FaultToleranceConfig,
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
@@ -526,6 +527,10 @@ class EngineArgs:
     async_scheduling: bool = SchedulerConfig.async_scheduling
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
+
+    # fault tolerance fields
+    enable_fault_tolerance: bool = FaultToleranceConfig.enable_fault_tolerance
+    engine_recovery_timeout: int = FaultToleranceConfig.engine_recovery_timeout
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1034,6 +1039,21 @@ class EngineArgs:
         )
         vllm_group.add_argument(
             "--structured-outputs-config", **vllm_kwargs["structured_outputs_config"]
+        )
+
+        # fault tolerance arguments
+        fault_tolerance_kwargs = get_kwargs(FaultToleranceConfig)
+        fault_tolerance_group = parser.add_argument_group(
+            title="FaultToleranceConfig",
+            description=FaultToleranceConfig.__doc__,
+        )
+        fault_tolerance_group.add_argument(
+            "--enable-fault-tolerance",
+            **fault_tolerance_kwargs["enable_fault_tolerance"],
+        )
+        fault_tolerance_group.add_argument(
+            "--engine-recovery-timeout",
+            **fault_tolerance_kwargs["engine_recovery_timeout"],
         )
 
         # Other arguments
@@ -1563,6 +1583,11 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
+        fault_tolerance_config = FaultToleranceConfig(
+            enable_fault_tolerance=self.enable_fault_tolerance,
+            engine_recovery_timeout=self.engine_recovery_timeout,
+        )
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1577,6 +1602,7 @@ class EngineArgs:
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            fault_tolerance_config=fault_tolerance_config,
             additional_config=self.additional_config,
         )
 
