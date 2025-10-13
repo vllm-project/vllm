@@ -672,9 +672,8 @@ class CompilationConfig:
 
     def set_splitting_ops_for_inductor_graph_partition(self):
         assert self.use_inductor_graph_partition
-        logger.warning("EMPTY SPLITTING OPS WITH INDUCTOR GRAPH PARTITION")
-        # if self.splitting_ops is None:
-        self.splitting_ops = []  # list(self._attention_ops)
+        if self.splitting_ops is None:
+            list(self._attention_ops)
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.enable_attn_fusion
