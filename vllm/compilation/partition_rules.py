@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import contextlib
 from typing import TYPE_CHECKING
 
@@ -83,7 +81,7 @@ def resolve_defined_ops(op_names: list[str]) -> list[torch._ops.OpOverload]:
 
 
 @contextlib.contextmanager
-def inductor_partition_rule_context(overloads: list[torch._ops.OpOverload]):
+def inductor_partition_rule_context(overloads: list["torch._ops.OpOverload"]):
     """Context manager to temporarily register Inductor partition rules.
 
     Registers custom partition rules for specified operators, forcing the

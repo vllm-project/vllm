@@ -10,7 +10,7 @@ initialized randomly with a fixed seed.
 """
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 import torch
@@ -162,7 +162,7 @@ class LlamaDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         For tractable computation:
@@ -217,7 +217,7 @@ class LlamaModel(nn.Module):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states = self.embedding_tokens(input_ids)
