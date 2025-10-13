@@ -6,7 +6,7 @@ from typing import Any, Literal, Optional, Union
 
 import torch
 
-from vllm.config import VllmConfig, ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.models import (
     LoRAModel,
@@ -71,6 +71,7 @@ class WorkerLoRAManager:
     def create_lora_manager(
         self,
         model: torch.nn.Module,
+        model_config: Optional[ModelConfig] = None,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
@@ -80,6 +81,7 @@ class WorkerLoRAManager:
             lora_config=self.lora_config,
             device=self.device,
             lora_manager_cls=self._manager_cls,
+            model_config=model_config,
         )
         self._adapter_manager = lora_manager
         return lora_manager.model

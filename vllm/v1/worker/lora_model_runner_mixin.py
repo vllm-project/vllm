@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -29,7 +29,11 @@ logger = init_logger(__name__)
 # Defined as a mixin for GPUModelRunner
 class LoRAModelRunnerMixin:
     def load_lora_model(
-        self, model: nn.Module, vllm_config: VllmConfig, device: torch.device
+        self,
+        model: nn.Module,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        model_config: ModelConfig = None,
     ) -> nn.Module:
         if not supports_lora(model):
             raise ValueError(f"{model.__class__.__name__} does not support LoRA yet.")
@@ -54,7 +58,7 @@ class LoRAModelRunnerMixin:
         prompt_lora_mapping: tuple[int, ...],
         token_lora_mapping: tuple[int, ...],
         lora_requests: set[LoRARequest],
-        is_mm_input: bool = False
+        is_mm_input: bool = False,
     ) -> None:
         self._ensure_lora_enabled()
 
@@ -63,7 +67,10 @@ class LoRAModelRunnerMixin:
         # On cuda platforms we use the same kernels for prefill and
         # decode and this flag is generally ignored.
         lora_mapping = LoRAMapping(
-            token_lora_mapping, prompt_lora_mapping, is_prefill=True, is_mm_input=is_mm_input
+            token_lora_mapping,
+            prompt_lora_mapping,
+            is_prefill=True,
+            is_mm_input=is_mm_input,
         )
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
@@ -72,7 +79,10 @@ class LoRAModelRunnerMixin:
             raise RuntimeError("LoRA is not enabled. Use --enable-lora to enable LoRA.")
 
     def set_active_loras(
-        self, input_batch: InputBatch, num_scheduled_tokens: np.ndarray, is_mm_input: bool = False
+        self,
+        input_batch: InputBatch,
+        num_scheduled_tokens: np.ndarray,
+        is_mm_input: bool = False,
     ) -> None:
         prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
         token_lora_mapping: tuple[int, ...]  # of size np.sum(num_scheduled_tokens)
@@ -122,7 +132,10 @@ class LoRAModelRunnerMixin:
 
     @contextmanager
     def maybe_select_dummy_loras(
-        self, lora_config: Optional[LoRAConfig], num_scheduled_tokens: np.ndarray, is_mm_input: bool = False
+        self,
+        lora_config: Optional[LoRAConfig],
+        num_scheduled_tokens: np.ndarray,
+        is_mm_input: bool = False,
     ):
         if lora_config is None:
             yield
@@ -151,7 +164,10 @@ class LoRAModelRunnerMixin:
             }
 
             self._set_active_loras(
-                tuple(prompt_lora_mapping), tuple(token_lora_mapping), lora_requests, is_mm_input
+                tuple(prompt_lora_mapping),
+                tuple(token_lora_mapping),
+                lora_requests,
+                is_mm_input,
             )
 
             yield
@@ -162,11 +178,13 @@ class LoRAModelRunnerMixin:
         lora_config: Optional[LoRAConfig],
         num_scheduled_tokens: np.ndarray,
         remove_lora: bool = True,
-        is_mm_input: bool = False
+        is_mm_input: bool = False,
     ):
         with (
             self.maybe_setup_dummy_loras(lora_config, remove_lora),
-            self.maybe_select_dummy_loras(lora_config, num_scheduled_tokens, is_mm_input),
+            self.maybe_select_dummy_loras(
+                lora_config, num_scheduled_tokens, is_mm_input
+            ),
         ):
             yield
 

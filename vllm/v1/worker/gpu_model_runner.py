@@ -512,6 +512,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
         )
 
+        # Multimodal LoRA support
+        if self.supports_mm_inputs:
+            self.info = self.mm_registry.create_processor(self.model_config).info
+            self.supports_mm_lora = hasattr(self.info, "get_num_mm_encoder_tokens")
+        else:
+            self.supports_mm_lora = False
+
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
             self.mm_budget.reset_cache()
@@ -570,15 +577,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device=self.device
         )
         return model_kwargs
-
-        # Multimodal LoRA support
-        if self.is_multimodal_model:
-            self.info = self.mm_registry.create_processor(
-                self.model_config, disable_cache=True).info
-            self.supports_mm_lora = hasattr(self.info,
-                                            "get_num_mm_encoder_tokens")
-        else:
-            self.supports_mm_lora = False
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -1751,6 +1749,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # encoder outputs.
         model = cast(SupportsMultiModal, self.model)
         encoder_outputs = []
+
+        if self.lora_config and self.supports_mm_lora:
+            mm_tokens = [
+                self.info.get_num_mm_encoder_tokens(pos_info.length)
+                for _, pos_info in mm_hashes_pos
+            ]
+            num_scheduled_tokens = np.array(mm_tokens, dtype=np.int32)
+            self.set_active_loras(
+                self.input_batch,
+                num_scheduled_tokens,
+                is_mm_input=True,
+            )
+
         for modality, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
             mm_kwargs,
             device=self.device,
@@ -2903,7 +2914,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             if self.lora_config:
                 self.model = self.load_lora_model(
-                    self.model, self.vllm_config, self.device
+                    self.model, self.vllm_config, self.device, self.model_config
                 )
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
