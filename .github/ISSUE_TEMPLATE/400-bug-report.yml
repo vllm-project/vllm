@@ -100,6 +100,10 @@ body:
 
       Thanks for reporting 🙏!
 - type: checkboxes
+  attributes:
+    options:
+      - label: Are you planning to fix this bug?
+- type: checkboxes
   id: askllm
   attributes:
     label: Before submitting a new issue...

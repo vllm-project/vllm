@@ -44,6 +44,10 @@ body:
   validations:
     required: false
 - type: checkboxes
+  attributes:
+    options:
+      - label: Are you planning to implement this feature?
+- type: checkboxes
   id: askllm
   attributes:
     label: Before submitting a new issue...

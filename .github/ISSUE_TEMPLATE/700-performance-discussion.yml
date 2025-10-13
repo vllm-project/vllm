@@ -51,6 +51,10 @@ body:
     value: >
       Thanks for contributing 🎉!
 - type: checkboxes
+  attributes:
+    options:
+      - label: Are you planning to implement the performance enhancements?
+- type: checkboxes
   id: askllm
   attributes:
     label: Before submitting a new issue...
