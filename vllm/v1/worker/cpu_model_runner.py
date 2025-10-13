@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -77,7 +77,13 @@ class CPUModelRunner(GPUModelRunner):
         logger.info("Warming up model for the compilation...")
         # Only generate graph for the generic shape
         with _set_global_compilation_settings(self.vllm_config):
-            self._dummy_run(max(16, self.max_num_reqs))
+            self._dummy_run(
+                min(
+                    max(16, self.max_num_reqs),
+                    self.scheduler_config.max_num_batched_tokens,
+                )
+            )
+
         logger.info("Warming up done.")
 
     def _init_device_properties(self) -> None:
@@ -89,7 +95,7 @@ class CPUModelRunner(GPUModelRunner):
     def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
         return sampled_token_ids.tolist()
 
-    def get_dp_padding(self, num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+    def get_dp_padding(self, num_tokens: int) -> tuple[int, torch.Tensor | None]:
         # Note: For CPU backend, dp padding is not required for now.
         return 0, None
 

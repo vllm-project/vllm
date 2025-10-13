@@ -4,7 +4,6 @@
 from contextlib import suppress
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -38,13 +37,13 @@ class MockModelConfig:
     trust_remote_code: bool = False
     tokenizer_mode: str = "auto"
     max_model_len: int = 100
-    tokenizer_revision: Optional[str] = None
+    tokenizer_revision: str | None = None
     multimodal_config: MultiModalConfig = field(default_factory=MultiModalConfig)
     hf_config: MockHFConfig = field(default_factory=MockHFConfig)
-    logits_processor_pattern: Optional[str] = None
-    diff_sampling_param: Optional[dict] = None
+    logits_processor_pattern: str | None = None
+    diff_sampling_param: dict | None = None
     allowed_local_media_path: str = ""
-    allowed_media_domains: Optional[list[str]] = None
+    allowed_media_domains: list[str] | None = None
     encoder_config = None
     generation_config: str = "auto"
     skip_tokenizer_init: bool = False
@@ -56,7 +55,7 @@ class MockModelConfig:
 class MockLoRAResolver(LoRAResolver):
     async def resolve_lora(
         self, base_model_name: str, lora_name: str
-    ) -> Optional[LoRARequest]:
+    ) -> LoRARequest | None:
         if lora_name == "test-lora":
             return LoRARequest(
                 lora_name="test-lora",
@@ -113,15 +112,17 @@ def mock_serving_setup():
     mock_engine.generate.reset_mock()
     mock_engine.add_lora.reset_mock()
 
-    mock_model_config = MockModelConfig()
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
+
     models = OpenAIServingModels(
         engine_client=mock_engine,
         base_model_paths=BASE_MODEL_PATHS,
-        model_config=mock_model_config,
     )
 
     serving_completion = OpenAIServingCompletion(
-        mock_engine, mock_model_config, models, request_logger=None
+        mock_engine, models, request_logger=None
     )
 
     serving_completion._process_inputs = AsyncMock(

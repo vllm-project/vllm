@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -10,7 +9,7 @@ from vllm.config import CompilationLevel
 
 
 class MyMod(torch.nn.Module):
-    def forward(self, x: torch.Tensor, cache: Optional[torch.Tensor] = None):
+    def forward(self, x: torch.Tensor, cache: torch.Tensor | None = None):
         if cache is not None:
             return x + cache
         return x * 2
@@ -24,11 +23,11 @@ class MyWrapper(TorchCompileWrapperWithCustomDispatcher):
             compiled_callable, compilation_level=CompilationLevel.DYNAMO_ONCE
         )
 
-    def forward(self, x: torch.Tensor, cache: Optional[torch.Tensor] = None):
+    def forward(self, x: torch.Tensor, cache: torch.Tensor | None = None):
         # this is the function to be compiled
         return self.model(x, cache)
 
-    def __call__(self, x: torch.Tensor, cache: Optional[torch.Tensor] = None):
+    def __call__(self, x: torch.Tensor, cache: torch.Tensor | None = None):
         # let torch.compile compile twice
         if len(self.compiled_codes) == 2:
             dispatch_id = 0 if cache is None else 1
