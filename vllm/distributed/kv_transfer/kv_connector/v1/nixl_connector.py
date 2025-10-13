@@ -1066,12 +1066,22 @@ class NixlConnectorWorker:
         is_kv_replicated = self._tp_size[engine_id] // total_num_kv_heads >= 1
 
         remote_block_len = nixl_agent_meta.block_lens[0]
-        if nixl_agent_meta.kv_cache_layout == "HND" and self.kv_cache_layout == "NHD":
-            logger.info(
-                "Remote is HND and local is NHD, enabled additional permute "
-                "on local device KV."
-            )
-            self.enable_permute_local_kv = True
+        if nixl_agent_meta.kv_cache_layout != self.kv_cache_layout:
+            if (
+                self.vllm_config.kv_transfer_config.enable_permute_local_kv
+                and nixl_agent_meta.kv_cache_layout == "HND"
+            ):
+                logger.info(
+                    "Remote is HND and local is NHD, enabled additional permute "
+                    "on local device KV."
+                )
+                self.enable_permute_local_kv = True
+            else:
+                raise RuntimeError(
+                    "Heterogeneous TP expects same kv_cache_layout. "
+                    "Or enable experimental feature to use HND to NHD support by "
+                    "setting 'enable_permute_local_kv'=True in --kv-transfer-config."
+                )
         if self.use_mla or is_kv_replicated:
             # With replicated KV cache, only the number of blocks can differ.
             assert self.block_len_per_layer == nixl_agent_meta.block_lens, (
