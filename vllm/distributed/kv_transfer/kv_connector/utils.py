@@ -195,9 +195,9 @@ class KVOutputAggregator:
             invalid_block_ids |= kv_output.invalid_block_ids
 
         # select output of the worker specified by output_rank
-        output = outputs[output_rank]
+        runner_output = outputs[output_rank]
 
-        output.kv_connector_output = KVConnectorOutput(
+        runner_output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
             kv_connector_stats=aggregated_kv_connector_stats or None,
@@ -205,7 +205,7 @@ class KVOutputAggregator:
             expected_finished_reqs=self._expected_finished_reqs,
         )
 
-        return output
+        return runner_output
 
     def async_aggregate(
         self, output_futures: Sequence[Future[ModelRunnerOutput]], output_rank: int = 0
