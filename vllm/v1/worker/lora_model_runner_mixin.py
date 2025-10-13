@@ -5,7 +5,6 @@ Define LoRA functionality mixin for model runners.
 """
 
 from contextlib import contextmanager
-from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -21,7 +20,7 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
 
-InputBatch = Union[TPUInputBatch, GPUInputBatch]
+InputBatch = TPUInputBatch | GPUInputBatch
 
 logger = init_logger(__name__)
 
@@ -96,7 +95,7 @@ class LoRAModelRunnerMixin:
 
     @contextmanager
     def maybe_setup_dummy_loras(
-        self, lora_config: Optional[LoRAConfig], remove_lora: bool = True
+        self, lora_config: LoRAConfig | None, remove_lora: bool = True
     ):
         if lora_config is None:
             yield
@@ -132,10 +131,7 @@ class LoRAModelRunnerMixin:
 
     @contextmanager
     def maybe_select_dummy_loras(
-        self,
-        lora_config: Optional[LoRAConfig],
-        num_scheduled_tokens: np.ndarray,
-        is_mm_input: bool = False,
+        self, lora_config: LoRAConfig | None, num_scheduled_tokens: np.ndarray, is_mm_input: bool = False
     ):
         if lora_config is None:
             yield
@@ -175,7 +171,7 @@ class LoRAModelRunnerMixin:
     @contextmanager
     def maybe_dummy_run_with_lora(
         self,
-        lora_config: Optional[LoRAConfig],
+        lora_config: LoRAConfig | None,
         num_scheduled_tokens: np.ndarray,
         remove_lora: bool = True,
         is_mm_input: bool = False,
@@ -188,7 +184,7 @@ class LoRAModelRunnerMixin:
         ):
             yield
 
-    def maybe_remove_all_loras(self, lora_config: Optional[LoRAConfig]):
+    def maybe_remove_all_loras(self, lora_config: LoRAConfig | None):
         if lora_config is None:
             return
         self.lora_manager.remove_all_adapters()
