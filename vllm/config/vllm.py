@@ -322,6 +322,20 @@ class VllmConfig:
                 # NB: Passing both --enforce-eager and a compilation level
                 # in V0 means the compilation level wins out.
                 self.compilation_config.level = CompilationLevel.NO_COMPILATION
+        else:
+            assert self.compilation_config.level >= CompilationLevel.NO_COMPILATION
+            assert self.compilation_config.level <= CompilationLevel.PIECEWISE
+
+        # If user does not set custom ops via none or all set it here based on
+        # compilation level and backend.
+        if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
+            if (
+                self.compilation_config.backend == "inductor"
+                and self.compilation_config.level > CompilationLevel.NO_COMPILATION
+            ):
+                self.compilation_config.custom_ops.append("none")
+            else:
+                self.compilation_config.custom_ops.append("all")
 
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
