@@ -133,24 +133,22 @@ class AutoRoundConfig(QuantizationConfig):
                 cfg = self.extra_config[name]
                 return (
                     cfg.get("bits", self.weight_bits if quantized else 16),
-                    cfg.get("group_size",
-                            self.group_size if quantized else -1),
+                    cfg.get("group_size", self.group_size if quantized else -1),
                     cfg.get("sym", self.sym if quantized else True),
                 )
 
             REGEX_SPECIAL_CHARS = set(r"*+?^$()[]{}|\\")
             for pattern, cfg in self.extra_config.items():
                 if not isinstance(pattern, str) or not any(
-                        c in REGEX_SPECIAL_CHARS for c in pattern):
+                    c in REGEX_SPECIAL_CHARS for c in pattern
+                ):
                     continue
 
                 try:
                     if re.search(pattern, name):
                         return (
-                            cfg.get("bits",
-                                    self.weight_bits if quantized else 16),
-                            cfg.get("group_size",
-                                    self.group_size if quantized else -1),
+                            cfg.get("bits", self.weight_bits if quantized else 16),
+                            cfg.get("group_size", self.group_size if quantized else -1),
                             cfg.get("sym", self.sym if quantized else True),
                         )
                 except re.error:
