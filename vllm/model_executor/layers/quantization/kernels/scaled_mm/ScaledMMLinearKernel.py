@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm.platforms import current_platform
+
 
 @dataclass
 class ScaledMMLinearLayerConfig:
@@ -15,6 +17,22 @@ class ScaledMMLinearLayerConfig:
 
 
 class ScaledMMLinearKernel(ABC):
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if compute_capability is None:
+            _cc = current_platform.get_device_capability()
+            if _cc is not None:
+                compute_capability = _cc.major * 10 + _cc.minor
+
+        if compute_capability is not None:
+            min_cap = cls.get_min_capability()
+            if min_cap is not None and min_cap > compute_capability:
+                return False, f"requires capability {min_cap}, got {compute_capability}"
+
+        return True, None
+
     @classmethod
     @abstractmethod
     def get_min_capability(cls) -> int:
@@ -35,6 +53,7 @@ class ScaledMMLinearKernel(ABC):
         azp_adj_param_name: str,
     ) -> None:
         assert self.can_implement(c)
+        assert self.is_supported()
         self.config = c
         self.w_q_name = w_q_param_name
         self.w_s_name = w_s_param_name
