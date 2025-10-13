@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
-from typing import Literal, Union
+from typing import Literal
 
 import torch
 from typing_extensions import assert_never
@@ -14,7 +14,7 @@ def encoding_pooling_output(
     output: PoolingRequestOutput,
     encoding_format: Literal["float", "base64"],
     embed_dtype: str,
-) -> Union[list[float], str]:
+) -> list[float] | str:
     if encoding_format == "float":
         return output.outputs.data.tolist()
     elif encoding_format == "base64":
