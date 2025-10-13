@@ -32,13 +32,13 @@ def temporary_environ(env_vars):
                 os.environ[k] = v
 
 
-test_params_full_cudagraph = []
+model_backends_full_cudagraph = []
 
 # deepseek-ai/DeepSeek-V2-Lite with MLA
 MLA_backends = ["FlashMLA", "FlashAttentionMLA", "CutlassMLA"]
 for mla_backend in MLA_backends:
-    test_params_full_cudagraph.append(
-        pytest.param(("deepseek-ai/DeepSeek-V2-Lite", backend_configs[mla_backend]))
+    model_backends_full_cudagraph.append(
+        ("deepseek-ai/DeepSeek-V2-Lite", backend_configs[mla_backend])
     )
 
 # Qwen/Qwen2-1.5B-Instruct with other backends
@@ -46,14 +46,24 @@ other_backend_configs = [
     backend_configs[c] for c in backend_configs if c not in MLA_backends
 ]
 for backend_config in other_backend_configs:
-    test_params_full_cudagraph.append(
-        pytest.param(("Qwen/Qwen2-1.5B-Instruct", backend_config))
-    )
+    model_backends_full_cudagraph.append(("Qwen/Qwen2-1.5B-Instruct", backend_config))
 
 
 @pytest.fixture(scope="class")
 def llm_pair(request):
-    model, backend_config = request.param
+    model, backend_config, use_inductor_graph_partition = request.param
+    backend_config.comp_config["use_inductor_graph_partition"] = (
+        use_inductor_graph_partition
+    )
+
+    # TODO(luka/boyuan): fix Inductor assert
+    if use_inductor_graph_partition:  # and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("Inductor graph partition only supported in torch>=2.9")
+
+    # if use_inductor_graph_partition:
+    #     # TODO otherwise we reuse an unpartitioned graph
+    #     backend_config.comp_config["inductor_compile_config"] = \
+    #         {"force_disable_caches": True}
 
     # Dynamically skip test if GPU capability is not met
     if (
@@ -104,7 +114,15 @@ def llm_pair(request):
     )
 
 
-@pytest.mark.parametrize("llm_pair", test_params_full_cudagraph, indirect=True)
+@pytest.mark.parametrize(
+    "llm_pair",
+    [
+        pytest.param((model, backend_config, use_inductor_graph_partition))
+        for model, backend_config in model_backends_full_cudagraph
+        for use_inductor_graph_partition in [True, False]
+    ],
+    indirect=True,
+)
 class TestFullCUDAGraph:
     """
     Use a class such that an llm pair is constructed once for all
