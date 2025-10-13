@@ -3976,7 +3976,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 raise ValueError(msg)
 
             # attempt to resolve the full cudagraph related mode
-            if self.compilation_config.splitting_ops_contain_attention():
+            if self.compilation_config.is_attention_compiled_piecewise():
                 msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
                 cudagraph_mode = self.compilation_config.cudagraph_mode = (
                     CUDAGraphMode.FULL_AND_PIECEWISE
@@ -3999,8 +3999,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f"{min_cg_support})"
             )
             if self.compilation_config.level == CompilationLevel.PIECEWISE and (
-                self.compilation_config.splitting_ops_contain_attention()
-                or self.compilation_config.use_inductor_graph_partition
+                self.compilation_config.is_attention_compiled_piecewise()
             ):
                 msg += (
                     "; setting cudagraph_mode=PIECEWISE because "
@@ -4031,7 +4030,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f" with spec-decode for attention backend "
                 f"{min_cg_builder_name} (support: {min_cg_support})"
             )
-            if self.compilation_config.splitting_ops_contain_attention():
+            if self.compilation_config.is_attention_compiled_piecewise():
                 msg += "; setting cudagraph_mode=PIECEWISE"
                 cudagraph_mode = self.compilation_config.cudagraph_mode = (
                     CUDAGraphMode.PIECEWISE

@@ -690,7 +690,7 @@ class CompilationConfig:
             )
             self.cudagraph_mode = CUDAGraphMode.FULL
 
-        assert not self.splitting_ops_contain_attention(), (
+        assert not self.is_attention_compiled_piecewise(), (
             "attention ops should not be in splitting_ops "
             "when enable_attn_fusion is True"
         )

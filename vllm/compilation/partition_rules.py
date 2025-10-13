@@ -16,11 +16,33 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _mutated_arg_names(op_overload):
+    """Extract names of arguments that are mutated by this operator.
+
+    Args:
+        op_overload: Resolved OpOverload object
+
+    Returns:
+        List of argument names that are mutated (modified in-place)
+    """
+    schema = getattr(op_overload, "_schema", None)
+    if not schema:
+        return []
+    return [
+        arg.name
+        for arg in schema.arguments
+        if getattr(getattr(arg, "alias_info", None), "is_write", False)
+    ]
+
+
 def resolve_defined_ops(op_names: list[str]) -> list[torch._ops.OpOverload]:
     """Resolve operator names to OpOverload objects.
 
     Skips operators that fail to resolve (e.g., operators not registered or
     model-specific operators not present in the current model).
+
+    Also skips operators with mutating arguments, as PyTorch Inductor cannot
+    correctly track origin_node for mutation operations when partitioning.
 
     Note: Users should inspect the operator graph before lowering and ensure
     the specified operators are present in the final graph. Built-in PyTorch
@@ -32,18 +54,30 @@ def resolve_defined_ops(op_names: list[str]) -> list[torch._ops.OpOverload]:
             (e.g., "vllm::unified_attention")
 
     Returns:
-        List of successfully resolved operator overloads
+        List of successfully resolved operator overloads (excluding mutation ops)
     """
     resolved = []
     for op_name in op_names:
         try:
-            resolved.append(lookup_op(op_name))
+            overload = lookup_op(op_name)
         except Exception:
             # Skip operators that don't exist (e.g., model-specific ops)
             logger.warning(
                 "Failed to resolve operator for Inductor partition: %s", op_name
             )
             continue
+
+        # Check if operator has mutating arguments
+        mutated = _mutated_arg_names(overload)
+        if mutated:
+            logger.warning(
+                "Skipping operator %s for Inductor partition: mutates args %s",
+                op_name,
+                mutated,
+            )
+            continue
+
+        resolved.append(overload)
 
     return resolved
 

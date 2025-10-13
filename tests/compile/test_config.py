@@ -145,7 +145,7 @@ def test_splitting_ops_dynamic():
     # Default V1 config leaves cudagraph mode unset; splitting ops are only
     # populated when the engine decides to use piecewise compilation.
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    assert not config.compilation_config.splitting_ops_contain_attention()
+    assert not config.compilation_config.is_attention_compiled_piecewise()
 
     # When use_inductor_graph_partition=True
     if is_torch_equal_or_newer("2.9.0.dev"):
@@ -170,7 +170,7 @@ def test_splitting_ops_dynamic():
         )
     )
     # With the new simplified logic, attention fusion works with splitting_ops
-    assert config.compilation_config.splitting_ops_contain_attention()
+    assert config.compilation_config.is_attention_compiled_piecewise()
     # cudagraph mode remains PIECEWISE
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
@@ -187,7 +187,7 @@ def test_splitting_ops_dynamic():
         )
         # With inductor graph partition, attn_fusion and splitting_ops
         # work together. Default splitting_ops include attention ops.
-        assert config.compilation_config.splitting_ops_contain_attention()
+        assert config.compilation_config.is_attention_compiled_piecewise()
         # enable_attn_fusion is directly supported under
         # use_inductor_graph_partition=True, and cudagraph_mode
         # is unchanged.
