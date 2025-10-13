@@ -557,7 +557,7 @@ class MoriAll2AllManager(All2AllManagerBase):
         scale_dim: int,
         scale_type_size: int,
         data_type: torch.dtype = torch.bfloat16,
-        quant_dtype: Optional[torch.dtype] = None,
+        quant_dtype: torch.dtype | None = None,
     ):
         """Create mori EpDispatchCombineConfig"""
         import mori.ops.dispatch_combine as mori_ops
@@ -610,7 +610,7 @@ class MoriAll2AllManager(All2AllManagerBase):
             scale_dim: int,
             scale_type_size: int,
             data_type: torch.dtype = torch.bfloat16,
-            quant_dtype: Optional[torch.dtype] = None,
+            quant_dtype: torch.dtype | None = None,
         ):
             import mori
 
