@@ -71,7 +71,7 @@ class WorkerLoRAManager:
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        model_config: Optional[ModelConfig] = None,
+        model_config: ModelConfig | None = None,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
@@ -222,7 +222,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        model_config: Optional[ModelConfig] = None,
+        model_config: ModelConfig | None = None,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,

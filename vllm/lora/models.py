@@ -336,7 +336,7 @@ class LoRAModelManager:
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        model_config: Optional[ModelConfig],
+        model_config: ModelConfig | None,
         device: torch.device,
     ):
         """Create a LoRAModelManager and adapter for a given model.
@@ -709,7 +709,7 @@ class LoRAModelManager:
                 return any([module_name.startswith(prefix) for prefix in prefix_lst])
         return False
 
-    def _get_mm_punica_wrapper(self, module_name: str) -> Optional[PunicaWrapperBase]:
+    def _get_mm_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
         """
         Match the corresponding punica_wrapper based on module_name,
         and return None if lora is not supported for this module.
