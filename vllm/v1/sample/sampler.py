@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A layer that samples the next tokens from the model's outputs."""
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 
@@ -140,7 +138,7 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Sample logits based on sampling metadata.
 
         The various logits processing functions called in this method
@@ -243,7 +241,7 @@ class Sampler(nn.Module):
     @staticmethod
     def _combine_outputs_with_spec_tokens(
         output_token_ids: list[list[int]],
-        spec_token_ids: Optional[list[list[int]]] = None,
+        spec_token_ids: list[list[int]] | None = None,
     ) -> list[list[int]]:
         if spec_token_ids is None:
             return output_token_ids
