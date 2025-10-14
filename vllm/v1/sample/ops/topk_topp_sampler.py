@@ -16,7 +16,8 @@ logger = init_logger(__name__)
 try:
     import flashinfer.sampling
 
-    flashinfer.sampling.get_sampling_module()
+    if hasattr(flashinfer.sampling, "get_sampling_module"):
+        flashinfer.sampling.get_sampling_module()
     is_flashinfer_available = True
 except (ImportError, RuntimeError) as e:
     if "Ninja build failed." in str(e):
