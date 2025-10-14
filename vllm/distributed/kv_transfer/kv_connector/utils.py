@@ -160,15 +160,15 @@ class KVOutputAggregator:
             # Allow the worker to dynamically update the expected number of
             # finished sending/recving for new requests
             if (
-                output.expected_finished_reqs > 0
-                and output.expected_finished_reqs != self._expected_finished_reqs
+                kv_output.expected_finished_reqs > 0
+                and kv_output.expected_finished_reqs != self._expected_finished_reqs
             ):
                 logger.debug(
                     "Expected finished requests updated from %d to %d",
                     self._expected_finished_reqs,
-                    output.expected_finished_reqs,
+                    kv_output.expected_finished_reqs,
                 )
-                self._expected_finished_reqs = output.expected_finished_reqs
+                self._expected_finished_reqs = kv_output.expected_finished_reqs
 
             update_finished_set(
                 kv_output.finished_sending, self._send_remaining_count, finished_sending
@@ -195,9 +195,9 @@ class KVOutputAggregator:
             invalid_block_ids |= kv_output.invalid_block_ids
 
         # select output of the worker specified by output_rank
-        runner_output = outputs[output_rank]
+        output = outputs[output_rank]
 
-        runner_output.kv_connector_output = KVConnectorOutput(
+        output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
             kv_connector_stats=aggregated_kv_connector_stats or None,
@@ -205,7 +205,7 @@ class KVOutputAggregator:
             expected_finished_reqs=self._expected_finished_reqs,
         )
 
-        return runner_output
+        return output
 
     def async_aggregate(
         self, output_futures: Sequence[Future[ModelRunnerOutput]], output_rank: int = 0
