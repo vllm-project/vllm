@@ -1,26 +1,21 @@
----
-hide:
-  - navigation
-  - toc
----
-
 # Welcome to vLLM
 
-<figure markdown="span">
-  ![](./assets/logos/vllm-logo-text-light.png){ align="center" alt="vLLM Light" class="logo-light" width="60%" }
-  ![](./assets/logos/vllm-logo-text-dark.png){ align="center" alt="vLLM Dark" class="logo-dark" width="60%" }
-</figure>
-
-<p style="text-align:center">
-<strong>Easy, fast, and cheap LLM serving for everyone
-</strong>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/logos/vllm-logo-text-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/logos/vllm-logo-text-light.png">
+    <img alt="vLLM" src="./assets/logos/vllm-logo-text-light.png" width="60%">
+  </picture>
 </p>
 
-<p style="text-align:center">
-<script async defer src="https://buttons.github.io/buttons.js"></script>
-<a class="github-button" href="https://github.com/vllm-project/vllm" data-show-count="true" data-size="large" aria-label="Star">Star</a>
-<a class="github-button" href="https://github.com/vllm-project/vllm/subscription" data-show-count="true" data-icon="octicon-eye" data-size="large" aria-label="Watch">Watch</a>
-<a class="github-button" href="https://github.com/vllm-project/vllm/fork" data-show-count="true" data-icon="octicon-repo-forked" data-size="large" aria-label="Fork">Fork</a>
+<p align="center">
+<strong>Easy, fast, and cheap LLM serving for everyone</strong>
+</p>
+
+<p align="center">
+<a href="https://github.com/vllm-project/vllm">Star</a> |
+<a href="https://github.com/vllm-project/vllm/subscription">Watch</a> |
+<a href="https://github.com/vllm-project/vllm/fork">Fork</a>
 </p>
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.
