@@ -101,10 +101,12 @@ flashinfer_cutedsl_grouped_gemm_nt_masked = _lazy_import_wrapper(
 )
 flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
 nvfp4_batched_quantize = _lazy_import_wrapper("flashinfer", "nvfp4_batched_quantize")
-silu_and_mul_nvfp4_batched_quantize = _lazy_import_wrapper(
-    "flashinfer", "silu_and_mul_nvfp4_batched_quantize"
+silu_and_mul_scaled_nvfp4_experts_quantize = _lazy_import_wrapper(
+    "flashinfer", "silu_and_mul_scaled_nvfp4_experts_quantize"
 )
-silu_and_mul = _lazy_import_wrapper("flashinfer", "silu_and_mul")
+scaled_fp4_grouped_quantize = _lazy_import_wrapper(
+    "flashinfer", "scaled_fp4_grouped_quantize"
+)
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer", "nvfp4_block_scale_interleave"
 )
@@ -194,8 +196,8 @@ def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
     # Check if all required functions are available
     required_functions = [
         ("flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"),
-        ("flashinfer", "silu_and_mul"),
-        ("flashinfer", "nvfp4_batched_quantize"),
+        ("flashinfer", "scaled_fp4_grouped_quantize"),
+        ("flashinfer", "silu_and_scaled_nvfp4_experts_quantize"),
     ]
 
     for module_name, attr_name in required_functions:
@@ -482,9 +484,8 @@ __all__ = [
     "flashinfer_cutlass_fused_moe",
     "flashinfer_cutedsl_grouped_gemm_nt_masked",
     "flashinfer_fp4_quantize",
-    "silu_and_mul_nvfp4_batched_quantize",
-    "silu_and_mul",
-    "nvfp4_batched_quantize",
+    "silu_and_mul_scaled_nvfp4_experts_quantize",
+    "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
     "trtllm_fp4_block_scale_moe",
     "autotune",

@@ -13,8 +13,8 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked,
     has_flashinfer_cutedsl_grouped_gemm_nt_masked,
-    nvfp4_batched_quantize,
-    silu_and_mul,
+    scaled_fp4_grouped_quantize,
+    silu_and_mul_scaled_nvfp4_experts_quantize,
 )
 
 logger = init_logger(__name__)
@@ -110,18 +110,9 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
         """
-        # assert a.dim() == 2
-        # assert aq.dim() == 3
-        # output_shape = aq.shape
-        # workspace_dtype = a.dtype
-        # E = aq.size(0)
-        # workspace2 = (E, M, N)
-        # workspace1 = output_shape
         output_shape = (local_num_experts, M, K)
         workspace2 = (local_num_experts, M, N)
         workspace1 = output_shape
-        # The workspace is determined by `aq`, since it comes after any
-        # potential communication op and is involved in the expert computation.
         return (workspace1, workspace2, output_shape)
 
     def apply(
@@ -180,54 +171,6 @@ def get_cute_dtype(input: torch.Tensor) -> str:
         return "float32"
     else:
         raise ValueError(f"Unsupported cute dtype {input.dtype}")
-
-
-def scaled_fp4_grouped_quant(
-    input_tensor: torch.Tensor,
-    input_global_scale: torch.Tensor,
-    mask: torch.Tensor,
-):
-    """
-    Wrapper around nvfp4_batched_quantize
-
-    Args:
-        input_tensor (Tensor):
-            - Shape (l, m, k)
-        input_global_scale (Tensor): Shape (l,)
-        mask (Tensor): Mask tensor, broadcastable
-
-    Returns:
-        output (Tensor): Quantized tensor, logical shape (m, k//2, l)
-        output_scales (Tensor): Blockscale tensor, logical shape
-        (32, 4, rm, 4, rk, l)
-    """
-    num_experts, m, k = input_tensor.shape
-
-    sf_vec_size = 16
-    assert k % sf_vec_size == 0, f"k must be multiple of 16, but got {k}."
-
-    scale_k = k // sf_vec_size
-    padded_k = (scale_k + (4 - 1)) // 4 * 4
-    padded_m = (m + (128 - 1)) // 128 * 128
-
-    aq, aq_sf = nvfp4_batched_quantize(
-        input_tensor,
-        input_global_scale,
-        mask=mask,
-    )
-
-    # --- re-layout quantized tensor ---
-    # physical (l, m, k//2) -> logical (m, k//2, l)
-    output = aq.permute(1, 2, 0)
-
-    # --- re-layout blockscales ---
-    # physical (l, rm, rk, 32, 4, 4) -> logical (32, 4, rm, 4, rk, l)
-    output_scales = aq_sf.view(torch.float8_e4m3fn).view(
-        num_experts, padded_m // 128, padded_k // 4, 32, 4, 4
-    )
-    output_scales = output_scales.permute(3, 4, 1, 5, 2, 0)
-
-    return output, output_scales
 
 
 def flashinfer_cutedsl_moe_masked(
@@ -313,10 +256,10 @@ def flashinfer_cutedsl_moe_masked(
         f"w2_alpha must be (l,), got {w2_alpha.shape}"
     )
 
-    aq, aq_sf = scaled_fp4_grouped_quant(
+    aq, aq_sf = scaled_fp4_grouped_quantize(
         hidden_states,
-        input_global_scale,
         masked_m,
+        input_global_scale,
     )
 
     workspace = workspace.permute(1, 2, 0)  # requirement of kernel
@@ -343,11 +286,10 @@ def flashinfer_cutedsl_moe_masked(
     )  # in logical [m, n, l]
 
     # SILU and quantization
-
-    diq, diq_sf = scaled_fp4_grouped_quant(
-        silu_and_mul(workspace.permute(2, 0, 1)),
-        a2_global_scale,
+    diq, diq_sf = silu_and_mul_scaled_nvfp4_experts_quantize(
+        workspace.permute(2, 0, 1),
         masked_m,
+        a2_global_scale,
     )
 
     # Gemm2

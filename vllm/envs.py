@@ -1053,9 +1053,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_MARLIN_USE_ATOMIC_ADD", "0"
     )
     == "1",
-    "VLLM_DEEPEPLL_BF16_DISPATCH": lambda: bool(
-        int(os.getenv("VLLM_DEEPEPLL_BF16_DISPATCH", "0"))
-    ),
     # Whether to use marlin kernel in mxfp4 quantization method
     "VLLM_MXFP4_USE_MARLIN": lambda: maybe_convert_bool(
         os.environ.get("VLLM_MXFP4_USE_MARLIN", None)
