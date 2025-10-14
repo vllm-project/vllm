@@ -1339,10 +1339,8 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     else:
         sampling_params = {}
 
-    if args.extra_body:
-        # Merge extra_body from command line argument. The command line
-        # argument has higher priority.
-        extra_body = {**sampling_params, **args.extra_body}
+    extra_body = args.extra_body or {}
+    extra_body = {**sampling_params, **extra_body}
 
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
