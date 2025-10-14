@@ -7,13 +7,13 @@ import json
 import os
 import time
 from contextlib import contextmanager
-from dataclasses import field, replace
+from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -57,23 +57,23 @@ class VllmConfig:
 
     # TODO: use default_factory once default constructing ModelConfig doesn't
     # try to download a model
-    model_config: ModelConfig = None  # type: ignore
+    model_config: ModelConfig = Field(default=None)
     """Model configuration."""
-    cache_config: CacheConfig = field(default_factory=CacheConfig)
+    cache_config: CacheConfig = Field(default_factory=CacheConfig)
     """Cache configuration."""
-    parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
+    parallel_config: ParallelConfig = Field(default_factory=ParallelConfig)
     """Parallel configuration."""
-    scheduler_config: SchedulerConfig = field(default_factory=SchedulerConfig)
+    scheduler_config: SchedulerConfig = Field(default_factory=SchedulerConfig)
     """Scheduler configuration."""
-    device_config: DeviceConfig = field(default_factory=DeviceConfig)
+    device_config: DeviceConfig = Field(default_factory=DeviceConfig)
     """Device configuration."""
-    load_config: LoadConfig = field(default_factory=LoadConfig)
+    load_config: LoadConfig = Field(default_factory=LoadConfig)
     """Load configuration."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
-    structured_outputs_config: StructuredOutputsConfig = field(
+    structured_outputs_config: StructuredOutputsConfig = Field(
         default_factory=StructuredOutputsConfig
     )
     """Structured outputs configuration."""
@@ -81,7 +81,7 @@ class VllmConfig:
     """Observability configuration."""
     quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
-    compilation_config: CompilationConfig = field(default_factory=CompilationConfig)
+    compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
     """`torch.compile` and cudagraph capture configuration for the model.
 
     As a shorthand, `-O<n>` can be used to directly specify the compilation
@@ -103,7 +103,7 @@ class VllmConfig:
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
-    additional_config: dict | SupportsHash = field(default_factory=dict)
+    additional_config: dict | SupportsHash = Field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
     you are using. Contents must be hashable."""
@@ -322,6 +322,20 @@ class VllmConfig:
                 # NB: Passing both --enforce-eager and a compilation level
                 # in V0 means the compilation level wins out.
                 self.compilation_config.level = CompilationLevel.NO_COMPILATION
+        else:
+            assert self.compilation_config.level >= CompilationLevel.NO_COMPILATION
+            assert self.compilation_config.level <= CompilationLevel.PIECEWISE
+
+        # If user does not set custom ops via none or all set it here based on
+        # compilation level and backend.
+        if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
+            if (
+                self.compilation_config.backend == "inductor"
+                and self.compilation_config.level > CompilationLevel.NO_COMPILATION
+            ):
+                self.compilation_config.custom_ops.append("none")
+            else:
+                self.compilation_config.custom_ops.append("all")
 
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
@@ -509,13 +523,13 @@ class VllmConfig:
             )
 
         if self.parallel_config.enable_dbo:
-            a2a_backend = envs.VLLM_ALL2ALL_BACKEND
+            a2a_backend = self.parallel_config.all2all_backend
             assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
                 "Microbatching currently only supports the deepep_low_latency and "
                 f"deepep_high_throughput all2all backend. {a2a_backend} is not "
-                "supported. To fix set the VLLM_ALL2ALL_BACKEND environment "
-                "variable to deepep_low_latency or deepep_high_throughput and "
-                "install the DeepEP kernels."
+                "supported. To fix use --all2all-backend=deepep_low_latency or "
+                "--all2all-backend=deepep_high_throughput and install the DeepEP"
+                " kernels."
             )
 
             if not self.model_config.disable_cascade_attn:
