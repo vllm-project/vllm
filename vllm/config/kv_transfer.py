@@ -64,6 +64,11 @@ class KVTransferConfig:
     enable_permute_local_kv: bool = False
     """Experiment feature flag to enable HND to NHD KV Transfer"""
 
+    kv_load_retry_policy: Literal["recompute", "abort"] = "recompute"
+    """Policy for handling KV cache load failures.
+    'recompute': reschedule the request to recompute failed blocks (default)
+    'abort': immediately abort the request with an error finish reason"""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
