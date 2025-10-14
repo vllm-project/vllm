@@ -13,9 +13,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field
 from pydantic.dataclasses import dataclass
-from typing_extensions import Self
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -56,7 +55,7 @@ class VllmConfig:
     simplifies passing around the distinct configurations in the codebase.
     """
 
-    model_config: ModelConfig = Field(default_factory=ModelConfig)
+    model_config: ModelConfig = Field(default=None)
     """Model configuration."""
     cache_config: CacheConfig = Field(default_factory=CacheConfig)
     """Cache configuration."""
@@ -68,17 +67,17 @@ class VllmConfig:
     """Device configuration."""
     load_config: LoadConfig = Field(default_factory=LoadConfig)
     """Load configuration."""
-    lora_config: LoRAConfig | None = Field(default=None)
+    lora_config: LoRAConfig | None = None
     """LoRA configuration."""
-    speculative_config: SpeculativeConfig | None = Field(default=None)
+    speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
     structured_outputs_config: StructuredOutputsConfig = Field(
         default_factory=StructuredOutputsConfig
     )
     """Structured outputs configuration."""
-    observability_config: ObservabilityConfig | None = Field(default=None)
+    observability_config: ObservabilityConfig | None = None
     """Observability configuration."""
-    quant_config: QuantizationConfig | None = Field(default=None)
+    quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
     """`torch.compile` and cudagraph capture configuration for the model.
@@ -95,9 +94,9 @@ class VllmConfig:
     You can specify the full compilation config like so:
     `{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
-    kv_transfer_config: KVTransferConfig | None = Field(default=None)
+    kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
-    kv_events_config: KVEventsConfig | None = Field(default=None)
+    kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
@@ -108,64 +107,6 @@ class VllmConfig:
     you are using. Contents must be hashable."""
     instance_id: str = Field(default="")
     """The ID of the vLLM instance."""
-
-    @model_validator(mode="after")
-    def validate_runai_load_format(self) -> Self:
-        model_weights = getattr(self.model_config, "model_weights", None)
-        if model_weights and is_runai_obj_uri(model_weights):
-            if self.load_config.load_format == "auto":
-                logger.info(
-                    "Detected Run:ai model config. "
-                    "Overriding `load_format` to 'runai_streamer'"
-                )
-                self.load_config.load_format = "runai_streamer"
-
-            elif self.load_config.load_format != "runai_streamer":
-                raise ValueError(
-                    f"To load a model from Run:ai or S3, `load_format` "
-                    "must be 'runai_streamer', but got"
-                    f"'{self.load_config.load_format}'. "
-                    f"Model: {self.model_config.model}"
-                )
-
-        return self
-
-    @model_validator(mode="after")
-    def validate_fast_prefill_eagle_compatibility(self) -> Self:
-        if (
-            self.cache_config.kv_sharing_fast_prefill
-            and self.speculative_config is not None
-            and self.speculative_config.use_eagle()
-        ):
-            raise NotImplementedError(
-                "Fast prefill optimization for KV sharing is not compatible "
-                "with EAGLE, since EAGLE requires correct logits for all tokens "
-                "while fast prefill produces incorrect logits for prompt tokens."
-            )
-        logger.warning_once(
-            "--kv-sharing-fast-prefill requires changes on model side for "
-            "correctness and to realize prefill savings. "
-        )
-        return self
-
-    @model_validator(mode="after")
-    def validate_all2all_backend_for_dbo(self) -> Self:
-        if self.parallel_config.enable_dbo:
-            a2a_backend = self.parallel_config.all2all_backend
-            allowed = {"deepep_low_latency", "deepep_high_throughput"}
-
-            if a2a_backend not in allowed:
-                raise ValueError(
-                    "Microbatching currently only supports the deepep_low_latency and "
-                    f"deepep_high_throughput all2all backend. {a2a_backend} is not "
-                    "supported. To fix use --all2all-backend=deepep_low_latency or "
-                    "--all2all-backend=deepep_high_throughput and install the DeepEP"
-                    " kernels."
-                )
-        if not self.model_config.disable_cascade_attn:
-            self.model_config.disable_cascade_attn = True
-            logger.warning_once("Disabling cascade attention when DBO is enabled.")
-        return self
 
     def compute_hash(self) -> str:
         """
@@ -444,6 +385,23 @@ class VllmConfig:
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
+        if self.cache_config.kv_sharing_fast_prefill:
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.use_eagle()
+            ):
+                raise NotImplementedError(
+                    "Fast prefill optimization for KV sharing is not "
+                    "compatible with EAGLE as EAGLE requires correct logits "
+                    "for all tokens while fast prefill gives incorrect logits "
+                    "for prompt tokens."
+                )
+
+            logger.warning_once(
+                "--kv-sharing-fast-prefill requires changes on model side for "
+                "correctness and to realize prefill savings. "
+            )
+
         disable_chunked_prefill_reasons: list[str] = []
 
         if self.model_config:
@@ -561,6 +519,20 @@ class VllmConfig:
             self.compilation_config.full_cuda_graph = (
                 self.compilation_config.cudagraph_mode.has_full_cudagraphs()
             )
+
+        if self.parallel_config.enable_dbo:
+            a2a_backend = self.parallel_config.all2all_backend
+            assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
+                "Microbatching currently only supports the deepep_low_latency and "
+                f"deepep_high_throughput all2all backend. {a2a_backend} is not "
+                "supported. To fix use --all2all-backend=deepep_low_latency or "
+                "--all2all-backend=deepep_high_throughput and install the DeepEP"
+                " kernels."
+            )
+
+            if not self.model_config.disable_cascade_attn:
+                self.model_config.disable_cascade_attn = True
+                logger.warning_once("Disabling cascade attention when DBO is enabled.")
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
@@ -762,6 +734,23 @@ class VllmConfig:
             from vllm.model_executor.models.adapters import SequenceClassificationConfig
 
             SequenceClassificationConfig.verify_and_update_config(self)
+
+        if hasattr(self.model_config, "model_weights") and is_runai_obj_uri(
+            self.model_config.model_weights
+        ):
+            if self.load_config.load_format == "auto":
+                logger.info(
+                    "Detected Run:ai model config. "
+                    "Overriding `load_format` to 'runai_streamer'"
+                )
+                self.load_config.load_format = "runai_streamer"
+            elif self.load_config.load_format != "runai_streamer":
+                raise ValueError(
+                    f"To load a model from S3, 'load_format' "
+                    f"must be 'runai_streamer', "
+                    f"but got '{self.load_config.load_format}'. "
+                    f"Model: {self.model_config.model}"
+                )
 
     def compile_debug_dump_path(self) -> Path | None:
         """Returns a rank-aware path for dumping
