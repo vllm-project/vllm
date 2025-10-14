@@ -604,38 +604,23 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     if self.cp_world_size > 1:
                         kv_indptr_cpu = qo_indptr_cpu * self.cp_world_size
                         # init custom mask for head-tail query order
-                        mask_arr = []
-                        q_pos = common_attn_metadata.query_positions[
-                            prefill_start:]
-                        for i in range(num_prefills):
-                            # |----<C>-----|-<Q0>-|-<Q1>-|
-                            # |---<C+Q*cp_world_size>----|
-                            # cp_world_size = 2
-                            # Q = 2
-                            # C = 8
-                            # cur_q_pos = [0,3] // [1, 2] in another rank
-                            # context_mask_i.shape = (2, 8)
-                            # upper = [0,1,2,3]
-                            # local_mask_i = [[True, False, False, False], 
-                            #                 [True, True, True, True]]
-                            # mask_i.shape = (2, 12)
-                            cur_q_pos = torch.from_numpy(q_pos[qo_indptr_cpu[i]
-                                                           :qo_indptr_cpu[i+1]])
-                            Q = len(cur_q_pos)
-                            C = prefill_num_computed_tokens_cpu[i]
-                            if Q <= 0:
-                                mask_arr.append(torch.zeros(0,
-                                                            dtype=torch.bool))
-                                continue
-                            context_mask_i = torch.ones((Q, C),
-                                                        dtype=torch.bool)
-                            upper = torch.arange(Q*self.cp_world_size)
-                            local_mask_i = (upper.unsqueeze(0)
-                                            <= cur_q_pos.unsqueeze(1))
-                            mask_i = torch.cat([context_mask_i, local_mask_i],
-                                               dim=1)
-                            mask_arr.append(mask_i.flatten())
-                        custom_mask = torch.cat(mask_arr, dim=0).to(self.device)
+                        q_pos = torch.from_numpy(
+                            common_attn_metadata.query_positions[
+                                prefill_start:]).long()
+                        kv_lens = prefill_num_computed_tokens_cpu + \
+                            kv_indptr_cpu[1:] - kv_indptr_cpu[:-1]
+                        max_q_lens = int(q_pos.max().item()) + 1
+                        max_kv_lens = int(kv_lens.max().item())
+                        mask = torch.ones(max_q_lens, max_kv_lens,
+                                          dtype=torch.bool).tril()
+                        selected_rows = torch.index_select(mask, 0, q_pos)
+                        col_indices = torch.arange(max_kv_lens).expand(q_pos.size(0), -1)
+                        valid_mask = col_indices < torch.repeat_interleave(
+                                                        kv_lens,
+                                                        qo_indptr_cpu[1:] - \
+                                                            qo_indptr_cpu[:-1]
+                                                    ).unsqueeze(1)
+                        custom_mask = selected_rows[valid_mask].to(self.device)
 
                         attn_metadata.prefill_wrapper.plan(
                             qo_indptr_cpu.to(self.device),
