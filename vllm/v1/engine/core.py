@@ -293,7 +293,7 @@ class EngineCore:
         model_output = self.execute_model_with_error_logging(
             self.model_executor.execute_model,  # type: ignore
             scheduler_output)
-        for req_id, num_scheduled_token in 
+        for req_id, num_scheduled_token in \
             scheduler_output.num_scheduled_tokens.items():
             self.scheduler.requests[req_id].num_computed_tokens += \
                     num_scheduled_token * (model_output.step_num - 1)
