@@ -628,11 +628,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 f"reorder_batch_threshold must be 1 when query_len_support is "
                 f"SINGLE_ONLY, got {self.reorder_batch_threshold}"
             )
-        else:
-            assert self.reorder_batch_threshold > 1, (
-                f"reorder_batch_threshold must be > 1 when query_len_support "
-                f"is not SINGLE_ONLY, got {self.reorder_batch_threshold}"
-            )
 
     def _build_fi_prefill_wrappers(self, prefill: FlashInferPrefillMetadata):
         qo_indptr = prefill.query_start_loc
