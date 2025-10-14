@@ -602,6 +602,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     num_computed_tokens_cpu[prefill_start:]
                 if not attn_metadata.prefill_use_trtllm:
                     if self.cp_world_size > 1:
+                        assert common_attn_metadata.query_positions is not None
                         kv_indptr_cpu = qo_indptr_cpu * self.cp_world_size
                         # init custom mask for head-tail query order
                         q_pos = torch.from_numpy(

@@ -806,7 +806,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         `num_cp_pads` the number of padding tokens per request for alignment,
         `unpad_mask` the mask for non-padded tokens,
         `cp_allgather_restore_idx` indices to restore the original vector
-        order after CP allgather. 
+            order after CP allgather. 
         Example:
         >>> tokens = [1, 5, 8]
         >>> cp_world_size = 2

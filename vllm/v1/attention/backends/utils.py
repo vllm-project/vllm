@@ -143,8 +143,9 @@ def _make_metadata_with_slice(
     # cp_kv_recover_idx as following approach
     query_positions = attn_metadata.query_positions[token_slice] \
         if attn_metadata.query_positions is not None else None
-    cp_allgather_restore_idx = attn_metadata.cp_allgather_restore_idx[token_slice] \
-        if attn_metadata.cp_allgather_restore_idx is not None else None
+    cp_allgather_restore_idx = attn_metadata.cp_allgather_restore_idx[
+        token_slice] if attn_metadata.cp_allgather_restore_idx is not None \
+                else None
 
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
