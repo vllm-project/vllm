@@ -151,17 +151,16 @@ class VllmConfig:
     @model_validator(mode="after")
     def validate_all2all_backend_for_dbo(self) -> Self:
         if self.parallel_config.enable_dbo:
-            a2a_backend = envs.VLLM_ALL2ALL_BACKEND
+            a2a_backend = self.parallel_config.all2all_backend
             allowed = {"deepep_low_latency", "deepep_high_throughput"}
 
             if a2a_backend not in allowed:
                 raise ValueError(
-                    "Microbatching currently only supports the 'deepep_low_latency' "
-                    "and 'deepep_high_throughput' all2all backends. "
-                    f"Got '{a2a_backend}'.\n"
-                    "To fix this, set the environment variable:\n"
-                    "  export VLLM_ALL2ALL_BACKEND=deepep_low_latency\n"
-                    "and install the DeepEP kernels."
+                    "Microbatching currently only supports the deepep_low_latency and "
+                    f"deepep_high_throughput all2all backend. {a2a_backend} is not "
+                    "supported. To fix use --all2all-backend=deepep_low_latency or "
+                    "--all2all-backend=deepep_high_throughput and install the DeepEP"
+                    " kernels."
                 )
         if not self.model_config.disable_cascade_attn:
             self.model_config.disable_cascade_attn = True
@@ -562,20 +561,6 @@ class VllmConfig:
             self.compilation_config.full_cuda_graph = (
                 self.compilation_config.cudagraph_mode.has_full_cudagraphs()
             )
-
-        if self.parallel_config.enable_dbo:
-            a2a_backend = self.parallel_config.all2all_backend
-            assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
-                "Microbatching currently only supports the deepep_low_latency and "
-                f"deepep_high_throughput all2all backend. {a2a_backend} is not "
-                "supported. To fix use --all2all-backend=deepep_low_latency or "
-                "--all2all-backend=deepep_high_throughput and install the DeepEP"
-                " kernels."
-            )
-
-            if not self.model_config.disable_cascade_attn:
-                self.model_config.disable_cascade_attn = True
-                logger.warning_once("Disabling cascade attention when DBO is enabled.")
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
