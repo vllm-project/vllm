@@ -926,18 +926,25 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
 
-        if (envs.VLLM_NVFP4_GEMM_BACKEND and envs.VLLM_NVFP4_GEMM_BACKEND.startswith("flashinfer-")):
+        self.backend = "none"
+        if envs.VLLM_NVFP4_GEMM_BACKEND is None:
+            if has_flashinfer():
+                self.backend = "flashinfer-cutlass"
+            elif cutlass_fp4_supported():
+                self.backend = "cutlass"
+            elif is_fp4_marlin_supported():
+                self.backend = "marlin"
+        elif envs.VLLM_NVFP4_GEMM_BACKEND.startswith("flashinfer-"):
             self.backend = envs.VLLM_NVFP4_GEMM_BACKEND
             assert has_flashinfer(), f"FlashInfer is required for {self.backend}"
-        elif cutlass_fp4_supported():
-            self.backend = "cutlass"
-        elif is_fp4_marlin_supported():
-            self.backend = "marlin"
-        else:
+
+        if self.backend == "none":
             raise ValueError(
                 "No valid NVFP4 GEMM backend found. "
                 "Please check your platform capability."
             )
+
+        logger.info_once(f"Using {self.backend} for NVFP4 GEMM")
 
     def create_weights(
         self,

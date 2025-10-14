@@ -56,7 +56,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                 "No valid NVFP4 GEMM backend found. "
                 "Please check your platform capability."
             )
-    
+
         logger.info_once(f"Using {self.backend} for NVFP4 GEMM")
         self.group_size = 16
 
