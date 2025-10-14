@@ -604,19 +604,6 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> int:
         # Allocate extra `num_speculative_blocks` blocks for
         # speculative decoding (MTP/EAGLE) with linear attention.
-        """
-        Get the number of blocks needed to be allocated for the request.
-
-        Args:
-            request_id: The request ID.
-            num_tokens: The total number of tokens that need a slot (including
-                tokens that are already allocated).
-            new_computed_blocks: The new computed blocks just hitting the
-                prefix caching.
-
-        Returns:
-            The number of blocks
-        """
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.kv_cache_spec.num_speculative_blocks > 0:
             num_tokens += (
