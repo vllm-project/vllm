@@ -301,7 +301,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         pad_sorted_ids: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Aligns tokens and experts into block-sized chunks for LoRA-based mixture-of-experts (MoE) execution.
+        Aligns tokens and experts into block-sized chunks for LoRA-based 
+        mixture-of-experts (MoE) execution.
         """
         max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
         if pad_sorted_ids:
@@ -317,7 +318,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         # mapping global expert ids to local expert ids in expert parallelism.
         expert_ids = torch.full(
             (max_loras * max_num_m_blocks,),
-            num_experts,
+            -1,
             dtype=torch.int32,
             device=topk_ids.device,
         )
