@@ -779,6 +779,35 @@ class OpenAIServing:
         )
         return json_str
 
+    def _handle_error_finish_reason(
+        self, outputs: list[CompletionOutput], request_id: str
+    ) -> ErrorResponse | None:
+        """handle error finish reason by logging and returning 502 if found"""
+        for output in outputs:
+            if output.finish_reason == "error":
+                logger.error(
+                    "KV cache load failure detected for request %s",
+                    request_id,
+                )
+                return self.create_error_response(
+                    "Service temporarily unavailable",
+                    err_type="BadGateway",
+                    status_code=HTTPStatus.BAD_GATEWAY,
+                )
+        return None
+
+    def _handle_streaming_error_finish_reason(
+        self, finish_reason: str | None, request_id: str
+    ) -> str | None:
+        """handle error finish reason in streaming mode by logging and
+        returning error data if found"""
+        if finish_reason == "error":
+            logger.error("KV cache load failure detected for request %s", request_id)
+            return self.create_streaming_error_response(
+                "Service temporarily unavailable"
+            )
+        return None
+
     async def _check_model(
         self,
         request: AnyRequest,

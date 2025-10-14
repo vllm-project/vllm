@@ -5,7 +5,6 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from http import HTTPStatus
 from typing import cast
 
 import jinja2
@@ -292,13 +291,9 @@ class OpenAIServingCompletion(OpenAIServing):
 
             # check for error finish reason and return 502 error
             for final_res in final_res_batch_checked:
-                for output in final_res.outputs:
-                    if output.finish_reason == "error":
-                        return self.create_error_response(
-                            "Service temporarily unavailable",
-                            err_type="BadGateway",
-                            status_code=HTTPStatus.BAD_GATEWAY,
-                        )
+                error = self._handle_error_finish_reason(final_res.outputs, request_id)
+                if error:
+                    return error
 
             response = self.request_output_to_completion_response(
                 final_res_batch_checked,
@@ -449,15 +444,10 @@ class OpenAIServingCompletion(OpenAIServing):
                     stop_reason = output.stop_reason
 
                     # check for error finish reason and abort streaming
-                    if finish_reason == "error":
-                        logger.error(
-                            "KV cache load failure detected for request %s",
-                            request_id,
-                        )
-                        data = self.create_streaming_error_response(
-                            "Service temporarily unavailable"
-                        )
-                        yield f"data: {data}\n\n"
+                    if error_data := self._handle_streaming_error_finish_reason(
+                        finish_reason, request_id
+                    ):
+                        yield f"data: {error_data}\n\n"
                         yield "data: [DONE]\n\n"
                         return
 
