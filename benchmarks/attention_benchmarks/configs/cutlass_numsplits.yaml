@@ -7,14 +7,81 @@ description: "CUTLASS MLA num-splits optimization study"
 # Single backend for this study
 backend: cutlass_mla
 
-# Test various decode batch sizes with different KV cache lengths
+# Fine-grained matrix sweep: batch sizes × sequence lengths
+# Batch sizes: 8, 16, 24, 32, 48, 64, 96, 128
+# Sequence lengths: 1k, 2k, 4k, 8k, 16k, 32k, 64k
 batch_specs:
-  - "32q1s1k"     # 32 decode requests, 1k KV cache
-  - "64q1s1k"     # 64 decode requests, 1k KV cache
-  - "64q1s4k"     # 64 decode requests, 4k KV cache
-  - "64q1s16k"    # 64 decode requests, 16k KV cache
-  - "128q1s1k"    # 128 decode requests, 1k KV cache
-  - "128q1s4k"    # 128 decode requests, 4k KV cache
+  # Batch size: 8
+  - "8q1s1k"
+  - "8q1s2k"
+  - "8q1s4k"
+  - "8q1s8k"
+  - "8q1s16k"
+  - "8q1s32k"
+  - "8q1s64k"
+
+  # Batch size: 16
+  - "16q1s1k"
+  - "16q1s2k"
+  - "16q1s4k"
+  - "16q1s8k"
+  - "16q1s16k"
+  - "16q1s32k"
+  - "16q1s64k"
+
+  # Batch size: 24
+  - "24q1s1k"
+  - "24q1s2k"
+  - "24q1s4k"
+  - "24q1s8k"
+  - "24q1s16k"
+  - "24q1s32k"
+  - "24q1s64k"
+
+  # Batch size: 32
+  - "32q1s1k"
+  - "32q1s2k"
+  - "32q1s4k"
+  - "32q1s8k"
+  - "32q1s16k"
+  - "32q1s32k"
+  - "32q1s64k"
+
+  # Batch size: 48
+  - "48q1s1k"
+  - "48q1s2k"
+  - "48q1s4k"
+  - "48q1s8k"
+  - "48q1s16k"
+  - "48q1s32k"
+  - "48q1s64k"
+
+  # Batch size: 64
+  - "64q1s1k"
+  - "64q1s2k"
+  - "64q1s4k"
+  - "64q1s8k"
+  - "64q1s16k"
+  - "64q1s32k"
+  - "64q1s64k"
+
+  # Batch size: 96
+  - "96q1s1k"
+  - "96q1s2k"
+  - "96q1s4k"
+  - "96q1s8k"
+  - "96q1s16k"
+  - "96q1s32k"
+  - "96q1s64k"
+
+  # Batch size: 128
+  - "128q1s1k"
+  - "128q1s2k"
+  - "128q1s4k"
+  - "128q1s8k"
+  - "128q1s16k"
+  - "128q1s32k"
+  - "128q1s64k"
 
 # Unified parameter sweep configuration
 parameter_sweep:
