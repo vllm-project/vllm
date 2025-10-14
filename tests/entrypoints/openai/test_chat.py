@@ -3,7 +3,6 @@
 
 # imports for structured outputs tests
 import json
-from typing import Optional
 
 import jsonschema
 import openai  # use the official client for correctness check
@@ -176,7 +175,7 @@ async def test_too_many_chat_logprobs(client: openai.AsyncOpenAI, model_name: st
     [(MODEL_NAME, 1), (MODEL_NAME, 0), (MODEL_NAME, -1), (MODEL_NAME, None)],
 )
 async def test_prompt_logprobs_chat(
-    client: openai.AsyncOpenAI, model_name: str, prompt_logprobs: Optional[int]
+    client: openai.AsyncOpenAI, model_name: str, prompt_logprobs: int | None
 ):
     params: dict = {
         "messages": [
@@ -369,7 +368,7 @@ async def test_chat_completion_stream_options(
             assert chunk.usage is None
         else:
             assert chunk.usage is None
-            final_chunk = await stream.__anext__()
+            final_chunk = await anext(stream)
             assert final_chunk.usage is not None
             assert final_chunk.usage.prompt_tokens > 0
             assert final_chunk.usage.completion_tokens > 0
