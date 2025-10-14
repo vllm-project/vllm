@@ -145,7 +145,7 @@ class RMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
         FusedRMSQuantKey(
             kFp8DynamicTokenSym,
             False,
-        ): (torch.ops.vllm.rocm_aiter_rmsnorm_fused_dynamic_quant.default),  # noqa: E501
+        ): torch.ops.vllm.rocm_aiter_rmsnorm_fused_dynamic_quant.default,
     }
 
     def __init__(
@@ -226,7 +226,7 @@ class FusedAddRMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
         FusedRMSQuantKey(
             kFp8DynamicTokenSym,
             True,
-        ): (torch.ops.vllm.rocm_aiter_rmsnorm_fused_add_dynamic_quant.default),
+        ): torch.ops.vllm.rocm_aiter_rmsnorm_fused_add_dynamic_quant.default,
     }
 
     def __init__(
