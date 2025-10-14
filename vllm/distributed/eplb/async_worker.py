@@ -97,5 +97,7 @@ async def transfer_run_periodically(
                     state.ep_buffer_ready = 1
                 finally:
                     state.buffer_lock.release()
+            else:
+                await asyncio.sleep(0.001)
 
         state.rearrange_event.clear()
