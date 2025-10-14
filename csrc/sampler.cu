@@ -121,7 +121,7 @@ static __global__ void topKPerRow(const float* logits, const int* rowStarts,
     for (int rowIt = threadIdx.x; rowIt < rowLen;
          rowIt += kNumThreadsPerBlock) {
       int idx = rowStart + rowIt;
-      outIndices[rowIdx * kTopK + rowIt] = idx;
+      outIndices[rowIdx * kTopK + rowIt] = idx - rowStart;
     }
     for (int rowIt = rowLen + threadIdx.x; rowIt < kTopK;
          rowIt += kNumThreadsPerBlock) {
@@ -255,7 +255,8 @@ static __global__ void topKPerRow(const float* logits, const int* rowStarts,
 #pragma unroll
   for (int ii = 0; ii < kNumTopKItemsPerThread; ++ii) {
     int offset = rowIdx * kTopK + ii * kNumThreadsPerBlock + threadIdx.x;
-    outIndices[offset] = smemIndices[ii * kNumThreadsPerBlock + threadIdx.x];
+    outIndices[offset] =
+        smemIndices[ii * kNumThreadsPerBlock + threadIdx.x] - rowStart;
   }
 }
 
