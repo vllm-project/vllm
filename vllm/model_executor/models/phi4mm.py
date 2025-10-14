@@ -1248,8 +1248,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             if modality == "images":
                 audio_projection_mode = "vision"
                 image_input = modalities["images"]
-                vision_embeddings = self._process_image_input(image_input)
-                multimodal_embeddings += tuple(vision_embeddings)
+                image_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "audios":
                 audio_input = modalities["audios"]
                 audio_embeddings = self._process_audio_input(

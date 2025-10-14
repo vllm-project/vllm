@@ -1608,11 +1608,11 @@ class Glm4vForConditionalGeneration(
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
-                vision_embeddings = self._process_image_input(multimodal_input)
-                multimodal_embeddings += vision_embeddings
+                image_embeddings = self._process_image_input(multimodal_input)
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
-                multimodal_embeddings += video_embeddings
+                multimodal_embeddings += tuple(video_embeddings)
         return multimodal_embeddings
 
     def forward(
