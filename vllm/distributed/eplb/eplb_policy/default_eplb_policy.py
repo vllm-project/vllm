@@ -18,7 +18,6 @@ from .abstract_policy import EplbPolicy
 
 
 class DefaultEplb(EplbPolicy):
-
     def balanced_packing(
         self, weight: torch.Tensor, num_packs: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -166,12 +165,14 @@ class DefaultEplb(EplbPolicy):
         # [num_layers * num_nodes, num_physical_experts // num_nodes]
         tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
         pack_index, rank_in_pack = self.balanced_packing(
-            tokens_per_phy, num_gpus // num_nodes)
+            tokens_per_phy, num_gpus // num_nodes
+        )
         phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
         pphy2phy = inverse(phy2pphy)
 
         pphy2mlog = phy2mlog.gather(
-            -1, pphy2phy)  # [num_layers * num_nodes, num_log_per_nodes]
+            -1, pphy2phy
+        )  # [num_layers * num_nodes, num_log_per_nodes]
         pphy2mlog = (
             pphy2mlog.view(num_layers, num_nodes, -1)
             + torch.arange(
