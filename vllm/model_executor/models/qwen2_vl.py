@@ -480,7 +480,7 @@ class Qwen2VisionAttention(nn.Module):
                 pdropout=0.0,
                 softmax_scale=1.0 / (q.shape[-1] ** 0.5),
                 zero_tensors=False,
-                is_causal=True,
+                is_causal=False,
                 return_softmax=False,
                 gen_=None,
                 window_size_left=-1,
