@@ -589,10 +589,24 @@ class OpenAIServingResponses(OpenAIServing):
             input_tokens=num_prompt_tokens,
             output_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
-            input_tokens_details=InputTokensDetails(cached_tokens=num_cached_tokens),
+            input_tokens_details=InputTokensDetails(
+                cached_tokens=num_cached_tokens,
+                input_tokens_per_turn=[
+                    turn.input_tokens for turn in context.all_turn_metrics
+                ],
+                cached_tokens_per_turn=[
+                    turn.cached_input_tokens for turn in context.all_turn_metrics
+                ],
+            ),
             output_tokens_details=OutputTokensDetails(
                 reasoning_tokens=num_reasoning_tokens,
                 tool_output_tokens=num_tool_output_tokens,
+                output_tokens_per_turn=[
+                    turn.output_tokens for turn in context.all_turn_metrics
+                ],
+                tool_output_tokens_per_turn=[
+                    turn.tool_output_tokens for turn in context.all_turn_metrics
+                ],
             ),
         )
         response = ResponsesResponse.from_request(
@@ -665,11 +679,13 @@ class OpenAIServingResponses(OpenAIServing):
                     token=text,
                     logprob=max(token_logprob.logprob, -9999.0),
                     bytes=list(text.encode("utf-8", errors="replace")),
-                    top_logprobs=self._topk_logprobs(
-                        logprob, top_logprobs=top_logprobs, tokenizer=tokenizer
-                    )
-                    if top_logprobs
-                    else [],
+                    top_logprobs=(
+                        self._topk_logprobs(
+                            logprob, top_logprobs=top_logprobs, tokenizer=tokenizer
+                        )
+                        if top_logprobs
+                        else []
+                    ),
                 )
             )
         return out
@@ -758,14 +774,16 @@ class OpenAIServingResponses(OpenAIServing):
                 text=content,
                 annotations=[],  # TODO
                 type="output_text",
-                logprobs=self._create_response_logprobs(
-                    token_ids=final_output.token_ids,
-                    logprobs=final_output.logprobs,
-                    tokenizer=tokenizer,
-                    top_logprobs=request.top_logprobs,
-                )
-                if request.is_include_output_logprobs()
-                else None,
+                logprobs=(
+                    self._create_response_logprobs(
+                        token_ids=final_output.token_ids,
+                        logprobs=final_output.logprobs,
+                        tokenizer=tokenizer,
+                        top_logprobs=request.top_logprobs,
+                    )
+                    if request.is_include_output_logprobs()
+                    else None
+                ),
             )
             message = ResponseOutputMessage(
                 id=f"msg_{random_uuid()}",
@@ -870,15 +888,21 @@ class OpenAIServingResponses(OpenAIServing):
             with_custom_tools = has_custom_tools(tool_types)
             sys_msg = get_system_message(
                 reasoning_effort=reasoning_effort,
-                browser_description=self.tool_server.get_tool_description("browser")
-                if enable_browser and self.tool_server is not None
-                else None,
-                python_description=self.tool_server.get_tool_description("python")
-                if enable_code_interpreter and self.tool_server is not None
-                else None,
-                container_description=self.tool_server.get_tool_description("container")
-                if enable_container and self.tool_server is not None
-                else None,
+                browser_description=(
+                    self.tool_server.get_tool_description("browser")
+                    if enable_browser and self.tool_server is not None
+                    else None
+                ),
+                python_description=(
+                    self.tool_server.get_tool_description("python")
+                    if enable_code_interpreter and self.tool_server is not None
+                    else None
+                ),
+                container_description=(
+                    self.tool_server.get_tool_description("container")
+                    if enable_container and self.tool_server is not None
+                    else None
+                ),
                 instructions=request.instructions,
                 with_custom_tools=with_custom_tools,
             )
@@ -1283,14 +1307,16 @@ class OpenAIServingResponses(OpenAIServing):
                             output_index=current_output_index,
                             item_id=current_item_id,
                             delta=delta_message.content,
-                            logprobs=self._create_stream_response_logprobs(
-                                token_ids=output.token_ids,
-                                logprobs=output.logprobs,
-                                tokenizer=tokenizer,
-                                top_logprobs=request.top_logprobs,
-                            )
-                            if request.is_include_output_logprobs()
-                            else [],
+                            logprobs=(
+                                self._create_stream_response_logprobs(
+                                    token_ids=output.token_ids,
+                                    logprobs=output.logprobs,
+                                    tokenizer=tokenizer,
+                                    top_logprobs=request.top_logprobs,
+                                )
+                                if request.is_include_output_logprobs()
+                                else []
+                            ),
                         )
                     )
                 current_content_index += 1
