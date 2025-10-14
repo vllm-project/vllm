@@ -102,6 +102,7 @@ class NixlAgentMetadata(
     block_lens: list[int]
     attn_backend_name: str
     kv_cache_layout: str
+    block_size: int
 
 
 @dataclass
@@ -1010,6 +1011,7 @@ class NixlConnectorWorker:
             block_lens=self.block_len_per_layer,
             attn_backend_name=self.backend_name,
             kv_cache_layout=self.kv_cache_layout,
+            block_size=self.block_size,
         )
         ready_event = threading.Event()
         self._nixl_handshake_listener_t = threading.Thread(
@@ -1094,39 +1096,36 @@ class NixlConnectorWorker:
         is_kv_replicated = self._tp_size[engine_id] // total_num_kv_heads >= 1
 
         remote_block_len = nixl_agent_meta.block_lens[0]
+        # NOTE(Chendi): we want to support remote and local with different block_size.
+        # To achieve this goal, we need to make sure that
+        # remote_block_lens * remote_block_size = local_block_lens * local_block_size
+        remote_block_size = nixl_agent_meta.block_size
+        block_size_ratio = remote_block_size / self.block_size
+        self.block_size_ratio = block_size_ratio
         if self.use_mla or is_kv_replicated:
             # With replicated KV cache, only the number of blocks can differ.
-            assert self.block_len_per_layer == nixl_agent_meta.block_lens, (
+            assert self.block_len_per_layer[0] * block_size_ratio == remote_block_len, (
                 "KV cache sizes must match between P and D when replicated"
             )
-            remote_block_size = remote_block_len // (self.slot_size_per_layer[0])
         else:
             # When MLA is not used, this is a list of the same block length
             for block_len in nixl_agent_meta.block_lens:
                 assert block_len == remote_block_len, (
                     "All remote layers must have the same block size"
                 )
-            remote_block_size = remote_block_len // (
-                self.slot_size_per_layer[0] * tp_ratio
-            )
-            if self._use_flashinfer:
-                # With flashinfer, KV are sent in the same message.
-                remote_block_size //= 2
             if tp_ratio > 1:
                 # Heterogeneous TP expects same kv_cache_layout.
                 assert nixl_agent_meta.kv_cache_layout == self.kv_cache_layout
                 if self.device_type == "xpu":
                     raise ValueError("Heterogeneous TP is not supported on XPU")
 
-            assert remote_block_len == self.block_len_per_layer[0] * tp_ratio, (
+            assert (
+                remote_block_len
+                == self.block_len_per_layer[0] * tp_ratio * block_size_ratio
+            ), (
                 "Remote P worker KV layer cache must be of shape [2, N, "
                 "local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
             )
-
-        assert self.block_size == remote_block_size, (
-            "Remote P worker with different page/block size is not supported "
-            f"{self.block_size=}, {remote_block_size=}"
-        )
 
         # Create dst descs and xfer side handles. TP workers have same #blocks.
         if engine_id in self.dst_num_blocks:
@@ -1150,7 +1149,11 @@ class NixlConnectorWorker:
                 if not (self.use_mla or is_kv_replicated)
                 else 0
             )
-            for block_id in range(nixl_agent_meta.num_blocks):
+            # NOTE(Chendi): In case remote and local use different block_size.
+            local_num_blocks = int(nixl_agent_meta.num_blocks * block_size_ratio)
+            # print(f"{local_num_blocks*i=} {local_num_blocks=} "
+            # f "{nixl_agent_meta.num_blocks=} {nixl_agent_meta.block_lens[0]=}")
+            for block_id in range(local_num_blocks):
                 block_offset = block_id * nixl_agent_meta.block_lens[i]
                 # For each block, grab the heads chunk belonging to rank_i
                 # of size remote_nheads // tp_ratio, which correspond to
@@ -1161,8 +1164,10 @@ class NixlConnectorWorker:
 
             if self._use_flashinfer:
                 # With FlashInfer index V separately to allow head splitting.
-                for block_id in range(nixl_agent_meta.num_blocks):
-                    block_offset = block_id * nixl_agent_meta.block_lens[i]
+                for block_id in range(local_num_blocks):
+                    block_offset = block_id * math.ceil(
+                        nixl_agent_meta.block_lens[i] * block_size_ratio
+                    )
                     addr = base_addr + block_offset + rank_offset
                     v_addr = addr + nixl_agent_meta.block_lens[i] // 2
                     blocks_data.append((v_addr, kv_block_len, remote_tp_rank))
@@ -1373,11 +1378,15 @@ class NixlConnectorWorker:
                         continue
 
             # Handshake already completed, start async read xfer.
-            self._read_blocks_for_req(req_id, meta)
+            # FIXME(Chendi): should store per engine
+            self._read_blocks_for_req(req_id, meta, self.block_size_ratio)
 
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
-            self._read_blocks_for_req(*self._ready_requests.get_nowait())
+            # FIXME(Chendi): should store per engine
+            self._read_blocks_for_req(
+                *self._ready_requests.get_nowait(), self.block_size_ratio
+            )
 
         # Keep around the requests that have been part of a batch. This is
         # needed because async scheduling pushes the misalignment between the
@@ -1399,7 +1408,7 @@ class NixlConnectorWorker:
             if req_id in self._reqs_to_process:
                 self._reqs_to_send[req_id] = expiration_time
 
-    def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
+    def _read_blocks_for_req(self, req_id: str, meta: ReqMeta, block_size_ratio: float):
         logger.debug(
             "Remote agent %s available, calling _read_blocks for req %s",
             meta.remote_engine_id,
@@ -1410,6 +1419,7 @@ class NixlConnectorWorker:
             dst_engine_id=meta.remote_engine_id,
             local_block_ids=meta.local_block_ids,
             remote_block_ids=meta.remote_block_ids,
+            block_size_ratio=block_size_ratio,
         )
 
     def _read_blocks(
@@ -1418,7 +1428,22 @@ class NixlConnectorWorker:
         remote_block_ids: list[int],
         dst_engine_id: str,
         request_id: str,
+        block_size_ratio: float,
     ):
+        # FIXME(Chendi): Very naive codes to re-calculate remote block
+        # Only works for remote block_size < local block_size now,
+        # remote block_size > local block_size needs extra map
+        # print(f"before {local_block_ids=} {remote_block_ids=}")
+        block_size_ratio_inv = int(1 / block_size_ratio)
+        remote_block_ids = [
+            i // block_size_ratio_inv
+            for i in remote_block_ids
+            if i % block_size_ratio_inv == 0
+        ]
+        if len(remote_block_ids) < len(local_block_ids):
+            remote_block_ids.append(remote_block_ids[-1] + 1)
+        # print(f"after {local_block_ids=} {remote_block_ids=}")
+
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the
@@ -1472,7 +1497,7 @@ class NixlConnectorWorker:
         if not self.block_window_per_layer:
             # Default case: assume global attention
             remote_block_descs_ids = self._get_block_descs_ids(
-                dst_engine_id, remote_block_ids
+                dst_engine_id, remote_block_ids, block_size_ratio=block_size_ratio
             )
             local_block_descs_ids = self._get_block_descs_ids(
                 self.engine_id, local_block_ids
@@ -1499,7 +1524,10 @@ class NixlConnectorWorker:
                     self.engine_id, layer_local_block_ids, layer_idx
                 )
                 layer_remote_desc_ids = self._get_block_descs_ids(
-                    dst_engine_id, layer_remote_block_ids, layer_idx
+                    dst_engine_id,
+                    layer_remote_block_ids,
+                    layer_idx,
+                    block_size_ratio=block_size_ratio,
                 )
 
                 local_descs_list.append(layer_local_desc_ids)
@@ -1542,7 +1570,11 @@ class NixlConnectorWorker:
             self._failed_recv_reqs.add(request_id)
 
     def _get_block_descs_ids(
-        self, engine_id: str, block_ids: list[int], layer_idx: int | None = None
+        self,
+        engine_id: str,
+        block_ids: list[int],
+        layer_idx: int | None = None,
+        block_size_ratio: float = 1,
     ) -> np.ndarray:
         """
         Get the descs ids for a set of block ids.
@@ -1569,7 +1601,7 @@ class NixlConnectorWorker:
         # Compute the desc ids for each block.
         region_ids = region_ids[:, None]
         block_ids = np.array(block_ids)[None, :]
-        descs_ids = region_ids * num_blocks + block_ids
+        descs_ids = region_ids * int(num_blocks * block_size_ratio) + block_ids
         return descs_ids.flatten()
 
     def get_backend_aware_kv_block_len(self, layer_idx: int):
