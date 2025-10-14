@@ -12,7 +12,7 @@ import weakref
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from enum import Enum, auto
+from enum import auto, Enum
 from functools import cached_property, partial
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
@@ -27,22 +27,13 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
-from vllm.distributed.parallel_state import (
-    get_dp_group,
-    get_ep_group,
-    get_pp_group,
-    get_tp_group,
-)
-from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.utils import (
     _maybe_force_spawn,
-    decorate_logs,
     get_distributed_init_method,
     get_loopback_ip,
     get_mp_context,
     get_open_port,
-    set_process_title,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
@@ -445,13 +436,8 @@ class WorkerProc:
             )
             self.async_output_copy_thread.start()
 
-        # Initialize device
+        # Initialize device (process title/log prefix set inside)
         self.worker.init_device()
-
-        # Set process title and log prefix
-        self.setup_proc_title_and_log_prefix(
-            enable_ep=vllm_config.parallel_config.enable_expert_parallel
-        )
 
         # Load model
         self.worker.load_model()
@@ -706,27 +692,6 @@ class WorkerProc:
 
             if output_rank is None or self.rank == output_rank:
                 self.handle_output(output)
-
-    @staticmethod
-    def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
-        dp_size = get_dp_group().world_size
-        dp_rank = get_dp_group().rank_in_group
-        pp_size = get_pp_group().world_size
-        pp_rank = get_pp_group().rank_in_group
-        tp_size = get_tp_group().world_size
-        tp_rank = get_tp_group().rank_in_group
-        process_name = "Worker"
-        if dp_size > 1:
-            process_name += f"_DP{dp_rank}"
-        if pp_size > 1:
-            process_name += f"_PP{pp_rank}"
-        if tp_size > 1:
-            process_name += f"_TP{tp_rank}"
-        if enable_ep:
-            ep_rank = get_ep_group().rank_in_group
-            process_name += f"_EP{ep_rank}"
-        set_process_title(name=process_name)
-        decorate_logs(process_name)
 
 
 def set_multiprocessing_worker_envs():

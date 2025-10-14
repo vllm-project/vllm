@@ -26,7 +26,7 @@ from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.platforms.tpu import USE_TPU_INFERENCE
 from vllm.tasks import SupportedTask
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, set_process_title_and_log_prefix
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
@@ -134,6 +134,10 @@ class TPUWorker:
         self._init_tpu_worker_distributed_environment(
             self.vllm_config, self.rank, self.distributed_init_method, self.local_rank
         )
+
+        # Set process title and logging prefix immediately after
+        # distributed environment is initialized
+        set_process_title_and_log_prefix(self.parallel_config)
 
         # Device initialization should happen after initializing
         # the distributed runtime.

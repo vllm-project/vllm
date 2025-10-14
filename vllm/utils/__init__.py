@@ -52,14 +52,7 @@ from concurrent.futures.process import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Generic,
-    Literal,
-    TextIO,
-    TypeVar,
-)
+from typing import TYPE_CHECKING, Any, Generic, Literal, TextIO, TypeVar
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -87,12 +80,13 @@ from vllm.ray.lazy_utils import is_in_ray_actor
 if TYPE_CHECKING:
     from argparse import Namespace
 
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import ModelConfig, ParallelConfig, VllmConfig
     from vllm.sequence import IntermediateTensors
 else:
     Namespace = object
 
     ModelConfig = object
+    ParallelConfig = object
     VllmConfig = object
     IntermediateTensors = object
 
@@ -1635,10 +1629,9 @@ def weak_ref_tensor(tensor: Any) -> Any:
 
 
 def weak_ref_tensors(
-    tensors: torch.Tensor
-    | list[torch.Tensor]
-    | tuple[torch.Tensor]
-    | IntermediateTensors,
+    tensors: (
+        torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor] | IntermediateTensors
+    ),
 ) -> torch.Tensor | list[Any] | tuple[Any] | Any:
     """
     Convenience function to create weak references to tensors,
@@ -2881,6 +2874,41 @@ def decorate_logs(process_name: str | None = None) -> None:
     pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
+
+
+def set_process_title_and_log_prefix(parallel_config: ParallelConfig) -> None:
+    """Set process title and logging prefix based on distributed config.
+
+    This should be called immediately after distributed environment
+    initialization to enable earlier debugging visibility.
+    """
+
+    # Lazy import to avoid circular dependency.
+    from vllm.distributed.parallel_state import (
+        get_dp_group,
+        get_ep_group,
+        get_pp_group,
+        get_tp_group,
+    )
+
+    dp_size = get_dp_group().world_size
+    dp_rank = get_dp_group().rank_in_group
+    pp_size = get_pp_group().world_size
+    pp_rank = get_pp_group().rank_in_group
+    tp_size = get_tp_group().world_size
+    tp_rank = get_tp_group().rank_in_group
+    process_name = "Worker"
+    if dp_size > 1:
+        process_name += f"_DP{dp_rank}"
+    if pp_size > 1:
+        process_name += f"_PP{pp_rank}"
+    if tp_size > 1:
+        process_name += f"_TP{tp_rank}"
+    if parallel_config.enable_expert_parallel:
+        ep_rank = get_ep_group().rank_in_group
+        process_name += f"_EP{ep_rank}"
+    set_process_title(name=process_name)
+    decorate_logs(process_name)
 
 
 def length_from_prompt_token_ids_or_embeds(
