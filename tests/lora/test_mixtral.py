@@ -8,6 +8,8 @@ import vllm
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
+from ..utils import multi_gpu_test
+
 MODEL_PATH = "mistralai/Mixtral-8x7B-Instruct-v0.1"
 
 
@@ -30,7 +32,7 @@ def do_sample(
     return generated_texts
 
 
-@pytest.mark.parametrize("tp_size", [4])
+@multi_gpu_test(num_gpus=4)
 def test_mixtral_lora(mixtral_lora_files, tp_size):
     """Original test, the LoRA model has the common target modules, not all"""
     if (

@@ -7,7 +7,7 @@ import vllm
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
-from ..utils import create_new_process_for_each_test, multi_gpu_test
+from ..utils import multi_gpu_test
 
 MODEL_PATH = "hmellor/Ilama-3.2-1B"
 
@@ -54,7 +54,6 @@ def test_ilama_lora(ilama_lora_files):
         max_loras=4,
         max_lora_rank=16,
         trust_remote_code=True,
-        enable_chunked_prefill=True,
     )
 
     output1 = do_sample(llm, ilama_lora_files, lora_id=1)
@@ -69,7 +68,6 @@ def test_ilama_lora(ilama_lora_files):
     current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
 )
 @multi_gpu_test(num_gpus=4)
-@create_new_process_for_each_test()
 def test_ilama_lora_tp4(ilama_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
@@ -80,7 +78,6 @@ def test_ilama_lora_tp4(ilama_lora_files):
         tensor_parallel_size=4,
         trust_remote_code=True,
         fully_sharded_loras=False,
-        enable_chunked_prefill=True,
     )
 
     output1 = do_sample(llm, ilama_lora_files, lora_id=1)
@@ -95,7 +92,6 @@ def test_ilama_lora_tp4(ilama_lora_files):
     current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
 )
 @multi_gpu_test(num_gpus=4)
-@create_new_process_for_each_test()
 def test_ilama_lora_tp4_fully_sharded_loras(ilama_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
@@ -106,7 +102,6 @@ def test_ilama_lora_tp4_fully_sharded_loras(ilama_lora_files):
         tensor_parallel_size=4,
         trust_remote_code=True,
         fully_sharded_loras=True,
-        enable_chunked_prefill=True,
     )
     output1 = do_sample(llm, ilama_lora_files, lora_id=1)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
