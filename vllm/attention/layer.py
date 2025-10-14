@@ -40,7 +40,6 @@ logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
 
 
-
 def check_xformers_availability():
     global USE_XFORMERS_OPS
     if USE_XFORMERS_OPS is not None:
