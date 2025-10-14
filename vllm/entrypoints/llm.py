@@ -953,7 +953,7 @@ class LLM:
         truncate_prompt_tokens: int | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
-        pooling_task: PoolingTask = "encode",
+        pooling_task: PoolingTask | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[PoolingRequestOutput]:
         """Apply pooling to the hidden states corresponding to the input
@@ -988,25 +988,24 @@ class LLM:
             instead pass them via the `inputs` parameter.
         """
 
-        if self.supported_tasks == ["encode"] and pooling_task is None:
-            pooling_task = "encode"
+        error_str = (
+            "pooling_task required for `LLM.encode`\n"
+            "Please use one of the more specific methods or set the "
+            "pooling_task when using `LLM.encode`:\n"
+            "  - For embeddings, use `LLM.embed(...)` "
+            'or `pooling_task="embed"`.\n'
+            "  - For classification logits, use `LLM.classify(...)` "
+            'or `pooling_task="classify"`.\n'
+            "  - For similarity scores, use `LLM.score(...)`.\n"
+            "  - For rewards, use `LLM.reward(...)` "
+            'or `pooling_task="token_classify"`\n'
+            "  - For token classification, "
+            'use `pooling_task="token_classify"`\n'
+            '  - For multi-vector retrieval, use `pooling_task="token_embed"`'
+        )
 
         if pooling_task is None:
-            pooling_task = "embed" if "embed" in self.supported_tasks else "encode"
-
-            logger.warning_once(
-                "`LLM.encode` is currently using `pooling_task = %s`.\n"
-                "Please use one of the more specific methods or set the "
-                "task directly when using `LLM.encode`:\n"
-                "  - For embeddings, use `LLM.embed(...)` "
-                'or `pooling_task="embed"`.\n'
-                "  - For classification logits, use `LLM.classify(...)` "
-                'or `pooling_task="classify"`.\n'
-                "  - For rewards, use `LLM.reward(...)` "
-                'or `pooling_task="reward"`\n'
-                "  - For similarity scores, use `LLM.score(...)`.",
-                pooling_task,
-            )
+            raise ValueError(error_str)
 
         model_config = self.model_config
         runner_type = model_config.runner_type
