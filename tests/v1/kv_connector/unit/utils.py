@@ -83,6 +83,7 @@ def create_vllm_config(
     block_size: int = 16,
     max_model_len: int = 10000,
     enable_chunked_prefill: bool = True,
+    enable_permute_local_kv: bool = False,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     scheduler_config = SchedulerConfig(
@@ -108,6 +109,7 @@ def create_vllm_config(
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
         kv_role="kv_both",
+        enable_permute_local_kv=enable_permute_local_kv,
     )
     return VllmConfig(
         scheduler_config=scheduler_config,
