@@ -1,8 +1,8 @@
 # Welcome to vLLM
 
 <figure markdown="span" style="text-align:center">
-  <img src="./assets/logos/vllm-logo-text-light.png" alt="vLLM Light" class="logo-light" width="60%">
-  <img src="./assets/logos/vllm-logo-text-dark.png" alt="vLLM Dark" class="logo-dark" width="60%">
+  <img src="./assets/logos/vllm-logo-text-light.png" alt="vLLM Light" class="logo-light" width="60%" style="display:inline">
+  <img src="./assets/logos/vllm-logo-text-dark.png" alt="vLLM Dark" class="logo-dark" width="60%" style="display:none">
 </figure>
 
 <p style="text-align:center">
