@@ -726,7 +726,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             mm_kwargs = dict(
                 **mm_kwargs,
             )
-            mm_kwargs["truncation"] = True
+            mm_kwargs["truncation"] = False
 
         hf_inputs = super()._call_hf_processor(
             prompt=prompt,
