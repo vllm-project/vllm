@@ -41,7 +41,7 @@ batch_specs:
 
 # Backends that support query length > 1
 backends:
-  - flash_attn_mla    # reorder_batch_threshold = 512
+  - flashattn_mla    # reorder_batch_threshold = 512
   - flashmla          # reorder_batch_threshold = 1 (tunable)
 
 # FlashInfer-MLA also supports uniform spec-as-decode but with different mechanism

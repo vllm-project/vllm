@@ -47,8 +47,8 @@ batch_specs:
 backends:
   - cutlass_mla
   - flashinfer_mla
-  - flash_attn_mla   # Hopper only
-  - flashmla         # Hopper only
+  - flashattn_mla   # Hopper only
+  - flashmla        # Hopper only
 
 device: "cuda:0"
 repeats: 5

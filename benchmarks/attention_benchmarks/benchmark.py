@@ -162,7 +162,7 @@ def main():
         "--backends",
         nargs="+",
         help="Backends to benchmark (flash, triton, flashinfer, cutlass_mla, "
-        "flashinfer_mla, flash_attn_mla, flashmla)",
+        "flashinfer_mla, flashattn_mla, flashmla)",
     )
     parser.add_argument(
         "--backend",
@@ -617,7 +617,7 @@ def main():
                         if backend in [
                             "cutlass_mla",
                             "flashinfer_mla",
-                            "flash_attn_mla",
+                            "flashattn_mla",
                             "flashmla",
                         ]:
                             result = run_mla_benchmark(config)
