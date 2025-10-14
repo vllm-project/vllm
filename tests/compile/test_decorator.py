@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
 import torch
 from torch import nn
 
@@ -65,7 +66,12 @@ def run_model(
         return output.cpu()
 
 
-def test_ignore_torch_compile_decorator():
+@pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
+def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatch):
+    # disable compile cache so that we run separately for different splitting_ops
+    # and get the expected number of cudagraphs captured.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
     # piecewise
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
@@ -73,9 +79,23 @@ def test_ignore_torch_compile_decorator():
             use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
+            use_inductor_graph_partition=use_inductor_graph_partition,
         )
     )
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
+
+    expected_num_graphs_seen = 1
+    expected_num_cudagraph_captured = (
+        4  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+    )
+    if use_inductor_graph_partition:
+        expected_num_piecewise_graphs_seen = 1
+        expected_num_piecewise_capturable_graphs_seen = 1
+        expected_num_backend_compilations = 1
+    else:
+        expected_num_piecewise_graphs_seen = 3
+        expected_num_piecewise_capturable_graphs_seen = 2
+        expected_num_backend_compilations = 2
 
     @support_torch_compile
     class A(nn.Module):
@@ -103,12 +123,11 @@ def test_ignore_torch_compile_decorator():
 
     # A has support_torch_compile
     with compilation_counter.expect(
-        num_graphs_seen=1,
-        num_piecewise_graphs_seen=3,
-        num_piecewise_capturable_graphs_seen=2,
-        num_backend_compilations=2,
-        num_cudagraph_captured=4,
-        # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        num_graphs_seen=expected_num_graphs_seen,
+        num_piecewise_graphs_seen=expected_num_piecewise_graphs_seen,
+        num_piecewise_capturable_graphs_seen=expected_num_piecewise_capturable_graphs_seen,
+        num_backend_compilations=expected_num_backend_compilations,
+        num_cudagraph_captured=expected_num_cudagraph_captured,
     ):
         run_model(vllm_config, mod_A, cudagraph_runtime_mode)
 
@@ -130,12 +149,11 @@ def test_ignore_torch_compile_decorator():
 
     # C's support_torch_compile should override B's ignore_torch_compile
     with compilation_counter.expect(
-        num_graphs_seen=1,
-        num_piecewise_graphs_seen=3,
-        num_piecewise_capturable_graphs_seen=2,
-        num_backend_compilations=2,
-        num_cudagraph_captured=4,
-        # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        num_graphs_seen=expected_num_graphs_seen,
+        num_piecewise_graphs_seen=expected_num_piecewise_graphs_seen,
+        num_piecewise_capturable_graphs_seen=expected_num_piecewise_capturable_graphs_seen,
+        num_backend_compilations=expected_num_backend_compilations,
+        num_cudagraph_captured=expected_num_cudagraph_captured,
     ):
         run_model(vllm_config, mod_C, cudagraph_runtime_mode)
 
