@@ -1,18 +1,15 @@
 # Welcome to vLLM
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./assets/logos/vllm-logo-text-dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="./assets/logos/vllm-logo-text-light.png">
-    <img alt="vLLM" src="./assets/logos/vllm-logo-text-light.png" width="60%">
-  </picture>
-</p>
+<figure markdown="span" style="text-align:center">
+  <img src="./assets/logos/vllm-logo-text-light.png" alt="vLLM Light" class="logo-light" width="60%">
+  <img src="./assets/logos/vllm-logo-text-dark.png" alt="vLLM Dark" class="logo-dark" width="60%">
+</figure>
 
-<p align="center">
+<p style="text-align:center">
 <strong>Easy, fast, and cheap LLM serving for everyone</strong>
 </p>
 
-<p align="center">
+<p style="text-align:center">
 <a href="https://github.com/vllm-project/vllm">Star</a> |
 <a href="https://github.com/vllm-project/vllm/subscription">Watch</a> |
 <a href="https://github.com/vllm-project/vllm/fork">Fork</a>
