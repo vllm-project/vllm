@@ -1,27 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import dataclasses
 import functools
 import json
 from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
-from typing import Optional, Union, cast
+from typing import cast
 
 from vllm.sampling_params import SamplingParams
-from vllm.v1.structured_output.backend_types import (StructuredOutputGrammar,
-                                                     StructuredOutputKey,
-                                                     StructuredOutputOptions)
+from vllm.v1.structured_output.backend_types import (
+    StructuredOutputGrammar,
+    StructuredOutputKey,
+    StructuredOutputOptions,
+)
 
 
 @dataclasses.dataclass
 class StructuredOutputRequest:
-
     sampling_params: SamplingParams
-    _grammar: Optional[Union[Future[StructuredOutputGrammar],
-                             StructuredOutputGrammar]] = None
-    reasoning_ended: Optional[bool] = None
+    _grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar | None = None
+    reasoning_ended: bool | None = None
 
     def _check_grammar_completion(self) -> bool:
         # NOTE: We have to lazy import to gate circular imports
@@ -41,15 +39,15 @@ class StructuredOutputRequest:
         return self._check_grammar_completion()
 
     @property
-    def grammar(self) -> Optional[StructuredOutputGrammar]:
+    def grammar(self) -> StructuredOutputGrammar | None:
         completed = self._check_grammar_completion()
-        return cast(Optional[StructuredOutputGrammar],
-                    self._grammar) if completed else None
+        return (
+            cast(StructuredOutputGrammar | None, self._grammar) if completed else None
+        )
 
     @grammar.setter
     def grammar(
-        self, grammar: Union[StructuredOutputGrammar,
-                             Future[StructuredOutputGrammar]]
+        self, grammar: StructuredOutputGrammar | Future[StructuredOutputGrammar]
     ) -> None:
         self._grammar = grammar
 
@@ -58,8 +56,7 @@ class StructuredOutputRequest:
         return get_structured_output_key(self.sampling_params)
 
 
-def get_structured_output_key(
-        sampling_params: SamplingParams) -> StructuredOutputKey:
+def get_structured_output_key(sampling_params: SamplingParams) -> StructuredOutputKey:
     params = sampling_params.structured_outputs
     assert params is not None, "params can't be None."
     if params.json is not None:

@@ -26,7 +26,7 @@ RemovedRequest = int
 
 # (index, params, prompt_tok_ids, output_tok_ids) tuples for new
 # requests added to the batch.
-AddedRequest = tuple[int, SamplingParams, Optional[list[int]], list[int]]
+AddedRequest = tuple[int, SamplingParams, list[int] | None, list[int]]
 
 # (index 1, index 2, directionality) tuples representing
 # one-way moves or two-way swaps of requests in batch
@@ -36,6 +36,7 @@ MovedRequest = tuple[int, int, MoveDirectionality]
 @dataclass(frozen=True)
 class BatchUpdate:
     """Persistent batch state change info for logitsprocs"""
+
     batch_size: int  # Current num reqs in batch
 
     # Metadata for requests added to, removed from, and moved
@@ -57,10 +58,10 @@ class BatchUpdate:
 
 
 class LogitsProcessor(ABC):
-
     @abstractmethod
-    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
-                 is_pin_memory: bool) -> None:
+    def __init__(
+        self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
+    ) -> None:
         raise NotImplementedError
 
     @abstractmethod
