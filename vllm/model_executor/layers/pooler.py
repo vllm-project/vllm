@@ -558,7 +558,7 @@ class ClassifierPooler(Pooler):
         self,
         pooling: PoolingFn,
         classifier: ClassifierFn | None,
-        act_fn: PoolerActivation | None = None,
+        act_fn: PoolerActivation | str | None = None,
     ) -> None:
         super().__init__()
 
@@ -636,7 +636,7 @@ class TokenClassifierPoolerHead(nn.Module):
     def __init__(
         self,
         classifier: ClassifierFn | None,
-        act_fn: PoolerActivation | None = None,
+        act_fn: PoolerActivation | str | None = None,
     ) -> None:
         super().__init__()
         vllm_config = get_current_vllm_config()
