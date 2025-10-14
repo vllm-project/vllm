@@ -8,7 +8,7 @@ from vllm import LLM
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
-from ..utils import VLLM_PATH, multi_gpu_test
+from ..utils import VLLM_PATH, create_new_process_for_each_test, multi_gpu_test
 
 MODEL_PATH = "meta-llama/Llama-2-7b-hf"
 
@@ -99,6 +99,7 @@ def generate_and_test(llm, sql_lora_files, tensorizer_config_dict: dict | None =
     print("removing lora")
 
 
+@create_new_process_for_each_test()
 def test_llama_lora(sql_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,

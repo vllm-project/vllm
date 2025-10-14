@@ -4,7 +4,7 @@
 import vllm
 from vllm.lora.request import LoRARequest
 
-from ..utils import multi_gpu_test
+from ..utils import create_new_process_for_each_test, multi_gpu_test
 
 MODEL_PATH = "zai-org/chatglm3-6b"
 
@@ -49,6 +49,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
+@create_new_process_for_each_test()
 def test_chatglm3_lora(chatglm3_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
