@@ -378,7 +378,7 @@ class OutputProcessor:
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
 
-    def process_outputs(
+    def process_outputs_slice(
         self,
         engine_core_outputs: list[EngineCoreOutput],
         engine_core_timestamp: float | None = None,
@@ -476,12 +476,26 @@ class OutputProcessor:
                 )
                 if self.tracer:
                     self.do_tracing(engine_core_output, req_state, iteration_stats)
-        self.lora_states.update_iteration_stats(iteration_stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
+
+    def update_iteration_stats(self, iteration_stats: IterationStats | None):
+        self.lora_states.update_iteration_stats(iteration_stats)
+
+    def process_outputs(
+        self,
+        engine_core_outputs: list[EngineCoreOutput],
+        engine_core_timestamp: float | None = None,
+        iteration_stats: IterationStats | None = None,
+    ) -> OutputProcessorOutput:
+        ret = self.process_outputs_slice(
+            engine_core_outputs, engine_core_timestamp, iteration_stats
+        )
+        self.lora_states.update_iteration_stats(iteration_stats)
+        return ret
 
     def do_tracing(
         self,

@@ -380,9 +380,8 @@ class LoRARequestStates:
         self._request_update(req_id, lora_name, waiting=False, running=False)
 
     def update_iteration_stats(self, iteration_stats: IterationStats | None):
-        if not self.log_stats:
+        if not self.log_stats or iteration_stats is None:
             return
-        assert iteration_stats is not None
         for lora_name, stats in self.requests.items():
             iteration_stats.waiting_lora_adapters[lora_name] = len(stats.waiting)
             iteration_stats.running_lora_adapters[lora_name] = len(stats.running)
