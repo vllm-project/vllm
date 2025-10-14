@@ -1320,16 +1320,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
-        for kv_cache_group_id, kv_cache_group_spec in enumerate(
+        for kv_cache_gid, kv_cache_group in enumerate(
             self.kv_cache_config.kv_cache_groups
         ):
             encoder_seq_lens = self._get_encoder_seq_lens(
                 scheduled_encoder_inputs or {},
-                kv_cache_group_spec.kv_cache_spec,
+                kv_cache_group.kv_cache_spec,
                 num_reqs,
             )
 
-            if isinstance(kv_cache_group_spec.kv_cache_spec, EncoderOnlyAttentionSpec):
+            if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 # Encoder-only layers do not have KV cache, so we need to
                 # create a dummy block table and slot mapping for them.
                 blk_table_tensor = torch.zeros(
@@ -1343,7 +1343,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     device=self.device,
                 )
             else:
-                blk_table = self.input_batch.block_table[kv_cache_group_id]
+                blk_table = self.input_batch.block_table[kv_cache_gid]
                 blk_table_tensor = blk_table.get_device_tensor(num_reqs)
                 slot_mapping = blk_table.slot_mapping.gpu[:total_num_scheduled_tokens]
 
@@ -1372,22 +1372,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, EagleProposer):
-                    if (
-                        self.drafter.attn_layer_names[0]
-                        in kv_cache_group_spec.layer_names
-                    ):
+                    if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = common_attn_metadata
                 else:
                     spec_decode_common_attn_metadata = common_attn_metadata
 
-            for attn_group_idx, attn_group in enumerate(
-                self.attn_groups[kv_cache_group_id]
-            ):
-                # Use pre-computed cascade attention prefix length
+            for attn_gid, attn_group in enumerate(self.attn_groups[kv_cache_gid]):
                 common_prefix_len = (
                     0
                     if common_prefix_lens is None
-                    else common_prefix_lens[kv_cache_group_id][attn_group_idx]
+                    else common_prefix_lens[kv_cache_gid][attn_gid]
                 )
                 builder = attn_group.get_metadata_builder()
 
@@ -1407,18 +1401,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     for ubid, common_attn_metadata in enumerate(
                         common_attn_metadata_list
                     ):
+                        builder = attn_group.get_metadata_builder(ubatch_id=ubid)
                         if for_cudagraph_capture:
-                            attn_metadata_i = attn_group.get_metadata_builder(
-                                ubatch_id=ubid
-                            ).build_for_cudagraph_capture(common_attn_metadata)
+                            attn_metadata_i = builder.build_for_cudagraph_capture(
+                                common_attn_metadata
+                            )
                         else:
-                            attn_metadata_i = attn_group.get_metadata_builder(
-                                ubatch_id=ubid
-                            ).build(
+                            attn_metadata_i = builder.build(
                                 common_prefix_len=common_prefix_len,
                                 common_attn_metadata=common_attn_metadata,
                             )
-                        for layer_name in kv_cache_group_spec.layer_names:
+                        for layer_name in kv_cache_group.layer_names:
                             assert type(attn_metadata) is list
                             attn_metadata[ubid][layer_name] = attn_metadata_i
                 else:
@@ -1451,15 +1444,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
         common_prefix_lens: list[list[int]] = [[] for _ in range(num_kv_cache_groups)]
 
-        for kv_cache_group_id in range(num_kv_cache_groups):
-            for attn_group in self.attn_groups[kv_cache_group_id]:
+        for kv_cache_gid in range(num_kv_cache_groups):
+            for attn_group in self.attn_groups[kv_cache_gid]:
                 prefix_len = self._compute_cascade_attn_prefix_len(
                     num_scheduled_tokens,
-                    num_common_prefix_blocks[kv_cache_group_id],
+                    num_common_prefix_blocks[kv_cache_gid],
                     attn_group.kv_cache_spec,
                     attn_group.get_metadata_builder(),
                 )
-                common_prefix_lens[kv_cache_group_id].append(prefix_len)
+                common_prefix_lens[kv_cache_gid].append(prefix_len)
                 use_cascade_attn |= prefix_len > 0
 
         return common_prefix_lens, use_cascade_attn
@@ -4312,9 +4305,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             list[int]: List of kernel block sizes for each cache group.
         """
         kernel_block_sizes = []
-        for kv_cache_group_id, kv_cache_group in enumerate(
-            kv_cache_config.kv_cache_groups
-        ):
+        for kv_cache_gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group.kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 # All layers in the UniformTypeKVCacheSpecs have the same type,
@@ -4326,7 +4317,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # This is an attention backend that supports virtual
                 # block splitting. Get the supported block sizes from
                 # all backends in the group.
-                attn_groups = self.attn_groups[kv_cache_group_id]
+                attn_groups = self.attn_groups[kv_cache_gid]
                 kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
                 selected_kernel_size = self._select_common_block_size(
                     kv_manager_block_size, attn_groups
