@@ -109,13 +109,16 @@ class DefaultEplb(EplbPolicy):
             num_physical_experts: number of physical experts after replication
             num_groups: number of expert groups
             num_nodes: number of server nodes, where the intra-node network
-            (e.g, NVLink) is faster
+                (e.g, NVLink) is faster
             num_gpus: number of GPUs, must be a multiple of `num_nodes`
 
         Returns:
-            physical_to_logical_map: [num_moe_layers, num_physical_experts]
-            logical_to_physical_map: [num_moe_layers, num_logical_experts, X]
-            logical_count: [num_moe_layers, num_logical_experts]
+            phy2log: [layers, num_replicas], the expert
+                index of each replica
+            log2phy: [layers, num_logical_experts, X],
+                the replica indices for each expert
+            logcnt: [layers, num_logical_experts], number of
+                physical replicas for each logical expert
         """
         num_layers, num_logical_experts = weight.shape
         assert num_logical_experts % num_groups == 0
@@ -201,7 +204,7 @@ class DefaultEplb(EplbPolicy):
 
         Parameters:
             old_global_expert_indices: [num_moe_layers, num_physical_experts],
-            mapping from physical experts to logical experts.
+                mapping from physical experts to logical experts.
             weight: [layers, num_logical_experts], the load statistics for all
                 logical experts
             num_replicas: number of physical experts, must be a multiple of
@@ -209,15 +212,15 @@ class DefaultEplb(EplbPolicy):
             num_groups: number of expert groups
             num_nodes: number of server nodes, where the intra-node network
                 (e.g, NVLink) is faster
-            num_gpus: number of GPUs, must be a multiple of `num_nodes`
+            num_ranks: number of ranks, must be a multiple of `num_nodes`
 
         Returns:
-            physical_to_logical_map: [layers, num_replicas], the expert
-             index of each replica
-            logical_to_physical_map: [layers, num_logical_experts, X],
-             the replica indices for each expert
-            expert_count: [layers, num_logical_experts], number of
-            physical replicas for each logical expert
+            phy2log: [layers, num_replicas], the expert
+                index of each replica
+            log2phy: [layers, num_logical_experts, X],
+                the replica indices for each expert
+            logcnt: [layers, num_logical_experts], number of
+                physical replicas for each logical expert
         """
         num_layers, num_logical_experts = weight.shape
         weight = weight.float().cpu()
