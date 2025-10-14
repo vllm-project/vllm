@@ -1408,7 +1408,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
 # --8<-- [end:env-vars-definition]
 
 
-@functools.cache
 def __getattr__(name: str):
     # lazy evaluation of environment variables
     if name in environment_variables:
@@ -1416,14 +1415,20 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def reset_envs_cache() -> None:
-    """Resets the cache of vllm environment variables."""
-    __getattr__.cache_clear()
+def enable_envs_cache() -> None:
+    """
+    Enables caching of environment variables. This is useful for performance
+    reasons, as it avoids the need to re-evaluate environment variables on
+    every call.
 
-
-def refresh_envs_cache() -> None:
-    """Refreshes the cache of vllm environment variables."""
-    reset_envs_cache()
+    NOTE: Currently, it's invoked after service initialization to reduce
+    runtime overhead. This also means that environment variables should NOT
+    be updated after the service is initialized.
+    """
+    # Tag __getattr__ with lru_cache
+    global __getattr__
+    __getattr__ = functools.cache(__getattr__)
+    # Cache all environment variables
     for key in environment_variables:
         __getattr__(key)
 

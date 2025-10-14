@@ -20,7 +20,7 @@ import zmq
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import is_global_first_rank
-from vllm.envs import refresh_envs_cache
+from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
@@ -602,9 +602,9 @@ class EngineCoreProc(EngineCore):
         # If enable, attach GC debugger after static variable freeze.
         maybe_attach_gc_debug_callback()
 
-        # Refresh environment variable cache (e.g. assume no more
+        # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
-        refresh_envs_cache()
+        enable_envs_cache()
 
     @contextmanager
     def _perform_handshakes(

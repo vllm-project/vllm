@@ -8,56 +8,52 @@ import pytest
 
 import vllm.envs as envs
 from vllm.envs import (
-    __getattr__,
+    enable_envs_cache,
     env_list_with_choices,
     env_with_choices,
     environment_variables,
-    refresh_envs_cache,
-    reset_envs_cache,
 )
 
 
-def test_reset_envs_cache(monkeypatch: pytest.MonkeyPatch):
-    assert envs.VLLM_PORT is None
-    # VLLM_PORT is still None after explictly
-    # updating "VLLM_PORT" to "1234" due to __getattr__ cache
-    monkeypatch.setenv("VLLM_PORT", "1234")
-    assert envs.VLLM_PORT is None
-    # VLLM_PORT is updated properly after invalidate the cache
-    reset_envs_cache()
-    assert envs.VLLM_PORT == 1234
-
-    # Reset envs cache to avoid data pollution to other tests
-    reset_envs_cache()
-
-
-def test_refresh_envs_cache(monkeypatch: pytest.MonkeyPatch):
+def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert envs.VLLM_HOST_IP == ""
     assert envs.VLLM_PORT is None
-
-    environment_variables_cnt = len(environment_variables)
-    # After environment variable refresh, ensure
-    # - values are udpated
-    # - values are all cached
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")
-    refresh_envs_cache()
-
-    # No more cache miss after environment variable refresh
-    # NOTE: We use misses over hits in the test, as some environment variable
-    # initializations calls the __getattr__ which messed up the hit counts
-    # (e.g. VLLM_DP_RANK_LOCAL).
-    assert __getattr__.cache_info().misses == environment_variables_cnt
     assert envs.VLLM_HOST_IP == "1.1.1.1"
     assert envs.VLLM_PORT == 1234
-    assert __getattr__.cache_info().misses == environment_variables_cnt
+    # __getattr__ is not decorated with functools.cache
+    assert not hasattr(envs.__getattr__, "cache_info")
+
+
+def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
+    monkeypatch.setenv("VLLM_PORT", "1234")
+    # __getattr__ is not decorated with functools.cache
+    assert not hasattr(envs.__getattr__, "cache_info")
+
+    # Enable envs cache and ignore ongoing environment changes
+    enable_envs_cache()
+
+    # __getattr__ is not decorated with functools.cache
+    assert hasattr(envs.__getattr__, "cache_info")
+    start_hits = envs.__getattr__.cache_info().hits
+
+    # 2 more hits due to VLLM_HOST_IP and VLLM_PORT accesses
+    assert envs.VLLM_HOST_IP == "1.1.1.1"
+    assert envs.VLLM_PORT == 1234
+    assert envs.__getattr__.cache_info().hits == start_hits + 2
+
     # All environment variables are cached
     for environment_variable in environment_variables:
-        __getattr__(environment_variable)
-    assert __getattr__.cache_info().misses == environment_variables_cnt
+        envs.__getattr__(environment_variable)
+    assert envs.__getattr__.cache_info().hits == start_hits + 2 + len(
+        environment_variables
+    )
 
-    # Reset envs cache to avoid data pollution to other tests
-    reset_envs_cache()
+    # Reset envs.__getattr__ back to none-cached version to
+    # avoid affecting other tests
+    envs.__getattr__ = envs.__getattr__.__wrapped__
 
 
 class TestEnvWithChoices:
