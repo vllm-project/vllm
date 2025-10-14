@@ -1207,7 +1207,7 @@ class LLM:
             lora_request=lora_request,
             pooling_params=pooling_params,
             truncate_prompt_tokens=truncate_prompt_tokens,
-            pooling_task="encode",
+            pooling_task="token_classify",
         )
 
     def _embedding_score(
