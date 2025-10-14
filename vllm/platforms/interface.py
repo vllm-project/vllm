@@ -112,6 +112,10 @@ class Platform:
     additional_env_vars: list[str] = []
 
     _global_graph_pool: Any | None = None
+    
+    @property
+    def pass_key(self) -> str:
+        return ""
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:

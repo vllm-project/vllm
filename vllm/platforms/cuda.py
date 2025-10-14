@@ -74,6 +74,10 @@ class CudaPlatformBase(Platform):
         # though vLLM doesn't support these GPUs.
         return [torch.float32]
 
+    @property
+    def pass_key(self) -> str:
+        return "post_grad_custom_post_pass"
+
     @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
