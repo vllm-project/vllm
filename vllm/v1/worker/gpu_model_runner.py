@@ -2631,7 +2631,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # as inputs, and does not need to wait for bookkeeping to finish.
             propose_draft_token_ids(sampler_output.sampled_token_ids)
 
-        with record_function_or_nullcontext("Bookkeep"):
+        with record_function_or_nullcontext("Model:Bookkeep"):
             (
                 num_nans_in_logits,
                 logprobs_lists,
