@@ -462,13 +462,13 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   #pragma unroll
   for (int i = 0; i < NUM_STAGES - 1; i++) {
     // We unroll the loop with no branches.
-    auto smem_load_ptr_staged = smem_load_ptr + load_stage_offset;
-    load_stage_offset += LOAD_STAGE_SIZE;
-    cp_async4(smem_load_ptr_staged, load_ptr);
-    load_ptr += GROUP_SIZE / 8;
+    cp_async4(smem_load_ptr + i * LOAD_STAGE_SIZE,
+              load_ptr + i * (GROUP_SIZE / 8));
     cp_async_fence();
   }
 
+  load_stage_offset = (NUM_STAGES - 1) * LOAD_STAGE_SIZE;
+  load_ptr += (NUM_STAGES - 1) * (GROUP_SIZE / 8);
   t_load = NUM_STAGES - 1;
 
   __nv_fp8x4_e4m3* y_q_base_ptr =
