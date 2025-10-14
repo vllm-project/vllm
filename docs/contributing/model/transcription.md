@@ -15,6 +15,7 @@ Declare supported languages and capabilities:
 - Set `supports_transcription_only=True` if the model should not serve text generation (eg Whisper).
 
 ??? code "supported_languages and supports_transcription_only"
+
     ```python
     from typing import ClassVar, Mapping, Literal
     import numpy as np
@@ -43,6 +44,7 @@ Provide an ASR configuration via [get_speech_to_text_config][vllm.model_executor
 This is for controlling general behavior of the API when serving your model:
 
 ??? code "get_speech_to_text_config()"
+
     ```python
     class YourASRModel(nn.Module, SupportsTranscription):
         ...
@@ -71,6 +73,7 @@ Implement the prompt construction via [get_generation_prompt][vllm.model_executo
 Return a dict containing `multi_modal_data` with the audio, and either a `prompt` string or `prompt_token_ids`:
 
 ??? code "get_generation_prompt()"
+
     ```python
     class YourASRModel(nn.Module, SupportsTranscription):
         ...
@@ -107,6 +110,7 @@ Return a dict containing `multi_modal_data` with the audio, and either a `prompt
 Return a dict with separate `encoder_prompt` and `decoder_prompt` entries:
 
 ??? code "get_generation_prompt()"
+
     ```python
     class YourASRModel(nn.Module, SupportsTranscription):
         ...
@@ -148,12 +152,16 @@ Language validation via [validate_language][vllm.model_executor.models.interface
 If your model requires a language and you want a default, override this method (see Whisper):
 
 ??? code "validate_language()"
+
     ```python
     @classmethod
     def validate_language(cls, language: str | None) -> str | None:
         if language is None:
             logger.warning(
-                "Defaulting to language='en'. If you wish to transcribe audio in a different language, pass the `language` field.")
+                "Defaulting to language='en'. If you wish to transcribe "
+                "audio in a different language, pass the `language` field "
+                "in the TranscriptionRequest."
+            )
             language = "en"
         return super().validate_language(language)
     ```
@@ -165,6 +173,7 @@ Token accounting for streaming via [get_num_audio_tokens][vllm.model_executor.mo
 Provide a fast duration→token estimate to improve streaming usage statistics:
 
 ??? code "get_num_audio_tokens()"
+
     ```python
     class YourASRModel(nn.Module, SupportsTranscription):
         ...
@@ -191,6 +200,7 @@ The API server takes care of basic audio I/O and optional chunking before buildi
 Relevant server logic:
 
 ??? code "_preprocess_speech_to_text()"
+
     ```python
     # vllm/entrypoints/openai/speech_to_text.py
     async def _preprocess_speech_to_text(...):

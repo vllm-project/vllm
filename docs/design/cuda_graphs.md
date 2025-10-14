@@ -106,9 +106,11 @@ The dispatch code looks like:
 batch_descriptor=BatchDescriptor(num_tokens=num_input_tokens, uniform_decode=...)
 runtime_mode, batch_descriptor = cudagraphdispatcher.dispatch(batch_descriptor)
 # execution
-with set_forward_context(..., 
-            cudagraph_runtime_mode=runtime_mode, 
-            batch_descriptor=batch_descriptor):
+with set_forward_context(
+    ..., 
+    cudagraph_runtime_mode=runtime_mode, 
+    batch_descriptor=batch_descriptor,
+):
      output = self.model(...)
 ```
 
@@ -202,10 +204,10 @@ from vllm.config import CUDAGraphMode
 
 compilation_config = {"level": 3, "cudagraph_mode": "FULL_AND_PIECEWISE"}
 model = vllm.LLM(
-            model="meta-llama/Llama-3.1-8B-Instruct",
-            dtype='auto',
-            compilation_config = compilation_config,
-        )
+    model="meta-llama/Llama-3.1-8B-Instruct",
+    dtype="auto",
+    compilation_config=compilation_config,
+)
 sampling_params = vllm.SamplingParams(
     temperature=0,  # greedy decoding
     max_tokens=1024,
