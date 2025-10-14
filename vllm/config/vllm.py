@@ -26,7 +26,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 
 from .cache import CacheConfig
-from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
+from .compilation import CompilationConfig, CompilationLevel, CompilationMode, CUDAGraphMode, PassConfig
 from .device import DeviceConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
@@ -289,6 +289,54 @@ class VllmConfig:
 
         return replace(self, model_config=model_config)
 
+    def _set_pass_config_defaults(self, enable_all: bool) -> None:
+        """Set all PassConfig enable_* flags if they're at default values.
+
+        Args:
+            enable_all: If True, enable all passes. If False, disable all passes.
+        """
+        from dataclasses import fields
+
+        default_config = PassConfig()
+        current_config = self.compilation_config.pass_config
+
+        for field in fields(PassConfig):
+            if field.name.startswith('enable_'):
+                current_val = getattr(current_config, field.name)
+                default_val = getattr(default_config, field.name)
+                if current_val == default_val:
+                    setattr(current_config, field.name, enable_all)
+
+    def _apply_optimization_level_defaults(self) -> None:
+        """Apply optimization level-specific default configurations.
+
+        Configures defaults for -O0 through -O3 based on compilation level.
+        Only sets values not explicitly configured by the user.
+
+        Optimization Levels:
+            - O0 (NO_COMPILATION): No optimization, fast startup, eager execution
+            - O1 (DYNAMO_AS_IS): Fast compilation (to be implemented)
+            - O2 (DYNAMO_ONCE): Full optimization (to be implemented)
+            - O3 (PIECEWISE): Maximum optimization with autotuning (to be implemented)
+        """
+        from vllm.platforms import current_platform
+
+        level = self.compilation_config.level
+
+        if level == CompilationLevel.NO_COMPILATION:
+            # -O0: No compilation, fast startup, eager execution
+            backend = self.compilation_config.backend
+            if backend == current_platform.simple_compile_backend:
+                self.compilation_config.backend = "eager"
+
+            if self.compilation_config.cudagraph_mode is None:
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+            # Disable all compilation passes
+            self._set_pass_config_defaults(enable_all=False)
+
+        # TODO: Implement -O1, -O2, -O3 optimization levels
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -336,6 +384,9 @@ class VllmConfig:
         else:
             assert self.compilation_config.mode >= CompilationMode.NONE
             assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
+
+        # Apply optimization level-specific defaults
+        self._apply_optimization_level_defaults()
 
         # If user does not set custom ops via none or all set it here based on
         # compilation mode and backend.
