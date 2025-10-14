@@ -1230,6 +1230,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "the ready check will be skipped.",
     )
 
+    parser.add_argument(
+        "--extra-body",
+        help="A JSON string representing extra body parameters to include "
+        "in each request."
+        'Example: \'{"chat_template_kwargs":{"enable_thinking":false}}\'',
+        type=json.loads,
+        default=None,
+    )
+
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
     return asyncio.run(main_async(args))
@@ -1328,12 +1337,10 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         if "temperature" not in extra_body:
             extra_body["temperature"] = 0.0  # Default to greedy decoding.
 
-        # Default disable thinking
-        extra_body["chat_template_kwargs"] = {
-            "enable_thinking": False,
-        }
-    else:
-        extra_body = {}
+    if args.extra_body:
+        # Merge extra_body from command line argument. The command line
+        # argument has higher priority.
+        extra_body = {**extra_body, **args.extra_body}
 
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
