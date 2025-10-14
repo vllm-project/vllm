@@ -14,7 +14,11 @@ from starlette.background import BackgroundTask, BackgroundTasks
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    CompletionRequest,
+    StreamOptions,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
@@ -237,3 +241,16 @@ def log_non_default_args(args: Namespace | EngineArgs):
         )
 
     logger.info("non-default args: %s", non_default_args)
+
+
+def should_include_usage(
+    stream_options: StreamOptions | None, enable_force_include_usage: bool
+) -> tuple[bool, bool]:
+    if stream_options:
+        include_usage = stream_options.include_usage or enable_force_include_usage
+        include_continuous_usage = include_usage and bool(
+            stream_options.continuous_usage_stats
+        )
+    else:
+        include_usage, include_continuous_usage = enable_force_include_usage, False
+    return include_usage, include_continuous_usage
