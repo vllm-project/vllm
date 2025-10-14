@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Rotary Positional Embeddings Base Class."""
 
-from typing import Optional
-
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
@@ -89,8 +87,8 @@ class RotaryEmbedding(CustomOp):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """A PyTorch-native implementation of forward()."""
         positions = positions.flatten()
         num_tokens = positions.shape[0]
@@ -118,8 +116,8 @@ class RotaryEmbedding(CustomOp):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.use_flashinfer:
             torch.ops.vllm.flashinfer_rotary_embedding(
                 positions,
@@ -151,8 +149,8 @@ class RotaryEmbedding(CustomOp):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.is_rocm_triton_rotary_embed_enabled:
             self._match_cos_sin_cache_dtype(query)
             rocm_aiter_ops.triton_rotary_embed(
@@ -174,8 +172,8 @@ class RotaryEmbedding(CustomOp):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         from vllm._ipex_ops import ipex_ops as ops
 
         self._match_cos_sin_cache_dtype(query)

@@ -8,7 +8,7 @@ Run `pytest tests/kernels/test_moe.py`.
 import functools
 import importlib
 import sys
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 
 import pytest
 import torch
@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk,
     modular_triton_fused_moe,
@@ -83,7 +84,7 @@ vllm_config.scheduler_config.max_model_len = 8192
 
 
 def run_moe_test(
-    baseline: Union[Callable, torch.Tensor],
+    baseline: Callable | torch.Tensor,
     moe_fn: Callable,
     a: torch.Tensor,
     w1: torch.Tensor,
@@ -91,7 +92,7 @@ def run_moe_test(
     score: torch.Tensor,
     topk: int,
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
     padding: bool = False,
     use_compile: bool = False,
     use_cudagraph: bool = False,
@@ -215,7 +216,7 @@ def test_fused_moe(
         score: torch.Tensor,
         topk: int,
         global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
+        expert_map: torch.Tensor | None = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
         return m_fused_moe_fn(
@@ -725,7 +726,7 @@ def test_fused_marlin_moe(
     with set_current_vllm_config(vllm_config):
         torch_output = torch_moe(a, w_ref1, w_ref2, score, topk, expert_map=e_map)
 
-    marlin_output = torch.ops.vllm.fused_marlin_moe(
+    marlin_output = fused_marlin_moe(
         a,
         qweight1,
         qweight2,
@@ -838,7 +839,7 @@ def test_fused_marlin_moe_with_bias(m):
     with set_current_vllm_config(vllm_config):
         torch_output = torch_moe(a, w_ref1, w_ref2, score, topk, b_bias1, b_bias2)
 
-    marlin_output = torch.ops.vllm.fused_marlin_moe(
+    marlin_output = fused_marlin_moe(
         a,
         qweight1,
         qweight2,

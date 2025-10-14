@@ -25,6 +25,7 @@ EMBEDDING_MODELS = [
         mteb_score=0.824413164,
         architecture="XLMRobertaModel",
         is_matryoshka=True,
+        dtype="float32",
     )
 ]
 

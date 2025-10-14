@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import IntEnum
-from typing import Optional
 
 import torch
 
@@ -44,7 +43,7 @@ def rocm_aiter_grouped_topk(
     topk_group: int = 0,
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
-    e_score_correction_bias: Optional[torch.Tensor] = None,
+    e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     token = hidden_states.shape[0]
     device = hidden_states.device
@@ -86,8 +85,8 @@ def rocm_aiter_fused_experts(
     topk_ids: torch.Tensor,
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
-    expert_map: Optional[torch.Tensor] = None,
-    quant_config: Optional[FusedMoEQuantConfig] = None,
+    expert_map: torch.Tensor | None = None,
+    quant_config: FusedMoEQuantConfig | None = None,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG

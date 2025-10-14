@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -92,7 +92,7 @@ class DotsOCRImageEmbeddingInputs(TensorSchema):
     image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
-DotsOCRImageInputs = Union[DotsOCRImagePixelInputs, DotsOCRImageEmbeddingInputs]
+DotsOCRImageInputs: TypeAlias = DotsOCRImagePixelInputs | DotsOCRImageEmbeddingInputs
 
 
 class DotsOCRDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
@@ -104,7 +104,7 @@ class DotsOCRDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -134,7 +134,7 @@ class DotsOCRProcessingInfo(Qwen2VLProcessingInfo):
 
         return config
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_mm_max_tokens_per_item(
@@ -253,7 +253,7 @@ class DotsVisionAttention(nn.Module):
         num_heads: int = 16,
         bias: bool = True,
         *,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -316,10 +316,10 @@ class DotsVisionAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        rotary_pos_emb: Optional[torch.Tensor] = None,
+        rotary_pos_emb: torch.Tensor | None = None,
         *,
-        max_seqlen: Optional[int] = None,
-        seqlens: Optional[list[int]] = None,
+        max_seqlen: int | None = None,
+        seqlens: list[int] | None = None,
     ) -> torch.Tensor:
         # [S, C] -> [S, B=1, C]
         x = hidden_states.unsqueeze(1)
@@ -394,7 +394,7 @@ class DotsSwiGLUFFN(nn.Module):
         self,
         config,
         *,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -507,7 +507,7 @@ class DotsVisionBlock(nn.Module):
         self,
         config,
         *,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -537,8 +537,8 @@ class DotsVisionBlock(nn.Module):
         *,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
-        max_seqlen: Optional[int] = None,
-        seqlens: Optional[list[int]] = None,
+        max_seqlen: int | None = None,
+        seqlens: list[int] | None = None,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
@@ -555,10 +555,10 @@ class DotsVisionTransformer(nn.Module):
     def __init__(
         self,
         config: DotsVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
-        require_post_norm: Optional[bool] = None,
+        num_hidden_layers_override: int | None = None,
+        require_post_norm: bool | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -653,7 +653,7 @@ class DotsVisionTransformer(nn.Module):
 
     def compute_attn_mask_seqlen(
         self, cu_seqlens: torch.Tensor
-    ) -> tuple[Optional[int], Optional[list[int]]]:
+    ) -> tuple[int | None, list[int] | None]:
         max_seqlen, seqlens = None, None
         if (
             self.attn_backend == _Backend.FLASH_ATTN
@@ -680,7 +680,7 @@ class DotsVisionTransformer(nn.Module):
             dim=0,
             dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
         )
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
 
         max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
         for blk in self.blocks:
@@ -734,7 +734,7 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
     supports_encoder_tp_data = True
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|img|><|imgpad|><|endofimg|>"
 
@@ -765,7 +765,7 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[DotsOCRImageInputs]:
+    ) -> DotsOCRImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
         image_grid_thw = kwargs.pop("image_grid_thw", None)
@@ -834,10 +834,10 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
         elif inputs_embeds is None:
@@ -861,7 +861,7 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

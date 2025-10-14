@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from functools import wraps
-from typing import Callable, Optional
 
 import torch
 
@@ -37,14 +37,14 @@ def _rocm_aiter_fused_moe_impl(
     w2: torch.Tensor,
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
-    expert_mask: Optional[torch.Tensor] = None,
+    expert_mask: torch.Tensor | None = None,
     activation_method: int = 0,
     quant_method: int = 0,
     doweight_stage1: bool = False,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -75,14 +75,14 @@ def _rocm_aiter_fused_moe_fake(
     w2: torch.Tensor,
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
-    expert_mask: Optional[torch.Tensor] = None,
+    expert_mask: torch.Tensor | None = None,
     activation_method: int = 0,
     quant_method: int = 0,
     doweight_stage1: bool = False,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -93,13 +93,13 @@ def _rocm_aiter_asm_moe_tkw1_impl(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    fc1_scale: Optional[torch.Tensor] = None,
-    fc2_scale: Optional[torch.Tensor] = None,
-    fc1_smooth_scale: Optional[torch.Tensor] = None,
-    fc2_smooth_scale: Optional[torch.Tensor] = None,
+    fc1_scale: torch.Tensor | None = None,
+    fc2_scale: torch.Tensor | None = None,
+    fc1_smooth_scale: torch.Tensor | None = None,
+    fc2_smooth_scale: torch.Tensor | None = None,
     a16: bool = False,
-    per_tensor_quant_scale: Optional[torch.Tensor] = None,
-    expert_mask: Optional[torch.Tensor] = None,
+    per_tensor_quant_scale: torch.Tensor | None = None,
+    expert_mask: torch.Tensor | None = None,
     activation_method: int = 0,
 ) -> torch.Tensor:
     from aiter import ActivationType
@@ -130,13 +130,13 @@ def _rocm_aiter_asm_moe_tkw1_fake(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    fc1_scale: Optional[torch.Tensor] = None,
-    fc2_scale: Optional[torch.Tensor] = None,
-    fc1_smooth_scale: Optional[torch.Tensor] = None,
-    fc2_smooth_scale: Optional[torch.Tensor] = None,
+    fc1_scale: torch.Tensor | None = None,
+    fc2_scale: torch.Tensor | None = None,
+    fc1_smooth_scale: torch.Tensor | None = None,
+    fc2_smooth_scale: torch.Tensor | None = None,
     a16: bool = False,
-    per_tensor_quant_scale: Optional[torch.Tensor] = None,
-    expert_mask: Optional[torch.Tensor] = None,
+    per_tensor_quant_scale: torch.Tensor | None = None,
+    expert_mask: torch.Tensor | None = None,
     activation_method: int = 0,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
@@ -246,9 +246,9 @@ def _rocm_aiter_mla_decode_fwd_impl(
     o: torch.Tensor,
     qo_indptr: torch.Tensor,
     max_seqlen_qo: int,
-    kv_indptr: Optional[torch.Tensor] = None,
-    kv_indices: Optional[torch.Tensor] = None,
-    kv_last_page_lens: Optional[torch.Tensor] = None,
+    kv_indptr: torch.Tensor | None = None,
+    kv_indices: torch.Tensor | None = None,
+    kv_last_page_lens: torch.Tensor | None = None,
     sm_scale: float = 1.0,
     logit_cap: float = 0.0,
 ) -> None:
@@ -274,9 +274,9 @@ def _rocm_aiter_mla_decode_fwd_fake(
     o: torch.Tensor,
     qo_indptr: torch.Tensor,
     max_seqlen_qo: int,
-    kv_indptr: Optional[torch.Tensor] = None,
-    kv_indices: Optional[torch.Tensor] = None,
-    kv_last_page_lens: Optional[torch.Tensor] = None,
+    kv_indptr: torch.Tensor | None = None,
+    kv_indices: torch.Tensor | None = None,
+    kv_last_page_lens: torch.Tensor | None = None,
     sm_scale: float = 1.0,
     logit_cap: float = 0.0,
 ) -> None:
@@ -288,7 +288,7 @@ def _rocm_aiter_gemm_w8a8_impl(
     B: torch.Tensor,
     As: torch.Tensor,
     Bs: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     from aiter import gemm_a8w8_CK
@@ -305,7 +305,7 @@ def _rocm_aiter_gemm_w8a8_fake(
     B: torch.Tensor,
     As: torch.Tensor,
     Bs: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     m = A.shape[0]
@@ -592,7 +592,7 @@ class rocm_aiter_ops:
         B: torch.Tensor,
         As: torch.Tensor,
         Bs: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_gemm_w8a8(A, B, As, Bs, bias, output_dtype)
@@ -617,14 +617,14 @@ class rocm_aiter_ops:
         w2: torch.Tensor,
         topk_weight: torch.Tensor,
         topk_ids: torch.Tensor,
-        expert_mask: Optional[torch.Tensor] = None,
+        expert_mask: torch.Tensor | None = None,
         activation_method: int = 0,
         quant_method: int = 0,
         doweight_stage1: bool = False,
-        w1_scale: Optional[torch.Tensor] = None,
-        w2_scale: Optional[torch.Tensor] = None,
-        a1_scale: Optional[torch.Tensor] = None,
-        a2_scale: Optional[torch.Tensor] = None,
+        w1_scale: torch.Tensor | None = None,
+        w2_scale: torch.Tensor | None = None,
+        a1_scale: torch.Tensor | None = None,
+        a2_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -649,13 +649,13 @@ class rocm_aiter_ops:
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        fc1_scale: Optional[torch.Tensor] = None,
-        fc2_scale: Optional[torch.Tensor] = None,
-        fc1_smooth_scale: Optional[torch.Tensor] = None,
-        fc2_smooth_scale: Optional[torch.Tensor] = None,
+        fc1_scale: torch.Tensor | None = None,
+        fc2_scale: torch.Tensor | None = None,
+        fc1_smooth_scale: torch.Tensor | None = None,
+        fc2_smooth_scale: torch.Tensor | None = None,
         a16: bool = False,
-        per_tensor_quant_scale: Optional[torch.Tensor] = None,
-        expert_mask: Optional[torch.Tensor] = None,
+        per_tensor_quant_scale: torch.Tensor | None = None,
+        expert_mask: torch.Tensor | None = None,
         activation_method: int = 0,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_asm_moe_tkw1(
@@ -739,9 +739,9 @@ class rocm_aiter_ops:
         sm_scale: float,
         qo_indptr: torch.Tensor,
         max_seqlen_qo: int,
-        kv_indptr: Optional[torch.Tensor] = None,
-        kv_indices: Optional[torch.Tensor] = None,
-        kv_last_page_lens: Optional[torch.Tensor] = None,
+        kv_indptr: torch.Tensor | None = None,
+        kv_indices: torch.Tensor | None = None,
+        kv_last_page_lens: torch.Tensor | None = None,
         logit_cap: float = 0.0,
     ):
         torch.ops.vllm.rocm_aiter_mla_decode_fwd(
@@ -762,8 +762,8 @@ class rocm_aiter_ops:
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        out_dtype: Optional[torch.dtype] = torch.bfloat16,
-        x_scales: Optional[torch.Tensor] = None,
+        out_dtype: torch.dtype | None = torch.bfloat16,
+        x_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
         from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
@@ -823,12 +823,12 @@ class rocm_aiter_ops:
         WQ: torch.Tensor,
         w_scale: torch.Tensor,
         group_size: int = 128,
-        bias: Optional[torch.Tensor] = None,
-        dtype: Optional[torch.dtype] = torch.bfloat16,
-        splitK: Optional[int] = None,
-        YQ: Optional[torch.Tensor] = None,
-        transpose_bm: Optional[bool] = False,
-        config: Optional[dict] = None,
+        bias: torch.Tensor | None = None,
+        dtype: torch.dtype | None = torch.bfloat16,
+        splitK: int | None = None,
+        YQ: torch.Tensor | None = None,
+        transpose_bm: bool | None = False,
+        config: dict | None = None,
     ) -> torch.Tensor:
         # ruff: noqa: E501 # isort: skip
         from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (

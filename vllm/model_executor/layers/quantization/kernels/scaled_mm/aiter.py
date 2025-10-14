@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
@@ -19,7 +18,7 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         return 90
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, Optional[str]]:
+    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
             return (
                 False,
@@ -59,7 +58,7 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         `AiterScaledMMLinearKernel` implements a fused version of
