@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
@@ -13,7 +12,7 @@ def moe_align_block_size(
     topk_ids: torch.Tensor,
     block_size: int,
     num_experts: int,
-    expert_map: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
     pad_sorted_ids: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
