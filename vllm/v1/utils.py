@@ -32,7 +32,7 @@ from vllm.utils import (
     get_tcp_uri,
     kill_process_tree,
 )
-from vllm.utils.lite_profiler import LiteScope
+from vllm.utils.lite_profiler.lite_profiler import LiteScope
 
 if TYPE_CHECKING:
     import numpy as np

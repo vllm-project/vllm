@@ -828,8 +828,7 @@ class EngineCoreProc(EngineCore):
                 logger.debug("EngineCore waiting for work.")
                 waited = True
             req = self.input_queue.get()
-            with record_function_or_nullcontext("Input:Process"):
-                self._handle_client_request(*req)
+            self._handle_client_request(*req)
 
         if waited:
             logger.debug("EngineCore loop active.")
@@ -837,8 +836,7 @@ class EngineCoreProc(EngineCore):
         # Handle any more client requests.
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
-            with record_function_or_nullcontext("Input:Process"):
-                self._handle_client_request(*req)
+            self._handle_client_request(*req)
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""

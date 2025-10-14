@@ -31,7 +31,7 @@ def _should_log_results() -> bool:
 _log_file: TextIO | None = None
 
 
-def _write_log_entry(name: str, elapsed_us: int) -> None:
+def _write_log_entry(name: str, elapsed_ns: int) -> None:
     """Write a profiler entry using cached file handle for optimal performance.
 
     This function implements an efficient caching approach where the file handle
@@ -43,8 +43,9 @@ def _write_log_entry(name: str, elapsed_us: int) -> None:
     """
     global _log_file
     _LOG_PATH = envs.VLLM_LITE_PROFILER_LOG_PATH
+    assert _LOG_PATH is not None
 
-    if not _should_log_results() or _LOG_PATH is None:
+    if not _should_log_results():
         return
 
     # Handle case where file handle was opened in parent but we're in the
@@ -52,19 +53,20 @@ def _write_log_entry(name: str, elapsed_us: int) -> None:
     if _log_file is not None:
         try:
             # Verify if the file handle is still valid
+            _log_file.flush()
             _log_file.tell()
         except (OSError, ValueError):
             # File handle is stale, clear and reopen
             _log_file = None
 
     # Write the log entry
-    log_line = f"{name}|{elapsed_us}\n"
+    log_line = f"{name}|{elapsed_ns}\n"
     if _log_file is None:
         directory = os.path.dirname(_LOG_PATH)
         if directory:
             os.makedirs(directory, exist_ok=True)
         # ruff: noqa: SIM115 - intentionally keeping file handle cached globally
-        _log_file = open(_LOG_PATH, "w", buffering=50000)
+        _log_file = open(_LOG_PATH, "a", buffering=50000)
         atexit.register(_log_file.close)
 
     _log_file.write(log_line)
@@ -93,9 +95,7 @@ class LiteScope:
     ) -> None:
         if self._start_time is not None and exc_type is None:
             elapsed_ns = time.perf_counter_ns() - self._start_time
-            # Use integer microseconds for better performance
-            elapsed_us = elapsed_ns // 1000
-            _write_log_entry(self._name, elapsed_us)
+            _write_log_entry(self._name, elapsed_ns)
 
 
 def maybe_emit_lite_profiler_report() -> None:
@@ -111,6 +111,13 @@ def maybe_emit_lite_profiler_report() -> None:
     if log_path is None:
         return
 
+    # Ensure the log file is flushed and closed before generating report
+    global _log_file
+    if _log_file is not None:
+        _log_file.flush()
+        _log_file.close()
+        _log_file = None
+
     if not os.path.exists(log_path):
         logger.warning(
             "Lite profiler log not found. Ensure the profiled process sets "
@@ -118,12 +125,13 @@ def maybe_emit_lite_profiler_report() -> None:
         )
         return
 
-    from vllm.utils import lite_profiler_report
+    from vllm.utils.lite_profiler import lite_profiler_report
 
     logger.info("")
     logger.info("Lite profiler summary (%s):", log_path)
     try:
         # Generate and display the summary report
         lite_profiler_report.summarize_log(log_path)
+        os.remove(log_path)
     except Exception as exc:  # pragma: no cover - avoid crashing benchmarks
         logger.error("Failed to summarize lite profiler log %s: %s", log_path, exc)
