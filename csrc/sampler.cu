@@ -349,8 +349,8 @@ void top_k_per_row_decode(const torch::Tensor& logits, int64_t batches,
       <<<numRows, kNumThreadsPerBlock, 0, stream>>>(
           logits.data_ptr<float>(), nullptr, nullptr, seq_lens.data_ptr<int>(),
           indices.data_ptr<int>(), values.data_ptr<float>(),
-          static_cast<int>(batches), static_cast<int>(next_n),
-          static_cast<int>(stride0), static_cast<int>(stride1));
+          static_cast<int>(stride0), static_cast<int>(stride1),
+          static_cast<int>(batches), static_cast<int>(next_n));
 }
 
 void top_k_per_row(const torch::Tensor& logits, const torch::Tensor& rowStarts,
