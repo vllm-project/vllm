@@ -726,6 +726,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             mm_kwargs = dict(
                 **mm_kwargs,
             )
+            mm_kwargs["truncation"] = True
 
         hf_inputs = super()._call_hf_processor(
             prompt=prompt,
@@ -747,10 +748,6 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                     if audio_length % hop_length == 0
                     else (audio_length // hop_length - 1)
                 )
-                if mm_kwargs.get("truncation", True):
-                    num_frame = min(
-                        num_frame, feature_extractor.n_samples // hop_length
-                    )
                 audio_num_frames.append(num_frame)
             hf_inputs["feature_attention_mask"] = [
                 torch.ones(num_frame) for num_frame in audio_num_frames
