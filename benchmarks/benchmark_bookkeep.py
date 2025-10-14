@@ -10,12 +10,6 @@ from tqdm import trange
 
 from vllm.utils import FlexibleArgumentParser
 
-"""
-Example Usage:
-
-buck run @mode/opt scripts/jialino/llm/python:np_update
-"""
-
 
 def update_one_by_one(
     num_tokens_no_spec_np: np.ndarray[np.int32, np.dtype[np.int32]],
