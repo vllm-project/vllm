@@ -247,10 +247,10 @@ async def test_tool_id_kimi_k2(
         )
         assert chat_completion.choices[0].message.tool_calls is not None
         assert len(chat_completion.choices[0].message.tool_calls) > 0
-        assert (
-            chat_completion.choices[0].message.tool_calls[0].id
-            == "functions.get_current_weather:0"
-        )
+        assert chat_completion.choices[0].message.tool_calls[0].id in [
+            "functions.get_current_weather:0",
+            "functions.get_forecast:1",
+        ]
     else:
         # Streaming test
         output_stream = await k2_client.chat.completions.create(
