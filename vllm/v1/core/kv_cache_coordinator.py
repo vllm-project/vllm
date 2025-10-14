@@ -48,8 +48,6 @@ class KVCacheCoordinator(ABC):
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
 
-        self.empty_blocks: tuple[KVCacheBlock, ...] = ()
-
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -78,7 +76,7 @@ class KVCacheCoordinator(ABC):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id, num_encoder_tokens, self.empty_blocks
+                    request_id, num_encoder_tokens, []
                 )
             else:
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(

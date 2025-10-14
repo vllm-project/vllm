@@ -146,6 +146,8 @@ class KVCacheManager:
         # Pre-constructed KVCacheBlocks with no blocks, callers should use this
         # via create_kv_cache_blocks instead of creating new ones to avoid GC
         # overhead.
+        #
+        # We use nested tuples to ensure the empty KVCacheBlocks is immutable.
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
