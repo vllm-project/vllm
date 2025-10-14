@@ -124,9 +124,11 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
-        intermediate_states = None
-        if return_intermediate_states:
-            intermediate_states = _reshape_intermediate_states(h, cu_seqlens)
+        intermediate_states = (
+            _reshape_intermediate_states(h, cu_seqlens)
+            if return_intermediate_states
+            else None
+        )
         return o.to(q.dtype), final_state, intermediate_states
 
 

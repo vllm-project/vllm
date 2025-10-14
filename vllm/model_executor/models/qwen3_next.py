@@ -550,6 +550,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 slot_in_copy = slot_in_safe.clamp(min=0).to(
                     device=conv_state.device, dtype=torch.long
                 )
+                breakpoint()
                 if slot_out_copy.numel() > 0:
                     conv_state.index_copy_(
                         0,
@@ -566,6 +567,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     slot_out,
                     base_decode_slots,
                 )
+                breakpoint()
                 non_spec_state_indices_runtime[decode_slice] = updated_decode_slots
                 state_indices_decode = updated_decode_slots
 
@@ -617,6 +619,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 slot_in_copy = slot_in_safe.clamp(min=0).to(
                     device=conv_state.device, dtype=torch.long
                 )
+                breakpoint()
                 if slot_out_copy.numel() > 0:
                     conv_state.index_copy_(
                         0,
@@ -634,9 +637,11 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     slot_out,
                     base_prefill_slots,
                 )
+                breakpoint()
                 non_spec_state_indices_runtime[start:end] = updated_prefill_slots
                 state_indices_prefill = updated_prefill_slots
 
+        breakpoint()
         if state_indices_decode is None and non_spec_state_indices_tensor is not None:
             state_indices_decode = non_spec_state_indices_tensor[
                 : attn_metadata.num_decodes
@@ -800,6 +805,13 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 if has_initial_state is not None:
                     chunk_has_initial_state = has_initial_state[:end_non_spec_prefill]
                     initial_state[~chunk_has_initial_state, ...] = 0
+
+            assert query_non_spec is not None
+            assert key_non_spec is not None
+            assert value_non_spec is not None
+            assert g_non_spec is not None
+            assert beta_non_spec is not None
+            cu_seqlens = non_spec_query_start_loc[: end_non_spec_prefill + 1]
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -812,7 +824,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 beta=beta_non_spec,
                 initial_state=initial_state,
                 output_final_state=True,
-                cu_seqlens=non_spec_query_start_loc[: end_non_spec_prefill + 1],
+                cu_seqlens=cu_seqlens,
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
                 return_intermediate_states=prefix_caching_enabled,
