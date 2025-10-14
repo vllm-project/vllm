@@ -864,6 +864,12 @@ class FlashInferImpl(AttentionImpl):
             # Profiling run.
             return output
 
+        # Ensure query dtype matches the expected dtype from attention metadata
+        assert attn_metadata.q_data_type == query.dtype, (
+            f"Query dtype mismatch: expected {attn_metadata.q_data_type}, "
+            f"got {query.dtype}"
+        )
+
         if self.bmm1_scale is None:
             self.bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
 

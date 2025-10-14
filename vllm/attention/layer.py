@@ -307,7 +307,10 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # for attn backends supporting query quantization
         self.query_quant = None
-        if self.kv_cache_dtype.startswith("fp8"):
+        if (
+            self.kv_cache_dtype.startswith("fp8")
+            and self.attn_backend.supports_quant_query_input
+        ):
             self.query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
     def forward(
@@ -329,11 +332,8 @@ class Attention(nn.Module, AttentionLayerBase):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
-
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(query, key, value, self.layer_name)
-
-        forward_context = get_forward_context()
         output_dtype = query.dtype
         if self.query_quant is not None:
             # quantizing with a simple torch operation enables
@@ -361,6 +361,7 @@ class Attention(nn.Module, AttentionLayerBase):
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size)
             if self.use_direct_call:
+                forward_context: ForwardContext = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
@@ -375,6 +376,7 @@ class Attention(nn.Module, AttentionLayerBase):
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
+                forward_context = get_forward_context()
                 attn_metadata = forward_context.attn_metadata
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]

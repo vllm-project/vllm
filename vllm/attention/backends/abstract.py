@@ -200,6 +200,17 @@ class AttentionImpl(ABC, Generic[T]):
         return False
 
     def supports_quant_query_input(self) -> bool:
+        """
+        Check if this attention implementation supports pre-quantized query input.
+
+        When True, the attention layer will quantize queries before passing them
+        to this backend, allowing torch.compile to fuse the quantization with
+        previous operations. This is typically supported when using FP8 KV cache
+        with compatible attention kernels (e.g., TRT-LLM).
+
+        Returns:
+            bool: True if the implementation can accept pre-quantized queries.
+        """
         return False
 
 
