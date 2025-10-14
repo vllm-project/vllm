@@ -278,10 +278,7 @@ def sequence_parallelism_pass_on_test_model(
 
     # this is a fake model name to construct the model config
     # in the vllm_config, it's not really used.
-    model_name = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e"
-    vllm_config.model_config = ModelConfig(
-        model=model_name, trust_remote_code=True, dtype=dtype, seed=42
-    )
+    vllm_config.model_config = ModelConfig(dtype=dtype, seed=42)
 
     noop_pass = NoOpEliminationPass(vllm_config)
     sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
