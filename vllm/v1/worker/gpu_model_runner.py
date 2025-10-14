@@ -2761,7 +2761,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         kv_connector_output.finished_sending)
                 final_kv_connector_output.finished_receving.update(
                         kv_connector_output.finished_receving)
-        
+
         final_token_ids = None
         for each_token_ids in cached_valid_sampled_token_ids:
             if final_token_ids is None:
