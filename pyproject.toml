@@ -107,6 +107,7 @@ markers = [
     "distributed: run this test only in distributed GPU tests",
     "skip_v1: do not run this test with v1",
     "optional: optional tests that are automatically skipped, include --optional to run them",
+    "extra_server_args: extra arguments to pass to the server fixture",
 ]
 
 [tool.ty.src]
