@@ -32,14 +32,14 @@ def test_basic_patterns():
     print("  ✓ q2k -> [(2048, 2048)]")
 
     # Decode
-    result = parse_batch_spec("8s1k")
+    result = parse_batch_spec("8q1s1k")
     assert len(result) == 8
     assert all(r.q_len == 1 and r.kv_len == 1024 for r in result)
     assert all(r.is_decode for r in result)
-    print("  ✓ 8s1k -> 8 x [(1, 1024)]")
+    print("  ✓ 8q1s1k -> 8 x [(1, 1024)]")
 
     # Context extension
-    result = parse_batch_spec("q1s2k")
+    result = parse_batch_spec("q1ks2k")
     assert len(result) == 1
     assert result[0].q_len == 1024
     assert result[0].kv_len == 2048
@@ -51,73 +51,61 @@ def test_combined_patterns():
     """Test combined batch specifications."""
     print("\nTesting combined patterns...")
 
-    result = parse_batch_spec("2q1k_32s1k")
+    result = parse_batch_spec("2q1k_32q1s1k")
     assert len(result) == 34
     assert sum(1 for r in result if r.is_prefill) == 2
     assert sum(1 for r in result if r.is_decode) == 32
-    print("  ✓ 2q1k_32s1k -> 2 prefill + 32 decode")
+    print("  ✓ 2q1k_32q1s1k -> 2 prefill + 32 decode")
 
-    result = parse_batch_spec("4q2k_spec8s1k_64s2k")
-    assert len(result) == 69
-    print("  ✓ 4q2k_spec8s1k_64s2k -> complex mix")
+    result = parse_batch_spec("4q2k_8q4s1k_64q1s2k")
+    assert len(result) == 76  # 4 + 8 + 64
+    print("  ✓ 4q2k_8q4s1k_64q1s2k -> complex mix")
 
 
-def test_speculative_decode():
-    """Test speculative decode patterns."""
-    print("\nTesting speculative decode...")
+def test_extend_patterns():
+    """Test context extension (extend) patterns."""
+    print("\nTesting extend patterns...")
 
-    result = parse_batch_spec("spec4s1k")
+    # 4-token extension with 1k context
+    result = parse_batch_spec("q4s1k")
     assert len(result) == 1
     assert result[0].q_len == 4
     assert result[0].kv_len == 1024
-    assert result[0].is_speculative
-    assert result[0].spec_length == 4
-    print("  ✓ spec4s1k -> 4-token speculative")
+    assert result[0].is_extend
+    assert not result[0].is_decode
+    assert not result[0].is_prefill
+    print("  ✓ q4s1k -> 4-token extend with 1k context")
 
-    result = parse_batch_spec("8spec8s2k")
+    # 8 requests of 8-token extension
+    result = parse_batch_spec("8q8s2k")
     assert len(result) == 8
-    assert all(r.is_speculative and r.spec_length == 8 for r in result)
-    print("  ✓ 8spec8s2k -> 8 x 8-token speculative")
-
-
-def test_chunked_prefill():
-    """Test chunked prefill patterns."""
-    print("\nTesting chunked prefill...")
-
-    result = parse_batch_spec("chunk8q16k")
-    assert len(result) == 1
-    assert result[0].q_len == 16384
-    assert result[0].is_chunked
-    assert result[0].chunk_size == 8
-    print("  ✓ chunk8q16k -> chunked 16k prefill")
-
-    result = parse_batch_spec("2chunk4q8k")
-    assert len(result) == 2
-    assert all(r.is_chunked and r.chunk_size == 4 for r in result)
-    print("  ✓ 2chunk4q8k -> 2 x chunked 8k prefill")
+    assert all(r.q_len == 8 and r.kv_len == 2048 for r in result)
+    assert all(r.is_extend for r in result)
+    print("  ✓ 8q8s2k -> 8 x 8-token extend with 2k context")
 
 
 def test_formatting():
     """Test batch spec formatting."""
     print("\nTesting formatting...")
 
-    requests = parse_batch_spec("2q2k_32s1k")
+    requests = parse_batch_spec("2q2k_32q1s1k")
     formatted = format_batch_spec(requests)
     assert "2 prefill" in formatted
     assert "32 decode" in formatted
     print(f"  ✓ Format: {formatted}")
 
-    requests = parse_batch_spec("spec4s1k_8s1k")
+    requests = parse_batch_spec("q4s1k_8q1s1k")
     formatted = format_batch_spec(requests)
-    assert "specdecode" in formatted
-    print(f"  ✓ Format with spec: {formatted}")
+    assert "1 extend" in formatted
+    assert "8 decode" in formatted
+    print(f"  ✓ Format with extend: {formatted}")
 
 
 def test_batch_stats():
     """Test batch statistics."""
     print("\nTesting batch statistics...")
 
-    requests = parse_batch_spec("2q2k_32s1k")
+    requests = parse_batch_spec("2q2k_32q1s1k")
     stats = get_batch_stats(requests)
 
     assert stats["total_requests"] == 34
@@ -162,9 +150,9 @@ def test_range_generation_simple():
     """Test simple range generation."""
     print("\nTesting range generation (simple)...")
 
-    ranges = [{"template": "q{q_len}s1k", "q_len": {"start": 1, "stop": 5, "step": 1}}]
+    ranges = [{"template": "q{q_len}ks1k", "q_len": {"start": 1, "stop": 5, "step": 1}}]
     specs = generate_batch_specs_from_ranges(ranges)
-    expected = ["q1s1k", "q2s1k", "q3s1k", "q4s1k", "q5s1k"]
+    expected = ["q1ks1k", "q2ks1k", "q3ks1k", "q4ks1k", "q5ks1k"]
     assert specs == expected, f"Expected {expected}, got {specs}"
     print(f"  ✓ Simple range: {len(specs)} specs generated")
 
@@ -174,11 +162,11 @@ def test_range_generation_multiple():
     print("\nTesting range generation (multiple ranges)...")
 
     ranges = [
-        {"template": "q{q_len}s1k", "q_len": {"start": 1, "stop": 3, "step": 1}},
-        {"template": "q{q_len}s1k", "q_len": {"start": 10, "stop": 20, "step": 5}},
+        {"template": "q{q_len}ks1k", "q_len": {"start": 1, "stop": 3, "step": 1}},
+        {"template": "q{q_len}ks1k", "q_len": {"start": 10, "stop": 20, "step": 5}},
     ]
     specs = generate_batch_specs_from_ranges(ranges)
-    expected = ["q1s1k", "q2s1k", "q3s1k", "q10s1k", "q15s1k", "q20s1k"]
+    expected = ["q1ks1k", "q2ks1k", "q3ks1k", "q10ks1k", "q15ks1k", "q20ks1k"]
     assert specs == expected, f"Expected {expected}, got {specs}"
     print(f"  ✓ Multiple ranges: {len(specs)} specs generated")
 
@@ -188,9 +176,9 @@ def test_range_generation_large():
     print("\nTesting range generation (large range)...")
 
     ranges = [
-        {"template": "q{q_len}s1k", "q_len": {"start": 1, "stop": 16, "step": 1}},
-        {"template": "q{q_len}s1k", "q_len": {"start": 17, "stop": 64, "step": 2}},
-        {"template": "q{q_len}s1k", "q_len": {"start": 65, "stop": 128, "step": 4}},
+        {"template": "q{q_len}ks1k", "q_len": {"start": 1, "stop": 16, "step": 1}},
+        {"template": "q{q_len}ks1k", "q_len": {"start": 17, "stop": 64, "step": 2}},
+        {"template": "q{q_len}ks1k", "q_len": {"start": 65, "stop": 128, "step": 4}},
     ]
     specs = generate_batch_specs_from_ranges(ranges)
     expected_count = 16 + 24 + 16  # (1-16) + (17,19,21...63) + (65,69,73...125)
@@ -206,14 +194,14 @@ def test_range_generation_cartesian():
 
     ranges = [
         {
-            "template": "q{q_len}s{kv_len}k",
+            "template": "q{q_len}ks{kv_len}k",
             "q_len": {"start": 1, "stop": 2, "step": 1},
             "kv_len": {"start": 1, "stop": 2, "step": 1},
         }
     ]
     specs = generate_batch_specs_from_ranges(ranges)
     # Should generate Cartesian product: (1,1), (1,2), (2,1), (2,2)
-    expected = ["q1s1k", "q1s2k", "q2s1k", "q2s2k"]
+    expected = ["q1ks1k", "q1ks2k", "q2ks1k", "q2ks2k"]
     assert specs == expected, f"Expected {expected}, got {specs}"
     print(f"  ✓ Cartesian product: {len(specs)} specs generated")
 
@@ -224,34 +212,34 @@ def test_range_generation_end_inclusive():
 
     # Test inclusive (default)
     ranges_inclusive = [
-        {"template": "q{q_len}s1k", "q_len": {"start": 1, "stop": 3, "step": 1}}
+        {"template": "q{q_len}ks1k", "q_len": {"start": 1, "stop": 3, "step": 1}}
     ]
     specs = generate_batch_specs_from_ranges(ranges_inclusive)
-    expected = ["q1s1k", "q2s1k", "q3s1k"]
+    expected = ["q1ks1k", "q2ks1k", "q3ks1k"]
     assert specs == expected, f"Expected {expected}, got {specs}"
     print(f"  ✓ end_inclusive default (true): {specs}")
 
     # Test explicit inclusive
     ranges_explicit_inclusive = [
         {
-            "template": "q{q_len}s1k",
+            "template": "q{q_len}ks1k",
             "q_len": {"start": 1, "stop": 5, "step": 1, "end_inclusive": True},
         }
     ]
     specs = generate_batch_specs_from_ranges(ranges_explicit_inclusive)
-    expected = ["q1s1k", "q2s1k", "q3s1k", "q4s1k", "q5s1k"]
+    expected = ["q1ks1k", "q2ks1k", "q3ks1k", "q4ks1k", "q5ks1k"]
     assert specs == expected, f"Expected {expected}, got {specs}"
     print("  ✓ end_inclusive=true: includes stop value")
 
     # Test exclusive
     ranges_exclusive = [
         {
-            "template": "q{q_len}s1k",
+            "template": "q{q_len}ks1k",
             "q_len": {"start": 1, "stop": 5, "step": 1, "end_inclusive": False},
         }
     ]
     specs = generate_batch_specs_from_ranges(ranges_exclusive)
-    expected = ["q1s1k", "q2s1k", "q3s1k", "q4s1k"]
+    expected = ["q1ks1k", "q2ks1k", "q3ks1k", "q4ks1k"]
     assert specs == expected, f"Expected {expected}, got {specs}"
     print("  ✓ end_inclusive=false: excludes stop value")
 
@@ -264,8 +252,7 @@ def main():
 
     test_basic_patterns()
     test_combined_patterns()
-    test_speculative_decode()
-    test_chunked_prefill()
+    test_extend_patterns()
     test_formatting()
     test_batch_stats()
     test_manual_batch()

@@ -210,22 +210,16 @@ def split_by_type(
         requests: List of BatchRequest
 
     Returns:
-        Dict with keys: 'decode', 'prefill', 'extend', 'speculative', 'chunked'
+        Dict with keys: 'decode', 'prefill', 'extend'
     """
     result = {
         "decode": [],
         "prefill": [],
         "extend": [],
-        "speculative": [],
-        "chunked": [],
     }
 
     for req in requests:
-        if req.is_chunked:
-            result["chunked"].append(req)
-        elif req.is_speculative:
-            result["speculative"].append(req)
-        elif req.is_decode:
+        if req.is_decode:
             result["decode"].append(req)
         elif req.is_prefill:
             result["prefill"].append(req)
@@ -252,8 +246,6 @@ def get_batch_stats(requests: list[BatchRequest]) -> dict:
         "num_decode": len(by_type["decode"]),
         "num_prefill": len(by_type["prefill"]),
         "num_extend": len(by_type["extend"]),
-        "num_speculative": len(by_type["speculative"]),
-        "num_chunked": len(by_type["chunked"]),
         "total_tokens": sum(r.q_len for r in requests),
         "total_kv_cache": sum(r.kv_len for r in requests),
         "max_q_len": max((r.q_len for r in requests), default=0),
