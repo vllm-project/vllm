@@ -3,7 +3,6 @@
 
 import hashlib
 import os
-from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
