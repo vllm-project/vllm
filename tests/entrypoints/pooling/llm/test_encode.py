@@ -31,12 +31,14 @@ TOKEN_IDS = [
 def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(model=MODEL_NAME,
-              max_num_batched_tokens=32768,
-              tensor_parallel_size=1,
-              gpu_memory_utilization=0.75,
-              enforce_eager=True,
-              seed=0)
+    llm = LLM(
+        model=MODEL_NAME,
+        max_num_batched_tokens=32768,
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.75,
+        enforce_eager=True,
+        seed=0,
+    )
 
     yield weakref.proxy(llm)
 
@@ -72,7 +74,6 @@ def test_multiple_pooling_params(llm: LLM):
     assert len(PROMPTS) == len(outputs)
 
 
-@pytest.mark.skip_global_cleanup
 def test_right_side_truncation(llm: LLM):
     # Embeddings models should truncate the end of the prompt
     tokenizer = llm.get_tokenizer()
