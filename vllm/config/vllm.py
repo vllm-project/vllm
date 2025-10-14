@@ -86,7 +86,6 @@ class VllmConfig:
 
     As a shorthand, one can append compilation arguments via 
     -0.parameter=arguement such as `-O.mode=3` (same as `-O='{"mode":3}'`).
-    NOTE: mode 3 is the default mode without any optimization.
 
     You can specify the full compilation config like so:
     `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
