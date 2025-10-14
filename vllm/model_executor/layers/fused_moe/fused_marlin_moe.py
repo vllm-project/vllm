@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused MoE utilities for GPTQ."""
 
+from collections.abc import Callable
+
 import torch
 from typing_extensions import override
 
@@ -22,7 +24,21 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     maybe_warn_marlin_atomic_add,
 )
 from vllm.scalar_type import ScalarType, scalar_types
-from vllm.utils import direct_register_custom_op
+
+
+def default_activation_func(
+    activation: str, output: torch.Tensor, input: torch.Tensor
+) -> None:
+    if activation == "silu":
+        torch.ops._C.silu_and_mul(output, input)
+    elif activation == "swigluoai":
+        # alpha = 1.702, limit = 7.0
+        torch.ops._C.swigluoai_and_mul(output, input)
+    else:
+        raise ValueError(
+            f"Unsupported activation: {activation}. "
+            "Only silu and swigluoai activations are supported."
+        )
 
 
 def fused_marlin_moe(
@@ -40,8 +56,9 @@ def fused_marlin_moe(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     activation: str | None = "silu",
-    activation_func: str | None = None,  # FIXME: type Callable
-    moe_sum: str | None = None,  # FIXME: type Callable
+    activation_func: Callable[[str, torch.Tensor, torch.Tensor], None]
+    | None = default_activation_func,
+    moe_sum: Callable[[torch.Tensor, torch.Tensor], None] | None = None,
     expert_map: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
@@ -190,22 +207,6 @@ def fused_marlin_moe(
         is_zp_float=False,
     )
 
-    if activation_func is None:
-
-        def activation_func(
-            activation: str, output: torch.Tensor, input: torch.Tensor
-        ) -> None:
-            if activation == "silu":
-                torch.ops._C.silu_and_mul(output, input)
-            elif activation == "swigluoai":
-                # alpha = 1.702, limit = 7.0
-                torch.ops._C.swigluoai_and_mul(output, input)
-            else:
-                raise ValueError(
-                    f"Unsupported activation: {activation}. "
-                    "Only silu and swigluoai activations are supported."
-                )
-
     activation_func(
         activation, intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
     )
@@ -252,44 +253,6 @@ def fused_marlin_moe(
         return torch.sum(intermediate_cache3.view(-1, topk, K), dim=1, out=output)
     else:
         return moe_sum(intermediate_cache3, output)
-
-
-def fused_marlin_moe_fake(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    gating_output: torch.Tensor | None,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    quant_type_id: int,
-    apply_router_weight_on_input: bool = False,
-    global_num_experts: int = -1,
-    global_scale1: torch.Tensor | None = None,
-    global_scale2: torch.Tensor | None = None,
-    expert_map: torch.Tensor | None = None,
-    g_idx1: torch.Tensor | None = None,
-    g_idx2: torch.Tensor | None = None,
-    sort_indices1: torch.Tensor | None = None,
-    sort_indices2: torch.Tensor | None = None,
-    w1_zeros: torch.Tensor | None = None,
-    w2_zeros: torch.Tensor | None = None,
-    workspace: torch.Tensor | None = None,
-    intermediate_cache13: torch.Tensor | None = None,
-    intermediate_cache2: torch.Tensor | None = None,
-    is_k_full: bool = True,
-    output: torch.Tensor | None = None,
-    inplace: bool = False,
-) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
-
-
-direct_register_custom_op(
-    op_name="fused_marlin_moe",
-    op_func=fused_marlin_moe,
-    fake_impl=fused_marlin_moe_fake,
-)
 
 
 class MarlinExperts(mk.FusedMoEPermuteExpertsUnpermute):
