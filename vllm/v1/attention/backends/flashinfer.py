@@ -21,8 +21,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.attention.ops.common import cp_lse_ag_out_ar
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.logger import init_logger
 from vllm.distributed.parallel_state import get_cp_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey, kFp8StaticTensorSym, kNvfp4Quant)
 from vllm.platforms import current_platform

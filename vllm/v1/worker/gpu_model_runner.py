@@ -8,7 +8,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union, cast, List
+from typing import TYPE_CHECKING, Any, List, NamedTuple, Optional, Union, cast
 
 import numpy as np
 import torch
@@ -31,8 +31,8 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
-    get_pp_group, get_tp_group, get_dcp_group, get_cp_group, graph_capture, is_global_first_rank,
-    prepare_communication_buffer_for_model)
+    get_cp_group, get_pp_group, get_tp_group, graph_capture,
+    is_global_first_rank, prepare_communication_buffer_for_model)
 from vllm.forward_context import (BatchDescriptor, DPMetadata,
                                   set_forward_context)
 from vllm.logger import init_logger
@@ -55,10 +55,10 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        GiB_bytes, check_use_alibi, get_dtype_size,
+                        GiB_bytes, cdiv, check_use_alibi, get_dtype_size,
                         is_pin_memory_available,
                         length_from_prompt_token_ids_or_embeds, round_up,
-                        supports_dynamo, cdiv)
+                        supports_dynamo)
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (

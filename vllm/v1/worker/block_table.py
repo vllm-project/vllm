@@ -5,7 +5,7 @@ from typing import Union
 import numpy as np
 import torch
 
-from vllm.distributed import get_dcp_group, get_cp_group
+from vllm.distributed import get_cp_group, get_dcp_group
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer

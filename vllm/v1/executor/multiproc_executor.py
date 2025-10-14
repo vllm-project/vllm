@@ -28,9 +28,9 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
-from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
-                                             get_pp_group, get_tp_group,
-                                             get_cp_group)
+from vllm.distributed.parallel_state import (get_cp_group, get_dp_group,
+                                             get_ep_group, get_pp_group,
+                                             get_tp_group)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import worker_receiver_cache_from_config
