@@ -1,5 +1,8 @@
 # AutoAWQ
 
+Notice:
+AutoAWQ has been deprecated but has been adopted by the vLLM project into [llm-compressor](https://github.com/vllm-project/llm-compressor), you can find more information about [AWQ in llm-compressor](https://github.com/vllm-project/llm-compressor/tree/main/examples/awq) or go to [AutoAWQ](https://github.com/casper-hansen/AutoAWQ) to see details about the deprecation.
+
 To create a new 4-bit quantized model, you can leverage [AutoAWQ](https://github.com/casper-hansen/AutoAWQ).
 Quantization reduces the model's precision from BF16/FP16 to INT4 which effectively reduces the total model memory footprint.
 The main benefits are lower latency and memory usage.
