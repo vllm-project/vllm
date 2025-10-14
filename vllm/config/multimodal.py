@@ -3,7 +3,7 @@
 
 import hashlib
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
