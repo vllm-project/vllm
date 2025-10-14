@@ -278,6 +278,270 @@ def create_performance_heatmap(results: list, output_path: str):
     plt.close()
 
 
+def heuristic_ratio_based(batch_size: int, seq_length_k: int) -> int:
+    """Original ratio-based heuristic (from visualize_numsplits.py)."""
+    ratio = seq_length_k / batch_size
+    if ratio >= 2.5:
+        return 8
+    elif ratio >= 1.2:
+        return 4
+    elif ratio >= 0.5:
+        return 2
+    else:
+        return 1
+
+
+def heuristic_constant(batch_size: int, seq_length_k: int) -> int:
+    """Ultra-simple constant heuristic: always use 2 for small batches."""
+    if batch_size <= 32:
+        return 2
+    else:
+        return 1
+
+
+def create_heuristic_policy_heatmaps(
+    optimal_splits: dict[tuple[int, int], int], output_dir: Path
+):
+    """Create heatmaps showing num_splits chosen by each heuristic policy."""
+    # Define heuristics to compare
+    heuristics = {
+        "Ratio-based": heuristic_ratio_based,
+        "Constant (batch<=32)": heuristic_constant,
+    }
+
+    # Extract unique batch sizes and sequence lengths
+    batch_sizes = sorted(set(b for b, _ in optimal_splits))
+    seq_lengths = sorted(set(s for _, s in optimal_splits), reverse=True)
+
+    # Create a separate heatmap for each heuristic
+    for heuristic_name, heuristic_func in heuristics.items():
+        # Build matrix of chosen num_splits
+        matrix = np.zeros((len(seq_lengths), len(batch_sizes)))
+
+        for i, seq_len in enumerate(seq_lengths):
+            for j, batch_size in enumerate(batch_sizes):
+                predicted_splits = heuristic_func(batch_size, seq_len)
+                matrix[i, j] = predicted_splits
+
+        # Create heatmap
+        _fig, ax = plt.subplots(figsize=(12, 8))
+
+        # Convert to log2 scale for coloring (same as optimal heatmap)
+        matrix_log2 = np.log2(matrix)
+
+        # Get min/max values
+        valid_values = matrix_log2[~np.isnan(matrix_log2)]
+        min_log2 = np.floor(valid_values.min())
+        max_log2 = np.ceil(valid_values.max())
+
+        vmin = min_log2 - 0.5
+        vmax = max_log2 + 0.5
+
+        # Create discrete colormap
+        n_colors = int(max_log2 - min_log2 + 1)
+        from matplotlib import cm
+
+        viridis = cm.viridis
+        indices = np.linspace(0, 1, n_colors)
+        colors_to_use = [viridis(i) for i in indices]
+        cmap = ListedColormap(colors_to_use)
+
+        # Create heatmap with log2 scaled data
+        im = ax.imshow(matrix_log2, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
+
+        # Set ticks
+        ax.set_xticks(np.arange(len(batch_sizes)))
+        ax.set_yticks(np.arange(len(seq_lengths)))
+        ax.set_xticklabels(batch_sizes)
+        ax.set_yticklabels([f"{s}k" for s in seq_lengths])
+
+        # Labels
+        ax.set_xlabel("Batch Size", fontsize=12, fontweight="bold")
+        ax.set_ylabel("Sequence Length", fontsize=12, fontweight="bold")
+        ax.set_title(
+            f"num_kv_splits Chosen by {heuristic_name} Policy",
+            fontsize=14,
+            fontweight="bold",
+            pad=20,
+        )
+
+        # Add text annotations (show actual value and mark mismatches)
+        for i in range(len(seq_lengths)):
+            for j in range(len(batch_sizes)):
+                value = matrix[i, j]
+                seq_len = seq_lengths[i]
+                batch_size = batch_sizes[j]
+                optimal = optimal_splits.get((batch_size, seq_len), None)
+
+                if not np.isnan(value):
+                    # Mark mismatches with red text
+                    if optimal is not None and int(value) != optimal:
+                        color = "red"
+                        text = f"{int(value)}\n✗"
+                    else:
+                        color = "black"
+                        text = str(int(value))
+
+                    ax.text(
+                        j,
+                        i,
+                        text,
+                        ha="center",
+                        va="center",
+                        color=color,
+                        fontsize=10,
+                        fontweight="bold",
+                    )
+
+        # Colorbar with power-of-2 labels
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label("num_kv_splits", rotation=270, labelpad=20, fontsize=12)
+        tick_positions = np.arange(min_log2, max_log2 + 1)
+        tick_labels = [str(int(2**i)) for i in tick_positions]
+        cbar.set_ticks(tick_positions)
+        cbar.set_ticklabels(tick_labels)
+
+        plt.tight_layout()
+
+        # Save with sanitized filename
+        safe_name = (
+            heuristic_name.lower().replace(" ", "_").replace("(", "").replace(")", "")
+        )
+        output_path = output_dir / f"numsplits_policy_{safe_name}.png"
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        print(f"Saved {heuristic_name} policy heatmap to {output_path}")
+        plt.close()
+
+
+def create_heuristic_speedup_heatmaps(
+    results: list, optimal_splits: dict[tuple[int, int], int], output_dir: Path
+):
+    """Create speedup heatmaps for each heuristic policy."""
+    # Define heuristics to compare
+    heuristics = {
+        "Ratio-based (Original)": heuristic_ratio_based,
+        "Constant (batch<=32)": heuristic_constant,
+    }
+
+    # Group results by batch_spec for performance lookup
+    by_batch_spec = {}
+    for result in results:
+        batch_spec = result["config"]["batch_spec"]
+        if batch_spec not in by_batch_spec:
+            by_batch_spec[batch_spec] = {}
+
+        if result["error"] is None and "mean_time" in result:
+            backend_name = result["config"]["backend"]
+            match = re.search(r"numsplits_(\d+)", backend_name)
+            if match:
+                num_splits = int(match.group(1))
+                by_batch_spec[batch_spec][num_splits] = result["mean_time"]
+
+    # Extract unique batch sizes and sequence lengths
+    batch_sizes = sorted(set(b for b, _ in optimal_splits))
+    seq_lengths = sorted(set(s for _, s in optimal_splits), reverse=True)
+
+    # Create a separate heatmap for each heuristic
+    for heuristic_name, heuristic_func in heuristics.items():
+        # Build speedup matrix for this heuristic
+        speedup_matrix = np.zeros((len(seq_lengths), len(batch_sizes)))
+        total_speedup = 0.0
+        count = 0
+
+        for i, seq_len in enumerate(seq_lengths):
+            for j, batch_size in enumerate(batch_sizes):
+                batch_spec = f"{batch_size}q1s{seq_len}k"
+                if batch_spec not in by_batch_spec:
+                    speedup_matrix[i, j] = np.nan
+                    continue
+
+                timings = by_batch_spec[batch_spec]
+                baseline_time = timings.get(1, None)
+
+                if not baseline_time:
+                    speedup_matrix[i, j] = np.nan
+                    continue
+
+                # Get the num_splits predicted by this heuristic
+                predicted_splits = heuristic_func(batch_size, seq_len)
+                predicted_time = timings.get(predicted_splits, baseline_time)
+                speedup = baseline_time / predicted_time
+
+                speedup_matrix[i, j] = speedup
+                total_speedup += speedup
+                count += 1
+
+        avg_speedup = total_speedup / count if count > 0 else 1.0
+
+        # Create heatmap
+        _fig, ax = plt.subplots(figsize=(12, 8))
+
+        # Colormap: 1.0 = white (neutral), higher = green (good)
+        max_speedup = np.nanmax(speedup_matrix)
+        colors_dict = {
+            "red": [(0.0, 1.0, 1.0), (1.0, 0.0, 0.0)],
+            "green": [(0.0, 1.0, 1.0), (1.0, 0.5, 0.5)],
+            "blue": [(0.0, 1.0, 1.0), (1.0, 0.0, 0.0)],
+        }
+        speedup_cmap = LinearSegmentedColormap("Speedup", colors_dict)
+
+        im = ax.imshow(
+            speedup_matrix,
+            cmap=speedup_cmap,
+            aspect="auto",
+            vmin=1.0,
+            vmax=max_speedup,
+        )
+
+        # Set ticks
+        ax.set_xticks(np.arange(len(batch_sizes)))
+        ax.set_yticks(np.arange(len(seq_lengths)))
+        ax.set_xticklabels(batch_sizes)
+        ax.set_yticklabels([f"{s}k" for s in seq_lengths])
+
+        # Labels
+        ax.set_xlabel("Batch Size", fontsize=12, fontweight="bold")
+        ax.set_ylabel("Sequence Length", fontsize=12, fontweight="bold")
+        ax.set_title(
+            f"Speedup with {heuristic_name} Policy\n"
+            f"(Average speedup: {avg_speedup:.3f}x vs. splits=1)",
+            fontsize=14,
+            fontweight="bold",
+            pad=20,
+        )
+
+        # Add text annotations
+        for i in range(len(seq_lengths)):
+            for j in range(len(batch_sizes)):
+                value = speedup_matrix[i, j]
+                if not np.isnan(value):
+                    ax.text(
+                        j,
+                        i,
+                        f"{value:.2f}x",
+                        ha="center",
+                        va="center",
+                        color="black",
+                        fontsize=9,
+                        fontweight="bold",
+                    )
+
+        # Colorbar
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label("Speedup Factor", rotation=270, labelpad=20, fontsize=12)
+
+        plt.tight_layout()
+
+        # Save with sanitized filename
+        safe_name = (
+            heuristic_name.lower().replace(" ", "_").replace("(", "").replace(")", "")
+        )
+        output_path = output_dir / f"numsplits_speedup_{safe_name}.png"
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        print(f"Saved {heuristic_name} speedup heatmap to {output_path}")
+        plt.close()
+
+
 def analyze_pattern(optimal_splits: dict[tuple[int, int], int]):
     """Analyze the pattern and suggest a formula."""
     print("\n" + "=" * 80)
@@ -320,53 +584,49 @@ def analyze_pattern(optimal_splits: dict[tuple[int, int], int]):
                 f"{np.mean(ratios):<12.1f}"
             )
 
-    # Suggest heuristic formula
+    # Test heuristics
     print("\n" + "=" * 80)
-    print("SUGGESTED HEURISTIC FORMULA")
+    print("HEURISTIC COMPARISON")
     print("=" * 80)
 
-    print("\nBased on the data, a simple heuristic could be:")
-    print("""
-    ratio = seq_length_k / batch_size
+    heuristics = {
+        "Ratio-based": heuristic_ratio_based,
+        "Constant (batch<=32)": heuristic_constant,
+    }
 
-    if ratio >= 4.0:
-        num_kv_splits = 8
-    elif ratio >= 2.0:
-        num_kv_splits = 4
-    elif ratio >= 1.0:
-        num_kv_splits = 2
-    else:
-        num_kv_splits = 1
-    """)
+    for name, heuristic_func in heuristics.items():
+        correct = 0
+        total = 0
+        mismatches = []
 
-    # Test the formula
-    print("\nTesting suggested formula against actual results:")
-    correct = 0
-    total = 0
+        for (batch, seq), actual_split in optimal_splits.items():
+            predicted_split = heuristic_func(batch, seq)
+            total += 1
+            if predicted_split == actual_split:
+                correct += 1
+            else:
+                mismatches.append((batch, seq, predicted_split, actual_split))
 
-    for (batch, seq), actual_split in optimal_splits.items():
-        ratio = seq / batch
-        if ratio >= 4.0:
-            predicted_split = 8
-        elif ratio >= 2.0:
-            predicted_split = 4
-        elif ratio >= 1.0:
-            predicted_split = 2
-        else:
-            predicted_split = 1
+        accuracy = 100 * correct / total
+        print(f"\n{name}:")
+        print(f"  Accuracy: {correct}/{total} = {accuracy:.1f}%")
 
-        total += 1
-        if predicted_split == actual_split:
-            correct += 1
-        elif total <= 10:  # Show first 10 mismatches
-            print(
-                f"  Mismatch: batch={batch:3d}, seq={seq:3d}k, "
-                f"predicted={predicted_split}, actual={actual_split}"
-            )
+        if mismatches and len(mismatches) <= 10:
+            print("  Mismatches:")
+            for batch, seq, pred, actual in mismatches:
+                print(
+                    f"    batch={batch:3d}, seq={seq:3d}k -> "
+                    f"predicted={pred}, actual={actual}"
+                )
+        elif mismatches:
+            print(f"  {len(mismatches)} mismatches (showing first 5):")
+            for batch, seq, pred, actual in mismatches[:5]:
+                print(
+                    f"    batch={batch:3d}, seq={seq:3d}k -> "
+                    f"predicted={pred}, actual={actual}"
+                )
 
-    accuracy = 100 * correct / total
-    print(f"\nFormula accuracy: {correct}/{total} = {accuracy:.1f}%")
-    print("=" * 80 + "\n")
+    print("\n" + "=" * 80 + "\n")
 
 
 def main():
@@ -390,6 +650,8 @@ def main():
 
     create_heatmap(optimal_splits, output_dir / "numsplits_heatmap.png")
     create_performance_heatmap(results, output_dir / "numsplits_speedup.png")
+    create_heuristic_policy_heatmaps(optimal_splits, output_dir)
+    create_heuristic_speedup_heatmaps(results, optimal_splits, output_dir)
 
     # Analyze pattern
     analyze_pattern(optimal_splits)
