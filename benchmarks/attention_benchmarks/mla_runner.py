@@ -56,20 +56,25 @@ def create_minimal_vllm_config(
     model_name: str = "deepseek-v3",
     block_size: int = 128,
     max_num_seqs: int = 256,
+    mla_dims: Optional[dict] = None,
 ) -> VllmConfig:
     """
     Create minimal VllmConfig for MLA benchmarks.
 
     Args:
-        model_name: Model name (deepseek-v2, deepseek-v3, etc.)
+        model_name: Model name (deepseek-v2, deepseek-v3, etc.) - used if mla_dims not
+                    provided
         block_size: KV cache block size
         max_num_seqs: Maximum number of sequences
+        mla_dims: Optional custom MLA dimensions dict. If not provided, uses
+                  setup_mla_dims(model_name)
 
     Returns:
         VllmConfig for benchmarking
     """
-    # Get MLA dimensions
-    mla_dims = setup_mla_dims(model_name)
+    # Get MLA dimensions - use provided or load from model name
+    if mla_dims is None:
+        mla_dims = setup_mla_dims(model_name)
 
     # Create model config
     model_config = ModelConfig(
@@ -337,7 +342,7 @@ def _create_input_tensors(
 
     MLA requires different tensor formats for decode vs prefill:
     - Decode: Uses kv_lora_rank (512) dimension
-    - Prefill: Uses qk_nope_head_dim (128) to stay under FlashAttention's 256 head dim limit
+    - Prefill: Uses qk_nope_head_dim (128) to stay under FlashAttention's 256 limit
 
     Args:
         total_q: Total number of query tokens
@@ -349,7 +354,7 @@ def _create_input_tensors(
     Returns:
         Tuple of (decode_inputs, prefill_inputs)
         - decode_inputs: Query tensor(s) for decode mode
-        - prefill_inputs: Dict with 'q', 'k_c_normed', 'k_pe', 'k_scale' for prefill mode
+        - prefill_inputs: Dict with 'q', 'k_c_normed', 'k_pe', 'k_scale' for prefill
     """
     if query_format == "tuple":
         # Decode mode format: (q_nope, q_pe) where q_nope has kv_lora_rank dim
@@ -516,6 +521,55 @@ def _create_backend_impl(
 
 
 # ============================================================================
+# Config Helpers
+# ============================================================================
+
+
+def _extract_mla_dims_from_config(config) -> Optional[dict]:
+    """
+    Extract MLA dimensions from BenchmarkConfig if all required fields are present.
+
+    Args:
+        config: BenchmarkConfig instance
+
+    Returns:
+        Dict with MLA dimensions if all fields are provided, None otherwise
+    """
+    # Check if all MLA-specific fields are provided
+    if all(
+        [
+            config.kv_lora_rank is not None,
+            config.qk_nope_head_dim is not None,
+            config.qk_rope_head_dim is not None,
+            config.v_head_dim is not None,
+        ]
+    ):
+        return {
+            "kv_lora_rank": config.kv_lora_rank,
+            "qk_nope_head_dim": config.qk_nope_head_dim,
+            "qk_rope_head_dim": config.qk_rope_head_dim,
+            "v_head_dim": config.v_head_dim,
+            "num_q_heads": config.num_q_heads,
+            "num_kv_heads": config.num_kv_heads,
+            "head_dim": config.head_dim,
+        }
+    # Fallback: if MLA fields not fully specified, try to construct from basic fields
+    elif config.head_dim == 576:
+        # This looks like a DeepSeek MLA config, use standard dimensions with custom
+        # head count
+        return {
+            "kv_lora_rank": 512,
+            "qk_nope_head_dim": 128,
+            "qk_rope_head_dim": 64,
+            "v_head_dim": 128,
+            "num_q_heads": config.num_q_heads,
+            "num_kv_heads": config.num_kv_heads,
+            "head_dim": config.head_dim,
+        }
+    return None
+
+
+# ============================================================================
 # Benchmark Execution
 # ============================================================================
 
@@ -653,14 +707,20 @@ def _run_mla_benchmark_batched(
     config_block_size = configs_with_params[0][0].block_size
     block_size = backend_cfg["block_size"] or config_block_size
 
+    # Extract MLA dimensions from the first config
+    first_config = configs_with_params[0][0]
+    mla_dims = _extract_mla_dims_from_config(first_config)
+
+    # If config didn't provide MLA dims, fall back to default model
+    if mla_dims is None:
+        mla_dims = setup_mla_dims("deepseek-v3")
+
     # Create and set vLLM config for MLA (reused across all benchmarks)
     vllm_config = create_minimal_vllm_config(
-        model_name="deepseek-v3",
+        model_name="deepseek-v3",  # Used only for model path
         block_size=block_size,
+        mla_dims=mla_dims,  # Use custom dims from config or default
     )
-
-    # Setup MLA dimensions (reused)
-    mla_dims = setup_mla_dims("deepseek-v3")
 
     results = []
 
