@@ -645,9 +645,6 @@ def sparse_attn_indexer(
             )
             num_rows = logits.shape[0]
             assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
-            # topk_indices = torch.empty(
-            #     num_rows, topk_tokens, dtype=torch.int32, device=logits.device
-            # )
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
@@ -699,9 +696,6 @@ def sparse_attn_indexer(
         )
         num_rows = logits.shape[0]
         assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
-        # topk_indices = torch.empty(
-        #     num_rows, topk_tokens, dtype=torch.int32, device=logits.device
-        # )
         topk_indices = topk_indices_buffer[:num_decode_tokens, :topk_tokens]
         topk_values = torch.empty(
             num_rows, topk_tokens, dtype=logits.dtype, device=logits.device
