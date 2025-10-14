@@ -978,12 +978,6 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
             **kwargs,
         )
 
-    def __init__(self, ctx: InputProcessingContext) -> None:
-        super().__init__(ctx)
-        mm_config = ctx.get_mm_config()
-        if getattr(mm_config, "mm_processor_dynamic_kwargs", None) is None:
-            mm_config.mm_processor_dynamic_kwargs = ["fps"]
-
 
 class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     def _get_mm_fields_config(
