@@ -47,7 +47,7 @@ def main(args):
         for data in response.json()["data"]:
             embedding.append(
                 torch.frombuffer(
-                    base64.b64decode(data["embedding"]), dtype=torch_dtype
+                    bytearray(base64.b64decode(data["embedding"])), dtype=torch_dtype
                 ).to(torch.float32)
             )
         embedding = torch.cat(embedding)

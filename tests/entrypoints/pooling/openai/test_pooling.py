@@ -282,7 +282,9 @@ async def test_base64_embed_dtype(server: RemoteOpenAIServer, model_name: str):
         base64_data = []
         for data in responses_base64.json()["data"]:
             base64_data.append(
-                torch.frombuffer(base64.b64decode(data["data"]), dtype=torch_dtype)
+                torch.frombuffer(
+                    bytearray(base64.b64decode(data["data"])), dtype=torch_dtype
+                )
                 .to(torch.float32)
                 .tolist()
             )
