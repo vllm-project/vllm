@@ -375,9 +375,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
-        self.async_output_copy_stream = (
-            torch.cuda.Stream() if self.use_async_scheduling else None
-        )
+        # Separate cuda stream for overlapping transfer of sampled token ids from
+        # GPU to CPU when async scheduling is enabled.
+        self.async_output_copy_stream: torch.cuda.Stream | None = None
+        # cuda event to synchronize use of reused CPU tensors between steps
+        # when async scheduling is enabled.
+        self.prepare_inputs_event: torch.cuda.Event | None = None
+        if self.use_async_scheduling:
+            self.async_output_copy_stream = torch.cuda.Stream()
+            self.prepare_inputs_event = torch.cuda.Event()
 
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
@@ -443,14 +449,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.mrope_positions = self._make_buffer(
                 (3, self.max_num_tokens + 1), dtype=torch.int64
             )
-
-        # CUDA event to synchronize use of reused CPU tensors between steps
-        # when async scheduling is enabled.
-        self.prepare_inputs_event: torch.cuda.Event | None = None
-        if self.use_async_scheduling:
-            self.prepare_inputs_event = torch.cuda.Event()
-            # Start in a completed state.
-            self.prepare_inputs_event.record(torch.cuda.default_stream())
 
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
@@ -2570,10 +2568,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logits = model_output_broadcast_data["logits"]
 
             # Apply structured output bitmasks if present
-            if scheduler_output.grammar_bitmask is not None:
-                apply_grammar_bitmask(
-                    scheduler_output, self.input_batch, logits, self.device
-                )
+            if scheduler_output.structured_output_request_ids:
+                apply_grammar_bitmask(scheduler_output, self.input_batch, logits)
 
         with record_function_or_nullcontext("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
