@@ -642,7 +642,7 @@ class TokenClassifierPoolerHead(nn.Module):
 
         self.classifier = classifier
         self.act_fn = ClassifierPooler.resolve_act_fn(
-            vllm_config.model_config, static_num_labels=True, act_fn=act_fn
+            vllm_config.model_config, static_num_labels=False, act_fn=act_fn
         )
         self.logit_bias: float | None = (
             vllm_config.model_config.pooler_config.logit_bias
@@ -654,16 +654,16 @@ class TokenClassifierPoolerHead(nn.Module):
 
     def forward(
         self,
-        hidden_size: torch.Tensor,
+        hidden_states: torch.Tensor,
         pooling_param: PoolingParams,
     ) -> torch.Tensor:
-        hidden_size = hidden_size.to(self.head_dtype)
-        # hidden_size shape: [n_token, hidden_size]
+        hidden_states = hidden_states.to(self.head_dtype)
+        # hidden_states shape: [n_token, hidden_size]
 
         if self.classifier is not None:
-            scores = self.classifier(hidden_size)
+            scores = self.classifier(hidden_states)
         else:
-            scores = hidden_size
+            scores = hidden_states
         # scores shape: [n_token, num_labels]
 
         if self.logit_bias is not None:
