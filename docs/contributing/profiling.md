@@ -235,3 +235,41 @@ Leverage VLLM_GC_DEBUG environment variable to debug GC costs.
 - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elpased times
 - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger to log top 5
   collected objects for each gc.collect
+
+## Lite Profiler
+
+The lite profiler is a lightweight, minimal-overhead profiling tool designed for capturing the time spent by the critical components of the system.
+
+### How It Works
+
+The lite profiler uses context managers to time code blocks and writes timing data to a log file with minimal overhead (~50KB buffer). After execution completes, it generates an aggregate summary report showing time spent in different pipeline stages.
+
+### Environment Variable
+
+Enable lite profiling by setting the `VLLM_LITE_PROFILER_LOG_PATH` environment variable to the desired log file path:
+
+```bash
+export VLLM_LITE_PROFILER_LOG_PATH=/tmp/vllm_lite_profile.log
+```
+
+### Example Commands and Usage
+
+#### Throughput Benchmark
+
+Profile throughput with the lite profiler:
+
+```bash
+VLLM_LITE_PROFILER_LOG_PATH=/tmp/vllm_lite_profile.log \
+vllm bench throughput \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --dataset-name random \
+    --num-prompts 1000 \
+    --input-len 128 \
+    --output-len 128
+```
+
+The profiler will automatically generate a summary report at the end showing time breakdowns for:
+
+- **Top-level pipeline events**: Schedule, Model execution, Output processing
+- **Model events**: State updates, input preparation, forward pass, postprocessing, bookkeeping
+```

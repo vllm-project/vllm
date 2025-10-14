@@ -35,7 +35,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils.async_utils import merge_async_iterators
-from vllm.utils.lite_profiler import maybe_emit_lite_profiler_report
+from vllm.utils.lite_profiler.lite_profiler import maybe_emit_lite_profiler_report
 
 
 def run_vllm(

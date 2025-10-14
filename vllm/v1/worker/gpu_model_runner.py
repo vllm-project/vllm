@@ -2588,12 +2588,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if scheduler_output.structured_output_request_ids:
                 apply_grammar_bitmask(scheduler_output, self.input_batch, logits)
 
-        with record_function_or_nullcontext("Model:Sample"):
+        with record_function_or_nullcontext("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
-            with record_function_or_nullcontext("Model:Draft"):
+            with record_function_or_nullcontext("Draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,
                     sampled_token_ids,
@@ -2631,7 +2631,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # as inputs, and does not need to wait for bookkeeping to finish.
             propose_draft_token_ids(sampler_output.sampled_token_ids)
 
-        with record_function_or_nullcontext("Model:Bookkeep"):
+        with record_function_or_nullcontext("Bookkeep"):
             (
                 num_nans_in_logits,
                 logprobs_lists,
@@ -2657,7 +2657,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # tokens on the CPU, so they are run after bookkeeping.
             propose_draft_token_ids(valid_sampled_token_ids)
 
-        with record_function_or_nullcontext("Model:EPLB"):
+        with record_function_or_nullcontext("EPLB"):
             self.eplb_step()
 
         output = ModelRunnerOutput(
