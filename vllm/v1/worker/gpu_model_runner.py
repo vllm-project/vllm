@@ -1438,7 +1438,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> list[list[int]] | None:
         """
         :return: Optional[common_prefix_lens]
-                   common_prefix_lens is 2D: [kv_cache_group_id][attn_group_idx],
+                   common_prefix_lens is 2D: ``[kv_cache_group_id][attn_group_idx]``,
                    None if we should not use cascade attention
         """
         use_cascade_attn = False
