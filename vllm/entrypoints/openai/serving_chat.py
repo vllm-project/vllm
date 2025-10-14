@@ -1116,7 +1116,7 @@ class OpenAIServingChat(OpenAIServing):
                                 request_id,
                             )
                             data = self.create_streaming_error_response(
-                                "Internal error: KV cache load failure"
+                                "Service temporarily unavailable"
                             )
                             yield f"data: {data}\n\n"
                             yield "data: [DONE]\n\n"
@@ -1320,13 +1320,13 @@ class OpenAIServingChat(OpenAIServing):
 
         assert final_res is not None
 
-        # Check for error finish reason and return 500 error
+        # Check for error finish reason and return 502 error
         for output in final_res.outputs:
             if output.finish_reason == "error":
                 return self.create_error_response(
-                    "Internal error: KV cache load failure",
-                    err_type="InternalServerError",
-                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "Service temporarily unavailable",
+                    err_type="BadGateway",
+                    status_code=HTTPStatus.BAD_GATEWAY,
                 )
 
         choices: list[ChatCompletionResponseChoice] = []
