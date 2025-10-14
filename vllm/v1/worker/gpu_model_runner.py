@@ -1284,12 +1284,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
         """
-        if common_prefix_lens is None:
-            common_prefix_lens = [
-                [0] * len(self.attn_groups[i])
-                for i in range(len(self.kv_cache_config.kv_cache_groups))
-            ]
-
         logits_indices_padded = None
         num_logits_indices = 0
         if logits_indices is not None:
@@ -1390,10 +1384,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.attn_groups[kv_cache_group_id]
             ):
                 # Use pre-computed cascade attention prefix length
-                if common_prefix_lens is not None:
-                    common_prefix_len = common_prefix_lens[kv_cache_group_id][
-                        attn_group_idx
-                    ]
+                common_prefix_len = (
+                    0
+                    if common_prefix_lens is None
+                    else common_prefix_lens[kv_cache_group_id][attn_group_idx]
+                )
                 builder = attn_group.get_metadata_builder()
 
                 extra_attn_metadata_args = {}
