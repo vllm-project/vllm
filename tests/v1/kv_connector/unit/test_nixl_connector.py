@@ -286,9 +286,12 @@ def test_prompt_less_than_block_size():
 class FakeNixlConnectorWorker(NixlConnectorWorker):
     REMOTE_ENGINE_ID = "remote_engine"
 
-    def __init__(self, *args, hand_shake_latency: float = 1.8, **kwargs):
+    def __init__(
+        self, *args, hand_shake_latency: float = 1.8, kv_cache_layout="HND", **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self._hand_shake_latency = hand_shake_latency
+        self.kv_cache_layout = kv_cache_layout
 
     def _nixl_handshake(
         self, host: str, port: int, remote_tp_size: int, expected_engine_id: str
@@ -564,9 +567,62 @@ class TestNixlHandshake:
 
             # We don't check layout for homogeneous TP and MLA for now, as the
             # whole block is moved.
-            worker.add_remote_agent(meta, remote_tp_size=2)
+            with pytest.raises(RuntimeError):
+                # mismatched layout is expected to fail
+                worker.add_remote_agent(meta, remote_tp_size=2)
             with pytest.raises(AssertionError):
                 worker.add_remote_agent(meta, remote_tp_size=1)
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_handshake_succeed_on_kv_cache_layout_mismatch_with_experimental(
+        self, dist_init
+    ):
+        """
+        Verify that adding a remote agent fails if kv_cache_layout differs.
+        This test is only relevant for heterogeneous TP.
+        """
+        vllm_config = create_vllm_config(enable_permute_local_kv=True)
+
+        # Mock TP world size to 2 to force heterogeneous TP when
+        # remote_tp_size=1
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.get_tensor_model_parallel_world_size",  # noqa: E501
+            return_value=2,
+        ):
+            # Initialize connector and worker (with fake NIXL wrapper)
+            connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+            connector.connector_worker = FakeNixlConnectorWorker(
+                vllm_config,
+                connector.engine_id,
+                hand_shake_latency=0,
+                kv_cache_layout="NHD",
+            )
+            worker = connector.connector_worker
+
+            # Minimal local registration params used by add_remote_agent
+            worker.slot_size_per_layer = [2048]
+            worker.block_len_per_layer = [2048 * worker.block_size]
+            worker.num_blocks = 1
+            worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+
+            # Metadata with different kv_cache_layout than local worker
+            meta = NixlAgentMetadata(
+                engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+                kv_caches_base_addr=[0],
+                num_blocks=1,
+                # prefill TP=1, decode TP=2, remote block_lens is double to local
+                block_lens=[i * 2 for i in worker.block_len_per_layer],
+                attn_backend_name=worker.backend_name,
+                kv_cache_layout="HND",
+            )
+
+            # We don't check layout for homogeneous TP and MLA for now, as the
+            # whole block is moved.
+            worker.add_remote_agent(meta, remote_tp_size=1)
 
 
 # NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
