@@ -102,7 +102,7 @@ class DefaultEplb(EplbPolicy):
         num_groups: int,
         num_nodes: int,
         num_gpus: int,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Parameters:
             weight: [num_moe_layers, num_logical_experts]
