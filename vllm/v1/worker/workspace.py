@@ -90,7 +90,7 @@ class WorkspaceManager:
         # Cache num ubatches at init based on configuration
         self._num_ubatches = 2 if vllm_config.parallel_config.enable_dbo else 1
         # List of workspace groups, where each group is a tuple of specs
-        # that were reserved together (via reserve or reserve_multiple)
+        # that were reserved together (via reserve or reserve_simultaneous)
         self._reserved_workspaces: list[tuple[WorkspaceSpec, ...]] = []
         self._current_workspaces: list[torch.Tensor | None] = [None, None]
         self._num_kv_cache_tokens: int | None = None
@@ -171,18 +171,18 @@ class WorkspaceManager:
             max_workspace_bytes = max(max_workspace_bytes, group_bytes)
 
         already_allocated = self.current_allocated_size_bytes()
-        expected_workspace = max_workspace_bytes
+        reserved_workspace_size = max_workspace_bytes
 
-        # If already allocated >= expected, no need to reserve more memory.
+        # If already allocated >= reserved, no need to reserve more memory.
         # This can happen if:
         # 1. Workspace already sized appropriately from previous profiling
         # 2. A .get() was called for a buffer not reserved during profiling,
         #    causing the workspace to resize larger than expected. This is fine
         #    since .get() acts as an implicit reserve in that case.
-        if already_allocated >= expected_workspace:
+        if already_allocated >= reserved_workspace_size:
             return available_memory
 
-        workspace_to_reserve = expected_workspace - already_allocated
+        workspace_to_reserve = reserved_workspace_size - already_allocated
         return max(available_memory - workspace_to_reserve, 0)
 
     def reserve(self, spec: "WorkspaceSpec") -> None:
@@ -208,8 +208,8 @@ class WorkspaceManager:
         if self._workspace_size_bytes(self._current_workspaces[0]) < num_bytes:
             self._increase_size(num_bytes, spec.name)
 
-    def reserve_multiple(self, *specs: "WorkspaceSpec") -> None:
-        """Reserve workspace memory for multiple specs efficiently.
+    def reserve_simultaneous(self, *specs: "WorkspaceSpec") -> None:
+        """Reserve workspace memory for multiple specs simultaneously.
 
         For PerKVCacheTokenWorkspace specs, this just registers them.
         For regular WorkspaceSpec specs, this registers them and allocates
@@ -267,8 +267,8 @@ class WorkspaceManager:
 
         return shape, num_bytes
 
-    def get_multiple(self, *specs: "WorkspaceSpec") -> list[torch.Tensor]:
-        """Get multiple workspace tensors efficiently from a single allocation.
+    def get_simultaneous(self, *specs: "WorkspaceSpec") -> list[torch.Tensor]:
+        """Get multiple workspace tensors simultaneously from a single allocation.
 
         Args:
             *specs: One or more workspace specifications.

@@ -758,7 +758,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         # as it is large enough. This will not always be the case for standard
         # format experts and with experts that have empty workspaces.
         if num_chunks == 1 and prod(workspace13_shape) >= prod(fused_out_shape):
-            workspace13, workspace2 = current_workspace_manager().get_multiple(
+            workspace13, workspace2 = current_workspace_manager().get_simultaneous(
                 workspace13_spec, workspace2_spec
             )
             fused_out = _resize_cache(workspace13, fused_out_shape)
@@ -767,7 +767,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 shape=fused_out_shape, dtype=out_dtype, name="moe.fused_out"
             )
             workspace13, workspace2, fused_out = (
-                current_workspace_manager().get_multiple(
+                current_workspace_manager().get_simultaneous(
                     workspace13_spec, workspace2_spec, fused_out_spec
                 )
             )

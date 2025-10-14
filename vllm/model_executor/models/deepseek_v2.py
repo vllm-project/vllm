@@ -612,7 +612,7 @@ def sparse_attn_indexer(
 
         # Get the full shared workspace buffers once (will allocate on first use)
         workspace_manager = current_workspace_manager()
-        k_fp8_full, k_scale_full = workspace_manager.get_multiple(
+        k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
             k_fp8_spec, k_scale_spec
         )
 

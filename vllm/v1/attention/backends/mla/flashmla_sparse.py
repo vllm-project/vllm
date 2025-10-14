@@ -250,6 +250,7 @@ def triton_convert_req_index_to_global_index(
     has_prefill = prefill_token_mask is not None
     if has_prefill:
         assert prefill_unique_count is not None
+        assert prefill_seen is not None
         prefill_unique_count.zero_()
 
     _convert_req_index_to_global_index_kernel[grid](
@@ -466,25 +467,21 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         assert indexer is not None
         self.topk_indices_buffer = indexer.topk_indices_buffer
         self.padding = 128 if current_platform.is_device_capability(100) else 64
-
-        self.prefill_bf16_workspace_spec = PerKVCacheTokenWorkspace(
-            shape=(head_size,), dtype=torch.bfloat16, name="prefill_bf16_workspace"
-        )
+        self.workspace_reservation_done = False
 
         # Workspace specs for prefill buffers
+        # Note: these are also registered in FlashMLASparseMetadataBuilder.__init__()
+        # before memory profiling to ensure proper memory accounting
+        self.prefill_bf16_workspace_spec = PerKVCacheTokenWorkspace(
+            shape=(head_size,),
+            dtype=torch.bfloat16,
+            name="FlashMLASparseImpl.prefill_bf16_workspace",
+        )
         self.prefill_seen_workspace_spec = PerKVCacheTokenWorkspace(
-            shape=(), dtype=torch.int32, name="prefill_seen_buffer"
+            shape=(), dtype=torch.int32, name="FlashMLASparseImpl.prefill_seen_buffer"
         )
         self.prefill_unique_output_workspace_spec = PerKVCacheTokenWorkspace(
-            shape=(), dtype=torch.int32, name="prefill_unique_output"
-        )
-
-        # Reserve all three workspace specs together to ensure they're live
-        # simultaneously
-        current_workspace_manager().reserve_multiple(
-            self.prefill_seen_workspace_spec,
-            self.prefill_unique_output_workspace_spec,
-            self.prefill_bf16_workspace_spec,
+            shape=(), dtype=torch.int32, name="FlashMLASparseImpl.prefill_unique_output"
         )
 
         # Small buffer allocated directly
@@ -553,7 +550,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         k_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
-        attn_metadata: FlashMLASparseMetadata,
+        attn_metadata: FlashMLASparseMetadata | None,
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
@@ -569,6 +566,18 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             )
 
         if attn_metadata is None:
+            # Profiling run, make sure to reserve the workspace specs if
+            # they haven't been reserved yet
+            # These need to be registered here (not in FlashMLASparseImpl.__init__)
+            # so they're accounted for during memory profiling
+            if self.use_fp8_kv_cache and not self.workspace_reservation_done:
+                self.workspace_reservation_done = True
+                current_workspace_manager().reserve_simultaneous(
+                    self.prefill_seen_workspace_spec,
+                    self.prefill_unique_output_workspace_spec,
+                    self.prefill_bf16_workspace_spec,
+                )
+
             # Dummy run - no need to allocate buffers
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
@@ -620,13 +629,11 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             )
             prefill_token_mask[attn_metadata.num_decode_tokens :] = True
 
-            # Get all prefill buffers from workspace using get_multiple
-            # to ensure they are live simultaneously
             (
                 prefill_seen,
                 prefill_unique_out,
                 prefill_bf16_workspace,
-            ) = current_workspace_manager().get_multiple(
+            ) = current_workspace_manager().get_simultaneous(
                 self.prefill_seen_workspace_spec,
                 self.prefill_unique_output_workspace_spec,
                 self.prefill_bf16_workspace_spec,
