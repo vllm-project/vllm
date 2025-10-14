@@ -1435,10 +1435,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         num_scheduled_tokens: np.ndarray,
         num_common_prefix_blocks: list[int],
-    ) -> tuple[list[list[int]], bool]:
+    ) -> list[list[int]] | None:
         """
-        :return: tuple[common_prefix_lens, use_cascade_attn]
-                 common_prefix_lens is 2D: [kv_cache_group_id][attn_group_idx]
+        :return: Optional[common_prefix_lens]
+                   common_prefix_lens is 2D: [kv_cache_group_id][attn_group_idx],
+                   None if we should not use cascade attention
         """
         use_cascade_attn = False
         num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
@@ -1455,7 +1456,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_prefix_lens[kv_cache_gid].append(prefix_len)
                 use_cascade_attn |= prefix_len > 0
 
-        return common_prefix_lens, use_cascade_attn
+        return common_prefix_lens if use_cascade_attn else None
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -2470,13 +2471,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
                 common_prefix_lens = None
-                use_cascade_attn = False
                 if self.cascade_attn_enabled:
-                    common_prefix_lens, use_cascade_attn = (
-                        self._compute_cascade_attn_prefix_lens(
-                            num_scheduled_tokens_np,
-                            scheduler_output.num_common_prefix_blocks,
-                        )
+                    common_prefix_lens = self._compute_cascade_attn_prefix_lens(
+                        num_scheduled_tokens_np,
+                        scheduler_output.num_common_prefix_blocks,
                     )
 
                 (
@@ -2490,7 +2488,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 # Disable cascade attention when using microbatching (DBO)
                 if ubatch_slices is not None:
-                    use_cascade_attn = False
                     common_prefix_lens = None
 
                 total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -2538,7 +2535,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_tokens=num_input_tokens, uniform_decode=uniform_decode
             )
             cudagraph_runtime_mode, batch_descriptor = (
-                self.cudagraph_dispatcher.dispatch(batch_descriptor, use_cascade_attn)
+                self.cudagraph_dispatcher.dispatch(
+                    batch_descriptor, use_cascade_attn=common_prefix_lens is not None
+                )
             )
 
         # Set cudagraph mode to none if calc_kv_scales is true.
