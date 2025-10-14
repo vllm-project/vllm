@@ -1381,6 +1381,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_prefix_len = (
                     0
                     if common_prefix_lens is None
+                    or isinstance(attn_group.kv_cache_spec, EncoderOnlyAttentionSpec)
                     else common_prefix_lens[kv_cache_gid][attn_gid]
                 )
                 builder = attn_group.get_metadata_builder()
@@ -1447,6 +1448,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         for kv_cache_gid in range(num_kv_cache_groups):
             for attn_group in self.attn_groups[kv_cache_gid]:
+                if isinstance(attn_group.kv_cache_spec, EncoderOnlyAttentionSpec):
+                    continue
                 prefix_len = self._compute_cascade_attn_prefix_len(
                     num_scheduled_tokens,
                     num_common_prefix_blocks[kv_cache_gid],
@@ -1482,9 +1485,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Returns:
             int: Length of common prefix in tokens.
         """
-
-        if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
-            return 0
 
         common_prefix_len = num_common_prefix_blocks * kv_cache_spec.block_size
         if common_prefix_len == 0:
