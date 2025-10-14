@@ -147,7 +147,7 @@ def test_tp2_serialize_and_deserialize_lora(
     tmp_path, sql_lora_files, sql_lora_huggingface_id
 ):
     # Run the tensorizing of the LoRA adapter and the model in a subprocess
-    # to guarantee cleanup
+    # to guarantee cleanup.
 
     tp_size = 2
     model_name = "model-rank-%03d.tensors"
