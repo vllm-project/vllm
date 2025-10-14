@@ -2218,7 +2218,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.total_step = 1
         else:
             self.total_step = 1
-        
+
         cached_valid_sampled_token_ids = []
         final_kv_connector_output = KVConnectorOutput()
         final_kv_connector_output.finished_sending = set()
