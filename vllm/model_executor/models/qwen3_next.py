@@ -490,8 +490,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             )
         )
         non_spec_state_indices_runtime = non_spec_state_indices_tensor
-        state_indices_decode: Optional[torch.Tensor] = None
-        state_indices_prefill: Optional[torch.Tensor] = None
+        state_indices_decode: torch.Tensor | None = None
+        state_indices_prefill: torch.Tensor | None = None
 
         start_non_spec_prefill = attn_metadata.num_decodes
         end_non_spec_prefill = start_non_spec_prefill + attn_metadata.num_prefills
@@ -534,24 +534,32 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 valid_out = (block_idx_last_scheduled_token_d[:num_decodes] >= 0) & (
                     slot_out >= 0
                 )
-                diff_mask = (slot_in != slot_out) & valid_in & valid_out
-                diff_positions = torch.nonzero(diff_mask, as_tuple=False).squeeze(-1)
-                if diff_positions.numel() > 0:
-                    slot_out_masked = slot_out.index_select(0, diff_positions).to(
-                        device=conv_state.device, dtype=torch.long
-                    )
-                    slot_in_masked = slot_in.index_select(0, diff_positions).to(
-                        device=conv_state.device, dtype=torch.long
-                    )
+                slot_out_safe = torch.where(
+                    valid_out,
+                    slot_out,
+                    base_decode_slots,
+                )
+                slot_in_safe = torch.where(
+                    valid_in,
+                    slot_in,
+                    slot_out_safe,
+                )
+                slot_out_copy = slot_out_safe.clamp(min=0).to(
+                    device=conv_state.device, dtype=torch.long
+                )
+                slot_in_copy = slot_in_safe.clamp(min=0).to(
+                    device=conv_state.device, dtype=torch.long
+                )
+                if slot_out_copy.numel() > 0:
                     conv_state.index_copy_(
                         0,
-                        slot_out_masked,
-                        conv_state.index_select(0, slot_in_masked),
+                        slot_out_copy,
+                        conv_state.index_select(0, slot_in_copy),
                     )
                     ssm_state.index_copy_(
                         0,
-                        slot_out_masked,
-                        ssm_state.index_select(0, slot_in_masked),
+                        slot_out_copy,
+                        ssm_state.index_select(0, slot_in_copy),
                     )
                 updated_decode_slots = torch.where(
                     valid_out,
@@ -593,24 +601,32 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 valid_out = (block_idx_last_scheduled_token_p[:num_prefills] >= 0) & (
                     slot_out >= 0
                 )
-                diff_mask = (slot_in != slot_out) & valid_in & valid_out
-                diff_positions = torch.nonzero(diff_mask, as_tuple=False).squeeze(-1)
-                if diff_positions.numel() > 0:
-                    slot_out_masked = slot_out.index_select(0, diff_positions).to(
-                        device=conv_state.device, dtype=torch.long
-                    )
-                    slot_in_masked = slot_in.index_select(0, diff_positions).to(
-                        device=conv_state.device, dtype=torch.long
-                    )
+                slot_out_safe = torch.where(
+                    valid_out,
+                    slot_out,
+                    base_prefill_slots,
+                )
+                slot_in_safe = torch.where(
+                    valid_in,
+                    slot_in,
+                    slot_out_safe,
+                )
+                slot_out_copy = slot_out_safe.clamp(min=0).to(
+                    device=conv_state.device, dtype=torch.long
+                )
+                slot_in_copy = slot_in_safe.clamp(min=0).to(
+                    device=conv_state.device, dtype=torch.long
+                )
+                if slot_out_copy.numel() > 0:
                     conv_state.index_copy_(
                         0,
-                        slot_out_masked,
-                        conv_state.index_select(0, slot_in_masked),
+                        slot_out_copy,
+                        conv_state.index_select(0, slot_in_copy),
                     )
                     ssm_state.index_copy_(
                         0,
-                        slot_out_masked,
-                        ssm_state.index_select(0, slot_in_masked),
+                        slot_out_copy,
+                        ssm_state.index_select(0, slot_in_copy),
                     )
 
                 updated_prefill_slots = torch.where(
@@ -817,78 +833,69 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                             ssm_state.dtype
                         ),
                     )
-            if prefix_caching_enabled:
-                if (
-                    block_state_history is not None
-                    and block_state_history.numel() > 0
-                    and block_idx_first_scheduled_token_p is not None
-                    and block_idx_last_scheduled_token_p is not None
-                    and state_indices_tensor_p is not None
-                    and attn_metadata.last_chunk_indices_p is not None
-                    and attn_metadata.num_computed_tokens_p is not None
-                    and attn_metadata.chunk_size is not None
-                    and attn_metadata.block_size is not None
-                ):
-                    block_history = block_state_history.to(ssm_state.dtype)
-                    chunk_size = attn_metadata.chunk_size
-                    block_size = attn_metadata.block_size
-                    chunk_stride = block_size // chunk_size
-                    last_chunk_indices = attn_metadata.last_chunk_indices_p
-                    last_chunk_indices_long = last_chunk_indices.to(torch.long)
-                    num_computed_tokens_p = attn_metadata.num_computed_tokens_p
+            if prefix_caching_enabled and (
+                block_state_history is not None
+                and block_state_history.numel() > 0
+                and block_idx_first_scheduled_token_p is not None
+                and block_idx_last_scheduled_token_p is not None
+                and state_indices_tensor_p is not None
+                and attn_metadata.last_chunk_indices_p is not None
+                and attn_metadata.num_computed_tokens_p is not None
+                and attn_metadata.chunk_size is not None
+                and attn_metadata.block_size is not None
+            ):
+                block_history = block_state_history.to(ssm_state.dtype)
+                chunk_size = attn_metadata.chunk_size
+                block_size = attn_metadata.block_size
+                chunk_stride = block_size // chunk_size
+                last_chunk_indices = attn_metadata.last_chunk_indices_p
+                last_chunk_indices_long = last_chunk_indices.to(torch.long())
+                num_computed_tokens_p = attn_metadata.num_computed_tokens_p
 
-                    for seq_idx in range(attn_metadata.num_prefills):
-                        block_first = int(
-                            block_idx_first_scheduled_token_p[seq_idx].item()
-                        )
-                        block_last = int(
-                            block_idx_last_scheduled_token_p[seq_idx].item()
-                        )
-                        n_blocks_to_fill = block_last - block_first
-                        if n_blocks_to_fill <= 0:
-                            continue
+                for seq_idx in range(attn_metadata.num_prefills):
+                    block_first = int(block_idx_first_scheduled_token_p[seq_idx].item())
+                    block_last = int(block_idx_last_scheduled_token_p[seq_idx].item())
+                    n_blocks_to_fill = block_last - block_first
+                    if n_blocks_to_fill <= 0:
+                        continue
 
-                        cache_blocks = state_indices_tensor_p[
-                            seq_idx, block_first:block_last
-                        ].to(torch.long)
+                    cache_blocks = state_indices_tensor_p[
+                        seq_idx, block_first:block_last
+                    ].to(torch.long)
 
-                        first_chunk = (
-                            0
-                            if seq_idx == 0
-                            else int(last_chunk_indices[seq_idx - 1].item()) + 1
-                        )
-                        first_aligned_chunk = first_chunk + chunk_stride - 1
-                        num_unaligned_tokens = int(
-                            num_computed_tokens_p[seq_idx].item() % block_size
-                        )
-                        if num_unaligned_tokens > 0:
-                            first_aligned_chunk -= num_unaligned_tokens // chunk_size
-                        chunk_stop = (
-                            first_aligned_chunk + n_blocks_to_fill * chunk_stride
-                        )
-                        cached_states = block_history[
-                            first_aligned_chunk:chunk_stop:chunk_stride
-                        ]
-                        ssm_state[cache_blocks] = cached_states
+                    first_chunk = (
+                        0
+                        if seq_idx == 0
+                        else int(last_chunk_indices[seq_idx - 1].item()) + 1
+                    )
+                    first_aligned_chunk = first_chunk + chunk_stride - 1
+                    num_unaligned_tokens = int(
+                        num_computed_tokens_p[seq_idx].item() % block_size
+                    )
+                    if num_unaligned_tokens > 0:
+                        first_aligned_chunk -= num_unaligned_tokens // chunk_size
+                    chunk_stop = first_aligned_chunk + n_blocks_to_fill * chunk_stride
+                    cached_states = block_history[
+                        first_aligned_chunk:chunk_stop:chunk_stride
+                    ]
+                    ssm_state[cache_blocks] = cached_states
 
-                    final_slots = state_indices_tensor_p.gather(
-                        1, block_idx_last_scheduled_token_p.unsqueeze(1)
-                    ).squeeze(1)
-                    valid_final = final_slots >= 0
-                    valid_final_positions = torch.nonzero(
-                        valid_final, as_tuple=False
-                    ).squeeze(-1)
-                    if valid_final_positions.numel() > 0:
-                        final_slot_ids = final_slots.index_select(
-                            0, valid_final_positions
-                        ).to(device=ssm_state.device, dtype=torch.long)
-                        final_states = block_history.index_select(
-                            0,
-                            last_chunk_indices_long.index_select(
-                                0, valid_final_positions
-                            ),
-                        )
-                        ssm_state.index_copy_(0, final_slot_ids, final_states)
+                final_slots = state_indices_tensor_p.gather(
+                    1, block_idx_last_scheduled_token_p.unsqueeze(1)
+                ).squeeze(1)
+                valid_final = final_slots >= 0
+                valid_final_positions = torch.nonzero(
+                    valid_final, as_tuple=False
+                ).squeeze(-1)
+                if valid_final_positions.numel() > 0:
+                    final_slot_ids = final_slots.index_select(
+                        0, valid_final_positions
+                    ).to(device=ssm_state.device, dtype=torch.long)
+                    final_states = block_history.index_select(
+                        0,
+                        last_chunk_indices_long.index_select(0, valid_final_positions),
+                    )
+                    ssm_state.index_copy_(0, final_slot_ids, final_states)
         elif attn_metadata.num_decodes > 0:
             assert state_indices_decode is not None
             core_attn_out_non_spec, last_recurrent_state = (
@@ -1384,7 +1391,6 @@ class Qwen3NextForCausalLM(
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
         scheduler_config = vllm_config.scheduler_config
         self.quant_config = vllm_config.quant_config

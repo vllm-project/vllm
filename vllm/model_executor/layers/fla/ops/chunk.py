@@ -24,7 +24,7 @@ from .wy_fast import recompute_w_u_fwd
 
 def _reshape_intermediate_states(
     states: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor],
+    cu_seqlens: torch.LongTensor | None,
 ) -> torch.Tensor:
     """Return a chunk-major view of the kernel's intermediate states."""
 
