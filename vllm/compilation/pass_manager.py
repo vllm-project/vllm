@@ -71,9 +71,11 @@ class PostGradPassManager(CustomGraphPass):
 
         shape = get_pass_context().runtime_shape
         for pass_ in self.passes:
-            if pass_.is_applicable_for_shape(shape):
+            if pass_.is_applicable(shape):
                 pass_(graph)
                 VllmInductorPass.dump_prefix += 1
+            else:
+                logger.debug("Skipping %s with shape %s", pass_, shape)
 
         # post-cleanup goes before fix_functionalization
         # because it requires a functional graph
