@@ -522,5 +522,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Mamba2ForCausalLM": MambaModelConfig,
     "FalconMambaForCausalLM": MambaModelConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
-    "Qwen2_5_VLForConditionalGeneration": Qwen2_5_VLDynamicConfig,
+    "Qwen2_5_VLForConditionalGeneration": Qwen2_5_VLMultiModalConfig,
 }
