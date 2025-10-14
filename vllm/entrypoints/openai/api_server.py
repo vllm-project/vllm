@@ -851,8 +851,7 @@ async def create_transcriptions(
             content=generator.model_dump(), status_code=generator.error.code
         )
 
-    elif isinstance(generator,
-                    (TranscriptionResponse, TranscriptionResponseVerbose)):
+    elif isinstance(generator, TranscriptionResponse | TranscriptionResponseVerbose):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
@@ -891,8 +890,7 @@ async def create_translations(
             content=generator.model_dump(), status_code=generator.error.code
         )
 
-    elif isinstance(generator,
-                    (TranslationResponse, TranslationResponseVerbose)):
+    elif isinstance(generator, TranslationResponse | TranslationResponseVerbose):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")

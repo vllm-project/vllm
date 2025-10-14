@@ -50,10 +50,13 @@ class OpenAIServingTranscription(OpenAISpeechToText):
         )
 
     async def create_transcription(
-        self, audio_data: bytes, request: TranscriptionRequest,
-        raw_request: Request
-    ) -> TranscriptionResponse | TranscriptionResponseVerbose | AsyncGenerator[
-            str, None] | ErrorResponse:
+        self, audio_data: bytes, request: TranscriptionRequest, raw_request: Request
+    ) -> (
+        TranscriptionResponse
+        | TranscriptionResponseVerbose
+        | AsyncGenerator[str, None]
+        | ErrorResponse
+    ):
         """Transcription API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/audio/createTranscription
@@ -63,9 +66,11 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             audio_data=audio_data,
             request=request,
             raw_request=raw_request,
-            response_class=(TranscriptionResponseVerbose
-                            if request.response_format == "verbose_json" else
-                            TranscriptionResponse),
+            response_class=(
+                TranscriptionResponseVerbose
+                if request.response_format == "verbose_json"
+                else TranscriptionResponse
+            ),
             stream_generator_method=self.transcription_stream_generator,
         )
 
@@ -113,10 +118,13 @@ class OpenAIServingTranslation(OpenAISpeechToText):
         )
 
     async def create_translation(
-        self, audio_data: bytes, request: TranslationRequest,
-        raw_request: Request
-    ) -> TranslationResponse | TranslationResponseVerbose | AsyncGenerator[
-            str, None] | ErrorResponse:
+        self, audio_data: bytes, request: TranslationRequest, raw_request: Request
+    ) -> (
+        TranslationResponse
+        | TranslationResponseVerbose
+        | AsyncGenerator[str, None]
+        | ErrorResponse
+    ):
         """Translation API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/audio/createTranslation
@@ -126,9 +134,11 @@ class OpenAIServingTranslation(OpenAISpeechToText):
             audio_data=audio_data,
             request=request,
             raw_request=raw_request,
-            response_class=(TranslationResponseVerbose
-                            if request.response_format == "verbose_json" else
-                            TranslationResponse),
+            response_class=(
+                TranslationResponseVerbose
+                if request.response_format == "verbose_json"
+                else TranslationResponse
+            ),
             stream_generator_method=self.translation_stream_generator,
         )
 
