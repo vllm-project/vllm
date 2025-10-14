@@ -54,7 +54,7 @@ async def test_async_llm_replace_default_loggers(log_stats_enabled_engine_args):
     engine = AsyncLLM.from_engine_args(
         log_stats_enabled_engine_args, stat_loggers=[RayPrometheusStatLogger]
     )
-    assert isinstance(engine.logger_manager.prometheus_logger, RayPrometheusStatLogger)
+    assert isinstance(engine.logger_manager.stat_loggers[0], RayPrometheusStatLogger)
     engine.shutdown()
 
 
@@ -73,9 +73,11 @@ async def test_async_llm_add_to_default_loggers(log_stats_enabled_engine_args):
         disabled_log_engine_args, stat_loggers=[DummyStatLogger]
     )
 
-    assert len(engine.logger_manager.per_engine_logger_dict[0]) == 1
+    assert len(engine.logger_manager.stat_loggers) == 2
+    assert len(engine.logger_manager.stat_loggers[0].per_engine_stat_loggers) == 1
     assert isinstance(
-        engine.logger_manager.per_engine_logger_dict[0][0], DummyStatLogger
+        engine.logger_manager.stat_loggers[0].per_engine_stat_loggers[0],
+        DummyStatLogger,
     )
 
     # log_stats is still True, since custom stat loggers are used
