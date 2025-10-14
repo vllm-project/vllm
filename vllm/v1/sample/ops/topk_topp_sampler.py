@@ -18,7 +18,13 @@ try:
 
     flashinfer.sampling.get_sampling_module()
     is_flashinfer_available = True
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError) as e:
+    if "Ninja build failed." in str(e):
+        logger.warning_once(
+            "FlashInfer is installed but failed to build properly. "
+            "please install `flashinfer-cubin` and `flashinfer-jit-cache`"
+            "to use pre-compiled kernels."
+        )
     is_flashinfer_available = False
 
 
