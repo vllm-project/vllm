@@ -80,7 +80,7 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
 
 
 @pytest.mark.parametrize(
-    "optimization_mode",
+    "compilation_mode",
     [CompilationMode.DYNAMO_TRACE_ONCE, CompilationMode.VLLM_COMPILE],
 )
 @pytest.mark.parametrize("model_info", models_list(all=True))
@@ -165,10 +165,10 @@ def test_custom_compile_config(
 
 
 @pytest.mark.parametrize(
-    "optimization_mode",
+    "compilation_mode",
     [CompilationMode.NONE, CompilationMode.VLLM_COMPILE],
 )
-def test_fp8_kv_scale_compile(optimization_mode: int):
+def test_fp8_kv_scale_compile(compilation_mode: int):
     model = "Qwen/Qwen2-0.5B"
     model_kwargs = {
         "quantization": "fp8",
@@ -176,7 +176,7 @@ def test_fp8_kv_scale_compile(optimization_mode: int):
         "calculate_kv_scales": True,
         "max_model_len": 512,
     }
-    run_model(optimization_mode, model, model_kwargs)
+    run_model(compilation_mode, model, model_kwargs)
 
 
 def test_inductor_graph_partition_attn_fusion(caplog_vllm):

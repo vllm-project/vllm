@@ -184,19 +184,21 @@ class CompilationConfig:
     either 0.12.0 or 0.11.2 whichever is soonest.
     Please use mode. Currently all levels are mapped to mode.
     """
-
     # Top-level Compilation control
     mode: int | None = None
-    """The mode of compilation:
+    """The compilation approach used for torch.compile-based compilation of the
+    model.
 
     - None: If None, we will select the default compilation mode.
       For V1 engine this is 3.
-    - 0: NONE: no compilation
-    - 1: STOCK_TORCH_COMPILE: just applying default torch.compile to model.
-    - 2: DYNAMO_TRACE_ONCE: force a single Dynamo trace step by removing guards.
+    - 0: NONE: No torch.compile compilation is applied, model runs in fully
+         eager pytorch mode. The model runs as-is.
+    - 1: STOCK_TORCH_COMPILE: The standard `torch.compile` compilation pipeline.
+    - 2: DYNAMO_TRACE_ONCE: Single Dynamo trace through the model, avoiding
+         recompilation by removing guards.
          Requires no dynamic-shape-dependent control-flow.
-    - 3: VLLM_COMPILE, single Dynamo trace, custom vLLM caching, custom passes,
-         custom cudagraph partitioning, etc."""
+    - 3: VLLM_COMPILE: Custom vLLM Inductor-based backend with caching,
+         piecewise compilation, shape specialization, and custom passes."""
     debug_dump_path: Path | None = None
     """The path to dump the debug information."""
     cache_dir: str = ""
