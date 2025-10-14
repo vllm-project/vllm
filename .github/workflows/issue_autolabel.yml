@@ -297,7 +297,7 @@ jobs:
             // You can add multiple users per label, and multiple label configurations
             const ccConfig = {
               rocm: {
-                users: ['tjtanaa', 'vllmellm'],  // Add more users as needed: ['tjtanaa', 'user2', 'user3']
+                users: ['hongxiayang', 'tjtanaa', 'vllmellm'],  // Add more users as needed: ['user1', 'user2', 'user3']
                 message: 'CC {users} for ROCm-related issue'  // {users} will be replaced with @mentions
               },
               // Add more label -> user mappings here
