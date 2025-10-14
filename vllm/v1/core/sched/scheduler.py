@@ -298,7 +298,6 @@ class Scheduler(SchedulerInterface):
                     # Cannot schedule this request.
                     break
                 # Continue scheduling subsequent requests
-                req_index += 1
                 continue
 
             # Schedule the request.
