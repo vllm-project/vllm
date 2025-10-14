@@ -12,8 +12,10 @@ ARG REPO_TYPE=habanalabs
 FROM ${DOCKER_URL}/${VERSION}/${BASE_NAME}/${REPO_TYPE}/pytorch-installer-${PT_VERSION}:${REVISION}
 
 # Parameterize commit/branch for vllm-project & vllm-gaudi checkout
-ARG VLLM_GAUDI_COMMIT=v0.10.2_next
-ARG VLLM_PROJECT_COMMIT=v0.10.2
+# Use main branch for vllm-gaudi (latest)
+ARG VLLM_GAUDI_COMMIT=main
+# VLLM_COMMIT can be overridden by user, defaults to last compatible version
+ARG VLLM_COMMIT=
 
 ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 
@@ -25,37 +27,41 @@ RUN apt-get update && \
       bash \
       gettext \
       moreutils \
-      jq && \
+      jq \
+      curl && \
     ln -sf /usr/bin/python3 /usr/bin/python && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /root
 
 ENV VLLM_PATH=/workspace/vllm-project
-ENV VLLM_PATH2=/workspace/vllm-gaudi
+ENV VLLM_PLUGIN_PATH=/workspace/vllm-gaudi
 
 RUN echo "dash dash/sh boolean false" | debconf-set-selections && \
     DEBIAN_FRONTEND=noninteractive dpkg-reconfigure dash
 ENV ENV=~/.profile
 
 # Clone the vllm-project repository and install inside the container
-
-RUN mkdir -p $VLLM_PATH && \
+# Dynamically fetch the compatible vLLM commit from vllm-gaudi repo
+RUN VLLM_STABLE_COMMIT=$(curl -s https://raw.githubusercontent.com/vllm-project/vllm-gaudi/vllm/last-good-commit-for-vllm-gaudi/VLLM_STABLE_COMMIT | tr -d '\n') && \
+    echo "Fetched stable commit: $VLLM_STABLE_COMMIT" && \
+    VLLM_COMMIT_TO_USE=${VLLM_COMMIT:-$VLLM_STABLE_COMMIT} && \
+    echo "Using vLLM commit: $VLLM_COMMIT_TO_USE" && \
+    mkdir -p $VLLM_PATH && \
     git clone https://github.com/vllm-project/vllm.git $VLLM_PATH && \
     cd $VLLM_PATH && \
     git remote add upstream https://github.com/vllm-project/vllm.git && \
     git fetch upstream --tags || true && \
-    git checkout ${VLLM_PROJECT_COMMIT} && \
+    git checkout $VLLM_COMMIT_TO_USE && \
     bash -c "pip install -r <(sed '/^[torch]/d' requirements/build.txt)" && \
     VLLM_TARGET_DEVICE=empty pip install --no-build-isolation .
 
-    # Clone the vllm-gaudi repository and install inside the container
-
-RUN mkdir -p $VLLM_PATH2 && \
-    git clone https://github.com/vllm-project/vllm-gaudi.git $VLLM_PATH2 && \
-    cd $VLLM_PATH2 && \
-    git checkout ${VLLM_GAUDI_COMMIT} && \ 
-    VLLM_TARGET_DEVICE=hpu && pip install -v $VLLM_PATH2 --no-build-isolation
+# Clone the vllm-gaudi repository and install inside the container
+RUN mkdir -p $VLLM_PLUGIN_PATH && \
+    git clone https://github.com/vllm-project/vllm-gaudi.git $VLLM_PLUGIN_PATH && \
+    cd $VLLM_PLUGIN_PATH && \
+    git checkout $VLLM_GAUDI_COMMIT && \
+    VLLM_TARGET_DEVICE=hpu && pip install -v $VLLM_PLUGIN_PATH --no-build-isolation
 
 # Install additional Python packages
 RUN pip install datasets && \
