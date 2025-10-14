@@ -2067,7 +2067,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
         if (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and not envs.VLLM_DISABLE_PAD_FOR_CUDAGRAPH
             and hasattr(self, "cudagraph_batch_sizes")
             and self.cudagraph_batch_sizes
             and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]
