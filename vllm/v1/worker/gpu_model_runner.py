@@ -1089,7 +1089,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             for x in range(num_reqs):
                 self.input_batch.token_ids_cpu[x, start_index[x]:end_token_index[x]] = \
                         draft_token_ids[x]
-                self.input_batch.spec_tokenids[x] = draft_token_ids[x]
+                self.input_batch.spec_token_ids[x] = draft_token_ids[x]
             # NOTE(woosuk): `num_tokens` here may include spec tokens.
             self.input_batch.num_tokens[:num_reqs] += num_draft_tokens
 
@@ -1287,12 +1287,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             if self.curr_step > 0:
                 num_decode_draft_tokens = np.full(num_reqs, -1, dtype=np.int32)
-                for req_idx in range(num_reqs):
-                    num_decode_draft_tokens[req_idx] = (
-                        len(draft_token_ids)
+                for x in range(num_reqs):
+                    num_decode_draft_tokens[x] = (
+                        num_draft_tokens[x]
                         if (
-                            self.input_batch.num_computed_tokens_cpu[req_idx]
-                            >= self.input_batch.num_prompt_tokens[req_idx]
+                            self.input_batch.num_computed_tokens_cpu[x]
+                            >= self.input_batch.num_prompt_tokens[x]
                         )
                         else -1
                     )
@@ -2584,6 +2584,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 ) = self._preprocess(
                     scheduler_output, num_input_tokens, intermediate_tensors
                 )
+
             # Set cudagraph mode to none if calc_kv_scales is true.
             if attn_metadata is not None:
                 metadata_list = (
@@ -2753,7 +2754,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             with record_function_or_nullcontext("EPLB"):
                 self.eplb_step()
-            
+
             cached_valid_sampled_token_ids.append(valid_sampled_token_ids)
             if kv_connector_output is not None:
                 final_kv_connector_output.finished_sending.update(
