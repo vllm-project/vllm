@@ -804,6 +804,104 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 ],
             )
 
+        #
+        # KVConnector metrics
+        #
+        self._nixl_metrics_enabled = False
+        if (
+            kv_transfer_config := vllm_config.kv_transfer_config
+        ) and kv_transfer_config.kv_connector == "NixlConnector":
+            self._nixl_metrics_enabled = True
+            buckets = [
+                0.001,
+                0.005,
+                0.01,
+                0.025,
+                0.05,
+                0.075,
+                0.1,
+                0.2,
+                0.3,
+                0.5,
+                0.75,
+                1.0,
+                5.0,
+            ]
+            nixl_histogram_xfer_time = self._histogram_cls(
+                name="vllm:nixl_xfer_time_seconds",
+                documentation="Histogram of transfer duration for NIXL KV"
+                " Cache transfers.",
+                buckets=buckets,
+                labelnames=labelnames,
+            )
+            self.nixl_histogram_xfer_time = make_per_engine(
+                nixl_histogram_xfer_time, engine_indexes, model_name
+            )
+            nixl_histogram_post_time = self._histogram_cls(
+                name="vllm:nixl_post_time_seconds",
+                documentation="Histogram of transfer post time for NIXL KV"
+                " Cache transfers.",
+                buckets=buckets[1:],
+                labelnames=labelnames,
+            )
+            self.nixl_histogram_post_time = make_per_engine(
+                nixl_histogram_post_time, engine_indexes, model_name
+            )
+            # uniform 2kb to 16gb range
+            buckets = [2**10 + i for i in range(1, 24, 2)]
+            nixl_histogram_bytes_transferred = self._histogram_cls(
+                name="vllm:nixl_bytes_transferred",
+                documentation="Histogram of bytes transferred per NIXL KV"
+                " Cache transfers.",
+                buckets=buckets,
+                labelnames=labelnames,
+            )
+            self.nixl_histogram_bytes_transferred = make_per_engine(
+                nixl_histogram_bytes_transferred, engine_indexes, model_name
+            )
+            buckets = [
+                10,
+                20,
+                30,
+                50,
+                75,
+                100,
+                200,
+                400,
+                1000,
+                2000,
+                4000,
+                10000,
+                20000,
+                50000,
+            ]
+            nixl_histogram_num_descriptors = self._histogram_cls(
+                name="vllm:nixl_num_descriptors",
+                documentation="Histogram of number of descriptors per NIXL"
+                "  KV Cache transfers.",
+                buckets=buckets,
+                labelnames=labelnames,
+            )
+            self.nixl_histogram_num_descriptors = make_per_engine(
+                nixl_histogram_num_descriptors, engine_indexes, model_name
+            )
+            counter_nixl_num_failed_transfers = self._counter_cls(
+                name="vllm:nixl_num_failed_transfers",
+                documentation="Number of failed NIXL KV Cache transfers.",
+                labelnames=labelnames,
+            )
+            self.counter_nixl_num_failed_transfers = make_per_engine(
+                counter_nixl_num_failed_transfers, engine_indexes, model_name
+            )
+            counter_nixl_num_failed_notifications = self._counter_cls(
+                name="vllm:nixl_num_failed_notifications",
+                documentation="Number of failed NIXL KV Cache notifications.",
+                labelnames=labelnames,
+            )
+            self.counter_nixl_num_failed_notifications = make_per_engine(
+                counter_nixl_num_failed_notifications, engine_indexes, model_name
+            )
+
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
         metrics_info = config_obj.metrics_info()
         metrics_info["engine"] = ""
@@ -869,6 +967,35 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.spec_decoding_prom.observe(
                     scheduler_stats.spec_decoding_stats, engine_idx
                 )
+            # TODO factor this out into OOT metrics class
+            if self._nixl_metrics_enabled and (
+                kv_stats := scheduler_stats.kv_connector_stats
+            ):
+                for prom_obj, list_item_key in zip(
+                    [
+                        self.nixl_histogram_xfer_time,
+                        self.nixl_histogram_post_time,
+                        self.nixl_histogram_bytes_transferred,
+                        self.nixl_histogram_num_descriptors,
+                    ],
+                    [
+                        "transfer_duration",
+                        "post_duration",
+                        "bytes_transferred",
+                        "num_descriptors",
+                    ],
+                ):
+                    for list_item in kv_stats[list_item_key]:
+                        prom_obj[engine_idx].observe(list_item)
+                for counter_obj, counter_item_key in zip(
+                    [
+                        self.counter_nixl_num_failed_transfers,
+                        self.counter_nixl_num_failed_notifications,
+                    ],
+                    ["num_failed_transfers", "num_failed_notifications"],
+                ):
+                    for list_item in kv_stats[counter_item_key]:
+                        counter_obj[engine_idx].inc(list_item)
 
         if mm_cache_stats is not None:
             self.counter_mm_cache_queries[engine_idx].inc(mm_cache_stats.queries)
