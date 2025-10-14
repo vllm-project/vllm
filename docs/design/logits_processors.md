@@ -174,7 +174,7 @@ The previous sections alluded to the interfaces which vLLM logits processors mus
     from collections.abc import Sequence
     from dataclasses import dataclass
     from enum import Enum, auto
-    from typing import TYPE_CHECKING, Optional
+    from typing import TYPE_CHECKING
 
     import torch
 
@@ -244,7 +244,7 @@ The previous sections alluded to the interfaces which vLLM logits processors mus
         @abstractmethod
         def update_state(
             self,
-            batch_update: Optional["BatchUpdate"],
+            batch_update: "BatchUpdate" | None,
         ) -> None:
             """Called when there are new output tokens, prior
             to each forward pass.
@@ -274,7 +274,7 @@ A vLLM logits processor must subclass `LogitsProcessor` and define (at minimum) 
     * Return `True` if the logits processor is argmax invariant (never changes what is the highest-logit-value token ID for a given request), `False` if the logits processor may modify argmax
     * `is_argmax_invariant()` is evaluated once at startup; if `True`, vLLM will skip applying this logits processor in a given step when all requests use greedy sampling
 
-* `update_state(self, batch_update: Optional["BatchUpdate"]) -> None`:
+* `update_state(self, batch_update: "BatchUpdate" | None) -> None`:
     * Consume a `BatchUpdate` data structure representing persistent batch state changes at the beginning of the current engine step
     * Use the `BatchUpdate` members to update logits processor internal state
     * **Note:** batch update data structure may be `None`, signaling no change to the batch constituents. In this case, the LogitsProcessor might still want to update its state based on the updated `output_token_ids` lists that it could have retained when they were added.
