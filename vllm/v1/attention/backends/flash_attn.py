@@ -611,7 +611,7 @@ class FlashAttentionImpl(AttentionImpl):
             descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
 
             if self.dcp_world_size > 1:
-                assert envs.VLLM_FLASH_ATTN_VERSION != 4, (
+                assert get_flash_attn_version() != 4, (
                     "Distributed Context Parallel doesn't support FA4 yet"
                 )
                 self._forward_with_dcp(
