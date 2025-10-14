@@ -235,7 +235,7 @@ class LLMEngine:
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         tier: float = 1,
-        prompt_text: str | None = None,,
+        prompt_text: str | None = None,
     ) -> None:
         # Validate the request_id type.
         if not isinstance(request_id, str):
