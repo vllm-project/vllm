@@ -199,6 +199,8 @@ class AttentionImpl(ABC, Generic[T]):
         to this backend, allowing torch.compile to fuse the quantization with
         previous operations. This is typically supported when using FP8 KV cache
         with compatible attention kernels (e.g., TRT-LLM).
+        TODO add support to more backends:
+        https://github.com/vllm-project/vllm/issues/25584
 
         Returns:
             bool: True if the implementation can accept pre-quantized queries.
