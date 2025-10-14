@@ -71,8 +71,11 @@ def _merge_mm_kwargs(
         allow_var_kwargs=True,
     )
     if mm_config.mm_processor_dynamic_kwargs is not None:
-        allowed_kwargs = {k: v for k, v in allowed_kwargs.items()
-                          if k not in mm_config.mm_processor_dynamic_kwargs}
+        allowed_kwargs = {
+            k: v
+            for k, v in allowed_kwargs.items()
+            if k not in mm_config.mm_processor_dynamic_kwargs
+        }
     # NOTE: Pythonic dict is not hashable and will raise unhashable type
     # error when calling `cached_get_processor`, therefore we need to
     # wrap it to a hashable dict.
