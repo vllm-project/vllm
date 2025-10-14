@@ -153,7 +153,7 @@ class AutoRoundConfig(QuantizationConfig):
                     continue
 
                 try:
-                    if re.search(pattern, name):
+                    if re.search(re.compile(pattern), name) is not None:
                         return (
                             cfg.get("bits", self.weight_bits if quantized else 16),
                             cfg.get("group_size", self.group_size if quantized else -1),
