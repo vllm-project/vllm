@@ -797,96 +797,92 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dummy_modality = mm_budget.get_modality_with_max_tokens()
         return self._get_mm_dummy_batch(dummy_modality, num_seqs)
 
-    def _num_scheduled_tokens_prefill_cp(self, num_tokens,
-                                         num_computed_tokens,
-                                         cp_kv_recover_idx):
-        num_scheduled_tokens = num_tokens - num_computed_tokens
-        num_cp_padded_scheduled_tokens = cdiv(
-            num_scheduled_tokens, 2 * self.cp_world_size) * (2 * self.cp_world_size
-                                                       )  # pad to 2*cp_world_size
-        cp_pad = num_cp_padded_scheduled_tokens - num_scheduled_tokens
-        full_indices = list(
-            range(self.max_num_tokens * self.cp_world_size * self.dcp_world_size +
-                  self.cp_world_size * self.dcp_world_size * self.max_num_reqs))
-        chunk_size = num_cp_padded_scheduled_tokens // (2 * self.cp_world_size)
-
-        # split position_ids (and use split position_ids to split input_ids afterwards)
-        req_position_cp = []
-        req_position_cp.extend(
-            full_indices[self.cp_rank * chunk_size:(self.cp_rank + 1) *
-                                                   chunk_size])
-        req_position_cp.extend(
-            full_indices[num_cp_padded_scheduled_tokens - (self.cp_rank + 1) *
-                         chunk_size:num_cp_padded_scheduled_tokens -
-                                    self.cp_rank * chunk_size])
-
-        # used to recover kv order in cp prefill (after all-gather kv and before storing kv_cache)
-        num_added_recover_tokens = len(cp_kv_recover_idx[0]) * self.cp_world_size
-        for rank in range(self.cp_world_size):
-            cp_kv_recover_idx[rank].extend(
-                full_indices[rank * chunk_size +
-                             num_added_recover_tokens:(rank + 1) * chunk_size +
-                                                      num_added_recover_tokens])
-            cp_kv_recover_idx[rank].extend(full_indices[
-                                           num_cp_padded_scheduled_tokens - (rank + 1) * chunk_size +
-                                           num_added_recover_tokens:num_cp_padded_scheduled_tokens -
-                                                                    rank * chunk_size + num_added_recover_tokens])
-
-        return req_position_cp, num_cp_padded_scheduled_tokens, cp_pad
-
-    def _update_tokens_for_cp(self, tokens, scheduler_output: "SchedulerOutput"):
-        if not self.cp_world_size > 1:
-            self.num_cp_pads = None
-            self.cp_kv_recover_idx = None
-            return tokens
+    def _update_tokens_for_cp(self, tokens):
+        """
+        If context parallelism is enabled, we will calculate
+        the number of tokens `tokens` after sequence splitting. 
+        Meanwhile, we will compute:
+        `positions` the new token positions,
+        `num_cp_pads` the number of padding tokens per request for alignment,
+        `unpad_mask` the mask for non-padded tokens,
+        `cp_allgather_restore_idx` indices to restore the original vector
+        order after CP allgather. 
+        Example:
+        >>> tokens = [1, 5, 8]
+        >>> cp_world_size = 2
+        >>> cp_rank = 0
+        >>> _update_tokens_for_cp(tokens)
+        ([1, 4, 4], [0, 2, 3, 4, 5, 2, 3, 4, 5], [1, 3, 0], [True, False,
+        True, True, True, True, True, False, False, False, True, True,
+        True, True, True, True, True, True], [0, 9, 1, 2, 10, 11, 12, 13,
+        3, 4, 5, 6, 14, 15, 16, 17, 7, 8])
+        >>> cp_rank = 1
+        >>> _update_tokens_for_cp(tokens)
+        ([1, 4, 4], [0, 0, 1, 6, 7, 0, 1, 6, 7], [1, 3, 0], [True, False,
+        True, True, True, True, True, False, False, False, True, True,
+        True, True, True, True, True, True], [0, 9, 1, 2, 10, 11, 12, 13,
+        3, 4, 5, 6, 14, 15, 16, 17, 7, 8])
+        """
         num_reqs = self.input_batch.num_reqs
-        self.num_cp_pads = torch.empty(num_reqs, dtype=torch.int32)
-        self.cp_kv_recover_idx: Union(List[List[int]], torch.Tensor, None) = [[]
-                                              for _ in range(self.cp_world_size)
-                                              ]
-        self.position_cp = np.zeros(self.max_num_tokens, dtype=np.int32)
-        start_index = 0
+        num_cp_pads = torch.zeros(num_reqs, dtype=torch.int32)
+        if not self.cp_world_size > 1:
+            return tokens, None, num_cp_pads, None, None
 
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            is_prefill = num_tokens > 1  # todo: compare num prompt tokens and num sch tokens + computed tokens
-            if is_prefill:
-                # when cp > 1 & prefill, need to pad & split sequence here
-                req_position_cp, num_cp_padded_scheduled_tokens, self.num_cp_pads[
-                    i] = self._num_scheduled_tokens_prefill_cp(
-                    num_tokens,
-                    self.input_batch.num_computed_tokens_cpu[i],
-                    self.cp_kv_recover_idx)
-                num_tokens = len(req_position_cp)
-                self.position_cp[start_index:start_index +
-                                             num_tokens] = req_position_cp
-                start_index += num_tokens
-                tokens[i] = num_tokens
-            else:
-                self.num_cp_pads[i] = self.cp_world_size-1 # we allgather cp_world_size duplicated tokens in decode phase
-                self.position_cp[start_index:start_index +
-                                             num_tokens] = [idx for idx in range(num_tokens)]
-                start_index += num_tokens
-                num_added_recover_tokens = len(self.cp_kv_recover_idx[0]) * self.cp_world_size
-                for rank in range(self.cp_world_size):
-                    self.cp_kv_recover_idx[rank].append(rank+num_added_recover_tokens)
+        num_decode_reqs = sum(self.input_batch.num_computed_tokens_cpu[
+            :num_reqs] >= self.input_batch.num_prompt_tokens[:num_reqs])
 
+        num_padded_scheduled_tokens = np.ceil(
+            tokens / (2 * self.cp_world_size)
+            ) * (2 * self.cp_world_size)
+        # we align scheduled tokens of decode reqs to cp_world_size instead
+        # of 2*cp_world_size
+        num_padded_scheduled_tokens[:num_decode_reqs] = self.cp_world_size
+        num_cp_pads = torch.from_numpy(num_padded_scheduled_tokens - tokens)
+        cu_padded_tokens, cp_padded_arange = \
+            self._get_cumsum_and_arange(num_padded_scheduled_tokens)
+        unpad_mask = torch.from_numpy(cp_padded_arange < 
+                                      np.repeat(
+                                          tokens,
+                                          num_padded_scheduled_tokens
+                                      ))
 
-        cp_kv_recover_idx = torch.from_numpy(np.concatenate(self.cp_kv_recover_idx)
-                                             ).to(device=self.device)
-        cp_kv_recover_idx = cp_kv_recover_idx.to(
-            torch.float32).argsort(
-                stable=True).to(torch.int32)
-        mask = torch.ones_like(cp_kv_recover_idx).to(torch.bool)
-        cur_req_end_loc = 0
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            cp_pad = self.num_cp_pads[i]
-            cur_req_end_loc += num_tokens + cp_pad
-            mask[cur_req_end_loc-cp_pad:cur_req_end_loc] = 0
-        self.cp_kv_recover_idx = cp_kv_recover_idx[mask]
+        cp_tokens = num_padded_scheduled_tokens // self.cp_world_size
+        cp_chunk_sizes = (cp_tokens // 2).clip(min=1)
+        _, cp_arange = self._get_cumsum_and_arange(cp_tokens)
+        _, cp_chunk_arange = self._get_cumsum_and_arange(cp_chunk_sizes)
+        cp_head_chunk_mask = cp_arange < np.repeat(cp_chunk_sizes,
+                                                   cp_tokens)
+        
 
-        return tokens
+        def get_current_rank_positions(cu_tokens, rank):
+            positions_start_loc = np.zeros_like(cu_tokens)
+            positions_start_loc[1:] = cu_tokens[:-1]
+            positions = np.zeros(len(cp_head_chunk_mask), dtype=np.int32)
+            head_start_loc = positions_start_loc + rank * cp_chunk_sizes
+            tail_start_loc = positions_start_loc + \
+                (2 * self.cp_world_size - rank - 1) * cp_chunk_sizes
+            positions[cp_head_chunk_mask] = cp_chunk_arange + \
+                np.repeat(head_start_loc, cp_chunk_sizes)
+            # Decode reqs do not have tail chunks.
+            positions[~cp_head_chunk_mask] = \
+                cp_chunk_arange[num_decode_reqs:] + \
+                np.repeat(tail_start_loc, cp_chunk_sizes)[num_decode_reqs:]
+            return positions
+
+        positions = get_current_rank_positions(np.zeros(num_reqs,
+                                                        dtype=np.int32),
+                                               self.cp_rank)
+        # Decode tokens are duplicate and their positions always be 0.
+        positions[:num_decode_reqs] = 0
+
+        all_positions = [get_current_rank_positions(cu_padded_tokens,
+                                                    rank_i)
+                         for rank_i in range(self.cp_world_size)]
+        all_positions = torch.from_numpy(np.concatenate(all_positions))
+        cp_allgather_restore_idx = all_positions.float().argsort(
+            ).long().to(self.device)
+        return (cp_tokens, positions, num_cp_pads,
+                unpad_mask, cp_allgather_restore_idx)
 
 
     def _get_cumsum_and_arange(
@@ -1023,10 +1019,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Get the number of scheduled tokens for each request.
         req_ids = self.input_batch.req_ids
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
-        total_num_scheduled_tokens_for_slotmapping = total_num_scheduled_tokens
+        # NOTE(qcs): we need compute slotmapping for all kv
+        # instead of sliced sequences
+        total_num_scheduled_tokens4sltmap = total_num_scheduled_tokens
         original_num_scheduled_tokens = np.array(tokens, dtype=np.int32)
-        tokens = self._update_tokens_for_cp(tokens, scheduler_output)
-        num_scheduled_tokens = np.array(tokens, dtype=np.int32)
+        num_scheduled_tokens, positions_cp, num_cp_pads, unpad_mask, \
+            self.cp_allgather_restore_idx = self._update_tokens_for_cp(
+                original_num_scheduled_tokens)
         # update total_num_scheduled_tokens
         total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
         max_num_scheduled_tokens = max(tokens)
@@ -1044,23 +1043,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Get positions.
         positions_np = self.positions.np[:total_num_scheduled_tokens]
         if self.cp_world_size > 1:
+            assert positions_cp is not None
             req_indices_for_slotmapping = np.repeat(self.arange_np[:num_reqs],
                                              original_num_scheduled_tokens)
-            cu_num_tokens_for_logits_indices, original_arange = self._get_cumsum_and_arange(
+            _, original_arange = self._get_cumsum_and_arange(
                 original_num_scheduled_tokens)
-            positions_np_for_slotmapping = self.positions.np[
-                :total_num_scheduled_tokens_for_slotmapping].copy()
+            positions_np_for_slotmapping = \
             np.add(self.input_batch.num_computed_tokens_cpu[req_indices_for_slotmapping],
                    original_arange,
-                   out=positions_np_for_slotmapping)
+                   )
             np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
-                   self.position_cp[:total_num_scheduled_tokens],
+                   positions_cp[:total_num_scheduled_tokens],
                    out=positions_np)
         else:
             np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                    arange,
                    out=positions_np)
-            cu_num_tokens_for_logits_indices = cu_num_tokens
             req_indices_for_slotmapping = req_indices
             positions_np_for_slotmapping = positions_np
 
@@ -1133,7 +1131,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.input_batch.block_table.compute_slot_mapping(
             req_indices_for_slotmapping, positions_np_for_slotmapping)
         self.input_batch.block_table.commit_slot_mapping(
-            total_num_scheduled_tokens_for_slotmapping)
+            total_num_scheduled_tokens4sltmap)
 
         # Prepare the attention metadata.
         self.query_start_loc.np[0] = 0
@@ -1199,7 +1197,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
-            logits_indices = torch.from_numpy(cu_num_tokens_for_logits_indices) - 1
+            logits_indices = torch.from_numpy(cu_num_tokens) * \
+                self.cp_world_size - num_cp_pads - 1
             num_draft_tokens = None
             spec_decode_metadata = None
         else:
@@ -1241,9 +1240,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
 
-        if self.cp_world_size > 1:
-            # Prepare the metadata for Context Parallel
-            total_num_scheduled_tokens_for_slotmapping = sum(original_num_scheduled_tokens[:num_reqs])
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -1261,7 +1257,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     device=self.device,
                 )
                 slot_mapping = torch.zeros(
-                    (total_num_scheduled_tokens_for_slotmapping, ),
+                    (total_num_scheduled_tokens4sltmap, ),
                     dtype=torch.int64,
                     device=self.device,
                 )
@@ -1270,16 +1266,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
                 blk_table_tensor = blk_table.get_device_tensor(num_reqs)
                 slot_mapping = blk_table.slot_mapping.gpu[:
-                                      total_num_scheduled_tokens_for_slotmapping]
+                                      total_num_scheduled_tokens4sltmap]
 
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode.
-                blk_table.slot_mapping.gpu[total_num_scheduled_tokens_for_slotmapping:].fill_(
-                    -1)
+                blk_table.slot_mapping.gpu[total_num_scheduled_tokens4sltmap:
+                    ].fill_(-1)
                 num_common_prefix_blocks = (
                     scheduler_output.
                     num_common_prefix_blocks[kv_cache_group_id])
 
+            if self.cp_world_size > 1:
+                assert unpad_mask is not None
+                # After cp allgather and restore, there are padded tokens in
+                # kv, so we need pad slotmapping for alignment.
+                padded_slot_mapping = torch.full((unpad_mask.shape[0],), 
+                                                 1).to(slot_mapping)
+                padded_slot_mapping[unpad_mask] = slot_mapping
+                slot_mapping = padded_slot_mapping
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
                 query_start_loc_cpu=query_start_loc_cpu,
@@ -1297,8 +1301,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 causal=True,
                 encoder_seq_lens=encoder_seq_lens,
                 query_positions=positions_np,
-                cp_kv_recover_idx=self.cp_kv_recover_idx,
-                num_cp_pads=self.num_cp_pads,
+                cp_allgather_restore_idx=self.cp_allgather_restore_idx,
             )
 
             if self.speculative_config and \
@@ -2356,13 +2359,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 aux_hidden_states = None
 
             if self.cp_world_size > 1:
-                if isinstance(attn_metadata, dict):
-                    cp_kv_recover_idx = list(attn_metadata.values())[0].cp_kv_recover_idx
-                else:
-                    cp_kv_recover_idx = attn_metadata.cp_kv_recover_idx
                 hidden_states = get_cp_group().all_gather(hidden_states, 0)
                 hidden_states = torch.index_select(
-                    hidden_states, 0, cp_kv_recover_idx)
+                    hidden_states, 0, self.cp_allgather_restore_idx)
             if not self.broadcast_pp_output:
                 # Common case.
                 if not get_pp_group().is_last_rank:

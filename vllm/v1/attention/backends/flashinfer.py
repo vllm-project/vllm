@@ -239,7 +239,7 @@ class FlashInferMetadata:
     paged_kv_indptr_gpu: Optional[torch.Tensor] = None
     
     # For context parallel
-    cp_kv_recover_idx: Optional[torch.Tensor] = None
+    cp_allgather_restore_idx: Optional[torch.Tensor] = None
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -551,7 +551,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             use_cascade=use_cascade,
-            cp_kv_recover_idx=common_attn_metadata.cp_kv_recover_idx,
+            cp_allgather_restore_idx=common_attn_metadata.cp_allgather_restore_idx,
         )
 
         qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
@@ -598,17 +598,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 qo_indptr_cpu = qo_indptr_cpu[prefill_start:] - qo_indptr_cpu[
                     prefill_start]
                 paged_kv_indptr_cpu = paged_kv_indptr_cpu[prefill_start:]
-                prefill_num_computed_tokens_cpu = num_computed_tokens_cpu[prefill_start:]
+                prefill_num_computed_tokens_cpu = \
+                    num_computed_tokens_cpu[prefill_start:]
                 if not attn_metadata.prefill_use_trtllm:
                     if self.cp_world_size > 1:
-                        # NOTE(qcs): no chunked prefill and prefix caching
                         kv_indptr_cpu = qo_indptr_cpu * self.cp_world_size
-                        kv_lens = kv_indptr_cpu[1:] - kv_indptr_cpu[:-1] - \
-                            common_attn_metadata.num_cp_pads[prefill_start:]
-                        kv_indptr_cpu[1:] = torch.cumsum(kv_lens, 0)
                         # init custom mask for head-tail query order
                         mask_arr = []
-                        q_pos = common_attn_metadata.query_positions[prefill_start:]
+                        q_pos = common_attn_metadata.query_positions[
+                            prefill_start:]
                         for i in range(num_prefills):
                             # |----<C>-----|-<Q0>-|-<Q1>-|
                             # |---<C+Q*cp_world_size>----|
@@ -619,18 +617,23 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             # context_mask_i.shape = (2, 8)
                             # upper = [0,1,2,3]
                             # local_mask_i = [[True, False, False, False], 
-                            #                 [True, True, True, True]] # size=(2, 4)
+                            #                 [True, True, True, True]]
                             # mask_i.shape = (2, 12)
-                            cur_q_pos = torch.from_numpy(q_pos[qo_indptr_cpu[i]:qo_indptr_cpu[i+1]])
+                            cur_q_pos = torch.from_numpy(q_pos[qo_indptr_cpu[i]
+                                                           :qo_indptr_cpu[i+1]])
                             Q = len(cur_q_pos)
                             C = prefill_num_computed_tokens_cpu[i]
                             if Q <= 0:
-                                mask_arr.append(torch.zeros(0, dtype=torch.bool))
+                                mask_arr.append(torch.zeros(0,
+                                                            dtype=torch.bool))
                                 continue
-                            context_mask_i = torch.ones((Q, C), dtype=torch.bool)
-                            upper = torch.arange(kv_lens[i])
-                            local_mask_i = (upper.unsqueeze(0) <= cur_q_pos.unsqueeze(1))
-                            mask_i = torch.cat([context_mask_i, local_mask_i], dim=1)
+                            context_mask_i = torch.ones((Q, C),
+                                                        dtype=torch.bool)
+                            upper = torch.arange(Q*self.cp_world_size)
+                            local_mask_i = (upper.unsqueeze(0)
+                                            <= cur_q_pos.unsqueeze(1))
+                            mask_i = torch.cat([context_mask_i, local_mask_i],
+                                               dim=1)
                             mask_arr.append(mask_i.flatten())
                         custom_mask = torch.cat(mask_arr, dim=0).to(self.device)
 
@@ -884,15 +887,17 @@ class FlashInferImpl(AttentionImpl):
         value_across_cp = get_cp_group().all_gather(
             value.contiguous(), dim=0)
         if (self.cp_world_size > 1
-            and attn_metadata.cp_kv_recover_idx is not None):
-            # reorder kv after cp allgather and remove duplicate decoding tokens
+            and attn_metadata.cp_allgather_restore_idx is not None):
+            # Reorder kv after cp allgather.
+            # Note that there are duplicate decoding tokens,
+            # but we only save the first one in kvcache.
             key_across_cp = torch.index_select(
                 key_across_cp, 0,
-                attn_metadata.cp_kv_recover_idx
+                attn_metadata.cp_allgather_restore_idx
             )
             value_across_cp = torch.index_select(
                 value_across_cp, 0,
-                attn_metadata.cp_kv_recover_idx
+                attn_metadata.cp_allgather_restore_idx
             )
         key = key_across_cp
         value = value_across_cp
@@ -951,12 +956,15 @@ class FlashInferImpl(AttentionImpl):
                     self.logits_soft_cap or 0.0)
                 assert prefill_wrapper._sm_scale == self.scale
                 if self.cp_world_size > 1:
-                    # TODO(qcs): 考虑 chunked prefill/ prefix cache 情况下
-                    # kvcache的获取与拼接
+                    # NOTE(qcs): Allgather causes duplicate decoding tokens.
+                    prefill_key = key[
+                        num_decode_tokens*self.cp_world_size:]
+                    prefill_value = value[
+                        num_decode_tokens*self.cp_world_size:]
                     prefill_wrapper.run(
                         prefill_query,
-                        key[num_decode_tokens:],
-                        value[num_decode_tokens:],
+                        prefill_key,
+                        prefill_value,
                         out=output[num_decode_tokens:],
                     )
                 else:
