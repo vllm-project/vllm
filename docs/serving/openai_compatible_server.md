@@ -830,8 +830,8 @@ You can pass multi-modal inputs to scoring models by passing `content` including
                                 "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
                             },
                         },
-                    ]
-                }
+                    ],
+                },
             },
         )
         response.raise_for_status()
