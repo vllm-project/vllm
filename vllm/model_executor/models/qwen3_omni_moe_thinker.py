@@ -30,7 +30,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from packaging.version import Version
 from transformers import PretrainedConfig
+from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
     Qwen3OmniMoeConfig,
@@ -726,7 +728,14 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             mm_kwargs = dict(
                 **mm_kwargs,
             )
-            mm_kwargs["truncation"] = False
+            # TODO(Isotr0py): Remove this patch after upstream fix PR
+            # released and Transformers version update:
+            # https://github.com/huggingface/transformers/pull/41473
+            if (
+                Version(TRANSFORMERS_VERSION) < Version("4.58.0")
+                and "truncation" not in mm_kwargs
+            ):
+                mm_kwargs["truncation"] = False
 
         hf_inputs = super()._call_hf_processor(
             prompt=prompt,
@@ -748,6 +757,10 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                     if audio_length % hop_length == 0
                     else (audio_length // hop_length - 1)
                 )
+                if mm_kwargs.get("truncation", False):
+                    num_frame = min(
+                        num_frame, feature_extractor.n_samples // hop_length
+                    )
                 audio_num_frames.append(num_frame)
             hf_inputs["feature_attention_mask"] = [
                 torch.ones(num_frame) for num_frame in audio_num_frames
