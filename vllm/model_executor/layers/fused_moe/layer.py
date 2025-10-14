@@ -1263,10 +1263,6 @@ class FusedMoE(CustomOp):
                 logits_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
             )
 
-        self.grouped_topk_func = grouped_topk_func
-        if rocm_aiter_ops.is_fused_moe_enabled():
-            self.grouped_topk_func = rocm_aiter_grouped_topk
-
     @property
     def shared_experts(self) -> torch.nn.Module | None:
         return None
