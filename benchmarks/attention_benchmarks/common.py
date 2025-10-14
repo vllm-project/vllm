@@ -33,10 +33,25 @@ class MockHfConfig:
         return self
 
 
-class MockLayer:
-    """Mock attention layer with scale parameters."""
+# Import AttentionLayerBase at module level to avoid circular dependencies
+try:
+    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 
-    def __init__(self, device: torch.device):
+    _HAS_ATTENTION_LAYER_BASE = True
+except ImportError:
+    _HAS_ATTENTION_LAYER_BASE = False
+    AttentionLayerBase = object  # Fallback
+
+
+class MockLayer(AttentionLayerBase):
+    """Mock attention layer with scale parameters and impl.
+
+    Inherits from AttentionLayerBase so it passes isinstance checks
+    in get_layers_from_vllm_config when FlashInfer prefill is enabled.
+    """
+
+    def __init__(self, device: torch.device, impl=None):
+        # Don't call super().__init__() as AttentionLayerBase doesn't have __init__
         self._k_scale = torch.tensor(1.0, device=device)
         self._v_scale = torch.tensor(1.0, device=device)
         self._q_scale = torch.tensor(1.0, device=device)
@@ -44,6 +59,13 @@ class MockLayer:
         self._k_scale_float = float(self._k_scale.item())
         self._v_scale_float = float(self._v_scale.item())
         self._q_scale_float = float(self._q_scale.item())
+        # AttentionImpl for metadata builders to query
+        self.impl = impl
+
+    def get_attn_backend(self):
+        """Get the attention backend class (required by AttentionLayerBase)."""
+        # Return None as this is just a mock layer for benchmarking
+        return None
 
 
 class MockModelConfig:
@@ -71,6 +93,22 @@ class MockModelConfig:
 
     def get_head_size(self) -> int:
         return self._d
+
+    def get_num_layers(self) -> int:
+        """Mock method for layer count queries."""
+        return 1
+
+    def get_sliding_window_for_layer(self, _layer_idx: int):
+        """Mock method for sliding window queries."""
+        return None
+
+    def get_logits_soft_cap_for_layer(self, _layer_idx: int):
+        """Mock method for logits soft cap queries."""
+        return None
+
+    def get_sm_scale_for_layer(self, _layer_idx: int) -> float:
+        """Mock method for SM scale queries."""
+        return 1.0 / (self.get_head_size() ** 0.5)
 
 
 class MockParallelConfig:
