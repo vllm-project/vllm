@@ -334,7 +334,7 @@ class ParallelConfig:
                     self.get_next_dp_init_port(),
                     self.data_parallel_rank,
                     self.data_parallel_size,
-                    backend="gloo",
+                    backend=current_platform.dist_backend,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
