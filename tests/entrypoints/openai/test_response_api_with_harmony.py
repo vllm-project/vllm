@@ -806,6 +806,10 @@ async def test_function_calling_with_stream(client: OpenAI, model_name: str):
     )
     assert response is not None
     async for event in response:
+        # check that no function call events in the stream
+        assert event.type != "response.function_call_arguments.delta"
+        assert event.type != "response.function_call_arguments.done"
+        # check that the response contains output text
         if event.type == "response.completed":
             assert len(event.response.output) > 0
             assert event.response.output_text is not None
