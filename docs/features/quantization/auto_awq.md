@@ -1,6 +1,6 @@
 # AutoAWQ
 
-> [!WARNING]
+> ⚠️ **Warning:**
     The `AutoAWQ` library is deprecated. This functionality has been adopted by the vLLM project in [`llm-compressor`](https://github.com/vllm-project/llm-compressor/tree/main/examples/awq).
     For the recommended quantization workflow, please see the AWQ examples in [`llm-compressor`](https://github.com/vllm-project/llm-compressor/tree/main/examples/awq). For more details on the deprecation, refer to the original [AutoAWQ repository](https://github.com/casper-hansen/AutoAWQ).
 
