@@ -73,6 +73,7 @@ def test_ignore_torch_compile_decorator():
             use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
+            use_inductor_graph_partition=False,  # TODO test both?
         )
     )
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
@@ -188,6 +189,7 @@ def test_conditional_compile_enable_if():
             use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
+            use_inductor_graph_partition=False,  # TODO test both
         ),
     )
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
@@ -220,6 +222,7 @@ def test_conditional_compile_enable_if():
             use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
+            use_inductor_graph_partition=False,  # TODO test both?
         ),
     )
 
