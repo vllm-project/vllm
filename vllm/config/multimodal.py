@@ -4,7 +4,7 @@
 import hashlib
 from collections.abc import Mapping
 from dataclasses import field
-from typing import Any, Literal, Optional, Union
+from typing import Any, Optional, Literal, Union
 
 from pydantic import ConfigDict, Field, field_validator
 from pydantic.dataclasses import dataclass
