@@ -237,6 +237,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
+
+        assert not self.base_layer.use_ep, (
+            "EP support for Fused MoE LoRA is not implemented yet."
+        )
+
         self.w1_lora_a_stacked = torch.zeros(
             (
                 max_loras,
