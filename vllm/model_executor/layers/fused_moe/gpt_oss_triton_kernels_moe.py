@@ -32,6 +32,7 @@ if has_triton_kernels():
             BIT,
             Bitmatrix,
             SparseMatrix,
+            Tensor,
             make_ragged_tensor_metadata,
         )
         from triton_kernels.topk import topk as triton_topk
@@ -83,7 +84,13 @@ def pack_bitmatrix(
         tl.store(bitmatrix_ptrs, y, mask=offsets_m[:, None] < n_rows)
 
 
-def routing_from_bitmatrix(bitmatrix, expt_scal, expt_indx, n_expts_tot, n_expts_act):
+def routing_from_bitmatrix(
+    bitmatrix: "Bitmatrix",
+    expt_scal: torch.Tensor,
+    expt_indx: torch.Tensor,
+    n_expts_tot: int,
+    n_expts_act: int,
+):
     sparse_logits = SparseMatrix(
         indx=expt_indx,
         vals=expt_scal,
@@ -108,7 +115,13 @@ def routing_from_bitmatrix(bitmatrix, expt_scal, expt_indx, n_expts_tot, n_expts
     return routing_data, gather_idx, scatter_idx
 
 
-def routing(logits, n_expts_act, sm_first=False, expt_indx=None, n_rows=None):
+def routing(
+    logits: "Tensor" | torch.Tensor,
+    n_expts_act: int,
+    sm_first: bool = False,
+    expt_indx: torch.Tensor | None = None,
+    n_rows: torch.Tensor | None = None,
+):
     if sm_first:
         logits = torch.softmax(logits, dim=-1)
     sparse_logits = triton_topk(
