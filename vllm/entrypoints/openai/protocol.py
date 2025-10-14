@@ -883,11 +883,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
             # If structured outputs wasn't already enabled,
             # we must enable it for these features to work
-            self.structured_outputs = (
-                StructuredOutputsParams(**kwargs_changes)
-                if self.structured_outputs is None
-                else replace(self.structured_outputs, **kwargs_changes)
-            )
+            if len(kwargs_changes) > 0:
+                self.structured_outputs = (
+                    StructuredOutputsParams(**kwargs_changes)
+                    if self.structured_outputs is None
+                    else replace(self.structured_outputs, **kwargs_changes)
+                )
+
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
