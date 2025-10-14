@@ -1390,9 +1390,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.attn_groups[kv_cache_group_id]
             ):
                 # Use pre-computed cascade attention prefix length
-                common_prefix_len = common_prefix_lens[kv_cache_group_id][
-                    attn_group_idx
-                ]
+                if common_prefix_lens is not None:
+                    common_prefix_len = common_prefix_lens[kv_cache_group_id][
+                        attn_group_idx
+                    ]
                 builder = attn_group.get_metadata_builder()
 
                 extra_attn_metadata_args = {}
@@ -1452,25 +1453,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                  common_prefix_lens is 2D: [kv_cache_group_id][attn_group_idx]
         """
         use_cascade_attn = False
-        common_prefix_lens = []
+        num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
+        common_prefix_lens: list[list[int]] = [[] for _ in range(num_kv_cache_groups)]
 
-        for kv_cache_group_id, kv_cache_group_spec in enumerate(
-            self.kv_cache_config.kv_cache_groups
-        ):
-            num_common_blocks = num_common_prefix_blocks[kv_cache_group_id]
-            group_prefix_lens = []
-
+        for kv_cache_group_id in range(num_kv_cache_groups):
             for attn_group in self.attn_groups[kv_cache_group_id]:
                 prefix_len = self._compute_cascade_attn_prefix_len(
                     num_scheduled_tokens,
-                    num_common_blocks,
+                    num_common_prefix_blocks[kv_cache_group_id],
                     attn_group.kv_cache_spec,
                     attn_group.get_metadata_builder(),
                 )
-                group_prefix_lens.append(prefix_len)
+                common_prefix_lens[kv_cache_group_id].append(prefix_len)
                 use_cascade_attn |= prefix_len > 0
-
-            common_prefix_lens.append(group_prefix_lens)
 
         return common_prefix_lens, use_cascade_attn
 
