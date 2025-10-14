@@ -61,8 +61,6 @@ from .utils import (
 
 logger = init_logger(__name__)
 
-logger = init_logger(__name__)
-
 
 class Llama4MoE(nn.Module):
     @staticmethod
@@ -88,7 +86,7 @@ class Llama4MoE(nn.Module):
         self.top_k = config.num_experts_per_tok
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
+        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
 
         intermediate_size_moe = config.intermediate_size
@@ -404,6 +402,9 @@ class Llama4Model(LlamaModel):
         layer_type: type[Llama4DecoderLayer] = Llama4DecoderLayer,
     ):
         self.num_experts = vllm_config.model_config.hf_config.num_local_experts
+        self.n_redundant_experts = (
+            vllm_config.parallel_config.eplb_config.num_redundant_experts
+        )
         super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
 
     def load_moe_expert_weights(
@@ -510,6 +511,8 @@ class Llama4Model(LlamaModel):
                         .flatten()
                         .to(new_loaded_weight.device)
                     )
+                    # Take redundant experts into account
+                    local_expert_indices %= new_loaded_weight.shape[0]
                     new_loaded_weight = new_loaded_weight[local_expert_indices]
                     expert_id = local_expert_indices[0].item()
             else:
@@ -518,16 +521,17 @@ class Llama4Model(LlamaModel):
 
             # Load the weight into the module parameter with corresponding
             # shard id and expert id.
-            weight_loader(
+            success = weight_loader(
                 param,
                 new_loaded_weight,
                 full_param_name,
                 shard_id=shard_id,
                 expert_id=expert_id,
+                return_success=True,
             )
-
-            loaded_params.add(full_param_name)
-            expert_param_loaded = True
+            if success:
+                loaded_params.add(full_param_name)
+                expert_param_loaded = True
 
         return expert_param_loaded
 
@@ -552,6 +556,7 @@ class Llama4Model(LlamaModel):
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.num_experts,
+            num_redundant_experts=self.n_redundant_experts,
         )
         # Expert parameter mapping for the case where the expert weights are
         # fused into a single weight tensor.

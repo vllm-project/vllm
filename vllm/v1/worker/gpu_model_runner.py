@@ -2849,7 +2849,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         logger.info("Starting to load model %s...", self.model_config.model)
         global_expert_loads, old_global_expert_indices_per_model, rank_mapping = (
-            EplbState.get_eep_state(eep_scale_up)
+            EplbState.get_eep_state(self.parallel_config)
+            if eep_scale_up
+            else (None, None, None)
         )
 
         if self.parallel_config.enable_eplb:

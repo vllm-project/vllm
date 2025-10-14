@@ -708,14 +708,12 @@ class EplbState:
 
     @classmethod
     def get_eep_state(
-        cls, parallel_config: ParallelConfig, eep_scale_up: bool = False
+        cls, parallel_config: ParallelConfig
     ) -> tuple[
         list[torch.Tensor] | None,
         list[torch.Tensor] | None,
         dict[int, int] | None,
     ]:
-        if not eep_scale_up:
-            return None, None, None
         num_local_physical_experts = torch.empty(1, dtype=torch.int32, device="cpu")
         torch.distributed.broadcast(
             num_local_physical_experts,
