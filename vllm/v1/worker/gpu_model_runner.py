@@ -2010,6 +2010,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_pad, num_tokens_after_padding = self.get_dp_padding(
                 num_input_tokens)
             num_input_tokens += num_pad
+        else:
+            raise RuntimeError(f"Unreachable branch, please check the value "
+                               f"of ubatch_slikces({ubatch_slices}).")
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
