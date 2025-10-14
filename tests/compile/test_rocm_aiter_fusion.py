@@ -14,7 +14,8 @@ from vllm.compilation.fusion import (
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.compilation.rocm_aiter_rmsnorm_fusion import (
-    ROCM_AITER_FUSED_OPS,
+    FusedAddRMSNormAiterDynamicQuantPattern,
+    RMSNormAiterDynamicQuantPattern,
     RMSNormAiterQuantFusionPass,
 )
 from vllm.config import CompilationConfig, CompilationLevel, PassConfig, VllmConfig
@@ -88,7 +89,10 @@ class TestModel(torch.nn.Module):
     def ops_in_model_after(self) -> Sequence[tuple[OpOverload, bool]]:
         # find aiter rmsnorm fused ops in the model
         # after fusion by directly targeting the function.
-
+        ROCM_AITER_FUSED_OPS = (
+            FusedAddRMSNormAiterDynamicQuantPattern.ROCM_AITER_FUSED_OPS
+            | RMSNormAiterDynamicQuantPattern.ROCM_AITER_FUSED_OPS
+        )
         return [
             (ROCM_AITER_FUSED_OPS[FusedRMSQuantKey(self.key, False)], True),
             (ROCM_AITER_FUSED_OPS[FusedRMSQuantKey(self.key, True)], True),

@@ -127,21 +127,6 @@ if current_platform.is_rocm():
     )
 
 
-ROCM_AITER_RMS_OP = torch.ops.vllm.rocm_aiter_rms_norm.default
-ROCM_AITER_RMS_ADD_OP = torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default  # noqa: E501
-
-ROCM_AITER_FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
-    FusedRMSQuantKey(
-        kFp8DynamicTokenSym,
-        False,
-    ): torch.ops.vllm.rocm_aiter_rmsnorm_fused_dynamic_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8DynamicTokenSym,
-        True,
-    ): torch.ops.vllm.rocm_aiter_rmsnorm_fused_add_dynamic_quant.default,  # noqa: E501
-}
-
-
 class RMSNormAiterQuantPattern(RMSNormQuantPattern):
     def __init__(self, epsilon, key):
         self.epsilon = epsilon
@@ -150,14 +135,18 @@ class RMSNormAiterQuantPattern(RMSNormQuantPattern):
         assert key.quant in QUANT_OPS, f"unsupported quantization scheme {key.quant}"
         self.QUANT_OP = QUANT_OPS[key.quant]
 
-        assert key in ROCM_AITER_FUSED_OPS, (
-            f"unsupported fused aiter rmsnorm+quant op for {key}"
-        )
-        self.FUSED_OP = ROCM_AITER_FUSED_OPS[key]
-
 
 class RMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
     """AITER RMSNorm + Dynamic Quantization pattern."""
+
+    ROCM_AITER_RMS_OP = torch.ops.vllm.rocm_aiter_rms_norm.default
+
+    ROCM_AITER_FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
+        FusedRMSQuantKey(
+            kFp8DynamicTokenSym,
+            False,
+        ): (torch.ops.vllm.rocm_aiter_rmsnorm_fused_dynamic_quant.default),  # noqa: E501
+    }
 
     def __init__(
         self,
@@ -171,6 +160,12 @@ class RMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
             fused_add=False,
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
+
+        assert key in self.ROCM_AITER_FUSED_OPS, (
+            f"unsupported fused aiter rmsnorm+quant op for {key}"
+        )
+        self.FUSED_OP = self.ROCM_AITER_FUSED_OPS[key]
+
         super().__init__(epsilon, key)
 
     def register(self, pm_pass):
@@ -180,7 +175,7 @@ class RMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
             weight: torch.Tensor,
             scale: torch.Tensor,
         ):
-            rms_out = ROCM_AITER_RMS_OP(
+            rms_out = self.ROCM_AITER_RMS_OP(
                 x=input,
                 weight=weight,
                 variance_epsilon=self.epsilon,
@@ -225,6 +220,15 @@ class RMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
 class FusedAddRMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
     """AITER RMSNorm Fused Add + Dynamic Quantization pattern."""
 
+    ROCM_AITER_RMS_ADD_OP = torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default
+
+    ROCM_AITER_FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
+        FusedRMSQuantKey(
+            kFp8DynamicTokenSym,
+            True,
+        ): (torch.ops.vllm.rocm_aiter_rmsnorm_fused_add_dynamic_quant.default),
+    }
+
     def __init__(
         self,
         epsilon: float,
@@ -237,6 +241,12 @@ class FusedAddRMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
             fused_add=True,
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
+
+        assert key in self.ROCM_AITER_FUSED_OPS, (
+            f"unsupported fused aiter rmsnorm+quant op for {key}"
+        )
+        self.FUSED_OP = self.ROCM_AITER_FUSED_OPS[key]
+
         super().__init__(epsilon, key)
 
     def register(self, pm_pass):
@@ -247,7 +257,7 @@ class FusedAddRMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
             weight: torch.Tensor,
             scale: torch.Tensor,
         ):
-            rms_out, residual_out = ROCM_AITER_RMS_ADD_OP(
+            rms_out, residual_out = self.ROCM_AITER_RMS_ADD_OP(
                 x=input,
                 residual=residual,
                 weight=weight,
