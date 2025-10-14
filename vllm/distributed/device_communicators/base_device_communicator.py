@@ -111,6 +111,7 @@ class DeviceCommunicatorBase:
         self.rank_in_group = dist.get_group_rank(self.cpu_group, self.global_rank)
 
         use_ep = False
+        all2all_backend = None
         from vllm.config import get_current_vllm_config
 
         config = get_current_vllm_config()
@@ -119,9 +120,11 @@ class DeviceCommunicatorBase:
             # where all data parallel ranks execute forward together),
             # we initialize the all2all manager used in expert parallel.
             use_ep = config.parallel_config.data_parallel_size > 1
+            all2all_backend = config.parallel_config.all2all_backend
 
         self.is_ep_communicator = "ep" in unique_name
         self.use_all2all = self.is_ep_communicator and use_ep
+        self.all2all_backend = all2all_backend
         self.all2all_manager: All2AllManagerBase | None = None
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:

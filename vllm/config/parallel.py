@@ -113,6 +113,25 @@ class ParallelConfig:
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
       for grouped expert models with no redundant experts."""
+    all2all_backend: (
+        Literal[
+            "naive",
+            "pplx",
+            "deepep_high_throughput",
+            "deepep_low_latency",
+            "allgather_reducescatter",
+            "flashinfer_all2allv",
+        ]
+        | None
+    ) = None
+    """All2All backend for MoE expert parallel communication. If not set, uses
+    the value from VLLM_ALL2ALL_BACKEND environment variable. Available options:
+    - "naive": Naive all2all implementation using broadcasts
+    - "allgather_reducescatter": All2all based on allgather and reducescatter
+    - "pplx": Use pplx kernels
+    - "deepep_high_throughput": Use deepep high-throughput kernels
+    - "deepep_low_latency": Use deepep low-latency kernels
+    - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
     num_redundant_experts: int | None = None
     """`num_redundant_experts` is deprecated and has been replaced with
     `eplb_config.num_redundant_experts`. This will be removed in v0.12.0.
@@ -341,7 +360,7 @@ class ParallelConfig:
     @property
     def use_sequence_parallel_moe(self) -> bool:
         return (
-            envs.VLLM_ALL2ALL_BACKEND
+            self.all2all_backend
             in (
                 "allgather_reducescatter",
                 "naive",
@@ -390,7 +409,7 @@ class ParallelConfig:
         factors.append(self.tensor_parallel_size)
         factors.append(self.enable_expert_parallel)
         factors.append(self.data_parallel_size)
-        factors.append(envs.VLLM_ALL2ALL_BACKEND)
+        factors.append(self.all2all_backend)
         factors.append(self.enable_eplb)
         if self.enable_eplb:
             factors.append(self.eplb_config.log_balancedness)
@@ -400,6 +419,16 @@ class ParallelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
+        # Set all2all_backend from env var if not specified, with deprecation warning
+        if self.all2all_backend is None:
+            self.all2all_backend = envs.VLLM_ALL2ALL_BACKEND
+            if envs.is_set("VLLM_ALL2ALL_BACKEND"):
+                logger.warning_once(
+                    "VLLM_ALL2ALL_BACKEND environment variable is deprecated and "
+                    "will be removed in a future release. Please use the "
+                    "--all2all-backend command-line argument instead."
+                )
+
         # Forward deprecated fields to their new location
         if self.num_redundant_experts is not None:
             self.eplb_config.num_redundant_experts = self.num_redundant_experts
