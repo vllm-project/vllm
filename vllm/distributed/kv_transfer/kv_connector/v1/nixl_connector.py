@@ -69,6 +69,7 @@ except ImportError:
     NixlWrapper = None
     nixlXferTelemetry = None
 
+
 try:
     from nixl._api import nixl_agent_config
 except ImportError:
@@ -242,6 +243,11 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Get block IDs that failed to load via NIXL."""
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
+
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         assert self.connector_worker is not None
         return self.connector_worker.get_kv_connector_stats()
@@ -309,7 +315,11 @@ class NixlConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-        self.side_channel_port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT
+        self.side_channel_port = (
+            envs.VLLM_NIXL_SIDE_CHANNEL_PORT
+            + vllm_config.parallel_config.data_parallel_rank
+        )
+        assert vllm_config.kv_transfer_config is not None
         self.use_host_buffer = vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
         logger.info("Initializing NIXL Scheduler %s", engine_id)
 
@@ -440,7 +450,8 @@ class NixlConnectorScheduler:
 
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
-            count = len(request.prompt_token_ids) - num_computed_tokens
+            token_ids = request.prompt_token_ids or []
+            count = len(token_ids) - num_computed_tokens
             if count > 0:
                 return count, True
 
@@ -621,6 +632,9 @@ class NixlConnectorWorker:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
+        if vllm_config.kv_transfer_config is None:
+            raise ValueError("kv_transfer_config must be set for NixlConnector")
+
         self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
             "backends", ["UCX"]
         )
@@ -667,17 +681,18 @@ class NixlConnectorWorker:
         self.use_host_buffer = self.kv_buffer_device == "cpu"
         # support for oot platform which can't register nixl memory
         # type based on kv_buffer_device
-        self.nixl_memory_type = current_platform.get_nixl_memory_type()
-        if self.nixl_memory_type is None:
+        nixl_memory_type = current_platform.get_nixl_memory_type()
+        if nixl_memory_type is None:
             if self.kv_buffer_device == "cuda":
-                self.nixl_memory_type = "VRAM"
+                nixl_memory_type = "VRAM"
             elif self.kv_buffer_device == "cpu":
-                self.nixl_memory_type = "DRAM"
-        if self.nixl_memory_type is None:
+                nixl_memory_type = "DRAM"
+        if nixl_memory_type is None:
             raise RuntimeError(
                 f"{self.device_type} with {self.kv_buffer_device} kv_buffer "
                 "is not supported."
             )
+        self.nixl_memory_type = nixl_memory_type
 
         # Note: host xfer buffer ops when use_host_buffer is True
         self.copy_blocks: CopyBlocksOp | None = None
@@ -710,6 +725,11 @@ class NixlConnectorWorker:
         self._reqs_to_send: dict[ReqId, float] = {}
         # Set of requests that have been part of a batch, regardless of status.
         self._reqs_to_process: set[ReqId] = set()
+
+        # invalid blocks from failed NIXL operations
+        self._invalid_block_ids: set[int] = set()
+        # requests that skipped transfer (handshake or transfer failures)
+        self._failed_recv_reqs: set[ReqId] = set()
 
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlAgentMetadata | None = None
@@ -788,6 +808,8 @@ class NixlConnectorWorker:
             msg = msgspec.msgpack.encode(
                 (GET_META_MSG, p_remote_dp_rank, p_remote_tp_rank)
             )
+            # Set receive timeout to 5 seconds to avoid hanging on dead server
+            sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
             sock.send(msg)
             metadata_bytes = sock.recv()
             decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
@@ -870,10 +892,20 @@ class NixlConnectorWorker:
 
             fut.add_done_callback(done_callback)
 
-        # TODO: handle failure state of future in the
-        # callback, we want to fail the request in this case.
-        def request_ready(_f: Future[Any], entry=(req_id, meta)):
-            self._ready_requests.put(entry)
+        # check handshake success before proceeding with request
+        def request_ready(f: Future[Any], entry=(req_id, meta)):
+            try:
+                # check if handshake succeeded
+                f.result()
+                self._ready_requests.put(entry)
+            except Exception:
+                # handshake failed - mark blocks as invalid
+                logger.exception(
+                    "Handshake failed for request %s, marking blocks as invalid", req_id
+                )
+                if req_meta := self._recving_metadata.get(req_id):
+                    self._invalid_block_ids.update(req_meta.local_block_ids)
+                self._failed_recv_reqs.add(req_id)
 
         fut.add_done_callback(request_ready)
 
@@ -1281,6 +1313,11 @@ class NixlConnectorWorker:
         """
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
+
+        # add requests that skipped transfer to done_recving
+        done_recving.update(self._failed_recv_reqs)
+        self._failed_recv_reqs.clear()
+
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
@@ -1290,10 +1327,10 @@ class NixlConnectorWorker:
                 len(done_recving),
             )
 
-        if self.use_host_buffer:
-            for req_id in done_recving:
-                meta = self._recving_metadata.pop(req_id)
-                assert meta, f"{req_id} not found in recving_metadata list"
+        # clean up metadata for completed requests
+        for req_id in done_recving:
+            meta = self._recving_metadata.pop(req_id, None)
+            if self.use_host_buffer and meta:
                 self.sync_recved_kv_to_device(req_id, meta)
 
         # Handle timeout to avoid stranding blocks on remote.
@@ -1372,7 +1409,19 @@ class NixlConnectorWorker:
                     in_progress = True
                     continue
                 else:
-                    raise RuntimeError("Transfer failed with state %s", xfer_state)
+                    # transfer failed - mark blocks as invalid
+                    logger.error(
+                        "NIXL transfer failed for request %s with state %s. "
+                        "Marking blocks as invalid.",
+                        req_id,
+                        xfer_state,
+                    )
+                    # mark all blocks for this request as invalid
+                    if meta := self._recving_metadata.pop(req_id, None):
+                        self._invalid_block_ids.update(meta.local_block_ids)
+                    self._recving_metadata.pop(req_id, None)
+                    self.nixl_wrapper.release_xfer_handle(handle)
+                    self.xfer_stats.record_failed_transfer()
             if not in_progress:
                 done_req_ids.add(req_id)
                 del transfers[req_id]
@@ -1393,8 +1442,8 @@ class NixlConnectorWorker:
                 len(meta.local_block_ids),
                 len(meta.remote_block_ids),
             )
-            if self.use_host_buffer:
-                self._recving_metadata[req_id] = meta
+            # always store metadata for failure recovery
+            self._recving_metadata[req_id] = meta
             if remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
@@ -1470,7 +1519,16 @@ class NixlConnectorWorker:
         if num_local_blocks == 0:
             remote_rank = self.tp_rank // tp_ratio
             agent_name = self._remote_agents[dst_engine_id][remote_rank]
-            self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
+            try:
+                self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
+            except Exception:
+                logger.exception(
+                    "NIXL send_notif failed for request %s: "
+                    "P worker blocks will be freed after timeout. "
+                    "This may indicate network issues.",
+                    request_id,
+                )
+                self.xfer_stats.record_failed_notification()
             return
 
         # Partial prefix cache hit: just read uncomputed blocks.
@@ -1533,20 +1591,35 @@ class NixlConnectorWorker:
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
-        handle = self.nixl_wrapper.make_prepped_xfer(
-            "READ",
-            local_xfer_side_handle,
-            local_block_descs_ids,
-            remote_xfer_side_handle,
-            remote_block_descs_ids,
-            notif_msg=notif_id,
-        )
+        handle = None
+        try:
+            handle = self.nixl_wrapper.make_prepped_xfer(
+                "READ",
+                local_xfer_side_handle,
+                local_block_descs_ids,
+                remote_xfer_side_handle,
+                remote_block_descs_ids,
+                notif_msg=notif_id,
+            )
 
-        # Begin async xfer.
-        self.nixl_wrapper.transfer(handle)
+            # Begin async xfer.
+            self.nixl_wrapper.transfer(handle)
 
-        # Use handle to check completion in future step().
-        self._recving_transfers[request_id].append((handle, time.perf_counter()))
+            # Use handle to check completion in future step().
+            self._recving_transfers[request_id].append((handle, time.perf_counter()))
+        except Exception:
+            logger.exception(
+                "NIXL transfer setup/initiation failed for request %s. "
+                "Marking blocks as invalid.",
+                request_id,
+            )
+            # mark all blocks for this request as invalid
+            if meta := self._recving_metadata.get(request_id):
+                self._invalid_block_ids.update(meta.local_block_ids)
+            self.xfer_stats.record_failed_transfer()
+            if handle is not None:
+                self.nixl_wrapper.release_xfer_handle(handle)
+            self._failed_recv_reqs.add(request_id)
 
     def _get_block_descs_ids(
         self, engine_id: str, block_ids: list[int], layer_idx: int | None = None
@@ -1604,6 +1677,17 @@ class NixlConnectorWorker:
             return self.xfer_stats.clone_and_reset()
         return None
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """
+        Return and clear the set of block IDs that failed to load.
+
+        This is called by the scheduler to identify blocks that need
+        to be retried after a NIXL transfer failure.
+        """
+        result = self._invalid_block_ids
+        self._invalid_block_ids = set()
+        return result
+
     def shutdown(self):
         """Shutdown the connector worker."""
         self._handshake_initiation_executor.shutdown(wait=False)
@@ -1660,6 +1744,8 @@ class NixlKVConnectorStats(KVConnectorStats):
             "post_duration": [],
             "bytes_transferred": [],
             "num_descriptors": [],
+            "num_failed_transfers": [],
+            "num_failed_notifications": [],
         }
 
     def record_transfer(self, res: nixlXferTelemetry):
@@ -1668,6 +1754,14 @@ class NixlKVConnectorStats(KVConnectorStats):
         self.data["post_duration"].append(res.postDuration / 1e6)
         self.data["bytes_transferred"].append(res.totalBytes)
         self.data["num_descriptors"].append(res.descCount)
+
+    def record_failed_transfer(self):
+        """Record a failed NIXL transfer operation."""
+        self.data["num_failed_transfers"].append(1.0)
+
+    def record_failed_notification(self):
+        """Record a failed NIXL notification (send_notif)."""
+        self.data["num_failed_notifications"].append(1.0)
 
     def clone_and_reset(self) -> "NixlKVConnectorStats":
         old = copy.copy(self)
