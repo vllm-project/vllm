@@ -201,7 +201,7 @@ class CompilationConfig:
     (it sees a part of the graph). The backend can not be custom for compilation
     level 3, i.e. the backend must be either eager or inductor. Furthermore,
     compilation is only piecewise if splitting ops is set accordingly and
-    use_inductor_cudagraphs_partition is off. Note that the default options for
+    use_inductor_graph_partition is off. Note that the default options for
     splitting ops are sufficient for piecewise compilation.
     """
     custom_ops: list[str] = field(default_factory=list)
@@ -346,7 +346,7 @@ class CompilationConfig:
     FULL_AND_PIECEWISE instead.
     """
 
-    use_inductor_graph_partition: bool = is_torch_equal_or_newer("2.9.0")
+    use_inductor_graph_partition: bool = False
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
