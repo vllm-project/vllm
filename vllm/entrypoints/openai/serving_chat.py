@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import Final
 
 import jinja2
@@ -1108,6 +1109,19 @@ class OpenAIServingChat(OpenAIServing):
 
                     # if the model is finished generating
                     else:
+                        # check for error finish reason and abort streaming
+                        if output.finish_reason == "error":
+                            logger.error(
+                                "KV cache load failure detected for request %s",
+                                request_id,
+                            )
+                            data = self.create_streaming_error_response(
+                                "Internal error: KV cache load failure"
+                            )
+                            yield f"data: {data}\n\n"
+                            yield "data: [DONE]\n\n"
+                            return
+
                         # check to make sure we haven't "forgotten" to stream
                         #   any tokens that were generated but previously
                         #   matched by partial json parsing
@@ -1305,6 +1319,15 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         assert final_res is not None
+
+        # Check for error finish reason and return 500 error
+        for output in final_res.outputs:
+            if output.finish_reason == "error":
+                return self.create_error_response(
+                    "Internal error: KV cache load failure",
+                    err_type="InternalServerError",
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
