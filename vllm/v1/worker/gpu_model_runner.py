@@ -2211,7 +2211,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # some cases that ms doesn't support
             if self.uses_mrope:
                 self.total_step = 1
-            if (self.supports_mm_inputs and not self.model_config.is_encoder_decoer):
+            if (self.supports_mm_inputs and not self.model_config.is_encoder_decoder):
                 self.total_step = 1
             if (self.model_config.is_encoder_decoder
                     and scheduler_output.scheduled_encoder_inputs):
@@ -2232,16 +2232,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                  ) = self._prepare_inputs(scheduler_output,
                     cached_valid_sampled_token_ids[-1])
                 (
-                num_scheduled_tokens,
-                num_input_tokens,
-                num_tokens_across_dp,
-                input_ids,
-                inputs_embeds,
-                positions,
-                intermediate_tensors,
-                model_kwargs,
+                    num_scheduled_tokens,
+                    num_input_tokens,
+                    num_tokens_across_dp,
+                    input_ids,
+                    inputs_embeds,
+                    positions,
+                    intermediate_tensors,
+                    model_kwargs,
                 ) = self._preprocess(scheduler_output, intermediate_tensors,
                                      ubatch_slices, num_tokens_after_padding)
+
             # Run the model.
             # Use persistent buffers for CUDA graphs.
             with (set_forward_context(
@@ -2368,12 +2369,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             with record_function_or_nullcontext("EPLB"):
                 self.eplb_step()
-            
+
             cached_valid_sampled_token_ids.append(valid_sampled_token_ids)
             if kv_connector_output is not None:
-                    final_kv_connector_output.finished_sending.update(
+                final_kv_connector_output.finished_sending.update(
                         kv_connector_output.finished_sending)
-                    final_kv_connector_output.finished_receving.update(
+                final_kv_connector_output.finished_receving.update(
                         kv_connector_output.finished_receving)
 
         final_token_ids = None
