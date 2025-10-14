@@ -478,15 +478,17 @@ us with:
 
 ```python
 if seq_group.is_finished():
-    if (seq_group.metrics.first_scheduled_time is not None and
-            seq_group.metrics.first_token_time is not None):
+    if (
+        seq_group.metrics.first_scheduled_time is not None
+        and seq_group.metrics.first_token_time is not None
+    ):
         time_queue_requests.append(
             seq_group.metrics.first_scheduled_time -
-            seq_group.metrics.arrival_time)
+            seq_group.metrics.arrival_time
+        )
     ...
     if seq_group.metrics.time_in_queue is not None:
-        time_in_queue_requests.append(
-            seq_group.metrics.time_in_queue)
+        time_in_queue_requests.append(seq_group.metrics.time_in_queue)
 ```
 
 This seems duplicative, and one of them should be removed. The latter
