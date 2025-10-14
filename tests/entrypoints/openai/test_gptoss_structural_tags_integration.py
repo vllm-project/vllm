@@ -109,39 +109,53 @@ class TestGptOssStructuralTagsIntegration:
         parsed_tag = json.loads(params.structural_tag)
         assert parsed_tag["type"] == "structural_tag"
 
-    def test_tool_server_interaction_flow(self, gptoss_parser):
+    @pytest.mark.parametrize(
+        "browser, python, container, expected_tags",
+        [
+            # No tools
+            (False, False, False, 1),
+            # Single tool
+            (True, False, False, 3),
+            # Multiple tools
+            (True, True, False, 5),
+            # All tools
+            (True, True, True, 7),
+        ],
+    )
+    def test_tool_server_interaction_flow(
+        self, gptoss_parser, browser, python, container, expected_tags
+    ):
         """Test the complete tool server interaction flow."""
-        # Create a comprehensive tool server
+
+        # Create a mock ToolServer
         tool_server = Mock(spec=ToolServer)
 
-        # Test different tool combinations
-        test_cases = [
-            # No tools
-            {"browser": False, "python": False, "container": False, "expected_tags": 1},
-            # Single tool
-            {"browser": True, "python": False, "container": False, "expected_tags": 3},
-            # Multiple tools
-            {"browser": True, "python": True, "container": False, "expected_tags": 5},
-            # All tools
-            {"browser": True, "python": True, "container": True, "expected_tags": 7},
-        ]
+        # Simulate tool availability based on parameters
+        tool_server.has_tool = Mock(
+            side_effect=lambda tool: {
+                "browser": browser,
+                "python": python,
+                "container": container,
+            }.get(tool, False)
+        )
 
-        for case in test_cases:
-            tool_server.has_tool = Mock(
-                side_effect=lambda tool, case=case: case.get(tool, False)
-            )
+        # Run the parser and verify results
+        result = gptoss_parser.prepare_structured_tag(None, tool_server)
+        parsed_result = json.loads(result)
 
-            result = gptoss_parser.prepare_structured_tag(None, tool_server)
-            parsed_result = json.loads(result)
+        # Validate number of tags
+        assert len(parsed_result["format"]["tags"]) == expected_tags
 
-            assert len(parsed_result["format"]["tags"]) == case["expected_tags"]
-
-            # Verify tool-specific tags are present for enabled tools
-            tag_begins = [tag["begin"] for tag in parsed_result["format"]["tags"]]
-            for tool in ["browser", "python", "container"]:
-                if case[tool]:
-                    assert f"<|channel|>commentary to={tool}" in tag_begins
-                    assert f"<|channel|>analysis to={tool}" in tag_begins
+        # Verify tool-specific tags exist for enabled tools
+        tag_begins = [tag["begin"] for tag in parsed_result["format"]["tags"]]
+        for tool, enabled in {
+            "browser": browser,
+            "python": python,
+            "container": container,
+        }.items():
+            if enabled:
+                assert f"<|channel|>commentary to={tool}" in tag_begins
+                assert f"<|channel|>analysis to={tool}" in tag_begins
 
     def test_original_tag_preservation(self, gptoss_parser, tool_server_with_python):
         """Test that original tags are preserved when provided."""
@@ -154,9 +168,9 @@ class TestGptOssStructuralTagsIntegration:
         # Should return original tag unchanged
         assert result == original_tag
 
-    def test_json_validity_comprehensive(self, gptoss_parser):
-        """Test JSON validity across all possible tool combinations."""
-        tool_combinations = [
+    @pytest.mark.parametrize(
+        "tools",
+        [
             [],
             ["browser"],
             ["python"],
@@ -165,28 +179,28 @@ class TestGptOssStructuralTagsIntegration:
             ["browser", "container"],
             ["python", "container"],
             ["browser", "python", "container"],
-        ]
+        ],
+    )
+    def test_json_validity_comprehensive(self, gptoss_parser, tools):
+        """Test JSON validity across all possible tool combinations."""
 
-        for tools in tool_combinations:
-            tool_server = Mock(spec=ToolServer)
-            tool_server.has_tool = Mock(
-                side_effect=lambda tool, tools=tools: tool in tools
-            )
+        tool_server = Mock(spec=ToolServer)
+        tool_server.has_tool = Mock(side_effect=lambda tool: tool in tools)
 
-            result = gptoss_parser.prepare_structured_tag(None, tool_server)
+        result = gptoss_parser.prepare_structured_tag(None, tool_server)
 
-            # Should be valid JSON
-            parsed_result = json.loads(result)
+        # Should be valid JSON
+        parsed_result = json.loads(result)
 
-            # Should have correct structure
-            assert parsed_result["type"] == "structural_tag"
-            assert "format" in parsed_result
-            assert "tags" in parsed_result["format"]
-            assert "triggers" in parsed_result["format"]
+        # Should have correct structure
+        assert parsed_result["type"] == "structural_tag"
+        assert "format" in parsed_result
+        assert "tags" in parsed_result["format"]
+        assert "triggers" in parsed_result["format"]
 
-            # Tag count should be: 1 (analysis) + 2 * len(tools)
-            expected_tag_count = 1 + (2 * len(tools))
-            assert len(parsed_result["format"]["tags"]) == expected_tag_count
+        # Tag count should be: 1 (analysis) + 2 * len(tools)
+        expected_tag_count = 1 + (2 * len(tools))
+        assert len(parsed_result["format"]["tags"]) == expected_tag_count
 
     def test_error_handling_invalid_tool_server(self, gptoss_parser):
         """Test error handling with invalid tool server."""

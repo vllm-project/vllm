@@ -360,19 +360,13 @@ class OpenAIServingResponses(OpenAIServing):
                 if self.reasoning_parser is not None:
                     reasoning_parser = self.reasoning_parser(tokenizer)
                     if sampling_params.structured_outputs is None:
-                        sampling_params.structured_outputs = StructuredOutputsParams(
-                            structural_tag=reasoning_parser.prepare_structured_tag(
-                                None, self.tool_server
-                            )
+                        sampling_params.structured_outputs = StructuredOutputsParams()
+                    sampling_params.structured_outputs.structural_tag = (
+                        reasoning_parser.prepare_structured_tag(
+                            sampling_params.structured_outputs.structural_tag,
+                            self.tool_server,
                         )
-                    else:
-                        sampling_params.structured_outputs.structural_tag = (
-                            reasoning_parser.prepare_structured_tag(
-                                sampling_params.structured_outputs.structural_tag,
-                                self.tool_server,
-                            )
-                        )
-
+                    )
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
                     request_prompt=request_prompts[i],

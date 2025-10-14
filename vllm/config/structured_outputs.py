@@ -36,8 +36,7 @@ class StructuredOutputsConfig:
     """Select the reasoning parser depending on the model that you're using.
     This is used to parse the reasoning content into OpenAI API format."""
     enable_in_reasoning: bool = False
-    """ Whether to use structured input for reasoning.
-    """
+    """Whether to use structured input for reasoning."""
 
     def compute_hash(self) -> str:
         """
