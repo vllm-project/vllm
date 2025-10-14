@@ -466,7 +466,7 @@ class Phi4MMImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"]
 
-    data: Annotated[
+    pixel_values: Annotated[
         torch.Tensor | list[torch.Tensor],
         TensorShape(
             "bn", "p", 3, "h", "w", dynamic_dims={"p"}
@@ -498,7 +498,7 @@ class Phi4MMAudioFeatureInputs(TensorSchema):
 
     type: Literal["audio_features"]
 
-    data: Annotated[
+    audio_features: Annotated[
         torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "t", 80, dynamic_dims={"t"}),
     ]
@@ -1094,7 +1094,10 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             return None
 
         if audio_features is not None:
-            return Phi4MMAudioFeatureInputs(type="audio_features", data=audio_features)
+            return Phi4MMAudioFeatureInputs(
+                type="audio_features",
+                audio_features=audio_features,
+            )
 
         if audio_embeds is not None:
             return Phi4MMAudioEmbeddingInputs(type="audio_embeds", data=audio_embeds)
@@ -1118,7 +1121,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         if audio_input["type"] == "audio_embeds":
             return audio_input["data"]
 
-        audio_features = audio_input["data"]
+        audio_features = audio_input["audio_features"]
         # (e.g. multiple examples) and the second dim is the multi-audio dim
         # (e.g. multiple audios in the same example)
 
@@ -1135,8 +1138,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> Phi4MMImagePixelInputs | None:
-        input_image_embeds = kwargs.get("input_image_embeds")
-        if input_image_embeds is None:
+        pixel_values = kwargs.get("input_image_embeds")
+        if pixel_values is None:
             return None
 
         image_sizes = kwargs.get("image_sizes")
@@ -1150,7 +1153,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
         return Phi4MMImagePixelInputs(
             type="pixel_values",
-            data=input_image_embeds,
+            pixel_values=pixel_values,
             image_sizes=image_sizes,
             image_attention_mask=image_attention_mask,
             num_img_tokens=num_img_tokens,
@@ -1179,7 +1182,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         self, image_input: Phi4MMImagePixelInputs
     ) -> list[torch.Tensor]:
         dtype = next(self.vision_encoder.parameters()).dtype
-        pixel_values = image_input["data"].to(dtype)
+        pixel_values = image_input["pixel_values"].to(dtype)
         image_sizes = image_input["image_sizes"]
         image_attention_mask = image_input["image_attention_mask"]
         image_embeds = self.vision_encoder(
