@@ -26,7 +26,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 
 from .cache import CacheConfig
-from .compilation import CompilationConfig, CompilationLevel, CompilationMode, CUDAGraphMode, PassConfig
+from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from .device import DeviceConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
@@ -301,7 +301,7 @@ class VllmConfig:
         current_config = self.compilation_config.pass_config
 
         for field in fields(PassConfig):
-            if field.name.startswith('enable_'):
+            if field.name.startswith("enable_"):
                 current_val = getattr(current_config, field.name)
                 default_val = getattr(default_config, field.name)
                 if current_val == default_val:
@@ -319,16 +319,9 @@ class VllmConfig:
             - O2 (DYNAMO_ONCE): Full optimization (to be implemented)
             - O3 (PIECEWISE): Maximum optimization with autotuning (to be implemented)
         """
-        from vllm.platforms import current_platform
-
         level = self.compilation_config.level
 
-        if level == CompilationLevel.NO_COMPILATION:
-            # -O0: No compilation, fast startup, eager execution
-            backend = self.compilation_config.backend
-            if backend == current_platform.simple_compile_backend:
-                self.compilation_config.backend = "eager"
-
+        if level == CompilationMode.NONE:
             if self.compilation_config.cudagraph_mode is None:
                 self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
