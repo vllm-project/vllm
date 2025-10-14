@@ -58,12 +58,18 @@ class StructuredOutputsParams:
                 self.choice is not None,
                 self.grammar is not None,
                 self.json_object is not None,
+                self.structural_tag is not None,
             ]
         )
         if count > 1:
             raise ValueError(
                 "You can only use one kind of structured outputs constraint "
                 f"but multiple are specified: {self.__dict__}"
+            )
+        if count < 1:
+            raise ValueError(
+                "You must use one kind of structured outputs constraint "
+                f"but none are specified: {self.__dict__}"
             )
 
 
