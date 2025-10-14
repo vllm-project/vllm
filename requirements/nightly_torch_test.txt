@@ -23,7 +23,7 @@ jiwer # required for audio tests
 timm # required for internvl test
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
-mistral_common[image,audio] >= 1.8.2 # required for voxtral test
+mistral_common[image,audio] >= 1.8.5 # required for voxtral test
 num2words # required for smolvlm test
 opencv-python-headless >= 4.11.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
@@ -44,4 +44,4 @@ numba == 0.61.2 # Required for N-gram speculative decoding
 numpy
 runai-model-streamer[s3,gcs]==0.14.0
 fastsafetensors>=0.1.10
-pydantic>=2.10 # 2.9 leads to error on python 3.10
+pydantic>=2.12 # 2.11 leads to error on python 3.13
