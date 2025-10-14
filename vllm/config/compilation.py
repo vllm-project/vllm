@@ -4,9 +4,10 @@
 import enum
 import hashlib
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
@@ -14,6 +15,7 @@ from pydantic.dataclasses import dataclass
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
 
 if TYPE_CHECKING:
@@ -168,7 +170,7 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    level: Optional[int] = None
+    level: int | None = None
     """The level of compilation:
 
     - None: If None, we will select the default compilation level.
@@ -177,7 +179,7 @@ class CompilationConfig:
     - 1: dynamo as is.
     - 2: dynamo once.
     - 3: piecewise compilation."""
-    debug_dump_path: Optional[Path] = None
+    debug_dump_path: Path | None = None
     """The path to dump the debug information."""
     cache_dir: str = ""
     """The directory to store the compiled graph, to accelerate Inductor
@@ -186,7 +188,8 @@ class CompilationConfig:
     backend: str = ""
     """The backend for compilation. It needs to be a string:
 
-    - "" (empty string): use the default backend.
+    - "" (empty string): use the default backend ("inductor" on CUDA-alike
+    platforms).
     - "eager"/"openxla"/...: use the specified backend registered in PyTorch.
     - "full.module.name": a qualified name which can be used to import the
 
@@ -195,7 +198,12 @@ class CompilationConfig:
     distributed setting. When the compilation level is 1 or 2, the backend is
     used for the compilation directly (it sees the whole graph). When the
     compilation level is 3, the backend is used for the piecewise compilation
-    (it sees a part of the graph)."""
+    (it sees a part of the graph). The backend can not be custom for compilation
+    level 3, i.e. the backend must be either eager or inductor. Furthermore,
+    compilation is only piecewise if splitting ops is set accordingly and
+    use_inductor_cudagraphs_partition is off. Note that the default options for
+    splitting ops are sufficient for piecewise compilation.
+    """
     custom_ops: list[str] = field(default_factory=list)
     """Fine-grained control over which custom ops to enable/disable. Use 'all'
     to enable all, 'none' to disable all. Also specify a list of custom op
@@ -208,7 +216,7 @@ class CompilationConfig:
     By default, all custom ops are enabled when running without Inductor and
     disabled when running with Inductor: level>=PIECEWISE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
-    splitting_ops: Optional[list[str]] = None
+    splitting_ops: list[str] | None = None
     """A list of ops to exclude from cudagraphs, used in piecewise compilation.
 
     The behavior depends on use_inductor_graph_partition:
@@ -228,8 +236,12 @@ class CompilationConfig:
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
 
     # Inductor capture
-    use_inductor: bool = True
-    """Whether to use inductor compilation:
+    use_inductor: bool | None = None
+    """
+    Whether to use inductor compilation.
+
+    This flag is deprecated and will be removed in the next release 0.12.0.
+    Please use the 'backend' option instead.
 
     - False: inductor compilation is not used. graph runs in eager
         (custom_ops enabled by default).
@@ -237,8 +249,12 @@ class CompilationConfig:
         One graph for symbolic shape and one graph per size in compile_sizes
         are compiled using configurations in inductor_compile_config.
 
-    This setting is ignored if level<PIECEWISE."""
-    compile_sizes: Optional[list[Union[int, str]]] = None
+    This setting is ignored if level<PIECEWISE.
+
+    For future compatibility:
+    If use_inductor is True, backend="inductor" otherwise backend="eager".
+    """
+    compile_sizes: list[int | str] | None = None
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
@@ -253,7 +269,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: Optional[CUDAGraphMode] = None
+    cudagraph_mode: CUDAGraphMode | None = None
     """
     The mode of the cudagraph:
 
@@ -308,7 +324,7 @@ class CompilationConfig:
     It means the first several runs will be treated as warmup runs.
     Only after that, the execution will be recorded, and the recorded
     cudagraph will be used for subsequent runs."""
-    cudagraph_capture_sizes: Optional[list[int]] = None
+    cudagraph_capture_sizes: list[int] | None = None
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
@@ -320,7 +336,7 @@ class CompilationConfig:
     internally managed buffer. Default is False. 
     Note that this flag is only effective when cudagraph_mode is PIECEWISE.
     """
-    full_cuda_graph: Optional[bool] = False
+    full_cuda_graph: bool | None = False
     """whether to use a full cuda graph for the entire forward pass rather than
     splitting certain operations such as attention into subgraphs. Thus this
     flag cannot be used together with splitting_ops. This may provide
@@ -544,7 +560,43 @@ class CompilationConfig:
                     "(where 'op' is the registered op name)"
                 )
 
-    def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
+        # Currently only eager and inductor backend are supported.
+        # for piecewise compilation. Custom backends are not suppported for
+        # piecewise compilation. Update when more backends are supported.
+        if self.level == CompilationLevel.PIECEWISE and self.backend not in [
+            "",
+            "eager",
+            "inductor",
+        ]:
+            raise ValueError(
+                f"Invalid backend for piecewise compilation: {self.backend}"
+            )
+
+        if self.use_inductor is not None:
+            logger.warning_once(
+                "The 'use_inductor' flag is deprecated and will be "
+                "removed in the next release (v0.12.0). "
+                "Please use the 'backend' option instead.",
+            )
+            self.backend = "inductor" if self.use_inductor else "eager"
+
+        if self.backend == "":
+            self.backend = current_platform.simple_compile_backend
+
+    def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
+        """
+        Initialize the backend for the compilation config from a vllm config.
+        Arguments:
+            vllm_config: The vllm config to initialize the backend from.
+        Returns:
+            The backend for the compilation config.
+        """
+        if self.level is None:
+            raise ValueError(
+                "No compilation level is set. This method should only be \
+                called via vllm config where the level is set if none is \
+                provided."
+            )
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
@@ -552,15 +604,15 @@ class CompilationConfig:
 
         torch_backends = list_backends(exclude_tags=tuple())
         if self.level in [CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE]:
-            if self.backend == "":
-                return "eager"
             if self.backend in torch_backends:
                 return self.backend
             return resolve_obj_by_qualname(self.backend)
 
-        # TODO: pass user-specified backend to piecewise compilation
-        # merge with the config use_inductor
         assert self.level == CompilationLevel.PIECEWISE
+        if self.backend not in ["eager", "inductor"]:
+            raise ValueError(
+                f"Invalid backend for piecewise compilation: {self.backend}"
+            )
 
         from vllm.compilation.backends import VllmBackend
 
@@ -710,7 +762,7 @@ class CompilationConfig:
 
         # Inductor partition case
         return (
-            self.level > CompilationLevel.NO_COMPILATION and self.backend == "inductor"
+            self.backend == "inductor" and self.level > CompilationLevel.NO_COMPILATION
         )
 
     def custom_op_log_check(self):
