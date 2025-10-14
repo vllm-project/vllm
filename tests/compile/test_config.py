@@ -99,7 +99,7 @@ def test_stock_torch_compile(vllm_runner, monkeypatch):
         # loading the model causes compilation (if enabled) to happen
         vllm_runner(
             "facebook/opt-125m",
-            compilation_config={"mode": 1},
+            compilation_config={"mode": CompilationMode.STOCK_TORCH_COMPILE},
             gpu_memory_utilization=0.4,
         ) as _,
     ):
