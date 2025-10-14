@@ -83,9 +83,7 @@ def pack_bitmatrix(
         tl.store(bitmatrix_ptrs, y, mask=offsets_m[:, None] < n_rows)
 
 
-def legacy_routing_from_bitmatrix(
-    bitmatrix, expt_scal, expt_indx, n_expts_tot, n_expts_act
-):
+def routing_from_bitmatrix(bitmatrix, expt_scal, expt_indx, n_expts_tot, n_expts_act):
     sparse_logits = SparseMatrix(
         indx=expt_indx,
         vals=expt_scal,
@@ -110,7 +108,7 @@ def legacy_routing_from_bitmatrix(
     return routing_data, gather_idx, scatter_idx
 
 
-def legacy_routing(logits, n_expts_act, sm_first=False, expt_indx=None, n_rows=None):
+def routing(logits, n_expts_act, sm_first=False, expt_indx=None, n_rows=None):
     if sm_first:
         logits = torch.softmax(logits, dim=-1)
     sparse_logits = triton_topk(
@@ -120,7 +118,7 @@ def legacy_routing(logits, n_expts_act, sm_first=False, expt_indx=None, n_rows=N
         y_indx=expt_indx,
         n_rows=n_rows,
     )
-    return legacy_routing_from_bitmatrix(
+    return routing_from_bitmatrix(
         sparse_logits.mask,
         sparse_logits.vals,
         sparse_logits.indx,
@@ -142,7 +140,7 @@ def triton_kernel_moe_forward(
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    routing_data, gather_idx, scatter_idx = legacy_routing(
+    routing_data, gather_idx, scatter_idx = routing(
         gating_output, topk, sm_first=not renormalize
     )
 
@@ -269,7 +267,7 @@ def make_routing_data(
 
     # matmul_ogs expects invalid topk_weights to be -1s
     topk_weights = torch.where(topk_ids == -1, -1.0, topk_weights)
-    routing_data, gather_indx, scatter_indx = legacy_routing_from_bitmatrix(
+    routing_data, gather_indx, scatter_indx = routing_from_bitmatrix(
         bitmatrix, topk_weights, topk_ids, num_local_experts, num_topk
     )
 
