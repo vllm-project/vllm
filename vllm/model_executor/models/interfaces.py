@@ -878,27 +878,6 @@ def supports_transcription(
 
 
 @runtime_checkable
-class SupportsV0Only(Protocol):
-    """Models with this interface are not compatible with V1 vLLM."""
-
-    supports_v0_only: ClassVar[Literal[True]] = True
-
-
-@overload
-def supports_v0_only(model: type[object]) -> TypeIs[type[SupportsV0Only]]: ...
-
-
-@overload
-def supports_v0_only(model: object) -> TypeIs[SupportsV0Only]: ...
-
-
-def supports_v0_only(
-    model: type[object] | object,
-) -> TypeIs[type[SupportsV0Only]] | TypeIs[SupportsV0Only]:
-    return getattr(model, "supports_v0_only", False)
-
-
-@runtime_checkable
 class SupportsEagle3(Protocol):
     """The interface required for models that support
     EAGLE3 speculative decoding."""
