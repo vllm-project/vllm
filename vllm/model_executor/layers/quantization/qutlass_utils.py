@@ -16,7 +16,7 @@ from typing import Literal
 import torch
 from torch.library import wrap_triton
 
-from vllm.triton_utils import triton, tl
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit
