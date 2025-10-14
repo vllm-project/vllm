@@ -87,7 +87,7 @@ def legacy_routing_from_bitmatrix(
     bitmatrix, expt_scal, expt_indx, n_expts_tot, n_expts_act
 ):
     sparse_logits = SparseMatrix(
-        index=expt_indx,
+        indx=expt_indx,
         vals=expt_scal,
         mask=bitmatrix,
     )
@@ -117,13 +117,13 @@ def legacy_routing(logits, n_expts_act, sm_first=False, expt_indx=None, n_rows=N
         logits,
         n_expts_act,
         apply_softmax=not sm_first,
-        y_index=expt_indx,
+        y_indx=expt_indx,
         n_rows=n_rows,
     )
     return legacy_routing_from_bitmatrix(
         sparse_logits.mask,
         sparse_logits.vals,
-        sparse_logits.index,
+        sparse_logits.indx,
         logits.shape[-1],
         n_expts_act,
     )
