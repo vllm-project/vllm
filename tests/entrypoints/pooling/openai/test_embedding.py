@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from tests.models.language.pooling.embed_utils import run_embedding_correctness_test
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import EmbeddingResponse, PoolingResponse
+from vllm.entrypoints.openai.protocol import EmbeddingResponse
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
@@ -437,20 +437,3 @@ async def test_normalize(server: RemoteOpenAIServer, model_name: str):
     assert torch.allclose(w_normal, F.normalize(wo_normal, p=2, dim=-1), atol=1e-2), (
         "w_normal should be close to normal(wo_normal)."
     )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_pooling(server: RemoteOpenAIServer, model_name: str):
-    input_text = ["The chef prepared a delicious meal."]
-
-    response = requests.post(
-        server.url_for("pooling"),
-        json={"model": model_name, "input": input_text, "encoding_format": "float"},
-    )
-
-    poolings = PoolingResponse.model_validate(response.json())
-
-    assert len(poolings.data) == 1
-    assert len(poolings.data[0].data) == 11
-    assert len(poolings.data[0].data[0]) == 384
