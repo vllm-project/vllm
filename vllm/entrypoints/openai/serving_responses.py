@@ -6,11 +6,11 @@ import json
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
-from typing import Callable, Final, Optional, Union
+from typing import Final
 
 import jinja2
 from fastapi import Request
@@ -23,6 +23,8 @@ from openai.types.responses import (
     ResponseCodeInterpreterToolCallParam,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
+    ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
     ResponseOutputItem,
@@ -49,7 +51,6 @@ from openai.types.responses.response_reasoning_item import (
 from openai_harmony import Message as OpenAIHarmonyMessage
 
 from vllm import envs
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -97,7 +98,6 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
@@ -109,17 +109,16 @@ class OpenAIServingResponses(OpenAIServing):
     def __init__(
         self,
         engine_client: EngineClient,
-        model_config: ModelConfig,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
-        chat_template: Optional[str],
+        request_logger: RequestLogger | None,
+        chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         return_tokens_as_token_ids: bool = False,
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
-        tool_parser: Optional[str] = None,
-        tool_server: Optional[ToolServer] = None,
+        tool_parser: str | None = None,
+        tool_server: ToolServer | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
@@ -127,11 +126,9 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> None:
         super().__init__(
             engine_client=engine_client,
-            model_config=model_config,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            enable_force_include_usage=enable_force_include_usage,
             log_error_stack=log_error_stack,
         )
 
@@ -139,18 +136,9 @@ class OpenAIServingResponses(OpenAIServing):
         self.chat_template_content_format: Final = chat_template_content_format
         self.enable_log_outputs = enable_log_outputs
 
-        self.reasoning_parser: Optional[Callable[[AnyTokenizer], ReasoningParser]] = (
-            None
+        self.reasoning_parser = self._get_reasoning_parser(
+            reasoning_parser_name=reasoning_parser
         )
-        if reasoning_parser:
-            try:
-                self.reasoning_parser = ReasoningParserManager.get_reasoning_parser(
-                    reasoning_parser
-                )
-                assert self.reasoning_parser is not None
-            except Exception as e:
-                raise TypeError(f"{reasoning_parser=} has not been registered") from e
-
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
@@ -176,7 +164,7 @@ class OpenAIServingResponses(OpenAIServing):
                 "the store."
             )
 
-        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
+        self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             logger.warning(
                 "For gpt-oss, we ignore --enable-auto-tool-choice "
@@ -223,7 +211,7 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _validate_generator_input(
         self, engine_prompt: EngineTokensPrompt
-    ) -> Optional[ErrorResponse]:
+    ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
         if self.max_model_len <= len(engine_prompt["prompt_token_ids"]):
             error_message = (
@@ -242,12 +230,12 @@ class OpenAIServingResponses(OpenAIServing):
     async def create_responses(
         self,
         request: ResponsesRequest,
-        raw_request: Optional[Request] = None,
-    ) -> Union[
-        AsyncGenerator[StreamingResponsesResponse, None],
-        ResponsesResponse,
-        ErrorResponse,
-    ]:
+        raw_request: Request | None = None,
+    ) -> (
+        AsyncGenerator[StreamingResponsesResponse, None]
+        | ResponsesResponse
+        | ErrorResponse
+    ):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -473,7 +461,7 @@ class OpenAIServingResponses(OpenAIServing):
     async def _make_request(
         self,
         request: ResponsesRequest,
-        prev_response: Optional[ResponsesResponse],
+        prev_response: ResponsesResponse | None,
         tokenizer: AnyTokenizer,
     ):
         if len(request.tools) > 0:
@@ -494,7 +482,7 @@ class OpenAIServingResponses(OpenAIServing):
     def _make_request_with_harmony(
         self,
         request: ResponsesRequest,
-        prev_response: Optional[ResponsesResponse],
+        prev_response: ResponsesResponse | None,
     ):
         if request.tool_choice != "auto":
             raise NotImplementedError(
@@ -535,8 +523,8 @@ class OpenAIServingResponses(OpenAIServing):
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-        created_time: Optional[int] = None,
-    ) -> Union[ErrorResponse, ResponsesResponse]:
+        created_time: int | None = None,
+    ) -> ErrorResponse | ResponsesResponse:
         if created_time is None:
             created_time = int(time.time())
 
@@ -655,9 +643,9 @@ class OpenAIServingResponses(OpenAIServing):
     def _create_response_logprobs(
         self,
         token_ids: Sequence[int],
-        logprobs: Optional[SampleLogprobs],
+        logprobs: SampleLogprobs | None,
         tokenizer: AnyTokenizer,
-        top_logprobs: Optional[int] = None,
+        top_logprobs: int | None = None,
     ) -> list[Logprob]:
         assert logprobs is not None, "logprobs must be provided"
         assert len(token_ids) == len(logprobs), (
@@ -689,9 +677,9 @@ class OpenAIServingResponses(OpenAIServing):
     def _create_stream_response_logprobs(
         self,
         token_ids: Sequence[int],
-        logprobs: Optional[SampleLogprobs],
+        logprobs: SampleLogprobs | None,
         tokenizer: AnyTokenizer,
-        top_logprobs: Optional[int] = None,
+        top_logprobs: int | None = None,
     ) -> list[response_text_delta_event.Logprob]:
         lgs = self._create_response_logprobs(
             token_ids=token_ids,
@@ -806,7 +794,7 @@ class OpenAIServingResponses(OpenAIServing):
     def _construct_input_messages(
         self,
         request: ResponsesRequest,
-        prev_response: Optional[ResponsesResponse] = None,
+        prev_response: ResponsesResponse | None = None,
     ) -> list[ChatCompletionMessageParam]:
         messages: list[ChatCompletionMessageParam] = []
         if request.instructions:
@@ -846,7 +834,7 @@ class OpenAIServingResponses(OpenAIServing):
     def _construct_input_messages_with_harmony(
         self,
         request: ResponsesRequest,
-        prev_response: Optional[ResponsesResponse],
+        prev_response: ResponsesResponse | None,
     ) -> list[OpenAIHarmonyMessage]:
         messages: list[OpenAIHarmonyMessage] = []
         if prev_response is None:
@@ -941,6 +929,11 @@ class OpenAIServingResponses(OpenAIServing):
                 # to add the tool call request to prev_outputs so that the
                 # parse_response_input can find the tool call request when
                 # parsing the tool call output.
+                if (
+                    isinstance(response_msg, dict)
+                    and response_msg.get("type") == "function_call"
+                ):
+                    response_msg = ResponseFunctionToolCall.model_validate(response_msg)
                 if isinstance(response_msg, ResponseFunctionToolCall):
                     prev_outputs.append(response_msg)
         return messages
@@ -999,7 +992,7 @@ class OpenAIServingResponses(OpenAIServing):
     async def responses_background_stream_generator(
         self,
         response_id: str,
-        starting_after: Optional[int] = None,
+        starting_after: int | None = None,
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         if response_id not in self.event_store:
             raise ValueError(f"Unknown response_id: {response_id}")
@@ -1024,13 +1017,13 @@ class OpenAIServingResponses(OpenAIServing):
     async def retrieve_responses(
         self,
         response_id: str,
-        starting_after: Optional[int],
-        stream: Optional[bool],
-    ) -> Union[
-        ErrorResponse,
-        ResponsesResponse,
-        AsyncGenerator[StreamingResponsesResponse, None],
-    ]:
+        starting_after: int | None,
+        stream: bool | None,
+    ) -> (
+        ErrorResponse
+        | ResponsesResponse
+        | AsyncGenerator[StreamingResponsesResponse, None]
+    ):
         async with self.response_store_lock:
             response = self.response_store.get(response_id)
 
@@ -1047,7 +1040,7 @@ class OpenAIServingResponses(OpenAIServing):
     async def cancel_responses(
         self,
         response_id: str,
-    ) -> Union[ErrorResponse, ResponsesResponse]:
+    ) -> ErrorResponse | ResponsesResponse:
         async with self.response_store_lock:
             response = self.response_store.get(response_id)
             if response is None:
@@ -1095,7 +1088,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         sampling_params: SamplingParams,
-        result_generator: AsyncIterator[Optional[ConversationContext]],
+        result_generator: AsyncIterator[ConversationContext | None],
         context: ConversationContext,
         model_name: str,
         tokenizer: AnyTokenizer,
@@ -1398,7 +1391,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         sampling_params: SamplingParams,
-        result_generator: AsyncIterator[Optional[ConversationContext]],
+        result_generator: AsyncIterator[ConversationContext | None],
         context: ConversationContext,
         model_name: str,
         tokenizer: AnyTokenizer,
@@ -1412,19 +1405,48 @@ class OpenAIServingResponses(OpenAIServing):
         current_output_index = 0
         current_item_id: str = ""
         sent_output_item_added = False
-
+        is_first_function_call_delta = False
         async for ctx in result_generator:
             assert isinstance(ctx, StreamingHarmonyContext)
 
             if ctx.is_expecting_start():
                 current_output_index += 1
                 sent_output_item_added = False
-
+                is_first_function_call_delta = False
                 if len(ctx.parser.messages) > 0:
                     previous_item = ctx.parser.messages[-1]
                     if previous_item.recipient is not None:
-                        # Deal with tool call here
-                        pass
+                        # Deal with tool call
+                        if previous_item.recipient.startswith("functions."):
+                            function_name = previous_item.recipient[len("functions.") :]
+                            yield _increment_sequence_number_and_return(
+                                ResponseFunctionCallArgumentsDoneEvent(
+                                    type="response.function_call_arguments.done",
+                                    arguments=previous_item.content[0].text,
+                                    name=function_name,
+                                    item_id=current_item_id,
+                                    output_index=current_output_index,
+                                    sequence_number=-1,
+                                )
+                            )
+                            function_call_item = ResponseFunctionToolCall(
+                                type="function_call",
+                                arguments=previous_item.content[0].text,
+                                name=function_name,
+                                item_id=current_item_id,
+                                output_index=current_output_index,
+                                sequence_number=-1,
+                                call_id=f"fc_{random_uuid()}",
+                                status="completed",
+                            )
+                            yield _increment_sequence_number_and_return(
+                                ResponseOutputItemDoneEvent(
+                                    type="response.output_item.done",
+                                    sequence_number=-1,
+                                    output_index=current_output_index,
+                                    item=function_call_item,
+                                )
+                            )
                     elif previous_item.channel == "analysis":
                         content = ResponseReasoningTextContent(
                             text=previous_item.content[0].text,
@@ -1780,17 +1802,54 @@ class OpenAIServingResponses(OpenAIServing):
                             ),
                         )
                     )
+            # developer tools will be triggered on the commentary channel
+            # and recipient starts with "functions.TOOL_NAME"
+            if (
+                ctx.parser.current_channel == "commentary"
+                and ctx.parser.current_recipient
+                and ctx.parser.current_recipient.startswith("functions.")
+            ):
+                if is_first_function_call_delta is False:
+                    is_first_function_call_delta = True
+                    fc_name = ctx.parser.current_recipient[len("functions.") :]
+                    tool_call_item = ResponseFunctionToolCall(
+                        name=fc_name,
+                        type="function_call",
+                        id=current_item_id,
+                        call_id=f"call_{random_uuid()}",
+                        arguments="",
+                        status="in_progress",
+                    )
+                    current_item_id = f"fc_{random_uuid()}"
+                    yield _increment_sequence_number_and_return(
+                        ResponseOutputItemAddedEvent(
+                            type="response.output_item.added",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item=tool_call_item,
+                        )
+                    )
+                else:
+                    yield _increment_sequence_number_and_return(
+                        ResponseFunctionCallArgumentsDeltaEvent(
+                            item_id=current_item_id,
+                            delta=ctx.parser.last_content_delta,
+                            output_index=current_output_index,
+                            sequence_number=-1,
+                            type="response.function_call_arguments.delta",
+                        )
+                    )
 
     async def responses_stream_generator(
         self,
         request: ResponsesRequest,
         sampling_params: SamplingParams,
-        result_generator: AsyncIterator[Optional[ConversationContext]],
+        result_generator: AsyncIterator[ConversationContext | None],
         context: ConversationContext,
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-        created_time: Optional[int] = None,
+        created_time: int | None = None,
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         # TODO:
         # 1. Handle disconnect
@@ -1876,6 +1935,6 @@ class OpenAIServingResponses(OpenAIServing):
                 ResponseCompletedEvent(
                     type="response.completed",
                     sequence_number=-1,
-                    response=final_response.model_dump(),
+                    response=final_response,
                 )
             )

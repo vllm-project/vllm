@@ -1,0 +1,6 @@
+model_name: "nvidia/Qwen3-30B-A3B-FP4"
+accuracy_threshold: 0.89
+num_questions: 1319
+num_fewshot: 5
+max_model_len: 4096
+

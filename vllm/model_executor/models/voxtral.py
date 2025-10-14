@@ -5,19 +5,15 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from math import ceil
-from typing import Literal, Optional, Union, cast
+from typing import Literal, cast
 
 import numpy as np
 import regex as re
 import torch
 import torch.nn as nn
 from mistral_common.audio import mel_filter_bank
-from mistral_common.protocol.instruct.messages import (
-    AudioChunk,
-    RawAudio,
-    TextChunk,
-    UserMessage,
-)
+from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChunk
+from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.protocol.transcription.request import TranscriptionRequest
 from mistral_common.tokens.tokenizers.audio import Audio, AudioEncoder
@@ -61,7 +57,7 @@ from vllm.transformers_utils.tokenizer import (
 )
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsTranscription
-from .utils import flatten_bn, init_vllm_registered_model, maybe_prefix
+from .utils import init_vllm_registered_model, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -129,9 +125,9 @@ class VoxtralProcessorAdapter:
 
     def __call__(
         self,
-        text: Optional[Union[TextInput, list[TextInput]]] = None,
-        audios: Optional[Union[np.ndarray, list[np.ndarray]]] = None,
-        return_tensors: Optional[Union[str, TensorType]] = None,
+        text: TextInput | list[TextInput] | None = None,
+        audios: np.ndarray | list[np.ndarray] | None = None,
+        return_tensors: str | TensorType | None = None,
         **kwargs,
     ) -> Mapping[str, NestedTensors]:
         if text is None:
@@ -192,7 +188,7 @@ class VoxtralProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self) -> VoxtralProcessorAdapter:
         return VoxtralProcessorAdapter(self.get_tokenizer())
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 5}  # Performance tends to degrade after 5
 
     def get_mm_max_tokens_per_item(
@@ -220,7 +216,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
 
@@ -238,7 +234,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 
@@ -307,11 +303,11 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
 
     def _cached_apply_hf_processor(
         self,
-        prompt: Union[str, list[int]],
+        prompt: str | list[int],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
             prompt=prompt,
@@ -337,6 +333,8 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
 class VoxtralForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsTranscription
 ):
+    merge_by_field_config = True
+
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     packed_modules_mapping = {
@@ -388,10 +386,10 @@ class VoxtralForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -403,7 +401,7 @@ class VoxtralForConditionalGeneration(
 
     def get_multimodal_embeddings(
         self, **kwargs
-    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...], None]:
+    ) -> list[torch.Tensor] | torch.Tensor | tuple[torch.Tensor, ...] | None:
         audio_inputs = self._parse_and_validate_audio_arrays(**kwargs)
         if audio_inputs is None:
             return None
@@ -435,7 +433,7 @@ class VoxtralForConditionalGeneration(
 
     def _parse_and_validate_audio_arrays(
         self, **kwargs: object
-    ) -> Union[list[torch.Tensor], None]:
+    ) -> list[torch.Tensor] | None:
         audio_arrays = kwargs.pop("audio_arrays", None)
         if audio_arrays is None:
             return None
@@ -445,7 +443,6 @@ class VoxtralForConditionalGeneration(
                 f"Incorrect type of audio_arrays. Got type: {type(audio_arrays)}"
             )
 
-        audio_arrays = flatten_bn(audio_arrays)
         if isinstance(audio_arrays, torch.Tensor):
             audio_arrays = list(audio_arrays.unbind(0))
         return audio_arrays
@@ -453,7 +450,7 @@ class VoxtralForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     @classmethod
@@ -478,10 +475,10 @@ class VoxtralForConditionalGeneration(
         audio: np.ndarray,
         model_config: ModelConfig,
         stt_config: SpeechToTextConfig,
-        language: Optional[str],
+        language: str | None,
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
-        to_language: Optional[str],
+        to_language: str | None,
     ) -> PromptType:
         tokenizer = cached_tokenizer_from_config(model_config)
         audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
@@ -503,7 +500,7 @@ class VoxtralForConditionalGeneration(
         audio_duration_s: float,
         stt_config: SpeechToTextConfig,
         model_config: ModelConfig,
-    ) -> Optional[int]:
+    ) -> int | None:
         """
         Map from audio duration to number of audio tokens produced by the ASR
         model, without running a forward pass.
@@ -796,7 +793,7 @@ class VoxtralEncoderModel(nn.Module):
         return torch.stack(chunked_features), chunks_per_example
 
     def forward(
-        self, input_features: Union[torch.Tensor, list[torch.Tensor]]
+        self, input_features: torch.Tensor | list[torch.Tensor]
     ) -> list[torch.Tensor]:
         if not isinstance(input_features, list):
             input_features = [input_features]

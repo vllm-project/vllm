@@ -3,7 +3,7 @@
 """Sequence and its related classes."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import torch
@@ -39,13 +39,13 @@ class RequestMetrics:
 
     arrival_time: float
     last_token_time: float
-    first_scheduled_time: Optional[float]
-    first_token_time: Optional[float]
-    time_in_queue: Optional[float]
-    finished_time: Optional[float] = None
-    scheduler_time: Optional[float] = None
-    model_forward_time: Optional[float] = None
-    model_execute_time: Optional[float] = None
+    first_scheduled_time: float | None
+    first_token_time: float | None
+    time_in_queue: float | None
+    finished_time: float | None = None
+    scheduler_time: float | None = None
+    model_forward_time: float | None = None
+    model_execute_time: float | None = None
 
 
 # cannot use msgspec.Struct here because Dynamo does not support it
@@ -59,7 +59,7 @@ class IntermediateTensors:
     """
 
     tensors: dict[str, torch.Tensor]
-    kv_connector_output: Optional[KVConnectorOutput]
+    kv_connector_output: KVConnectorOutput | None
 
     def __init__(self, tensors):
         # manually define this function, so that
@@ -68,7 +68,7 @@ class IntermediateTensors:
         # a string, and we will lose the information about the source file.
         self.tensors = tensors
 
-    def __getitem__(self, key: Union[str, slice]):
+    def __getitem__(self, key: str | slice):
         if isinstance(key, str):
             return self.tensors[key]
         elif isinstance(key, slice):

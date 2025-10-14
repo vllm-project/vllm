@@ -24,7 +24,6 @@
 """Inference-only GLM-4.5 MTP model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -52,7 +51,7 @@ class SharedHead(nn.Module):
         self,
         config: PretrainedConfig,
         prefix: str,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -72,8 +71,8 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         self,
         config: PretrainedConfig,
         prefix: str,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -94,7 +93,7 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
@@ -149,7 +148,7 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         if inputs_embeds is None:
@@ -192,8 +191,8 @@ class Glm4MoeMTP(nn.Module, SupportsPP):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         hidden_states = self.model(
@@ -205,7 +204,7 @@ class Glm4MoeMTP(nn.Module, SupportsPP):
         self,
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
