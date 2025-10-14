@@ -563,6 +563,7 @@ class MambaMixer2(MambaBase, CustomOp):
             hidden_states, _B, _C = split_hidden_states_B_C_fn(hidden_states_B_C)
             hidden_states = self.norm(hidden_states, gate)
             out, _ = self.out_proj(hidden_states)
+            output.copy_(out)
             return out
 
         # NOTE: V0 put prefill before decode, v1 puts decode before prefill
