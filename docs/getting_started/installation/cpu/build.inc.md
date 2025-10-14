@@ -1,3 +1,5 @@
+# --8<-- [start:extra-information]
+
 First, install the recommended compiler. We recommend using `gcc/g++ >= 12.3.0` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
 
 ```bash
@@ -38,8 +40,5 @@ If you want to develop vLLM, install it in editable mode instead.
 ```bash
 VLLM_TARGET_DEVICE=cpu python setup.py develop
 ```
-
-!!! note
-    If you are building vLLM from source and not using the pre-built images, remember to set `LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD"` on x86 machines before running vLLM.
 
 # --8<-- [end:extra-information]
