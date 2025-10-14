@@ -35,7 +35,11 @@ dummy_mm = {
 }
 
 
-def can_initialize(model: str, hf_overrides: dict[str, Any] | None = None, extra_args: list[str] | None = None):
+def can_initialize(
+    model: str,
+    hf_overrides: dict[str, Any] | None = None,
+    extra_args: list[str] | None = None,
+):
     # Server arguments
     extra_args = extra_args if extra_args is not None else []
     server_args = [
