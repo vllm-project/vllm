@@ -52,9 +52,14 @@ class SymmMemCommunicator:
         self.device = device
         self.group = group
         self.world_size = dist.get_world_size(self.group)
-        self.device_capability = (
-            current_platform.get_device_capability().as_version_str()
-        )
+        capability = current_platform.get_device_capability()
+        if capability is None:
+            logger.warning(
+                "SymmMemCommunicator: device capability is unknown, "
+                "communicator is not available."
+            )
+            return
+        self.device_capability = capability.as_version_str()
         if self.device_capability not in SYMM_MEM_ALL_REDUCE_MAX_SIZES:
             logger.warning(
                 "SymmMemCommunicator: Device capability %s not supported, "
