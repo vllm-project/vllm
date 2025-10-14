@@ -1298,7 +1298,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "flashinfer-cutlass": use flashinfer cutlass GEMM backend
     # - <none>: automatically pick an available backend
     "VLLM_NVFP4_GEMM_BACKEND": env_with_choices(
-        "VLLM_NVFP4_GEMM_BACKEND", None, ["flashinfer-cudnn", "flashinfer-trtllm", "flashinfer-cutlass"]
+        "VLLM_NVFP4_GEMM_BACKEND",
+        None,
+        ["flashinfer-cudnn", "flashinfer-trtllm", "flashinfer-cutlass"],
     ),
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
@@ -1470,11 +1472,6 @@ def compute_hash() -> str:
         "VLLM_DISABLED_KERNELS",
         "VLLM_USE_DEEP_GEMM",
         "VLLM_USE_DEEP_GEMM_E8M0",
-<<<<<<< HEAD
-        "VLLM_USE_DEEP_GEMM_E8M0_HOPPER",
-=======
-        "VLLM_USE_TRTLLM_FP4_GEMM",
->>>>>>> main
         "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
         "VLLM_USE_FLASHINFER_MOE_FP16",
         "VLLM_USE_FLASHINFER_MOE_FP8",
