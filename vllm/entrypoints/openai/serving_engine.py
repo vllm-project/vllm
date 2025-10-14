@@ -1299,7 +1299,7 @@ class OpenAIServing:
         return raw_request.headers.get("X-Request-Id", default)
 
     @staticmethod
-    def _get_data_parallel_rank(raw_request: Optional[Request]) -> Optional[int]:
+    def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
         """Pulls the data parallel rank from a header, if provided"""
         if raw_request is None:
             return None
