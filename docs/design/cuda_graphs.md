@@ -205,7 +205,7 @@ from vllm.config import CUDAGraphMode
 compilation_config = {"level": 3, "cudagraph_mode": "FULL_AND_PIECEWISE"}
 model = vllm.LLM(
     model="meta-llama/Llama-3.1-8B-Instruct",
-    dtype='auto',
+    dtype="auto",
     compilation_config=compilation_config,
 )
 sampling_params = vllm.SamplingParams(
