@@ -167,6 +167,8 @@ class EngineCore:
         self.step_num = int(additional_config.get("multi_step", 1))
         if self.step_num > 1:
             logger.info(f"multi step is enabled. step num is {self.step_num}")
+        self.scheduler.num_lookahead_tokens = (self.step_num - 1) \
+                * (1 + self.scheduler.num_spec_tokens)
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
