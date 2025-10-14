@@ -735,17 +735,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             tok_kwargs=tok_kwargs,
         )
 
-        if "audio_feature_lengths" in hf_inputs and audios:
-            audio_feature_lengths = hf_inputs["audio_feature_lengths"]
-            if not isinstance(audio_feature_lengths, torch.Tensor):
-                audio_feature_lengths = torch.as_tensor(
-                    audio_feature_lengths, dtype=torch.long
-                )
-                hf_inputs["audio_feature_lengths"] = audio_feature_lengths
-
-            hf_inputs["feature_attention_mask"] = [
-                torch.ones(int(num_frames)) for num_frames in audio_feature_lengths
-            ]
+        # Trust HF processor's audio_feature_lengths, don't recalculate
         return hf_inputs
 
     def _maybe_apply_prompt_updates(
