@@ -39,7 +39,7 @@ Next, make a request that triggers the model to use the available tools:
                         "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
                         "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
                     },
-                    "required": ["location", "unit"]
+                    "required": ["location", "unit"],
                 },
             },
         },
