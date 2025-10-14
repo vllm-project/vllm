@@ -1,0 +1,164 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-service
+  namespace: tzulingk-moe
+spec:
+  selector:
+    app: vllm-elastic-ep
+  ports:
+    - port: 8006
+      targetPort: 8006
+      name: api
+    - port: 9876
+      targetPort: 9876
+      name: rpc
+  type: NodePort
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vllm-elastic-ep
+  namespace: tzulingk-moe
+spec:
+  serviceName: vllm-service
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-elastic-ep
+  template:
+    metadata:
+      labels:
+        app: vllm-elastic-ep
+    spec:
+      imagePullSecrets:
+      - name: nvcr-imagepullsecret
+        
+      containers:
+      - name: vllm
+        image: nvcr.io/nvidian/dynamo-dev/tzulingk-vllm:vllm-elastic-ep-patch-1013
+        imagePullPolicy: Always
+        
+        # Run as privileged (needed for some operations)
+        securityContext:
+          privileged: true
+        
+        ports:
+        - containerPort: 8006
+          name: api
+        - containerPort: 9876
+          name: rpc
+          
+        env:
+        # PPLX Backend Configuration (No RDMA Required)
+        - name: VLLM_ALL2ALL_BACKEND
+          value: "pplx"
+          
+        # vLLM Elastic EP Configuration
+        - name: VLLM_USE_ELASTIC_EP
+          value: "1"
+        - name: VLLM_USE_DEEP_GEMM
+          value: "1"  # Enable DeepGEMM optimizations for MoE models on H200
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0,1"  # 2 GPUs for DP=2
+          
+        # Model Configuration - Using a smaller MoE for testing
+        - name: MODEL_NAME
+          value: "deepseek-ai/DeepSeek-V2-Lite"  # V2 MoE model with proper MixtureOfExperts support
+        - name: TP_SIZE
+          value: "1"  # No tensor parallelism for smaller model
+        - name: DP_SIZE
+          value: "2"  # DP=2 for data parallelism (EPLB disabled due to expert count)
+          
+        # Additional vLLM settings
+        - name: VLLM_USE_V1
+          value: "1"  # v1 engine (testing with V2 model that supports EPLB)
+        - name: VLLM_WORKER_MULTIPROC_METHOD
+          value: "spawn"
+        - name: NCCL_DEBUG
+          value: "INFO"
+        - name: VLLM_DEBUG
+          value: "1"  # Enable debug logging for vLLM
+        - name: CUDA_LAUNCH_BLOCKING
+          value: "1"  # Force synchronous CUDA operations for better error messages
+        - name: VLLM_TRACE_FUNCTION
+          value: "1"  # Trace function calls for debugging
+        - name: VLLM_LOGGING_LEVEL
+          value: "DEBUG"  # Maximum logging verbosity
+        
+        # Pod IP for data-parallel-address
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+          
+        command: ["/bin/bash"]
+        args:
+        - -c
+        - |
+          echo "====================================="
+          echo "Starting vLLM with PPLX Backend"
+          echo "====================================="
+          echo "No RDMA/InfiniBand required"
+          echo "Using standard NCCL communication"
+          echo ""
+          
+          # Check environment
+          echo "Checking GPUs..."
+          nvidia-smi --list-gpus || echo "Failed to list GPUs"
+          echo ""
+          
+          # Start vLLM with elastic EP using PPLX backend
+          echo "Starting vLLM server..."
+          echo "Configuration: DP=2 + EPLB ENABLED (DeepSeek V2 - num_redundant_experts=24 for proper weight reshaping)"
+          vllm serve $MODEL_NAME \
+            --trust-remote-code \
+            --disable-log-requests \
+            --host 0.0.0.0 \
+            --port 8006 \
+            --tensor-parallel-size 1 \
+            --gpu-memory-utilization 0.5 \
+            --max-model-len 1024 \
+            --no-enable-prefix-caching \
+            --enable-expert-parallel \
+            --enable-elastic-ep \
+            --enable-eplb \
+            --eplb-config.num_redundant_experts 24 \
+            --eplb-config.window_size 100 \
+            --eplb-config.step_interval 10 \
+            --data-parallel-size $DP_SIZE \
+            --uvicorn-log-level debug
+        
+        resources:
+          requests:
+            nvidia.com/gpu: "2"  # 2 GPUs for DP=2
+            memory: "50Gi"
+            cpu: "8"
+          limits:
+            nvidia.com/gpu: "2"
+            memory: "100Gi"
+            cpu: "16"
+            
+        volumeMounts:
+        # Mount for model weights
+        - name: model-cache
+          mountPath: /models
+          
+        # Shared memory for IPC
+        - name: dshm
+          mountPath: /dev/shm
+          
+      volumes:
+      - name: model-cache
+        emptyDir: {}
+        
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 10Gi
+          
+      # Tolerations for GPU nodes if needed
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
