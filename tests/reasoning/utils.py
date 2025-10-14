@@ -89,7 +89,7 @@ def run_reasoning_extraction_nonstreaming(
 ) -> tuple[str | None, str | None]:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     return reasoning_parser.extract_reasoning_content(
-        model_output="".join(model_output), request=request
+        model_output="".join(model_output), prompt_token_ids=[], request=request
     )
 
 
@@ -117,6 +117,7 @@ def run_reasoning_extraction_streaming(
             previous_tokens,
             current_tokens,
             token_delta,
+            request,
         )
         if delta_message is not None:
             reconstructor.append_delta(delta_message)
@@ -149,6 +150,7 @@ def run_reasoning_extraction_streaming_mistral(
             previous_tokens,
             current_tokens,
             token_delta,
+            request,
         )
         if delta_message is not None:
             reconstructor.append_delta(delta_message)

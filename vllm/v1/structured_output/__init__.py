@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import multiprocessing
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
@@ -169,7 +171,7 @@ class StructuredOutputManager:
         requests: dict[str, Request],
         structured_output_request_ids: dict[str, int],
         scheduled_spec_decode_tokens: dict[str, list[int]],
-    ) -> "npt.NDArray[np.int32] | None":
+    ) -> npt.NDArray[np.int32] | None:
         # Prepare the structured output bitmask for this batch.
         if not structured_output_request_ids:
             return None
@@ -279,7 +281,7 @@ class StructuredOutputManager:
             assert request.structured_output_request is not None
             if request.structured_output_request.reasoning_ended is None:
                 request.structured_output_request.reasoning_ended = (
-                    self.reasoner.is_reasoning_end(request.prompt_token_ids)
+                    self.reasoner.is_reasoning_end(request.prompt_token_ids, True)
                 )
             return request.structured_output_request.reasoning_ended
         return True
@@ -302,7 +304,7 @@ class StructuredOutputManager:
                 return True
 
             # Check if reasoning ends in *this* step
-            if self.reasoner.is_reasoning_end(request.all_token_ids):
+            if self.reasoner.is_reasoning_end(request.all_token_ids, True):
                 # Reasoning just ended, so we shouldn't advance til
                 # next pass
                 structured_req.reasoning_ended = True

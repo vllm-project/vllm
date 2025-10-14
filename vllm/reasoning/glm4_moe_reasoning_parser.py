@@ -49,7 +49,7 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
                 "think start/end or assistant tokens in the tokenizer!"
             )
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: list[int], is_prompt: bool) -> bool:
         """
         GLM's chat template has <think></think> tokens after every
         <|assistant|> token. Thus, we need to check if </think> is
@@ -79,6 +79,7 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
         """
         Extract reasoning content from a delta message.
@@ -135,7 +136,10 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
             return DeltaMessage(content=delta_text)
 
     def extract_reasoning_content(
-        self, model_output: str, request: ChatCompletionRequest
+        self,
+        model_output: str,
+        prompt_token_ids: list[int],
+        request: ChatCompletionRequest,
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.

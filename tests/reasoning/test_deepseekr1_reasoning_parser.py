@@ -274,7 +274,7 @@ def test_reasoning(
 
     # Test is_reasoning_end
     output_ids = deepseek_r1_qwen_tokenizer.convert_tokens_to_ids(output)
-    is_reasoning_end = parser.is_reasoning_end(output_ids)
+    is_reasoning_end = parser.is_reasoning_end(output_ids, False)
     assert is_reasoning_end == param_dict["is_reasoning_end"]
 
     # Test extract_content

@@ -57,7 +57,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 "think start/end tokens in the tokenizer!"
             )
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: list[int], is_prompt: bool) -> bool:
         end_token_id = self.end_token_id
         return any(input_id == end_token_id for input_id in reversed(input_ids))
 
@@ -78,6 +78,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
         """
         Extract reasoning content from a delta message.
@@ -134,7 +135,10 @@ class BaseThinkingReasoningParser(ReasoningParser):
             return DeltaMessage(content=delta_text)
 
     def extract_reasoning_content(
-        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+        self,
+        model_output: str,
+        prompt_token_ids: list[int],
+        request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.

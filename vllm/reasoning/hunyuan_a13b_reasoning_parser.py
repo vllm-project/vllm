@@ -77,7 +77,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         self.token_buffer = []
         self.text_buffer = ""
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: list[int], is_prompt: bool) -> bool:
         return self.current_state == "response"
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
@@ -88,7 +88,10 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         return []
 
     def extract_reasoning_content(
-        self, model_output: str, request: ChatCompletionRequest
+        self,
+        model_output: str,
+        prompt_token_ids: list[int],
+        request: ChatCompletionRequest,
     ) -> tuple[str | None, str | None]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
@@ -149,6 +152,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
         """Extract content using token ID sequence state machine"""
         # Define sequences

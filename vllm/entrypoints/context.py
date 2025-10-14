@@ -93,6 +93,14 @@ class ConversationContext(ABC):
     async def cleanup_session(self) -> None:
         raise NotImplementedError("Should not be called.")
 
+    @abstractmethod
+    def set_prompt(self, prompt_token_ids: list[int]) -> None:
+        pass
+
+    @abstractmethod
+    def get_prompt(self) -> list[int]:
+        pass
+
 
 class SimpleContext(ConversationContext):
     def __init__(self):
@@ -102,6 +110,7 @@ class SimpleContext(ConversationContext):
         self.num_cached_tokens = 0
         # todo num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
+        self.prompt_token_ids: list[int] = []
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -132,6 +141,12 @@ class SimpleContext(ConversationContext):
     async def cleanup_session(self) -> None:
         raise NotImplementedError("Should not be called.")
 
+    def set_prompt(self, prompt_token_ids: list[int]) -> None:
+        self.prompt_token_ids = prompt_token_ids
+
+    def get_prompt(self) -> list[int]:
+        return self.prompt_token_ids
+
 
 class HarmonyContext(ConversationContext):
     def __init__(
@@ -158,6 +173,7 @@ class HarmonyContext(ConversationContext):
         self.previous_turn = TurnTokens()
         self.is_first_turn = True
         self.first_tok_of_message = True  # For streaming support
+        self.prompt_token_ids: list[int] = []
 
     def _update_num_reasoning_tokens(self):
         # Count all analysis and commentary channels as reasoning tokens
@@ -430,6 +446,12 @@ class HarmonyContext(ConversationContext):
                 for tool in self.called_tools
             )
         )
+
+    def set_prompt(self, prompt_token_ids: list[int]) -> None:
+        self.prompt_token_ids = prompt_token_ids
+
+    def get_prompt(self) -> list[int]:
+        return self.prompt_token_ids
 
 
 class StreamingHarmonyContext(HarmonyContext):

@@ -688,6 +688,11 @@ class OpenAIServingChat(OpenAIServing):
                                 yield f"data: {data}\n\n"
                     first_iteration = False
 
+                if self.reasoning_parser and reasoning_parser.is_reasoning_end(
+                    res.prompt_token_ids or [], True
+                ):
+                    reasoning_end_arr[i] = True
+
                 for output in res.outputs:
                     i = output.index
                     tool_parser = tool_parsers[i]
@@ -804,14 +809,7 @@ class OpenAIServingChat(OpenAIServing):
                             delta_message = None
                     # handle streaming deltas for tools with named tool_choice
                     elif tool_choice_function_name:
-                        if (
-                            self.reasoning_parser
-                            and not reasoning_end_arr[i]
-                            and not reasoning_parser.is_reasoning_end(
-                                previous_token_ids
-                            )
-                        ):
-                            assert reasoning_parser is not None
+                        if self.reasoning_parser and not reasoning_end_arr[i]:
                             delta_message = (
                                 reasoning_parser.extract_reasoning_content_streaming(
                                     previous_text,
@@ -820,6 +818,7 @@ class OpenAIServingChat(OpenAIServing):
                                     previous_token_ids,
                                     current_token_ids,
                                     output.token_ids,
+                                    request,
                                 )
                             )
                             # When encountering think end id in delta_token_ids
@@ -827,13 +826,11 @@ class OpenAIServingChat(OpenAIServing):
                             # i.e {"enable_thinking": False},
                             # set reasoning status to end.
                             # Only keep 'content', remove 'reasoning_content'.
-                            if reasoning_parser.is_reasoning_end(
-                                as_list(output.token_ids)
-                            ) or (
-                                res.prompt_token_ids
-                                and reasoning_parser.is_reasoning_end(
-                                    res.prompt_token_ids
+                            if (
+                                reasoning_parser.is_reasoning_end(
+                                    as_list(output.token_ids), False
                                 )
+                                or reasoning_end_arr[i]
                             ):
                                 reasoning_end_arr[i] = True
                                 if delta_message and delta_message.content:
@@ -880,7 +877,7 @@ class OpenAIServingChat(OpenAIServing):
 
                         if self.reasoning_parser:
                             _, content = reasoning_parser.extract_reasoning_content(
-                                current_text, request
+                                current_text, res.prompt_token_ids or [], request
                             )
                         else:
                             content = current_text
@@ -918,6 +915,7 @@ class OpenAIServingChat(OpenAIServing):
                                     previous_token_ids,
                                     current_token_ids,
                                     output_token_ids,
+                                    request,
                                 )
                             )
                             # When encountering think end id in prompt_token_ids
@@ -925,13 +923,7 @@ class OpenAIServingChat(OpenAIServing):
                             # set reasoning status to end.
                             # Remove the text and token ids related
                             # to 'reasoning_content'.
-                            if (
-                                res.prompt_token_ids
-                                and reasoning_parser.is_reasoning_end(
-                                    res.prompt_token_ids
-                                )
-                            ):
-                                reasoning_end_arr[i] = True
+                            if reasoning_end_arr[i]:
                                 current_token_ids = output_token_ids
                                 if delta_message and delta_message.content:
                                     current_text = delta_message.content
@@ -942,7 +934,9 @@ class OpenAIServingChat(OpenAIServing):
                             # set reasoning status to end.
                             # Remove the text and token ids related
                             # to 'reasoning_content'.
-                            if reasoning_parser.is_reasoning_end(output_token_ids):
+                            if reasoning_parser.is_reasoning_end(
+                                output_token_ids, False
+                            ):
                                 reasoning_end_arr[i] = True
                                 current_token_ids = (
                                     reasoning_parser.extract_content_ids(
@@ -1004,6 +998,7 @@ class OpenAIServingChat(OpenAIServing):
                                 previous_token_ids,
                                 current_token_ids,
                                 output.token_ids,
+                                request,
                             )
                         )
                     # handle streaming just a content delta
@@ -1342,7 +1337,7 @@ class OpenAIServingChat(OpenAIServing):
                 # If the reasoning parser is enabled,
                 # tool calls are extracted exclusively from the content.
                 reasoning_content, content = reasoning_parser.extract_reasoning_content(
-                    output.text, request=request
+                    output.text, final_res.prompt_token_ids or [], request=request
                 )
                 if not request.include_reasoning:
                     reasoning_content = None

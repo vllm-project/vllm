@@ -51,7 +51,10 @@ class GraniteReasoningParser(ReasoningParser):
         )
 
     def extract_reasoning_content(
-        self, model_output: str, request: ChatCompletionRequest
+        self,
+        model_output: str,
+        prompt_token_ids: list[int],
+        request: ChatCompletionRequest,
     ) -> tuple[str | None, str | None]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
@@ -81,6 +84,7 @@ class GraniteReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
         """Extract the reasoning content / content emitted by granite models;
         If the sequence doesn't match what we expect, i.e., the model generates
