@@ -804,29 +804,30 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 assert attn_metadata.decode_metadata is not None
                 _, num_heads, head_size = query.shape
                 nbytes_per_qo_elem = torch.finfo(query.dtype).bits // 8
+                num_seqs = attn_metadata.seq_lens.shape[0]
                 max_num_partitions = (
-                    attn_metadata.decode_metadata.max_seq_len +
+                    attn_metadata.max_seq_len +
                     _PARTITION_SIZE_ROCM - 1) // _PARTITION_SIZE_ROCM
 
                 workspace_buffer = torch.empty(
-                    (num_decode_tokens * num_heads * max_num_partitions *
+                    (num_seqs * num_heads * max_num_partitions *
                      head_size) * nbytes_per_qo_elem + 2 *
-                    (num_decode_tokens * num_heads * max_num_partitions) * 4,
+                    (num_seqs * num_heads * max_num_partitions) * 4,
                     dtype=torch.uint8,
                     device=output.device,
                 )
 
                 torch.ops.aiter.paged_attention_v1(
-                    output_actual_tokens[:num_decode_tokens],
+                    output[:num_decode_tokens],
                     workspace_buffer,
                     query[:num_decode_tokens],
                     key_cache,
                     value_cache,
                     self.scale,
                     attn_metadata.block_table[:num_decodes],
-                    attn_metadata.decode_metadata.query_start_loc,
+                    attn_metadata.query_start_loc[:num_decodes],
                     attn_metadata.seq_lens[:num_decodes],
-                    attn_metadata.decode_metadata.max_seq_len,
+                    attn_metadata.max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
                     "NHD",
