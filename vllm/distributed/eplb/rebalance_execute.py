@@ -8,7 +8,6 @@ This involves the exchange of expert weights between GPUs.
 
 from collections.abc import Iterable, MutableSequence, Sequence
 from functools import partial
-from typing import Optional
 
 import torch
 from torch.distributed import (P2POp, ProcessGroup, all_gather,
@@ -135,8 +134,7 @@ def shuffle_layer(
                 continue
             if old_indices[src_global] == new_indices[dst_global]:
                 is_received_locally[dst] = True
-                for weight, buffer in zip(expert_weights,
-                                          expert_weights_buffer):
+                for weight, buffer in zip(expert_weights, expert_weights_buffer):
                     buffer[dst].copy_(weight[src])
 
     p2p_ops: list[P2POp] = []
@@ -274,7 +272,7 @@ def rearrange_expert_weights_inplace(
     expert_weights: Sequence[Iterable[torch.Tensor]],
     ep_group: ProcessGroup,
     is_profile: bool = False,
-    rank_mapping: Optional[dict[int, int]] = None,
+    rank_mapping: dict[int, int] | None = None,
 ) -> None:
     """
     Rearranges the expert weights in place according to the new expert indices.
@@ -298,29 +296,25 @@ def rearrange_expert_weights_inplace(
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
             # scale down
-            new_global_expert_indices = \
-                _map_new_expert_indices_with_rank_mapping(
+            new_global_expert_indices = _map_new_expert_indices_with_rank_mapping(
                 new_global_expert_indices,
                 rank_mapping,
             )
         else:
             # scale up
-            old_global_expert_indices = \
-                _map_old_expert_indices_with_rank_mapping(
+            old_global_expert_indices = _map_old_expert_indices_with_rank_mapping(
                 old_global_expert_indices,
                 rank_mapping,
                 ep_group.size(),
             )
 
-    assert old_global_expert_indices.shape[
-        1] == new_global_expert_indices.shape[1]
+    assert old_global_expert_indices.shape[1] == new_global_expert_indices.shape[1]
 
     num_moe_layers, num_physical_experts = old_global_expert_indices.shape
     assert len(expert_weights) == num_moe_layers
 
     num_local_physical_experts = next(iter(expert_weights[0])).shape[0]
-    assert new_global_expert_indices.shape == (num_moe_layers,
-                                               num_physical_experts)
+    assert new_global_expert_indices.shape == (num_moe_layers, num_physical_experts)
 
     ep_rank = ep_group.rank()
     ep_size = ep_group.size()
@@ -369,13 +363,13 @@ def _map_old_expert_indices_with_rank_mapping(
 ) -> torch.Tensor:
     """
     Map the old global expert indices to the new global expert indices.
-    
+
     Args:
         old_global_expert_indices:
             Shape (num_layers, old_ep_size * num_local_physical_experts).
         rank_mapping: Mapping from old rank to new rank.
         new_ep_size: New expert parallelism size.
-    
+
     Returns:
         Mapped expert indices with shape
         (num_layers, new_ep_size * num_local_physical_experts).
@@ -406,8 +400,9 @@ def _map_old_expert_indices_with_rank_mapping(
             new_start_idx = new_rank * num_local_physical_experts
             new_end_idx = (new_rank + 1) * num_local_physical_experts
 
-            mapped_expert_indices[:, new_start_idx:new_end_idx] = \
+            mapped_expert_indices[:, new_start_idx:new_end_idx] = (
                 old_global_expert_indices[:, old_start_idx:old_end_idx]
+            )
         # If new_rank is None or >= new_ep_size, the experts remain -1
         # (scale down case)
 
@@ -442,8 +437,9 @@ def _map_new_expert_indices_with_rank_mapping(
             new_start_idx = new_rank * num_local_physical_experts
             new_end_idx = (new_rank + 1) * num_local_physical_experts
 
-            mapped_expert_indices[:, old_start_idx:old_end_idx] = \
+            mapped_expert_indices[:, old_start_idx:old_end_idx] = (
                 new_global_expert_indices[:, new_start_idx:new_end_idx]
+            )
 
     return mapped_expert_indices
 

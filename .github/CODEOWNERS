@@ -12,8 +12,6 @@
 /vllm/model_executor/layers/mamba @tdoublep
 /vllm/model_executor/model_loader @22quinn
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche
-/vllm/v1/attention @LucasWilkinson
-/vllm/v1/sample @22quinn @houseroad
 /vllm/vllm_flash_attn @LucasWilkinson
 /vllm/lora @jeejeelee
 /vllm/reasoning @aarnphm @chaunceyjiang
@@ -25,14 +23,17 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
 /vllm/config @simon-mo @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
+/vllm/config/cache.py @simon-mo @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg @heheda12345
 
 # vLLM V1
 /vllm/v1 @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat
-/vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
-/vllm/v1/spec_decode @benchislett @luccafong
+/vllm/v1/attention @LucasWilkinson
 /vllm/v1/attention/backends/flashinfer.py @mgoin
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
 /vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat @heheda12345 @ApostaC
+/vllm/v1/sample @22quinn @houseroad @njhill
+/vllm/v1/spec_decode @benchislett @luccafong
+/vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
 /vllm/v1/kv_cache_interface.py @heheda12345
 /vllm/v1/offloading @ApostaC
 
@@ -54,7 +55,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
 /tests/models/language/generation/test_hybrid.py @tdoublep
-/tests/v1/kv_connector/nixl_integration @NickLucche 
+/tests/v1/kv_connector/nixl_integration @NickLucche
 /tests/v1/kv_connector @ApostaC
 /tests/v1/offloading @ApostaC
 
@@ -120,3 +121,11 @@ mkdocs.yaml @hmellor
 
 # KVConnector installation files
 /requirements/kv_connectors.txt @NickLucche
+
+# Pooling models
+/examples/*/pooling/ @noooop
+/tests/models/*/pooling* @noooop
+/tests/entrypoints/pooling @noooop
+/vllm/config/pooler.py @noooop
+/vllm/pooling_params.py @noooop
+/vllm/model_executor/layers/pooler.py @noooop
