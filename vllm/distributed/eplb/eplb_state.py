@@ -395,7 +395,7 @@ class EplbState:
             logical_to_physical_map,
             logical_replica_count,
         )
-        device_index: int = None
+        device_index: int | None = None
         if device.type == "cuda":
             device_index = device.index
             if device_index is None and torch.cuda.is_available():
