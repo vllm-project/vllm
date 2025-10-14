@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -27,7 +26,7 @@ class _RMSNormAndQuantOpHelper:
         epsilon: float,
         dtype: torch.dtype,
         device: str,
-        quant_op: Optional[torch._ops.OpOverload] = None,
+        quant_op: torch._ops.OpOverload | None = None,
         **kwargs,
     ):
         self.epsilon = epsilon
@@ -110,7 +109,7 @@ class _SequenceParallelPatternHelper(_RMSNormAndQuantOpHelper):
         epsilon: float,
         dtype: torch.dtype,
         device: str,
-        quant_op: Optional[torch._ops.OpOverload] = None,
+        quant_op: torch._ops.OpOverload | None = None,
         **kwargs,
     ):
         super().__init__(epsilon, dtype, device, quant_op=quant_op, **kwargs)
@@ -483,7 +482,25 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
             ).register(self.patterns)
         self.dump_patterns(config, self.patterns)
 
-    def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
+    def is_applicable(self, shape: int | None) -> bool:
+        # When sequence parallelism is enabled, the residual tensor from RMSNorm
+        # needs to be split along the sequence dimension. However, this dimension
+        # is symbolic during piecewise compilation, and splitting symbolic shapes
+        # is not supported.
+        #
+        # This pass is therefore only applied when the sequence dimension is
+        # concrete:
+        # 1. In full-graph compilation mode (no Dynamo splitting ops are used).
+        #   For this case we always pad num_tokens to be a multiple of
+        #   tensor_parallel_size, so there's no need to check shape % tp_size == 0.
+        # 2. For specific shape provided during compilation (e.g., from
+        #    `compile_sizes`), which must be divisible by the tensor-parallel
+        #    size.
+        if (
+            not self.compilation_config.splitting_ops
+            or self.compilation_config.use_inductor_graph_partition
+        ):
+            return True
         tp_size = get_tensor_model_parallel_world_size()
         return shape is not None and shape % tp_size == 0
 

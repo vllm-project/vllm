@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Union
+from typing import ClassVar
 
 import torch
 
@@ -20,8 +20,13 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    QueryLenSupport,
 )
-from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.v1.attention.backends.utils import (
+    AttentionCGSupport,
+    reshape_attn_output_for_spec_decode,
+    reshape_query_for_spec_decode,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -45,7 +50,7 @@ class FlashMLABackend(MLACommonBackend):
         return FlashMLAImpl
 
     @staticmethod
-    def get_supported_kernel_block_size() -> list[Union[int, MultipleOf]]:
+    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
         return [64]
 
 
@@ -62,6 +67,9 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+    reorder_batch_threshold: int = 512  # process small prefills with decode pathway
+    # ^ TODO(matt): tune this
 
     def __init__(
         self,
@@ -106,7 +114,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
-        dcp_tot_seq_lens_device: Optional[torch.Tensor],
+        dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = get_mla_metadata(
             seq_lens_device,
@@ -160,12 +168,12 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
         **mla_args,
     ) -> None:
@@ -203,11 +211,11 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
     def _forward_decode(
         self,
-        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLAMetadata,
         layer: AttentionLayer,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # TODO: (zyongye) decode function for mla here
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
@@ -216,8 +224,12 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             q = torch.cat(q, dim=-1)
 
         assert isinstance(q, torch.Tensor)
+
+        num_decodes = attn_metadata.num_decodes
+        q = reshape_query_for_spec_decode(q, num_decodes)
+
         o, lse = flash_mla_with_kvcache(
-            q=q.unsqueeze(1),  # Add seqlen dim of 1 (decode)
+            q=q,
             k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
             block_table=attn_metadata.decode.block_table,
             cache_seqlens=attn_metadata.decode.seq_lens,
@@ -229,5 +241,7 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             descale_q=layer._q_scale.reshape(1),
             descale_k=layer._k_scale.reshape(1),
         )
+
+        o = reshape_attn_output_for_spec_decode(o)
 
         return o, lse

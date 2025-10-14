@@ -4,7 +4,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import Set
 from dataclasses import dataclass, field
-from typing import Optional
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -24,7 +23,7 @@ class LoRAResolver(ABC):
     @abstractmethod
     async def resolve_lora(
         self, base_model_name: str, lora_name: str
-    ) -> Optional[LoRARequest]:
+    ) -> LoRARequest | None:
         """Abstract method to resolve and fetch a LoRA model adapter.
 
         Implements logic to locate and download LoRA adapter based on the name.
