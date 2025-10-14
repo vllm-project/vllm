@@ -1050,16 +1050,22 @@ class EagleProposer:
         num_tokens: int,
         use_cudagraphs=True,
     ) -> None:
-        if use_cudagraphs and num_tokens <= self.cudagraph_batch_sizes[-1]:
+        if (
+            use_cudagraphs
+            and self.use_cuda_graph
+            and num_tokens <= self.cudagraph_batch_sizes[-1]
+        ):
             num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
 
         with set_forward_context(
             None,
             self.vllm_config,
             num_tokens=num_tokens,
-            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
-            if use_cudagraphs
-            else CUDAGraphMode.NONE,
+            cudagraph_runtime_mode=(
+                CUDAGraphMode.PIECEWISE
+                if (use_cudagraphs and self.use_cuda_graph)
+                else CUDAGraphMode.NONE
+            ),
         ):
             if self.supports_mm_inputs:
                 input_ids = None
