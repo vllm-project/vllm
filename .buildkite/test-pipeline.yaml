@@ -315,8 +315,8 @@ steps:
   timeout_in_minutes: 30
   gpu: h100
   source_file_dependencies:
-    - vllm/
-    - tests/v1
+    - vllm/v1/attention
+    - tests/v1/attention
   commands:
     - pytest -v -s v1/attention
 
