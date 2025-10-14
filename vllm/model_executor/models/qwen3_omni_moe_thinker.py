@@ -722,8 +722,10 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                 else (pad_to_hop_length(audio[0], hop_length), audio[1])
                 for audio in audios
             ]
+            # Disable chunk_length limit to support long audio (>30s)
             mm_kwargs = dict(
                 **mm_kwargs,
+                chunk_length_s=None,  # Remove 30-second limit
             )
 
         hf_inputs = super()._call_hf_processor(
