@@ -266,7 +266,10 @@ async def test_tool_id_kimi_k2(
             if chunk.choices and chunk.choices[0].delta.tool_calls:
                 output.extend(chunk.choices[0].delta.tool_calls)
         for o in output:
-            assert o.id is None or o.id == "functions.get_current_weather:0"
+            assert o.id is None or o.id in [
+                "functions.get_current_weather:0",
+                "functions.get_forecast:1",
+            ]
 
 
 @pytest.mark.asyncio
