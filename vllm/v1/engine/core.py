@@ -300,7 +300,7 @@ class EngineCore:
             self.scheduler.requests[req_id].num_computed_tokens += \
                     num_scheduled_token * (model_output.step_num - 1)
         engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output, model_output.step_num)  # type: ignore
+            scheduler_output, model_output)  # type: ignore
 
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
