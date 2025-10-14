@@ -56,8 +56,9 @@ def fused_marlin_moe(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     activation: str | None = "silu",
-    activation_func: Callable[[str, torch.Tensor, torch.Tensor], None]
-    | None = default_activation_func,
+    activation_func: Callable[
+        [str | None, torch.Tensor, torch.Tensor], None
+    ] = default_activation_func,
     moe_sum: Callable[[torch.Tensor, torch.Tensor], None] | None = None,
     expert_map: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
