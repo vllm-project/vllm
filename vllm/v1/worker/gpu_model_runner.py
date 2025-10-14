@@ -1488,8 +1488,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Returns:
             int: Length of common prefix in tokens.
         """
-        # Only apply cascade attention to EncoderOnlyAttentionSpec
-        if not isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+
+        if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
             return 0
 
         common_prefix_len = num_common_prefix_blocks * kv_cache_spec.block_size
