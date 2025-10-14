@@ -84,6 +84,18 @@ from vllm.sampling_params import (
 )
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
+EMBED_DTYPE_TO_TORCH_DTYPE = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    # I'm not sure if other platforms' CPUs support the fp8 data format.
+    # EMBED_DTYPE only uses the fp8 data representation,
+    # does not use fp8 computation, and only occurs on the CPU.
+    # Apologize for any possible break.
+    "fp8_e4m3": torch.float8_e4m3fn,
+    "fp8_e5m2": torch.float8_e5m2,
+}
+
 logger = init_logger(__name__)
 
 _LONG_INFO = torch.iinfo(torch.long)
@@ -1549,8 +1561,17 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
-    normalize: bool | None = None
-
+    normalize: bool | None = Field(
+        default=None,
+        description="Whether to normalize the embeddings outputs. Default is True.",
+    )
+    embed_dtype: str = Field(
+        default="float32",
+        description=(
+            "What dtype to use for base64 encoding. Default to using "
+            "float32 for base64 encoding to match the OpenAI python client behavior."
+        ),
+    )
     # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
@@ -1626,7 +1647,17 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
-    normalize: bool | None = None
+    normalize: bool | None = Field(
+        default=None,
+        description="Whether to normalize the embeddings outputs. Default is True.",
+    )
+    embed_dtype: str = Field(
+        default="float32",
+        description=(
+            "Which dtype to use for base64 encoding. Defaults to float32 "
+            "to match OpenAI API."
+        ),
+    )
     # --8<-- [end:chat-embedding-extra-params]
 
     @model_validator(mode="before")
@@ -1670,6 +1701,14 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     by the plugin itself. Hence, we use a generic type for the request data
     """
     softmax: bool = True
+
+    embed_dtype: str = Field(
+        default="float32",
+        description=(
+            "What dtype to use for base64 encoding. Default to using "
+            "float32 for base64 encoding to match the OpenAI python client behavior."
+        ),
+    )
 
     def to_pooling_params(self):
         return PoolingParams(task="encode", softmax=self.softmax)
@@ -2103,7 +2142,7 @@ def serialize_message(msg):
     """
     if isinstance(msg, dict):
         return msg
-    elif hasattr(msg, "__dict__"):
+    elif hasattr(msg, "to_dict"):
         return msg.to_dict()
     else:
         # fallback to pyandic dump
