@@ -1430,9 +1430,10 @@ def enable_envs_cache() -> None:
     runtime overhead. This also means that environment variables should NOT
     be updated after the service is initialized.
     """
-    # Tag __getattr__ with lru_cache
+    # Tag __getattr__ with functools.cache
     global __getattr__
     __getattr__ = functools.cache(__getattr__)
+
     # Cache all environment variables
     for key in environment_variables:
         __getattr__(key)
