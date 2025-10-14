@@ -1050,11 +1050,11 @@ class EagleProposer:
         num_tokens: int,
         use_cudagraphs=True,
     ) -> None:
-        if (
-            use_cudagraphs
-            and self.use_cuda_graph
-            and num_tokens <= self.cudagraph_batch_sizes[-1]
-        ):
+        # Determine if CUDA graphs should be used for this run.
+        cudagraphs_enabled = (
+            use_cudagraphs and self.use_cuda_graph and bool(self.cudagraph_batch_sizes)
+        )
+        if cudagraphs_enabled and num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
 
         with set_forward_context(
@@ -1062,9 +1062,7 @@ class EagleProposer:
             self.vllm_config,
             num_tokens=num_tokens,
             cudagraph_runtime_mode=(
-                CUDAGraphMode.PIECEWISE
-                if (use_cudagraphs and self.use_cuda_graph)
-                else CUDAGraphMode.NONE
+                CUDAGraphMode.PIECEWISE if cudagraphs_enabled else CUDAGraphMode.NONE
             ),
         ):
             if self.supports_mm_inputs:
