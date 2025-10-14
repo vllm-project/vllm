@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -49,8 +48,8 @@ class OAIAttention(nn.Module):
     def __init__(
         self,
         config: GptOssConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
+        quant_config: QuantizationConfig | None = None,
+        cache_config: CacheConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -208,7 +207,7 @@ class TransformerBlock(torch.nn.Module):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -260,8 +259,8 @@ class GptOssModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -687,8 +686,8 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
