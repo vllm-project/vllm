@@ -5,9 +5,10 @@ pynvml. However, it should not initialize cuda context.
 """
 
 import os
+from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, wraps
-from typing import TYPE_CHECKING, Callable, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, TypeVar
 
 import torch
 from torch.distributed import PrefixStore, ProcessGroup
@@ -85,7 +86,7 @@ class CudaPlatformBase(Platform):
         _ = torch.zeros(1, device=device)
 
     @classmethod
-    def get_device_capability(cls, device_id: int = 0) -> Optional[DeviceCapability]:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         raise NotImplementedError
 
     @classmethod
@@ -191,7 +192,7 @@ class CudaPlatformBase(Platform):
 
         compilation_config = vllm_config.compilation_config
         if (
-            envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
+            parallel_config.all2all_backend == "deepep_high_throughput"
             and parallel_config.data_parallel_size > 1
             and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
@@ -203,14 +204,14 @@ class CudaPlatformBase(Platform):
                 "kernels are optimized for prefill and are incompatible with "
                 "CUDA Graphs. "
                 "In order to use CUDA Graphs for decode-optimized workloads, "
-                "set VLLM_ALL2ALL_BACKEND to another option, such as "
+                "use --all2all-backend with another option, such as "
                 "deepep_low_latency, pplx, or allgather_reducescatter."
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
     @classmethod
     def get_current_memory_usage(
-        cls, device: Optional[torch.types.Device] = None
+        cls, device: torch.types.Device | None = None
     ) -> float:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
@@ -594,7 +595,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @cache
     @with_nvml_context
-    def get_device_capability(cls, device_id: int = 0) -> Optional[DeviceCapability]:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         try:
             physical_device_id = cls.device_id_to_physical_device_id(device_id)
             handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
@@ -607,7 +608,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @with_nvml_context
     def has_device_capability(
         cls,
-        capability: Union[tuple[int, int], int],
+        capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
         try:
