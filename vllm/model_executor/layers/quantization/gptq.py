@@ -89,16 +89,22 @@ class GPTQConfig(QuantizationConfig):
                 "Currently, only 2/3/4/8-bit weight quantization is "
                 f"supported for GPTQ, but got {self.weight_bits} bits."
             )
+        # Somehow gptq_gemm 4-bit is buggy, maybe fix it in the future.
+        # Currently we can disable it since gptq_marlin will be used by default.
+        if self.weight_bits == 4:
+            raise ValueError(
+                "Currently, the 4-bit gptq_gemm kernel for GPTQ is buggy. "
+                "Please switch to gptq_marlin or gptq_bitblas."
+            )
 
         self.modules_in_block_to_quantize = modules_in_block_to_quantize or []
 
         # used to identify GPTQ model quantized by autoround
         self.autoround_version = autoround_version
 
-        # GPTQ v1 and v2 format deals with zero points differently,
-        # and require different gemm kernels.
+        # GPTQ v1 and v2 format deals with zero points differently.
         # Currently GPTQModel stores v1 format checkpoints by default,
-        # but provides the option to set `format='gptq_v2'` in `QuantizeConfig`.
+        # but provides the option to set `format="gptq_v2"` in `QuantizeConfig`.
         self.checkpoint_format = checkpoint_format
 
     def __repr__(self) -> str:
