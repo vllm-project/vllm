@@ -294,9 +294,6 @@ class Scheduler(SchedulerInterface):
                     break
 
             if new_blocks is None:
-                if req_index == len(self.running) - 1:
-                    # Cannot schedule this request.
-                    break
                 # Continue scheduling subsequent requests
                 continue
 
