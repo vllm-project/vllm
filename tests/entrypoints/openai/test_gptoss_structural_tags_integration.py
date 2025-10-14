@@ -122,7 +122,9 @@ class TestGptOssStructuralTagsIntegration:
             (True, True, True, 7),
         ],
     )
-    def test_tool_server_interaction_flow(self, gptoss_parser, browser, python, container, expected_tags):
+    def test_tool_server_interaction_flow(
+        self, gptoss_parser, browser, python, container, expected_tags
+    ):
         """Test the complete tool server interaction flow."""
 
         # Create a mock ToolServer
@@ -130,7 +132,11 @@ class TestGptOssStructuralTagsIntegration:
 
         # Simulate tool availability based on parameters
         tool_server.has_tool = Mock(
-            side_effect=lambda tool: {"browser": browser, "python": python, "container": container}.get(tool, False)
+            side_effect=lambda tool: {
+                "browser": browser,
+                "python": python,
+                "container": container,
+            }.get(tool, False)
         )
 
         # Run the parser and verify results
@@ -142,7 +148,11 @@ class TestGptOssStructuralTagsIntegration:
 
         # Verify tool-specific tags exist for enabled tools
         tag_begins = [tag["begin"] for tag in parsed_result["format"]["tags"]]
-        for tool, enabled in {"browser": browser, "python": python, "container": container}.items():
+        for tool, enabled in {
+            "browser": browser,
+            "python": python,
+            "container": container,
+        }.items():
             if enabled:
                 assert f"<|channel|>commentary to={tool}" in tag_begins
                 assert f"<|channel|>analysis to={tool}" in tag_begins
