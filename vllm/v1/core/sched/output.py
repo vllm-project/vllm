@@ -165,9 +165,8 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
-    # Dict of request ids to their index within the batch
-    # for filling the next token bitmask
-    structured_output_request_ids: dict[str, int]
+    # ids of structured outputs requests included in the bitmask, in order.
+    structured_output_request_ids: list[str]
     # the bitmask for the whole batch
     grammar_bitmask: "npt.NDArray[np.int32] | None"
 
