@@ -1523,6 +1523,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             use_sliding_window=use_sliding_window,
             use_local_attention=use_local_attention,
             num_sms=self.num_sms,
+            dcp_world_size=self.dcp_world_size,
         )
         return common_prefix_len if use_cascade else 0
 
@@ -2066,7 +2067,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
         if (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and not envs.VLLM_DISABLE_PAD_FOR_CUDAGRAPH
             and hasattr(self, "cudagraph_batch_sizes")
             and self.cudagraph_batch_sizes
             and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]

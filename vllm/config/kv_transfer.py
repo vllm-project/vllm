@@ -27,7 +27,7 @@ class KVTransferConfig:
     engine_id: str | None = None
     """The engine id for KV transfers."""
 
-    kv_buffer_device: str | None = "cuda"
+    kv_buffer_device: str = "cuda"
     """The device used by kv connector to buffer the KV cache. Choices are 
     'cuda' and 'cpu'."""
 
@@ -60,6 +60,9 @@ class KVTransferConfig:
     kv_connector_module_path: str | None = None
     """The Python module path to dynamically load the KV connector from.
     Only supported in V1."""
+
+    enable_permute_local_kv: bool = False
+    """Experiment feature flag to enable HND to NHD KV Transfer"""
 
     def compute_hash(self) -> str:
         """
