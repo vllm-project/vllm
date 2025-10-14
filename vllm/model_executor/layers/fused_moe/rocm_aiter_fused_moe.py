@@ -73,7 +73,6 @@ def init_aiter_topK_meta_data(
     aiter_topK_meta_data = (total_topk_weights, total_topk_ids)
 
 
-
 class QuantMethod(IntEnum):
     # This allows interfacing with AITER QuantType Enum
     # without importing the QuantType from AITER globally.

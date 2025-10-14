@@ -950,6 +950,7 @@ def determine_expert_map(
 
     return (local_num_experts, expert_map, expert_mask)
 
+
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
     """
     Compresses the expert map by removing any -1 entries.
@@ -1209,7 +1210,7 @@ class FusedMoE(CustomOp):
             )
 
         self.top_k = top_k
-        
+
         self._init_aiter_shared_experts_topK_buffer(
             vllm_config=vllm_config, dp_size=dp_size_
         )

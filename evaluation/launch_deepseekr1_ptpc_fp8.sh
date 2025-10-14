@@ -23,7 +23,6 @@ vllm serve $model_path \
   --trust-remote-code \
   --no-enable-prefix-caching \
   --disable-log-requests \
-  --enable-expert-parallel \
   --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
   --gpu_memory_utilization 0.9 \
   --block-size 1

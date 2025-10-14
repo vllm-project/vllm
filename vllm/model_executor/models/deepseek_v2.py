@@ -1475,7 +1475,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
                 break
             else:
                 is_expert_weight = False
-                
+
                 # Special handling: when AITER fusion_shared_experts is enabled,
                 # checkpoints may provide a single widened shared_experts tensor
                 # without explicit expert indices
