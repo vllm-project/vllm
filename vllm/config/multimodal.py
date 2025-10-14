@@ -3,8 +3,7 @@
 
 import hashlib
 from collections.abc import Mapping
-from dataclasses import field
-from typing import Any, Optional, Literal, Union
+from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
@@ -128,7 +127,7 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
-    mm_processor_dynamic_kwargs: Optional[list[str]] = None
+    mm_processor_dynamic_kwargs: [list[str]] | None = None
     """ avoid caching the kwargs in this list for mm_processor e.g., ["fps"]"""
 
     @field_validator("limit_per_prompt", mode="before")
