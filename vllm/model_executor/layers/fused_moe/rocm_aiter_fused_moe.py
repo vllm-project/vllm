@@ -71,6 +71,10 @@ def init_aiter_topK_meta_data(
     fake_expertid = n_routed_experts + n_shared_experts
 
     # all layers reuse same buffer
+    # This extra element when EP is enabled is used as a sentinel
+    # to mask out shared expert processing for tokens not owned by
+    # the current EP rank. This is necessary to avoid double-processing
+    # of shared experts.
     total_topk_ids = torch.empty(
         (max_num_tokens, top_k + n_shared_experts + is_EP),
         dtype=torch.int32,
@@ -101,6 +105,7 @@ def init_aiter_topK_meta_data(
         [top_k, n_shared_experts + is_EP], dim=1
     )
     s_topk_weights.fill_(shared_experts_score)
+    assert aiter_topK_meta_data is None, "AITER topK meta data is already initialized"
     aiter_topK_meta_data = (total_topk_weights, total_topk_ids)
 
 

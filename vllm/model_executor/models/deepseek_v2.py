@@ -207,7 +207,10 @@ class DeepseekV2MoE(nn.Module):
             self.physical_expert_start + self.n_local_physical_experts
         )
 
-        if config.n_shared_experts is None:
+        if (
+            config.n_shared_experts is None
+            or is_rocm_aiter_fusion_shared_expert_enabled()
+        ):
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -268,11 +271,9 @@ class DeepseekV2MoE(nn.Module):
             hidden_states=hidden_states, router_logits=router_logits
         )
 
-        if self.shared_experts is not None:
-            shared_output, final_hidden_states = fused_moe_out
-        else:
-            shared_output = None
-            final_hidden_states = fused_moe_out
+        shared_output, final_hidden_states = fused_moe_out
+        if self.shared_experts is None:
+            assert shared_output is None
 
         # Fix FP16 overflow
         # See DeepseekV2DecoderLayer for more details.
@@ -1530,6 +1531,8 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
                         if success:
                             if not is_fuse_shared_experts_layer:
                                 name = name_mapped
+                            else:
+                                loaded_params.add(name_mapped)
                             break
                     else:
                         if is_expert_weight:
@@ -1555,7 +1558,8 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
                             param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight)
-            loaded_params.add(name)
+            if not is_fuse_shared_experts_layer:
+                loaded_params.add(name)
 
         return loaded_params
 
