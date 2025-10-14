@@ -15,6 +15,7 @@ from typing import Literal, NamedTuple
 
 import pytest
 
+from vllm.config.compilation import CompilationMode
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
 

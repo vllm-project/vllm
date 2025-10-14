@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.compilation.collective_fusion import AsyncTPPass
 from vllm.config import (
     CompilationConfig,
+    CompilationMode,
     DeviceConfig,
     ModelConfig,
     PassConfig,

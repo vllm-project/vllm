@@ -88,14 +88,14 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
 def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
     model_info: tuple[str, dict[str, Any]],
-    optimization_mode: int,
+    compilation_mode: int,
 ):
     model, model_kwargs = model_info
 
     with monkeypatch.context():
         print(f"MODEL={model}")
 
-        run_model(optimization_mode, model, model_kwargs)
+        run_model(compilation_mode, model, model_kwargs)
 
 
 # TODO(luka) add other supported compilation config scenarios here

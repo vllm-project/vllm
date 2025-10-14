@@ -31,7 +31,7 @@ class CompilationMode:
     model."""
 
     NONE = 0
-    """No torch.compile compilation is applied, model runs in fully eager pytorch mode."""
+    """No torch.compile compilation is applied, model runs in fully eager pytorch mode.
     The model runs as-is."""
     STOCK_TORCH_COMPILE = 1
     """The standard `torch.compile` compilation pipeline."""
@@ -232,7 +232,7 @@ class CompilationConfig:
     - 'none,+op1,+op2' to enable only op1 and op2
 
     By default, all custom ops are enabled when running without Inductor and
-    disabled when running with Inductor: mode>=VLLM_CONFIG and use_inductor=True.
+    disabled when running with Inductor: mode>=VLLM_COMPILE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: list[str] | None = None
     """A list of ops to exclude from cudagraphs, used in piecewise compilation.
@@ -267,7 +267,7 @@ class CompilationConfig:
         One graph for symbolic shape and one graph per size in compile_sizes
         are compiled using configurations in inductor_compile_config.
 
-    This setting is ignored if mode<VLLM_CONFIG.
+    This setting is ignored if mode<VLLM_COMPILE.
 
     For future compatibility:
     If use_inductor is True, backend="inductor" otherwise backend="eager".
@@ -317,7 +317,7 @@ class CompilationConfig:
     Currently, the cudagraph mode is only used for the v1 engine.
     Note that the cudagraph logic is generally orthogonal to the 
     compilation logic. While piecewise cudagraphs require piecewise 
-    compilation (mode=VLLM_CONFIG and non-empty splitting_ops), full
+    compilation (mode=VLLM_COMPILE and non-empty splitting_ops), full
     cudagraphs are supported with and without compilation.
     
     Warning: This flag is new and subject to change in addition 

@@ -455,8 +455,8 @@ def benchmark():
 
     pool = torch.cuda.graph_pool_handle()
 
-    for vllm_compile in [False, True]:
-        if vllm_compile:
+    for piecewise in [False, True]:
+        if piecewise:
             compilation_config = CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
                 use_cudagraph=True,
@@ -486,7 +486,7 @@ def benchmark():
 
         model(input_ids, positions)
         for b in cudagraph_sizes[::-1]:
-            if not vllm_compile:
+            if not piecewise:
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph, pool=pool):
                     output = model(input_ids[:b], positions[:b])
@@ -495,7 +495,7 @@ def benchmark():
                 output = model(input_ids[:b], positions[:b])
                 graphs[b] = (model, output)
         for b in cudagraph_sizes:
-            if vllm_compile:
+            if piecewise:
                 # noqa is for `Function definition does not bind loop variable`
                 # it will be problematic if we save the created lambda function
                 # and use it later, because it will look up the name `b` in the
