@@ -298,6 +298,8 @@ class ModelConfig:
     override_pooler_config: dict | PoolerConfig | None = None
     """[DEPRECATED] Use `pooler_config` instead. This field will be removed in
     v0.12.0 or v1.0.0, whichever is sooner."""
+    is_moe_model: bool | None = None
+    """Whether the model is a MoE model."""
 
     # Multimodal config and init vars
     multimodal_config: MultiModalConfig | None = None
@@ -419,6 +421,42 @@ class ModelConfig:
             else:
                 # It's a dict-valued parameter - set it directly
                 setattr(config, key, value)
+
+    def parse_model_config_for_sequence_parallel(
+        self,
+        hf_config: PretrainedConfig,
+    ) -> bool:
+        """
+        Parse model configuration to determine if sequence parallel is needed.
+
+        Args:
+            hf_config: HuggingFace config
+
+        Returns:
+            A flag indicating if the model is a MoE model.
+        """
+        # Get text config (handles multimodal models)
+
+        text_config = hf_config.get_text_config()
+
+        # Check for MoE (Mixture of Experts) indicators
+        num_expert_names = [
+            "num_experts",  # Jamba
+            "moe_num_experts",  # Dbrx
+            "n_routed_experts",  # DeepSeek
+            "num_local_experts",  # Mixtral
+        ]
+
+        num_experts = getattr_iter(text_config, num_expert_names, 0)
+
+        # Handle list case (e.g., Ernie VL)
+        is_moe_model = False
+        if isinstance(num_experts, list):
+            is_moe_model = max(num_experts) > 1
+        else:
+            is_moe_model = num_experts > 1
+
+        return is_moe_model
 
     def __post_init__(
         self,
@@ -748,6 +786,10 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+
+        self.is_moe_model = self.parse_model_config_for_sequence_parallel(
+            self.hf_config
+        )
 
     @field_validator("quantization", mode="before")
     @classmethod

@@ -235,6 +235,20 @@ def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
     assert model_config.pooler_config.pooling_type == pooling_type
 
 
+@pytest.mark.parametrize(
+    ("model_id", "expected_is_moe_model"),
+    [
+        ("Qwen/Qwen1.5-7B", False),
+        ("deepseek-ai/DeepSeek-V2-Lite", True),
+    ],
+)
+def test_moe_model_detection(model_id, expected_is_moe_model):
+    model_config = ModelConfig(model_id)
+    # Just check that is_moe_model field exists and is a boolean
+    assert hasattr(model_config, "is_moe_model")
+    assert model_config.is_moe_model == expected_is_moe_model
+
+
 @pytest.mark.skipif(
     current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
 )
