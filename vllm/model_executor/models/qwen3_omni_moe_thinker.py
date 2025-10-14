@@ -710,30 +710,42 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                 x = np.pad(x, (0, pad_length), mode="constant", constant_values=0)
             return x
 
+        feature_extractor = None
+        original_chunk_length = None
+
         # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
         if audios:
             # NOTE: Qwen3-Omni processor accept "audio"
             # To make sure the cache works with padding=True, we pre-padded
             # the audio to multiple of hop_length.
-            hop_length = self.info.get_feature_extractor().hop_length
+            feature_extractor = self.info.get_feature_extractor()
+            hop_length = feature_extractor.hop_length
+
+            # Disable chunk_length limit to support long audio (>30s)
+            original_chunk_length = feature_extractor.chunk_length
+            feature_extractor.chunk_length = None
+
             mm_data["audio"] = [
                 pad_to_hop_length(audio, hop_length)
                 if isinstance(audio, np.ndarray)
                 else (pad_to_hop_length(audio[0], hop_length), audio[1])
                 for audio in audios
             ]
-            # Disable chunk_length limit to support long audio (>30s)
             mm_kwargs = dict(
                 **mm_kwargs,
-                chunk_length_s=None,  # Remove 30-second limit
             )
 
-        hf_inputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
+        try:
+            hf_inputs = super()._call_hf_processor(
+                prompt=prompt,
+                mm_data=mm_data,
+                mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
+            )
+        finally:
+            # Restore original chunk_length
+            if feature_extractor is not None and original_chunk_length is not None:
+                feature_extractor.chunk_length = original_chunk_length
 
         # Trust HF processor's audio_feature_lengths, don't recalculate
         return hf_inputs
