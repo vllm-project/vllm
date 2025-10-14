@@ -645,6 +645,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             from aiter import ActivationType, QuantType
             from aiter.fused_moe import fused_moe
 
+            aiter_acts = {
+                ActivationType.No.name.lower(): ActivationType.No,
+                ActivationType.Silu.name.lower(): ActivationType.Silu,
+                ActivationType.Gelu.name.lower(): ActivationType.Gelu,
+            }
+            assert activation in aiter_acts, (
+                f"Aiter CK fp4 MoE doesn't support activation {activation}"
+            )
             out = fused_moe(
                 x,
                 layer.w13_weight,
@@ -654,9 +662,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 quant_type=QuantType.per_1x32,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
-                activation=(
-                    ActivationType.Silu if activation == "silu" else ActivationType.Gelu
-                ),
+                activation=aiter_acts[activation],
                 doweight_stage1=False,
             )
         else:
