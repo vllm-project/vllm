@@ -31,7 +31,7 @@ class CompilationMode:
     model."""
 
     NONE = 0
-    """NONE (int): No torch.compile compilation is applied.
+    """No torch.compile compilation is applied, model runs in fully eager pytorch mode."""
     The model runs as-is."""
     STOCK_TORCH_COMPILE = 1
     """STOCK_TORCH_COMPILE (int): Uses the standard `torch.compile`
