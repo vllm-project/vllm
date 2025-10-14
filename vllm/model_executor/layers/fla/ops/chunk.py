@@ -23,6 +23,23 @@ from .utils import SUPPRESS_LEVEL, input_guard
 from .wy_fast import recompute_w_u_fwd
 
 
+def _reshape_intermediate_states(
+    states: torch.Tensor,
+    cu_seqlens: Optional[torch.LongTensor],
+) -> torch.Tensor:
+    """Return a chunk-major view of the kernel's intermediate states."""
+
+    if cu_seqlens is None:
+        # Equal-length batches keep their batch dimension; flatten it together
+        # with the chunk axis so callers receive a contiguous chunk stream.
+        return states.reshape(-1, *states.shape[-3:])
+
+    # Variable-length inputs collapse the batch dimension during preprocessing,
+    # so the kernel already emits a linearised chunk stream in ``states[:, i]``.
+    # Flattening mirrors the metadata builder's chunk enumeration order.
+    return states.reshape(-1, *states.shape[-3:])
+
+
 def chunk_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -66,6 +83,7 @@ def chunk_gated_delta_rule_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
     )
+    # TODO: perhaps bypass this if return_intermediate_states, if so always return h
     if SUPPRESS_LEVEL < 3:
         return g, o, A, final_state, None, None, None
     elif SUPPRESS_LEVEL >= 3:
@@ -88,6 +106,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool,
         cu_seqlens: Optional[torch.LongTensor] = None,
         use_qk_l2norm_in_kernel: bool = False,
+        return_intermediate_states: bool = False,
     ):
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
@@ -106,7 +125,10 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
-        return o.to(q.dtype), final_state
+        intermediate_states = None
+        if return_intermediate_states:
+            intermediate_states = _reshape_intermediate_states(h, cu_seqlens)
+        return o.to(q.dtype), final_state, intermediate_states
 
 
 @torch.compiler.disable
@@ -122,6 +144,7 @@ def chunk_gated_delta_rule(
     cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    return_intermediate_states: bool = False,
 ):
     r"""
     Args:
@@ -156,6 +179,10 @@ def chunk_gated_delta_rule(
             Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (torch.Tensor):
             Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+        intermediate_states (Optional[torch.Tensor]):
+            When ``return_intermediate_states`` is ``True`` a tensor containing
+            the per-chunk state snapshots shaped ``[num_chunks_total, H, K, V]``.
+            Otherwise ``None``.
 
     Examples::
         >>> import torch
@@ -170,7 +197,7 @@ def chunk_gated_delta_rule(
         >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda').sigmoid()
         >>> g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda'))
         >>> h0 = torch.randn(B, H, K, V, dtype=torch.bfloat16, device='cuda')
-        >>> o, ht = chunk_gated_delta_rule(
+        >>> o, ht, _ = chunk_gated_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
             output_final_state=True
@@ -179,7 +206,7 @@ def chunk_gated_delta_rule(
         >>> q, k, v, beta, g = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, beta, g))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
         >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
-        >>> o_var, ht_var = chunk_gated_delta_rule(
+        >>> o_var, ht_var, _ = chunk_gated_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
             output_final_state=True,
@@ -224,7 +251,7 @@ def chunk_gated_delta_rule(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    o, final_state = ChunkGatedDeltaRuleFunction.apply(
+    o, final_state, intermediate_states = ChunkGatedDeltaRuleFunction.apply(
         q,
         k,
         v,
@@ -235,7 +262,8 @@ def chunk_gated_delta_rule(
         output_final_state,
         cu_seqlens,
         use_qk_l2norm_in_kernel,
+        return_intermediate_states,
     )
     if head_first:
         o = rearrange(o, "b t h ... -> b h t ...")
-    return o, final_state
+    return o, final_state, intermediate_states

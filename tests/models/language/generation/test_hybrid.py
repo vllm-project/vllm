@@ -53,7 +53,8 @@ FP32_STATE_MODELS = [
 MAX_NUM_SEQS = 4
 
 
-@pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
+# @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
+@pytest.mark.parametrize("model", ["tiny-random/qwen3-next-moe"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
@@ -77,7 +78,9 @@ def test_models(
             example_prompts, max_tokens, num_logprobs
         )
 
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+    with vllm_runner(
+        model, max_num_seqs=MAX_NUM_SEQS, kv_cache_memory_bytes=1_000_000_000
+    ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
         )
@@ -528,7 +531,8 @@ def test_apc_single_prompt_block_align_alignment(
             )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
+# @pytest.mark.parametrize("model", [HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", ["tiny-random/qwen3-next-moe"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version

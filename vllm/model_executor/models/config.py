@@ -294,6 +294,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             "Mamba2ForCausalLM",
             "NemotronHForCausalLM",
             "Zamba2ForCausalLM",
+            "Qwen3NextForCausalLM",
         ]
         if cache_config.enable_prefix_caching:
             if model_config.architecture in MAMBA2_MODELS:
