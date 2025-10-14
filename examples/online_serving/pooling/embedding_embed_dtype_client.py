@@ -8,6 +8,7 @@ NOTE:
 
 import argparse
 import base64
+import io
 
 import requests
 import torch
@@ -45,11 +46,19 @@ def main(args):
 
         embedding = []
         for data in response.json()["data"]:
-            embedding.append(
-                torch.frombuffer(
-                    bytearray(base64.b64decode(data["embedding"])), dtype=torch_dtype
-                ).to(torch.float32)
-            )
+            # Decode base64 into a writable BytesIO buffer for zero-copy tensor creation
+            bio_in = io.BytesIO(data["embedding"].encode("ascii"))
+            bio_out = io.BytesIO()
+            base64.decode(bio_in, bio_out)
+
+            # Get writable memoryview and create tensor with zero-copy semantics
+            mv = bio_out.getbuffer()
+            tensor = torch.frombuffer(mv, dtype=torch_dtype)
+
+            # Keep buffer alive to ensure memory validity
+            tensor._buffer_owner = bio_out
+
+            embedding.append(tensor.to(torch.float32))
         embedding = torch.cat(embedding)
         print(embed_dtype, embedding.shape)
 

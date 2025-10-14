@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
+import io
 
 import numpy as np
 import openai
@@ -274,13 +275,19 @@ async def test_base64_embed_dtype(
 
         base64_data = []
         for data in responses_base64.json()["data"]:
-            base64_data.append(
-                torch.frombuffer(
-                    bytearray(base64.b64decode(data["embedding"])), dtype=torch_dtype
-                )
-                .to(torch.float32)
-                .tolist()
-            )
+            # Decode base64 into a writable BytesIO buffer for zero-copy tensor creation
+            bio_in = io.BytesIO(data["embedding"].encode("ascii"))
+            bio_out = io.BytesIO()
+            base64.decode(bio_in, bio_out)
+
+            # Get writable memoryview and create tensor with zero-copy semantics
+            mv = bio_out.getbuffer()
+            tensor = torch.frombuffer(mv, dtype=torch_dtype)
+
+            # Keep buffer alive to ensure memory validity
+            tensor._buffer_owner = bio_out
+
+            base64_data.append(tensor.to(torch.float32).tolist())
 
         check_embeddings_close(
             embeddings_0_lst=float_data,
