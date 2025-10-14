@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from vllm.v1.outputs import get_token_count
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
@@ -232,9 +233,7 @@ class IterationStats:
         req_stats: RequestStateStats,
         lora_stats: LoRAStats | None,
     ):
-        num_new_generation_tokens = (
-            1 if isinstance(output.new_token_ids, int) else len(output.new_token_ids)
-        )
+        num_new_generation_tokens = get_token_count(output.new_token_ids)
 
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:

@@ -29,7 +29,13 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    KVConnectorOutput,
+    ModelRunnerOutput,
+    convert_to_token_id_list,
+    convert_to_token_ids,
+)
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -952,11 +958,9 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            generated_token_ids = (
+            generated_token_ids: list[int] = convert_to_token_id_list(
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
-            if isinstance(generated_token_ids, int):
-                generated_token_ids = [generated_token_ids]
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
@@ -1030,9 +1034,7 @@ class Scheduler(SchedulerInterface):
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
-                        new_token_ids=new_token_ids[0]
-                        if len(new_token_ids) == 1
-                        else new_token_ids,
+                        new_token_ids=convert_to_token_ids(new_token_ids),
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
