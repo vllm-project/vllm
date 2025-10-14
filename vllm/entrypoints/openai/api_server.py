@@ -1811,6 +1811,7 @@ async def init_app_state(
             state.openai_serving_models,
             request_logger=request_logger,
             log_error_stack=args.log_error_stack,
+            enable_force_include_usage=args.enable_force_include_usage,
         )
         if "transcription" in supported_tasks
         else None
@@ -1821,6 +1822,7 @@ async def init_app_state(
             state.openai_serving_models,
             request_logger=request_logger,
             log_error_stack=args.log_error_stack,
+            enable_force_include_usage=args.enable_force_include_usage,
         )
         if "transcription" in supported_tasks
         else None
