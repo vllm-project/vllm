@@ -953,18 +953,16 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
         # Verify waiting counts
         assert iteration_stats.waiting_lora_adapters.get("lora-1") == 1
         assert iteration_stats.waiting_lora_adapters.get("lora-2") == 1
-        # FIXME
-        # assert iteration_stats.running_lora_adapters.get("lora-1") == 0
-        # assert iteration_stats.running_lora_adapters.get("lora-2") == 0
+        assert iteration_stats.running_lora_adapters.get("lora-1") == 0
+        assert iteration_stats.running_lora_adapters.get("lora-2") == 0
         # Verify internal state
-        assert len(output_processor.lora_states.lora_name_to_stats) == 2
-        assert "lora-1" in output_processor.lora_states.lora_name_to_stats
-        assert "lora-2" in output_processor.lora_states.lora_name_to_stats
+        assert len(output_processor.lora_states.requests) == 2
+        assert "lora-1" in output_processor.lora_states.requests
+        assert "lora-2" in output_processor.lora_states.requests
     else:
         # When log_stats=False, no tracking should occur
         assert iteration_stats is None
-        # FIXME
-        # assert len(output_processor.lora_states.lora_name_to_stats) == 0
+        assert len(output_processor.lora_states.requests) == 0
 
     # Second iteration: process outputs with SCHEDULED events
     outputs = engine_core.get_outputs()
@@ -980,15 +978,13 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
 
     if log_stats:
         # Verify running counts
-        # FIXME
-        # assert iteration_stats.waiting_lora_adapters.get("lora-1") == 0
-        # assert iteration_stats.waiting_lora_adapters.get("lora-2") == 0
+        assert iteration_stats.waiting_lora_adapters.get("lora-1") == 0
+        assert iteration_stats.waiting_lora_adapters.get("lora-2") == 0
         assert iteration_stats.running_lora_adapters.get("lora-1") == 1
         assert iteration_stats.running_lora_adapters.get("lora-2") == 1
     else:
         assert iteration_stats is None
-        # FIXME
-        # assert len(output_processor.lora_states.lora_name_to_stats) == 0
+        assert len(output_processor.lora_states.requests) == 0
 
     # Third iteration: finish request-0 (lora-1)
     outputs = engine_core.get_outputs()
@@ -1003,16 +999,12 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
 
     if log_stats:
         # lora-1 should be removed since no requests remain
-        # FIXME
-        # assert "lora-1" not in output_processor.lora_states.lora_name_to_stats
+        assert "lora-1" not in output_processor.lora_states.requests
         # lora-2 should still be running
         assert iteration_stats.running_lora_adapters.get("lora-2") == 1
-        # FIXME
-        # assert len(output_processor.lora_states.lora_name_to_stats) == 1
+        assert len(output_processor.lora_states.requests) == 1
     else:
-        # FIXME
-        # assert len(output_processor.lora_states.lora_name_to_stats) == 0
-        pass
+        assert len(output_processor.lora_states.requests) == 0
 
     # Fourth iteration: finish request-1 (lora-2)
     outputs = engine_core.get_outputs()
@@ -1027,15 +1019,11 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
 
     if log_stats:
         # lora-2 should be removed since no requests remain
-        # FIXME
-        # assert "lora-2" not in output_processor.lora_states.lora_name_to_stats
+        assert "lora-2" not in output_processor.lora_states.requests
         assert len(iteration_stats.running_lora_adapters) == 0
-        # assert len(output_processor.lora_states.lora_name_to_stats) == 0
-        pass
+        assert len(output_processor.lora_states.requests) == 0
     else:
-        # FIXME
-        # assert len(output_processor.lora_states.lora_name_to_stats) == 0
-        pass
+        assert len(output_processor.lora_states.requests) == 0
 
     # Finish the last request (no LoRA)
     outputs = engine_core.get_outputs()
