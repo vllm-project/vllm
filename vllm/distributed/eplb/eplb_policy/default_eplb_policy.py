@@ -172,9 +172,6 @@ class DefaultEplb(EplbPolicy):
 
         pphy2mlog = phy2mlog.gather(
             -1, pphy2phy)  # [num_layers * num_nodes, num_log_per_nodes]
-        pphy2mlog = (pphy2mlog.view(num_layers, num_nodes, -1) + torch.arange(
-            -1, pphy2phy
-        )  # [num_layers * num_nodes, num_log_per_nodes]
         pphy2mlog = (
             pphy2mlog.view(num_layers, num_nodes, -1)
             + torch.arange(
