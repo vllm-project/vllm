@@ -170,6 +170,9 @@ class SchedulerStats:
 
     num_corrupted_reqs: int = 0
 
+    waiting_lora_adapters: dict[str, int] = field(default_factory=dict)
+    running_lora_adapters: dict[str, int] = field(default_factory=dict)
+
 
 @dataclass
 class RequestStateStats:
@@ -219,8 +222,6 @@ class IterationStats:
         self.n_params_iter: list[int] = []
         self.time_to_first_tokens_iter: list[float] = []
         self.inter_token_latencies_iter: list[float] = []
-        self.waiting_lora_adapters: dict[str, int] = {}
-        self.running_lora_adapters: dict[str, int] = {}
 
     def __repr__(self) -> str:
         field_to_value_str = ", ".join(f"{k}={v}" for k, v in vars(self).items())
@@ -393,10 +394,9 @@ class LoRARequestStates:
     def request_finished(self, req_id: str, lora_name: str | None):
         self._request_update(req_id, lora_name, waiting=False, running=False)
 
-    def update_iteration_stats(self, iteration_stats: IterationStats | None):
-        if not self.log_stats:
+    def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
+        if not self.log_stats or scheduler_stats is None:
             return
-        assert iteration_stats is not None
         for lora_name, stats in self.requests.items():
-            iteration_stats.waiting_lora_adapters[lora_name] = len(stats.waiting)
-            iteration_stats.running_lora_adapters[lora_name] = len(stats.running)
+            scheduler_stats.waiting_lora_adapters[lora_name] = len(stats.waiting)
+            scheduler_stats.running_lora_adapters[lora_name] = len(stats.running)
