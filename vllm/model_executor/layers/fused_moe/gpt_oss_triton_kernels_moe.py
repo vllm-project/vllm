@@ -116,7 +116,7 @@ def routing_from_bitmatrix(
 
 
 def routing(
-    logits: "Tensor" | torch.Tensor,
+    logits: "torch.Tensor | Tensor",
     n_expts_act: int,
     sm_first: bool = False,
     expt_indx: torch.Tensor | None = None,
