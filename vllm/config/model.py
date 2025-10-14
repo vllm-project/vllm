@@ -1623,10 +1623,6 @@ class ModelConfig:
         return self._model_info.has_inner_state
 
     @property
-    def is_v1_compatible(self) -> bool:
-        return not self._model_info.supports_v0_only
-
-    @property
     def use_mla(self) -> bool:
         return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
 
