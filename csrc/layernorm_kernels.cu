@@ -353,11 +353,9 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
 
   int hidden_size = input.size(-1);
 
-  // NOTE: With fake tensors, doing this in the Python code
-  // can result in a stride that the rms_norm_kernel is currently unable
-  // to handle, since it expects non-contiguous row-major layout. Initially,
-  // a SEGV was found on ROCm, but has been confirmed on h100 as well with
-  // Qwen-235B-A22B.
+  // We cannot just use `input.stride(-2)` if the tensor is not row-major.
+  // Instead, we use a 2d view to get the second-innermost stride.
+  // That way the dimensions (except the last one) can be arbitrarily permuted.
   torch::Tensor input_view = input.view({-1, hidden_size});
 
   int num_tokens = input_view.numel() / hidden_size;
