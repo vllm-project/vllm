@@ -138,10 +138,6 @@ class SchedulerConfig:
     structured outputs, speculative decoding, and pipeline parallelism.
     """
 
-    split_prefill_from_chunk: bool = False
-    """Whether to split the prefill request into pure prefill and chunked
-    prefill in a single batch."""
-
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

@@ -187,8 +187,6 @@ class Scheduler(SchedulerInterface):
         # and the "jump decoding" optimization in the future.
 
         scheduled_new_reqs: list[Request] = []
-        new_reqs_for_pure_preill: list[Request] = []
-        new_reqs_for_chunk_prefill: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
@@ -349,10 +347,9 @@ class Scheduler(SchedulerInterface):
         skipped_waiting_requests = create_request_queue(self.policy)
 
         # Next, schedule the WAITING requests.
-        running_req_cnt = len(self.running)
         if not preempted_reqs:
             while self.waiting and token_budget > 0:
-                if running_req_cnt == self.max_num_running_reqs:
+                if len(self.running) == self.max_num_running_reqs:
                     break
 
                 request = self.waiting.peek_request()
@@ -541,19 +538,18 @@ class Scheduler(SchedulerInterface):
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
 
-                if num_computed_tokens > 0 and \
-                    self.scheduler_config.split_prefill_from_chunk:
-                    new_reqs_for_chunk_prefill.append(request)
-                else:
-                    new_reqs_for_pure_preill.append(request)
-
-                running_req_cnt += 1
                 req_index += 1
-
+                self.running.append(request)
                 if self.log_stats:
                     request.record_event(
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
                     )
+                if request.status == RequestStatus.WAITING:
+                    scheduled_new_reqs.append(request)
+                elif request.status == RequestStatus.PREEMPTED:
+                    scheduled_resumed_reqs.append(request)
+                else:
+                    raise RuntimeError(f"Invalid request status: {request.status}")
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
@@ -562,7 +558,7 @@ class Scheduler(SchedulerInterface):
                 )
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
-                # request.status = RequestStatus.RUNNING
+                request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Count the number of prefix cached tokens.
                 if request.num_cached_tokens < 0:
@@ -576,24 +572,6 @@ class Scheduler(SchedulerInterface):
                     for i in encoder_inputs_to_schedule:
                         self.encoder_cache_manager.allocate(request, i)
                     encoder_compute_budget = new_encoder_compute_budget
-
-        # reorder the request during scheduling, put chunked prefill
-        # at the top of the scheduled_new_reqs to make sure the actual
-        # reorder in model runner happens as less as possible.
-        assert running_req_cnt == len(new_reqs_for_chunk_prefill) + \
-            len(new_reqs_for_pure_preill) + len(self.running)
-
-        new_reqs_for_chunk_prefill.extend(new_reqs_for_pure_preill)
-        for req in new_reqs_for_chunk_prefill:
-            self.running.append(req)
-
-            if req.status == RequestStatus.WAITING:
-                scheduled_new_reqs.append(req)
-            elif req.status == RequestStatus.PREEMPTED:
-                scheduled_resumed_reqs.append(req)
-            else:
-                raise RuntimeError(f"Invalid request status: {req.status}")
-            req.status = RequestStatus.RUNNING
 
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:

@@ -89,8 +89,8 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
     reorder_batch_to_split_decodes_and_prefills,
-    reorder_batch_to_split_decodes_prefills_and_chunks,
-    split_attn_metadata)
+    split_attn_metadata,
+)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -621,16 +621,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 assert self.reorder_batch_threshold == 1, (
                     "DCP not support reorder_batch_threshold > 1 now."
                 )
-            if self.scheduler_config.split_prefill_from_chunk:
-                reorder_batch_to_split_decodes_prefills_and_chunks(
-                    self.input_batch,
-                    scheduler_output,
-                    decode_threshold=self.reorder_batch_threshold)
-            else:
-                reorder_batch_to_split_decodes_and_prefills(
-                    self.input_batch,
-                    scheduler_output,
-                    decode_threshold=self.reorder_batch_threshold)
+            reorder_batch_to_split_decodes_and_prefills(
+                self.input_batch,
+                scheduler_output,
+                decode_threshold=self.reorder_batch_threshold,
+            )
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -726,6 +721,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
                 self._init_mrope_positions(req_state)
+
             reqs_to_add.append(req_state)
 
         # Update the states of the running/resumed requests.
@@ -838,7 +834,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         for request in reqs_to_add:
-
             self.input_batch.add_request(request)
 
         # Condense the batched states if there are gaps left by removed requests
