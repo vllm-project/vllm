@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Generator
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -52,7 +52,7 @@ def _run_incremental_decode(
     skip_special_tokens: bool,
     starting_index: int,
     spaces_between_special_tokens: bool = True,
-    fast: Optional[bool] = None,
+    fast: bool | None = None,
 ):
     prompt_token_ids = all_input_ids[:starting_index]
 
