@@ -12,7 +12,7 @@ from typing import Optional
 
 import numpy as np
 import torch
-from batch_spec import BatchRequest, parse_batch_spec
+from batch_spec import parse_batch_spec
 from common import MockHfConfig, MockLayer, setup_mla_dims
 
 from vllm.config import (
@@ -69,6 +69,20 @@ def create_minimal_vllm_config(
 
     # Override head counts and dims for MLA
     model_config.hf_config = MockHfConfig(mla_dims)
+
+    # Add mock methods for layer-specific queries (needed by metadata builders)
+    import types
+
+    model_config.get_num_layers = types.MethodType(lambda self: 1, model_config)
+    model_config.get_sliding_window_for_layer = types.MethodType(
+        lambda self, _i: None, model_config
+    )
+    model_config.get_logits_soft_cap_for_layer = types.MethodType(
+        lambda self, _i: None, model_config
+    )
+    model_config.get_sm_scale_for_layer = types.MethodType(
+        lambda self, _i: 1.0 / model_config.get_head_size() ** 0.5, model_config
+    )
 
     # Cache config
     cache_config = CacheConfig(
@@ -144,107 +158,6 @@ def create_minimal_vllm_config(
     )
 
     return vllm_config
-
-
-def build_mla_metadata_cutlass(
-    requests: list[BatchRequest],
-    block_size: int,
-    device: torch.device,
-    mla_dims: dict,
-) -> tuple:
-    """
-    Build metadata for CUTLASS MLA backend.
-
-    Args:
-        requests: List of BatchRequest
-        block_size: KV cache block size
-        device: Torch device
-        mla_dims: MLA dimension configuration
-
-    Returns:
-        Tuple of (metadata, kv_cache, layer)
-    """
-    from vllm.v1.attention.backends.mla.common import (
-        MLACommonDecodeMetadata,
-        MLACommonMetadata,
-    )
-
-    q_lens = [r.q_len for r in requests]
-    kv_lens = [r.kv_len for r in requests]
-    total_q = sum(q_lens)
-    max_kv = max(kv_lens)
-
-    # Build query start locations
-    q_start_cpu = np.array(
-        [0] + [sum(q_lens[: i + 1]) for i in range(len(q_lens))], dtype=np.int32
-    )
-    q_start_gpu = torch.from_numpy(q_start_cpu).to(device)
-
-    # Build sequence lengths
-    seq_lens_cpu = np.array(kv_lens, dtype=np.int32)
-    seq_lens_gpu = torch.from_numpy(seq_lens_cpu).to(device)
-
-    # Build block table
-    num_blocks_per_req = [(kv + block_size - 1) // block_size for kv in kv_lens]
-    max_num_blocks = max(num_blocks_per_req)
-
-    block_table_cpu = np.zeros((len(requests), max_num_blocks), dtype=np.int32)
-    for i, num_blocks in enumerate(num_blocks_per_req):
-        block_table_cpu[i, :num_blocks] = np.arange(num_blocks, dtype=np.int32)
-    block_table_gpu = torch.from_numpy(block_table_cpu).to(device)
-
-    # Slot mapping
-    slot_mapping_list = []
-    for i, (q_len, kv_len, num_blocks) in enumerate(
-        zip(q_lens, kv_lens, num_blocks_per_req)
-    ):
-        context_len = kv_len - q_len
-        for j in range(q_len):
-            token_kv_idx = context_len + j
-            block_idx = token_kv_idx // block_size
-            offset_in_block = token_kv_idx % block_size
-            global_block_id = block_table_cpu[i, block_idx]
-            slot_id = global_block_id * block_size + offset_in_block
-            slot_mapping_list.append(slot_id)
-
-    slot_mapping = torch.tensor(slot_mapping_list, dtype=torch.int64, device=device)
-
-    # Create decode metadata
-    decode_metadata = MLACommonDecodeMetadata(
-        block_table=block_table_gpu,
-        seq_lens=seq_lens_gpu,
-        dcp_tot_seq_lens=None,
-    )
-
-    # Create common metadata
-    metadata = MLACommonMetadata(
-        num_reqs=len(requests),
-        max_query_len=max(q_lens),
-        max_seq_len=max_kv,
-        num_actual_tokens=total_q,
-        query_start_loc=q_start_gpu,
-        slot_mapping=slot_mapping,
-        num_decodes=len(requests),
-        num_decode_tokens=total_q,
-        num_prefills=0,
-        head_dim=mla_dims["head_dim"],
-        decode=decode_metadata,
-        prefill=None,
-    )
-
-    # Create KV cache
-    kv_cache = torch.zeros(
-        max_num_blocks,
-        block_size,
-        mla_dims["kv_lora_rank"] + mla_dims["qk_rope_head_dim"],
-        device=device,
-        dtype=torch.float16,
-    )
-
-    # Create layer
-    layer = MockLayer(device)
-
-    return metadata, kv_cache, layer
 
 
 # Backend name to class name prefix mapping
@@ -343,69 +256,76 @@ def _run_mla_benchmark_batched(
     backend_module = importlib.import_module(backend_cfg["module"])
     impl_class = getattr(backend_module, backend_cfg["impl_class"])
 
+    # Setup MLA dimensions (reused)
+    mla_dims = setup_mla_dims("deepseek-v3")
+
     # Import builder class if needed (for threshold setting)
     builder_class = None
     builder_instance = None
-    if backend_cfg["builder_class"]:
-        builder_class = getattr(backend_module, backend_cfg["builder_class"])
-
-        # Create a builder instance to use build() method
-        from vllm.v1.kv_cache_interface import FullAttentionSpec
-
-        kv_cache_spec = FullAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=1,  # MLA uses 1 KV head
-            head_size=576,  # MLA head dim
-            dtype=torch.float16,
-        )
-
-        builder_instance = builder_class(
-            kv_cache_spec=kv_cache_spec,
-            layer_names=["layer_0"],  # Dummy layer name for benchmark
-            vllm_config=vllm_config,
-            device=device,
-        )
-
-    # Import common metadata for backends that use it
-    if backend_cfg["metadata_class"] == "MLACommonMetadata":
-        pass
 
     with set_current_vllm_config(vllm_config):
-        # Setup MLA dimensions (reused)
-        mla_dims = setup_mla_dims("deepseek-v3")
         scale = 1.0 / np.sqrt(
             mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"]
         )
 
         # Create impl once (reused across all benchmarks)
-        impl_kwargs = {
-            "num_heads": mla_dims["num_q_heads"],
-            "head_size": mla_dims["head_dim"],
-            "scale": scale,
-            "num_kv_heads": mla_dims["num_kv_heads"],
-            "alibi_slopes": None,
-            "sliding_window": None,
-            "kv_cache_dtype": "auto",
-            "logits_soft_cap": None,
-            "attn_type": "decoder",
-            "kv_sharing_target_layer_name": None,
-            "q_lora_rank": None,
-            "kv_lora_rank": mla_dims["kv_lora_rank"],
-            "qk_nope_head_dim": mla_dims["qk_nope_head_dim"],
-            "qk_rope_head_dim": mla_dims["qk_rope_head_dim"],
-            "qk_head_dim": mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"],
-            "v_head_dim": mla_dims["v_head_dim"],
-            "kv_b_proj": None,
-        }
-
-        impl = impl_class(**impl_kwargs)
+        impl = impl_class(
+            num_heads=mla_dims["num_q_heads"],
+            head_size=mla_dims["head_dim"],
+            scale=scale,
+            num_kv_heads=mla_dims["num_kv_heads"],
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=None,
+            kv_lora_rank=mla_dims["kv_lora_rank"],
+            qk_nope_head_dim=mla_dims["qk_nope_head_dim"],
+            qk_rope_head_dim=mla_dims["qk_rope_head_dim"],
+            qk_head_dim=mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"],
+            v_head_dim=mla_dims["v_head_dim"],
+            kv_b_proj=None,
+        )
 
         # Initialize DCP attributes
         if not hasattr(impl, "dcp_world_size") or impl.dcp_world_size is None:
             impl.dcp_world_size = 1
             impl.dcp_rank = 0
 
-        layer = MockLayer(device)
+        # Create mock layer (used for benchmarks)
+        layer = MockLayer(device, impl=impl)
+
+        if backend_cfg["builder_class"]:
+            builder_class = getattr(backend_module, backend_cfg["builder_class"])
+
+            # Create a builder instance to use build() method
+            from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+            kv_cache_spec = FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,  # MLA uses 1 KV head
+                head_size=576,  # MLA head dim
+                dtype=torch.float16,
+            )
+
+            # Populate static_forward_context so builder can find the layer
+            # MockLayer now inherits from AttentionLayerBase, so isinstance checks pass
+            vllm_config.compilation_config.static_forward_context = {
+                "placeholder": layer
+            }
+
+            builder_instance = builder_class(
+                kv_cache_spec=kv_cache_spec,
+                layer_names=["placeholder"],  # Dummy layer name (like in tests)
+                vllm_config=vllm_config,
+                device=device,
+            )
+
+        # Import common metadata for backends that use it
+        if backend_cfg["metadata_class"] == "MLACommonMetadata":
+            pass
         results = []
 
         # Run each benchmark with the shared impl
@@ -441,6 +361,12 @@ def _run_mla_benchmark_batched(
                 # Build sequence lengths
                 seq_lens_cpu = np.array(kv_lens, dtype=np.int32)
                 seq_lens_gpu = torch.from_numpy(seq_lens_cpu).to(device)
+
+                # Build num_computed_tokens (context length for each request)
+                context_lens = [
+                    kv_len - q_len for q_len, kv_len in zip(q_lens, kv_lens)
+                ]
+                num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
 
                 # Build block table
                 num_blocks_per_req = [
@@ -489,6 +415,7 @@ def _run_mla_benchmark_batched(
                     query_start_loc_cpu=q_start_cpu,
                     seq_lens=seq_lens_gpu,
                     seq_lens_cpu=seq_lens_cpu,
+                    num_computed_tokens_cpu=num_computed_tokens_cpu,
                     slot_mapping=slot_mapping,
                     block_table_tensor=block_table_gpu,
                     dcp_local_seq_lens=None,
