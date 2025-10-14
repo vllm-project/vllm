@@ -10,14 +10,14 @@ Supports standard attention (Flash/Triton/FlashInfer) and MLA backends.
 
 Examples:
     # Standard attention
-    python benchmark.py --backends flash flashinfer --batch-specs "q2k" "8s1k"
+    python benchmark.py --backends flash flashinfer --batch-specs "q2k" "8q1s1k"
 
     # MLA backends
-    python benchmark.py --backends cutlass_mla flashinfer_mla --batch-specs "64s1k"
+    python benchmark.py --backends cutlass_mla flashinfer_mla --batch-specs "64q1s1k"
 
     # Parameter sweep (CLI)
     python benchmark.py --backend cutlass_mla \
-                        --batch-specs "64s1k" \
+                        --batch-specs "64q1s1k" \
                         --sweep-param num_kv_splits \
                         --sweep-values 1 4 8 16
 
@@ -280,7 +280,7 @@ def main():
     parser.add_argument(
         "--batch-specs",
         nargs="+",
-        default=["q2k", "8s1k"],
+        default=["q2k", "8q1s1k"],
         help="Batch specifications using extended grammar",
     )
 

@@ -255,9 +255,9 @@ from batch_spec import parse_batch_spec, format_batch_spec, get_batch_stats
 from common import BenchmarkConfig, BenchmarkResult, ResultsFormatter
 
 # Parse batch specs
-requests = parse_batch_spec("2q2k_q4s1k_32s1k")
+requests = parse_batch_spec("2q2k_q4s1k_32q1s1k")
 print(format_batch_spec(requests))
-# "2 prefill (2x2k), 1 extend (1xq4s1k), 32 decode (32x1k)"
+# "2 prefill (2x2k), 1 extend (1xq4kv1k), 32 decode (32x1k)"
 
 # Get batch statistics
 stats = get_batch_stats(requests)
@@ -317,7 +317,7 @@ source /path/to/vllm/.venv/bin/activate
 - Some backends need Hopper/Blackwell
 
 **OOM?**
-- Reduce batch size: `"32s1k"` → `"16s1k"`
+- Reduce batch size: `"32q1s1k"` → `"16q1s1k"`
 - Reduce sequence length: `"64q1s16k"` → `"64q1s4k"`
 
 ## What's Included
