@@ -2110,7 +2110,7 @@ def serialize_message(msg):
     """
     if isinstance(msg, dict):
         return msg
-    elif hasattr(msg, "__dict__"):
+    elif hasattr(msg, "to_dict"):
         return msg.to_dict()
     else:
         # fallback to pyandic dump

@@ -35,6 +35,7 @@ th {
 | Sonnet (deprecated) | ✅ | ✅ | Local file: `benchmarks/sonnet.txt` |
 | Random | ✅ | ✅ | `synthetic` |
 | RandomMultiModal (Image/Video) | 🟡 | 🚧 | `synthetic` |
+| RandomForReranking | ✅ | ✅ | `synthetic` |
 | Prefix Repetition | ✅ | ✅ | `synthetic` |
 | HuggingFace-VisionArena | ✅ | ✅ | `lmarena-ai/VisionArena-Chat` |
 | HuggingFace-MMVU | ✅ | ✅ | `yale-nlp/MMVU` |
@@ -875,6 +876,51 @@ vllm bench serve \
   --dataset-name hf \
   --dataset-path lmarena-ai/VisionArena-Chat
 ```
+
+</details>
+
+#### Reranker Benchmark
+
+Benchmark the performance of rerank requests in vLLM.
+
+<details class="admonition abstract" markdown="1">
+<summary>Show more</summary>
+
+Unlike generative models which use Completions API or Chat Completions API,
+you should set `--backend vllm-rerank` and `--endpoint /v1/rerank` to use the Reranker API.
+
+For reranking, the only supported dataset is `--dataset-name random-rerank`
+
+Start the server:
+
+```bash
+vllm serve BAAI/bge-reranker-v2-m3
+```
+
+Run the benchmark:
+
+```bash
+vllm bench serve \
+  --model BAAI/bge-reranker-v2-m3 \
+  --backend vllm-rerank \
+  --endpoint /v1/rerank \
+  --dataset-name random-rerank \
+  --tokenizer BAAI/bge-reranker-v2-m3 \
+  --random-input-len 512 \
+  --num-prompts 10 \
+  --random-batch-size 5
+```
+
+For reranker models, this will create `num_prompts / random_batch_size` requests with
+`random_batch_size` "documents" where each one has close to `random_input_len` tokens.
+In the example above, this results in 2 rerank requests with 5 "documents" each where
+each document has close to 512 tokens.
+
+Please note that the `/v1/rerank` is also supported by embedding models. So if you're running
+with an embedding model, also set `--no_reranker`. Because in this case the query is
+treated as a individual prompt by the server, here we send `random_batch_size - 1` documents
+to account for the extra prompt which is the query. The token accounting to report the
+throughput numbers correctly is also adjusted.
 
 </details>
 
