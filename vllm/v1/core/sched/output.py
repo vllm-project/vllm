@@ -6,16 +6,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-
-
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
 
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-        KVConnectorMetadata)
     from vllm.distributed.ec_transfer.ec_connector.base import (
         ECConnectorMetadata)
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorMetadata)
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
     from vllm.pooling_params import PoolingParams
@@ -159,6 +157,6 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
-    
+
     # EC Cache Connector metadata
     ec_connector_metadata: Optional[ECConnectorMetadata] = None

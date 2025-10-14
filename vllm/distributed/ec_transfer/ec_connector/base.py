@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-ECConnectorBase Class for Distributed Encoder Cache & P2P Encoder cache communication in V1
+ECConnectorBase Class for Distributed Encoder Cache &
+P2P Encoder cache communication in V1
 
 The class provides the following primitives:
     Scheduler-side: runs in the scheduler, binds metadata, which
@@ -9,8 +10,8 @@ The class provides the following primitives:
         check_caches_exist() - Check whether Encoder cache of requests exist
         update_state_after_alloc() - update ECConnector state after
         allocate. This will decide to load the cache or not 
-        request_finished() - called when a request is finished, free the cache with 
-        the requests
+        request_finished() - called when a request is finished,
+        free the cache with the requests
 
     Worker-side: runs in each worker, loads/saves Encoder Cache to/from
     the Connector based on the metadata.
@@ -23,21 +24,16 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.outputs import (KVConnectorOutput, ECConnectorOutput)
+from vllm.v1.outputs import ECConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
-    from vllm.distributed.kv_events import KVCacheEvent
-    from vllm.forward_context import ForwardContext
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -113,7 +109,10 @@ class ECConnectorBase(ABC):
         assert self._connector_metadata is not None
         return self._connector_metadata
 
-    def register_caches(self, ec_caches: dict[str, torch.Tensor],):
+    def register_caches(
+        self,
+        ec_caches: dict[str, torch.Tensor],
+    ):
         """
         Initialize with the EC caches.
         Args: 
@@ -219,11 +218,9 @@ class ECConnectorBase(ABC):
         return
 
     def request_finished(
-        self,
-        request: "Request"
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+            self, request: "Request") -> tuple[bool, Optional[dict[str, Any]]]:
         """
-        Called when a request has finished, before its freed the local encoder cached.
+        Called when a request has finished, before its encoder cache is freed.
 
         Returns:
             True if the request is being saved/sent asynchronously and cached
@@ -231,4 +228,3 @@ class ECConnectorBase(ABC):
             get_finished().
         """
         return False, None
-

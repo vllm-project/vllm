@@ -10,4 +10,4 @@ Please refer to [Disaggregated Encoder Feature](../../features/disagg_encoder.md
 - `disagg_1e1p1d_example.sh` - Setup 1e1p1d and run VisionArena benchmark.
 - `disagg_1e1pd_example.sh` - Setup 1e1pd and run VisionArena benchmark.
 
-Detailed explanations are commnented in the scripts. 
+Detailed explanations are commnented in the scripts.

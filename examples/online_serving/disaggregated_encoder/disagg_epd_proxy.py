@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 disagg_encoder_proxy.py
 
@@ -32,13 +34,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import os
 import random
 import uuid
-import copy
-from typing import Any, AsyncIterator, List, Optional
+from collections.abc import AsyncIterator
+from typing import Optional
+
 import aiohttp
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -64,14 +66,14 @@ decode_session: Optional[aiohttp.ClientSession] = None
 MM_TYPES = {"image_url", "audio_url", "input_audio"}
 
 
-def extract_mm_items(request_data: dict) -> List[dict]:
+def extract_mm_items(request_data: dict) -> list[dict]:
     """
     Return *all* image/audio items that appear anywhere in `messages`.
 
     Each returned dict looks like:
         { "type": "image_url", "image_url": {...} }
     """
-    items: List[dict] = []
+    items: list[dict] = []
     for msg in request_data.get("messages", []):
         content = msg.get("content")
         if not isinstance(content, list):
@@ -85,7 +87,7 @@ def extract_mm_items(request_data: dict) -> List[dict]:
 
 async def fanout_encoder_primer(
     orig_request: dict,
-    e_urls: List[str],
+    e_urls: list[str],
     request_id: str,
 ) -> None:
     """
@@ -150,20 +152,18 @@ async def maybe_prefill(
     req_id: str,
 ) -> dict:
     """
-    - Do prefill-only task if p_url exist; 
+    - Do prefill-only task if p_url exist;
     - Return modified request data with kv transfer params (for nixl connector)
     - Else, skip and return the original request data for decode
     """
     if p_url:
-        prefill_response = await process_prefill_stage(
-            req_data, p_url, req_id
-        )
+        prefill_response = await process_prefill_stage(req_data, p_url, req_id)
         # for nixl connector to facilitate kv transfer...
         prefill_response_json = await prefill_response.json()
-        kv_transfer_params = prefill_response_json.get('kv_transfer_params', {})
+        kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
         if kv_transfer_params:
             req_data["kv_transfer_params"] = kv_transfer_params
-            logger.debug(f"kv_transfer_params: {kv_transfer_params}")
+            logger.debug("kv_transfer_params: %s", kv_transfer_params)
 
         return req_data
     else:
@@ -176,16 +176,16 @@ async def process_prefill_stage(
     req_id: str,
 ) -> dict:
     """Process request through Prefill stage and return kv_transfer_params"""
-    logger.debug(f"Processing through prefill for req_id: {req_id}/ url: {p_url}")
-    
+    logger.debug("Processing through prefill for req_id: %s/ url: %s", req_id, p_url)
+
     prefill_request = req_data.copy()
-    prefill_request['kv_transfer_params'] = {
+    prefill_request["kv_transfer_params"] = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
         "remote_engine_id": None,
         "remote_block_ids": None,
         "remote_host": None,
-        "remote_port": None
+        "remote_port": None,
     }
     prefill_request["stream"] = False
     prefill_request["max_tokens"] = 1
@@ -193,13 +193,11 @@ async def process_prefill_stage(
         prefill_request["max_completion_tokens"] = 1
     if "stream_options" in prefill_request:
         del prefill_request["stream_options"]
-    
+
     headers = {"x-request-id": req_id}
     try:
         prefill_response = await prefill_session.post(
-            f"{p_url}/v1/chat/completions",
-            json=prefill_request,
-            headers=headers
+            f"{p_url}/v1/chat/completions", json=prefill_request, headers=headers
         )
         prefill_response.raise_for_status()
 
@@ -207,18 +205,18 @@ async def process_prefill_stage(
             error_text = await prefill_response.text()
             raise HTTPException(
                 status_code=prefill_response.status,
-                detail={"error": "Prefill request failed", "message": error_text}
+                detail={"error": "Prefill request failed", "message": error_text},
             )
-        logger.debug(f"Prefill processing completed successfully for req_id: {req_id}")
-        
+        logger.debug("Prefill processing completed successfully for req_id: %s", req_id)
+
         return prefill_response
 
     except Exception as e:
-        logger.error(f"Prefill processing failed: {e}")
+        logger.error("Prefill processing failed: %s", str(e))
         raise HTTPException(
             status_code=500,
-            detail={"error": "Prefill processing error", "message": str(e)}
-        )
+            detail={"error": "Prefill processing error", "message": str(e)},
+        ) from e
 
 
 ###############################################################################
@@ -255,18 +253,18 @@ async def on_shutdown() -> None:
 
 
 async def forward_non_stream(
-    req_data: dict, req_id: str, e_urls: List[str], p_url: str, d_url: str
+    req_data: dict, req_id: str, e_urls: list[str], p_url: str, d_url: str
 ) -> dict:
     # Step 1: Process through Encoder instance (if has MM input)
     await fanout_encoder_primer(req_data, e_urls, req_id)
-        
+
     # Step 2: Process through Prefill instance
     req_data = await maybe_prefill(req_data, p_url, req_id)
 
     # Step 3: Process through Decode instance
-    logger.debug(f"Getting response from decode for req_id: {req_id}/ url: {d_url}")   
+    logger.debug("Getting response from decode for req_id: %s/ url: %s", req_id, d_url)
     headers = {"x-request-id": req_id}
-    
+
     # Non-streaming response
     async with decode_session.post(
         f"{d_url}/v1/chat/completions", json=req_data, headers=headers
@@ -276,16 +274,18 @@ async def forward_non_stream(
 
 
 async def forward_stream(
-    req_data: dict, req_id: str, e_urls: List[str], p_url: str, d_url: str
+    req_data: dict, req_id: str, e_urls: list[str], p_url: str, d_url: str
 ) -> AsyncIterator[str]:
     # Step 1: Process through Encoder instance (if has MM input)
     await fanout_encoder_primer(req_data, e_urls, req_id)
-        
+
     # Step 2: Process through Prefill instance
     req_data = await maybe_prefill(req_data, p_url, req_id)
 
     # Step 3: Process through Decode instance
-    logger.debug(f"Streaming response from decode for req_id: {req_id}/ url: {d_url}")
+    logger.debug(
+        "Streaming response from decode for req_id: %s/ url: %s", req_id, d_url
+    )
     headers = {"x-request-id": req_id}
 
     # Streaming response
@@ -298,6 +298,7 @@ async def forward_stream(
         async for chunk in resp.content.iter_chunked(1024):
             if chunk:
                 yield chunk.decode("utf-8", errors="ignore")
+
 
 ###############################################################################
 # Public routes
@@ -312,9 +313,9 @@ async def chat_completions(request: Request):
     e_urls = app.state.e_urls  # we want the full list for fan-out
     p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
     d_url = random.choice(app.state.d_urls)
-    
+
     is_streaming = req_data.get("stream", False)
-    
+
     if is_streaming:
         return StreamingResponse(
             forward_stream(req_data, req_id, e_urls, p_url, d_url),
@@ -348,7 +349,9 @@ async def health_check():
         healthy(app.state.e_urls), healthy(app.state.p_urls), healthy(app.state.d_urls)
     )
 
-    overall_healthy = all(status != "unhealthy" for status in (e_status, p_status, d_status))
+    overall_healthy = all(
+        status != "unhealthy" for status in (e_status, p_status, d_status)
+    )
 
     status_code = 200 if overall_healthy else 503
 
@@ -379,13 +382,13 @@ async def _post_if_available(
 
     Returns
     -------
-    • The decoded JSON body on success (2xx)  
-    • None if the endpoint does not exist (404)  
+    • The decoded JSON body on success (2xx)
+    • None if the endpoint does not exist (404)
     • Raises for anything else.
     """
     try:
         resp = await session.post(url, json=payload, headers=headers)
-        if resp.status == 404:           # profiling disabled on that server
+        if resp.status == 404:  # profiling disabled on that server
             logger.warning("Profiling endpoint missing on %s", url)
             return None
         resp.raise_for_status()
@@ -410,14 +413,18 @@ async def _profile_cmd(cmd: str, payload: dict, e_url: str, p_url: str, d_url: s
     encode_task = _post_if_available(
         encode_session, f"{e_url}/{cmd}_profile", payload, headers
     )
-    prefill_task = _post_if_available(
-        prefill_session, f"{p_url}/{cmd}_profile", payload, headers
-    ) if p_url is not None else asyncio.sleep(0)
+    prefill_task = (
+        _post_if_available(prefill_session, f"{p_url}/{cmd}_profile", payload, headers)
+        if p_url is not None
+        else asyncio.sleep(0)
+    )
     decode_task = _post_if_available(
         decode_session, f"{d_url}/{cmd}_profile", payload, headers
     )
 
-    encode_res, prefill_res, decode_res = await asyncio.gather(encode_task, prefill_task, decode_task)
+    encode_res, prefill_res, decode_res = await asyncio.gather(
+        encode_task, prefill_task, decode_task
+    )
 
     # If *all* clusters said “I don’t have that route”, surface an error
     if encode_res is prefill_res is decode_res is None:
@@ -427,9 +434,9 @@ async def _profile_cmd(cmd: str, payload: dict, e_url: str, p_url: str, d_url: s
         )
 
     return {
-        "encode": encode_res,   # may be None
-        "prefill": prefill_res,   # may be None
-        "decode": decode_res,   # may be None
+        "encode": encode_res,  # may be None
+        "prefill": prefill_res,  # may be None
+        "decode": decode_res,  # may be None
     }
 
 
@@ -452,6 +459,7 @@ async def stop_profile(request: Request):
     d_url = random.choice(app.state.d_urls)
     return await _profile_cmd("stop", body, e_url, p_url, d_url)
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
@@ -464,23 +472,34 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prefill-servers-urls",
         required=True,
-        help='Comma-separated prefill URLs ("http://p1:8003,http://p2:8004") to enable E->P->D, set "disable" or "none" to enable E->PD',
+        help=(
+            'Comma-separated prefill URLs ("http://p1:8003,http://p2:8004") ',
+            'to enable E->P->D, set "disable" or "none" to enable E->PD',
+        ),
     )
     parser.add_argument(
         "--decode-servers-urls",
         required=True,
         help='Comma-separated decode URLs ("http://d1:8005,http://d2:8006")',
     )
-   
+
     args = parser.parse_args()
-    app.state.e_urls = [u.strip() for u in args.encode_servers_urls.split(",") if u.strip()]
-    app.state.d_urls = [u.strip() for u in args.decode_servers_urls.split(",") if u.strip()]
+    app.state.e_urls = [
+        u.strip() for u in args.encode_servers_urls.split(",") if u.strip()
+    ]
+    app.state.d_urls = [
+        u.strip() for u in args.decode_servers_urls.split(",") if u.strip()
+    ]
     # handle prefill instances
     if args.prefill_servers_urls.lower() in ("disable", "none", ""):
         app.state.p_urls = []
-        logger.info("Disaggregated prefill phase explicitly disabled by user. Running E + PD...")
+        logger.info(
+            "Disaggregated prefill phase explicitly disabled by user. Running E + PD..."
+        )
     else:
-        app.state.p_urls = [u.strip() for u in args.prefill_servers_urls.split(",") if u.strip()]
+        app.state.p_urls = [
+            u.strip() for u in args.prefill_servers_urls.split(",") if u.strip()
+        ]
         logger.info("Disaggregated prefill phase is enabled. Running E + P + D...")
 
     logger.info("Proxy listening on %s:%s", args.host, args.port)

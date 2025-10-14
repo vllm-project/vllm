@@ -5,8 +5,8 @@ import importlib
 from typing import TYPE_CHECKING, Callable
 
 # yapf: disable
-import vllm.envs as envs
-from vllm.distributed.ec_transfer.ec_connector.base import (ECConnectorRole,ECConnectorBase)
+from vllm.distributed.ec_transfer.ec_connector.base import (ECConnectorBase,
+                                                            ECConnectorRole)
 from vllm.logger import init_logger
 
 # yapf: enable
@@ -53,8 +53,8 @@ class ECConnectorFactory:
 
     @classmethod
     def get_connector_class(
-            cls, ec_transfer_config: "ECTransferConfig"
-    ) -> type[ECConnectorBase]:
+            cls,
+            ec_transfer_config: "ECTransferConfig") -> type[ECConnectorBase]:
         """Get the connector class by name."""
         connector_name = ec_transfer_config.ec_connector
         if connector_name in cls._registry:
@@ -77,4 +77,3 @@ ECConnectorFactory.register_connector(
     "ECSharedStorageConnector",
     "vllm.distributed.ec_transfer.ec_connector.shared_storage_connector",
     "ECSharedStorageConnector")
-

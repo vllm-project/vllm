@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
 import torch
+
 from vllm.v1.core.sched.output import SchedulerOutput
 
 
@@ -78,6 +79,7 @@ class KVConnectorOutput:
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
 
+
 @dataclass
 class ECConnectorOutput:
     # [mm_hash]
@@ -131,9 +133,9 @@ class DraftTokenIds:
     # num_reqs x num_draft_tokens
     draft_token_ids: list[list[int]]
 
+
 def make_empty_encoder_model_runner_output(
-    scheduler_output: "SchedulerOutput",
-) -> ModelRunnerOutput:
+    scheduler_output: "SchedulerOutput", ) -> ModelRunnerOutput:
     """
     Create a ModelRunnerOutput stub that contains the correct
     per-request bookkeeping but no generated data yet.
@@ -145,7 +147,10 @@ def make_empty_encoder_model_runner_output(
     req_ids: list[str] = list(scheduler_output.num_scheduled_tokens.keys())
 
     # Give every request its own contiguous index
-    req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
+    req_id_to_index: dict[str, int] = {
+        rid: idx
+        for idx, rid in enumerate(req_ids)
+    }
 
     # No tokens generated yet ⇒ one empty list per request
     sampled_token_ids: list[list[int]] = [[0] for _ in req_ids]
@@ -164,6 +169,7 @@ def make_empty_encoder_model_runner_output(
         ec_connector_output=None,
         num_nans_in_logits=None,
     )
+
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               req_id_to_index={},

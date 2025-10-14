@@ -3196,9 +3196,12 @@ class ObservabilityConfig:
             list[DetailedTraceModules],
             self.collect_detailed_traces[0].split(","))
 
+
 ECProducer = Literal["ec_producer"]
 ECConsumer = Literal["ec_consumer"]
 ECRole = Literal[ECProducer, ECConsumer]
+
+
 @config
 @dataclass
 class ECTransferConfig:
@@ -3293,6 +3296,7 @@ class ECTransferConfig:
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.ec_connector_extra_config.get(key, default)
+
 
 KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
@@ -3491,7 +3495,7 @@ class VllmConfig:
 
     ec_transfer_config: Optional[ECTransferConfig] = None
     """The configurations for distributed EC cache transfer."""
-    
+
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.

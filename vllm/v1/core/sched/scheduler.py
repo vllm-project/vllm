@@ -11,7 +11,8 @@ from typing import Any, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
-from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
+from vllm.distributed.ec_transfer.ec_connector.factory import (
+    ECConnectorFactory)
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
@@ -99,8 +100,7 @@ class Scheduler(SchedulerInterface):
         self.ec_connector = None
         if self.vllm_config.ec_transfer_config is not None:
             self.ec_connector = ECConnectorFactory.create_connector(
-                config=self.vllm_config, role=ECConnectorRole.SCHEDULER
-            )
+                config=self.vllm_config, role=ECConnectorRole.SCHEDULER)
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
@@ -222,7 +222,7 @@ class Scheduler(SchedulerInterface):
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
-            external_load_encoder_input = []
+            external_load_encoder_input: list[int] = []
             new_encoder_compute_budget = encoder_compute_budget
             if request.has_encoder_inputs:
                 (encoder_inputs_to_schedule, num_new_tokens,
@@ -317,7 +317,8 @@ class Scheduler(SchedulerInterface):
             if external_load_encoder_input:
                 for i in external_load_encoder_input:
                     self.encoder_cache_manager.allocate(request, i)
-                    self.ec_connector.update_state_after_alloc(request, i)
+                    if self.ec_connector is not None:
+                        self.ec_connector.update_state_after_alloc(request, i)
 
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
@@ -433,7 +434,8 @@ class Scheduler(SchedulerInterface):
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
                         (encoder_inputs_to_schedule, num_new_tokens,
-                         new_encoder_compute_budget, external_load_encoder_input
+                         new_encoder_compute_budget,
+                         external_load_encoder_input
                          ) = self._try_schedule_encoder_inputs(
                              request, num_computed_tokens, num_new_tokens,
                              encoder_compute_budget)
@@ -537,7 +539,9 @@ class Scheduler(SchedulerInterface):
                 if external_load_encoder_input:
                     for i in external_load_encoder_input:
                         self.encoder_cache_manager.allocate(request, i)
-                        self.ec_connector.update_state_after_alloc(request, i)
+                        if self.ec_connector is not None:
+                            self.ec_connector.update_state_after_alloc(
+                                request, i)
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
             self.waiting.prepend_requests(skipped_waiting_requests)
@@ -606,7 +610,7 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
-        
+
         events = self.kv_cache_manager.take_events()
         if events:
             batch = KVEventBatch(ts=time.time(), events=events)
@@ -618,7 +622,7 @@ class Scheduler(SchedulerInterface):
 
         self._update_after_schedule(scheduler_output)
         return scheduler_output
-    
+
     def _update_after_schedule(
         self,
         scheduler_output: SchedulerOutput,
@@ -811,23 +815,18 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = 0
                 break
 
-            if self.ec_connector is not None:
-                if remote_cache_has_item[i]:
-                    mm_hashes_to_schedule.add(request.mm_hashes[i])
-                    external_load_encoder_input.append(i)
-                    continue
+            if self.ec_connector is not None and remote_cache_has_item[i]:
+                mm_hashes_to_schedule.add(request.mm_hashes[i])
+                external_load_encoder_input.append(i)
+                continue
 
             num_tokens_to_schedule += num_encoder_tokens
             encoder_compute_budget -= num_encoder_tokens
             mm_hashes_to_schedule.add(request.mm_hashes[i])
             encoder_inputs_to_schedule.append(i)
 
-        return (
-            encoder_inputs_to_schedule,
-            num_new_tokens,
-            encoder_compute_budget,
-            external_load_encoder_input
-        )
+        return (encoder_inputs_to_schedule, num_new_tokens,
+                encoder_compute_budget, external_load_encoder_input)
 
     def get_grammar_bitmask(
         self,
