@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
@@ -397,8 +397,8 @@ class CompilationConfig:
         "vllm::gdn_attention",
         "vllm::sparse_attn_indexer",
     ]
-    
-    oot_compiler: Optional[str] = None
+
+    oot_compiler: str | None = None
 
     def compute_hash(self) -> str:
         """

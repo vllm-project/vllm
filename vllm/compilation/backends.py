@@ -24,7 +24,6 @@ from vllm.compilation.partition_rules import (
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import resolve_obj_by_qualname
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
 
 from .caching import VllmSerializableFunction
@@ -43,7 +42,7 @@ logger = init_logger(__name__)
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
     if compilation_config.oot_compiler:
-        return resolve_obj_by_qualname(compilation_config.oot_compiler)() 
+        return resolve_obj_by_qualname(compilation_config.oot_compiler)()
     if compilation_config.use_inductor:
         # Use standalone compile only if requested, version is new enough,
         # and the symbol actually exists in this PyTorch build.
@@ -519,7 +518,9 @@ class VllmBackend:
         self.prefix = prefix or model_tag
 
         # Passes to run on the graph post-grad.
-        self.pass_manager = resolve_obj_by_qualname(current_platform.get_pass_manager_cls())()
+        self.pass_manager = resolve_obj_by_qualname(
+            current_platform.get_pass_manager_cls()
+        )()
         self.pass_key = current_platform.pass_key
 
         self.sym_tensor_indices = []
@@ -545,10 +546,7 @@ class VllmBackend:
         if self.pass_key in inductor_config:
             if isinstance(inductor_config[self.pass_key], PostGradPassManager):
                 # PassManager already added to config, make sure it's correct
-                assert (
-                    inductor_config[self.pass_key].uuid()
-                    == self.pass_manager.uuid()
-                )
+                assert inductor_config[self.pass_key].uuid() == self.pass_manager.uuid()
             else:
                 # Config should automatically wrap all inductor passes
                 assert isinstance(inductor_config[self.pass_key], InductorPass)
