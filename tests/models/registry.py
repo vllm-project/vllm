@@ -262,7 +262,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
-        extras={"tiny": "bigcode/tiny_starcoder_py"},
+        extras={
+            "tiny": "bigcode/tiny_starcoder_py",
+            "santacoder": "bigcode/gpt_bigcode-santacoder",
+        },
         min_transformers_version="4.55.1",
         transformers_version_reason="HF model broken in 4.55.0",
     ),
