@@ -355,7 +355,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
         ):
             from flashinfer.fp4_quantization import nvfp4_block_scale_interleave
-            from flashinfer.fused_moe.core import _maybe_get_cached_w2_permute_indices
+            from flashinfer.fused_moe.core import get_w2_permute_indices_with_cache
 
             layer.gemm1_alpha = Parameter(
                 torch.tensor([1.702] * self.num_experts, dtype=torch.float32).cuda(),
@@ -447,7 +447,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
             for i in range(self.num_experts):
                 # w13 weight shuffling
-                permute_indices = _maybe_get_cached_w2_permute_indices(
+                permute_indices = get_w2_permute_indices_with_cache(
                     self._cache_permute_indices,
                     w13_weight[i].view(torch.uint8),
                     epilogue_tile_m,
@@ -458,7 +458,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     .contiguous()
                 )
                 # w13 scale shuffling
-                permute_sf_indices = _maybe_get_cached_w2_permute_indices(
+                permute_sf_indices = get_w2_permute_indices_with_cache(
                     self._cache_permute_indices,
                     w13_weight_scale[i].view(torch.uint8),
                     epilogue_tile_m,
@@ -474,7 +474,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     )
                 )
                 # w13 bias shuffling
-                permute_bias_indices = _maybe_get_cached_w2_permute_indices(
+                permute_bias_indices = get_w2_permute_indices_with_cache(
                     self._cache_permute_indices,
                     w13_bias[i].clone().reshape(-1, 1),
                     epilogue_tile_m,
@@ -486,7 +486,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     .contiguous()
                 )
                 # w2 weight shuffling
-                permute_indices = _maybe_get_cached_w2_permute_indices(
+                permute_indices = get_w2_permute_indices_with_cache(
                     self._cache_permute_indices,
                     w2_weight[i].view(torch.uint8),
                     epilogue_tile_m,
@@ -497,7 +497,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     .contiguous()
                 )
                 # w2 scale shuffling
-                permute_sf_indices = _maybe_get_cached_w2_permute_indices(
+                permute_sf_indices = get_w2_permute_indices_with_cache(
                     self._cache_permute_indices,
                     w2_weight_scale[i].view(torch.uint8),
                     epilogue_tile_m,
@@ -513,7 +513,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     )
                 )
                 # w2 bias shuffling
-                permute_indices = _maybe_get_cached_w2_permute_indices(
+                permute_indices = get_w2_permute_indices_with_cache(
                     self._cache_permute_indices,
                     w2_bias[i].clone().reshape(-1, 1),
                     epilogue_tile_m,
