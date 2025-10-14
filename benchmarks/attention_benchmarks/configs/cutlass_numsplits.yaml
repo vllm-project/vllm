@@ -26,7 +26,7 @@ num_splits:
   - 32
 
 # Compare against auto-selected num_kv_splits
-compare_auto: true
+compare_auto: false
 
 # Model configuration (DeepSeek V2/V3 defaults)
 model:
