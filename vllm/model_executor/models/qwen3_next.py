@@ -288,7 +288,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             prefix=f"{prefix}.in_proj_qkvz",
         )
         # ba_proj doesn't support blockwise fp8 quantization.
-        self.in_proj_ba = ColumnParallelLinear(
+        self.in_proj_ba = RowParallelLinear(
             input_size=self.hidden_size,
             output_size=self.projection_size_ba,
             bias=False,
