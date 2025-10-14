@@ -88,6 +88,11 @@ def can_initialize(
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
         return 1, 0, scheduler_kv_cache_config
 
+    if model_arch == "MiniMaxVL01ForConditionalGeneration":
+        pytest.skip(
+            "pickle error when loading `transformers.models.auto.CONFIG_MAPPING`"
+        )
+
     with (
         patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
         monkeypatch.context() as m,
@@ -129,8 +134,6 @@ def can_initialize(
 @pytest.mark.parametrize("model_arch", MINIMAL_MODEL_ARCH_LIST)
 def test_can_initialize_small_subset(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     """Test initializing small subset of supported models"""
-    if model_arch == "Lfm2ForCausalLM":
-        pytest.skip("Skipping until test supports V1-only models")
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
@@ -141,8 +144,6 @@ def test_can_initialize_large_subset(model_arch: str, monkeypatch: pytest.Monkey
     This test covers the complement of the tests covered in the "small subset"
     test.
     """
-    if model_arch == "Lfm2ForCausalLM":
-        pytest.skip("Skipping until test supports V1-only models")
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
