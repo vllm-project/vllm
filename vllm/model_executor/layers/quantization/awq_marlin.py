@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
@@ -27,8 +27,7 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
     set_weight_attrs,
 )
-from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.layers.quantization.awq import AWQConfig, is_layer_skipped_awq
+from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -49,11 +48,16 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     verify_marlin_supported,
     verify_marlin_supports_shape,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMParameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization import QuantizationMethods
+    from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -172,7 +176,9 @@ class AWQMarlinConfig(QuantizationConfig):
         if isinstance(layer, LinearBase) or (
             isinstance(layer, ParallelLMHead) and self.lm_head_quantized
         ):
-            if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
+            if is_layer_skipped(
+                prefix, self.modules_to_not_convert, self.packed_modules_mapping
+            ):
                 return UnquantizedLinearMethod()
             # Check if the layer is supported by AWQMarlin.
             if not check_marlin_supports_layer(layer, self.group_size):
@@ -187,9 +193,7 @@ class AWQMarlinConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
-            if is_layer_skipped_awq(
-                prefix, getattr(self, "modules_to_not_convert", [])
-            ):
+            if is_layer_skipped(prefix, getattr(self, "modules_to_not_convert", [])):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if not check_moe_marlin_supports_layer(layer, self.group_size):
                 logger.warning_once(
@@ -227,19 +231,26 @@ class AWQMarlinConfig(QuantizationConfig):
             quant_type=cls.TYPE_MAP[num_bits], group_size=group_size, has_zp=zero_point
         )
 
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        if self.modules_to_not_convert:
+            self.modules_to_not_convert = hf_to_vllm_mapper.apply_list(
+                self.modules_to_not_convert
+            )
+
     def maybe_update_config(self, model_name: str, revision: str | None = None):
         if self.modules_to_not_convert:
             return
 
         unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
         metadata = get_safetensors_params_metadata(model_name, revision=revision)
+        layers = {param_name.rsplit(".", 1)[0] for param_name in metadata}
         quant_layers: set[str] = {
             param_name.rsplit(".", 1)[0]
             for param_name, info in metadata.items()
             if (dtype := info.get("dtype", None))
-            and _SAFETENSORS_TO_TORCH_DTYPE[dtype] in unquant_dtypes
+            and _SAFETENSORS_TO_TORCH_DTYPE[dtype] not in unquant_dtypes
         }
-        self.modules_to_not_convert = list(quant_layers)
+        self.modules_to_not_convert = list(layers - quant_layers)
 
 
 class AWQMarlinLinearMethod(LinearMethodBase):

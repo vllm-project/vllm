@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Union
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
@@ -14,13 +14,17 @@ from vllm.model_executor.layers.linear import (
     LinearMethodBase,
     UnquantizedLinearMethod,
 )
-from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMParameter
 from vllm.transformers_utils.config import get_safetensors_params_metadata
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization import QuantizationMethods
+    from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -92,7 +96,9 @@ class AWQConfig(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> Union["LinearMethodBase", "QuantizeMethodBase"] | None:
         if isinstance(layer, LinearBase):
-            if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
+            if is_layer_skipped(
+                prefix, self.modules_to_not_convert, self.packed_modules_mapping
+            ):
                 return UnquantizedLinearMethod()
             return AWQLinearMethod(self)
         elif isinstance(layer, FusedMoE):
@@ -130,23 +136,26 @@ class AWQConfig(QuantizationConfig):
             return AWQMoEMethod(awq_marlin_config, layer.moe_config)
         return None
 
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        if self.modules_to_not_convert:
+            self.modules_to_not_convert = hf_to_vllm_mapper.apply_list(
+                self.modules_to_not_convert
+            )
+
     def maybe_update_config(self, model_name: str, revision: str | None = None):
         if self.modules_to_not_convert:
             return
 
         unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
         metadata = get_safetensors_params_metadata(model_name, revision=revision)
+        layers = {param_name.rsplit(".", 1)[0] for param_name in metadata}
         quant_layers: set[str] = {
             param_name.rsplit(".", 1)[0]
             for param_name, info in metadata.items()
             if (dtype := info.get("dtype", None))
-            and _SAFETENSORS_TO_TORCH_DTYPE[dtype] in unquant_dtypes
+            and _SAFETENSORS_TO_TORCH_DTYPE[dtype] not in unquant_dtypes
         }
-        self.modules_to_not_convert = list(quant_layers)
-
-
-def is_layer_skipped_awq(prefix: str, modules_to_not_convert: list[str]):
-    return any(module_name in prefix for module_name in modules_to_not_convert)
+        self.modules_to_not_convert = list(layers - quant_layers)
 
 
 class AWQLinearMethod(LinearMethodBase):
