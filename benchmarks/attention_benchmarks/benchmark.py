@@ -403,10 +403,13 @@ def main():
                         all_results.append(result)
 
                 except Exception as e:
+                    import traceback
                     console.print(
                         f"[red]Error running batched benchmarks for "
                         f"batch_size={batch_size}: {e}[/]"
                     )
+                    console.print("[red]Traceback:[/]")
+                    traceback.print_exc()
                     # Add error results for all configs
                     for config, _ in configs_with_thresholds:
                         result = BenchmarkResult(

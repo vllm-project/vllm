@@ -14,7 +14,7 @@ from typing import Optional
 import numpy as np
 import torch
 from batch_spec import parse_batch_spec
-from common import MockHfConfig, MockLayer, setup_mla_dims
+from common import MockHfConfig, MockKVBProj, MockLayer, setup_mla_dims
 
 from vllm.config import (
     CacheConfig,
@@ -325,7 +325,7 @@ def _build_attention_metadata(
     return metadata, current_block
 
 
-def _create_query_tensors(
+def _create_input_tensors(
     total_q: int,
     mla_dims: dict,
     query_format: str,
@@ -333,7 +333,11 @@ def _create_query_tensors(
     dtype: torch.dtype,
 ):
     """
-    Create query tensors in the appropriate format for the backend.
+    Create input tensors for both decode and prefill modes.
+
+    MLA requires different tensor formats for decode vs prefill:
+    - Decode: Uses kv_lora_rank (512) dimension
+    - Prefill: Uses qk_nope_head_dim (128) to stay under FlashAttention's 256 head dim limit
 
     Args:
         total_q: Total number of query tokens
@@ -343,10 +347,13 @@ def _create_query_tensors(
         dtype: Tensor dtype
 
     Returns:
-        Query tensor(s) - either (q_nope, q_pe) tuple or concatenated tensor
+        Tuple of (decode_inputs, prefill_inputs)
+        - decode_inputs: Query tensor(s) for decode mode
+        - prefill_inputs: Dict with 'q', 'k_c_normed', 'k_pe', 'k_scale' for prefill mode
     """
     if query_format == "tuple":
-        q_nope = torch.randn(
+        # Decode mode format: (q_nope, q_pe) where q_nope has kv_lora_rank dim
+        q_nope_decode = torch.randn(
             total_q,
             mla_dims["num_q_heads"],
             mla_dims["kv_lora_rank"],
@@ -360,15 +367,58 @@ def _create_query_tensors(
             device=device,
             dtype=dtype,
         )
-        return (q_nope, q_pe)
+        decode_inputs = (q_nope_decode, q_pe)
+
+        # For prefill, we need q with qk_nope_head_dim instead of kv_lora_rank
+        q_nope_prefill = torch.randn(
+            total_q,
+            mla_dims["num_q_heads"],
+            mla_dims["qk_nope_head_dim"],
+            device=device,
+            dtype=dtype,
+        )
+        prefill_q = torch.cat([q_nope_prefill, q_pe], dim=-1)
     else:  # concat
-        return torch.randn(
+        decode_inputs = torch.randn(
             total_q,
             mla_dims["num_q_heads"],
             mla_dims["kv_lora_rank"] + mla_dims["qk_rope_head_dim"],
             device=device,
             dtype=dtype,
         )
+        # For prefill with concat format
+        prefill_q = torch.randn(
+            total_q,
+            mla_dims["num_q_heads"],
+            mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"],
+            device=device,
+            dtype=dtype,
+        )
+
+    # Create additional inputs needed for prefill forward
+    k_c_normed = torch.randn(
+        total_q,
+        mla_dims["kv_lora_rank"],
+        device=device,
+        dtype=dtype,
+    )
+    k_pe = torch.randn(
+        total_q,
+        1,  # Single head for MLA
+        mla_dims["qk_rope_head_dim"],
+        device=device,
+        dtype=dtype,
+    )
+    k_scale = torch.ones(1, device=device, dtype=torch.float32)
+
+    prefill_inputs = {
+        "q": prefill_q,
+        "k_c_normed": k_c_normed,
+        "k_pe": k_pe,
+        "k_scale": k_scale,
+    }
+
+    return decode_inputs, prefill_inputs
 
 
 # ============================================================================
@@ -401,6 +451,13 @@ def _create_backend_impl(
     # Calculate scale
     scale = 1.0 / np.sqrt(mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"])
 
+    # Create mock kv_b_proj layer for prefill mode
+    mock_kv_b_proj = MockKVBProj(
+        num_heads=mla_dims["num_q_heads"],
+        qk_nope_head_dim=mla_dims["qk_nope_head_dim"],
+        v_head_dim=mla_dims["v_head_dim"],
+    )
+
     # Create impl
     impl = impl_class(
         num_heads=mla_dims["num_q_heads"],
@@ -419,7 +476,7 @@ def _create_backend_impl(
         qk_rope_head_dim=mla_dims["qk_rope_head_dim"],
         qk_head_dim=mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"],
         v_head_dim=mla_dims["v_head_dim"],
-        kv_b_proj=None,
+        kv_b_proj=mock_kv_b_proj,
     )
 
     # Initialize DCP attributes
@@ -509,8 +566,8 @@ def _run_single_benchmark(
         dtype=torch.float16,
     )
 
-    # Create query tensors
-    query = _create_query_tensors(
+    # Create input tensors for both decode and prefill modes
+    decode_inputs, prefill_inputs = _create_input_tensors(
         total_q,
         mla_dims,
         backend_cfg["query_format"],
@@ -518,9 +575,26 @@ def _run_single_benchmark(
         torch.float16,
     )
 
+    # Determine which forward method to use based on metadata
+    if metadata.decode is not None:
+        forward_fn = lambda: impl._forward_decode(
+            decode_inputs, kv_cache, metadata, layer
+        )
+    elif metadata.prefill is not None:
+        forward_fn = lambda: impl._forward_prefill(
+            prefill_inputs["q"],
+            prefill_inputs["k_c_normed"],
+            prefill_inputs["k_pe"],
+            kv_cache,
+            metadata,
+            prefill_inputs["k_scale"],
+        )
+    else:
+        raise RuntimeError("Metadata has neither decode nor prefill metadata")
+
     # Warmup
     for _ in range(config.warmup_iters):
-        impl._forward_decode(query, kv_cache, metadata, layer)
+        forward_fn()
     torch.cuda.synchronize()
 
     # Benchmark
@@ -531,7 +605,7 @@ def _run_single_benchmark(
 
         start.record()
         for _ in range(config.num_layers):
-            impl._forward_decode(query, kv_cache, metadata, layer)
+            forward_fn()
         end.record()
 
         torch.cuda.synchronize()
@@ -596,19 +670,13 @@ def _run_mla_benchmark_batched(
             backend_cfg, mla_dims, vllm_config, device
         )
 
-        # Get builder class for threshold setting (if applicable)
-        builder_class = None
-        if backend_cfg["builder_class"]:
-            backend_module = importlib.import_module(backend_cfg["module"])
-            builder_class = getattr(backend_module, backend_cfg["builder_class"])
-
         # Run each benchmark with the shared impl
         for config, threshold, num_splits in configs_with_params:
             # Set threshold for this benchmark (FlashAttn/FlashMLA only)
             original_threshold = None
-            if threshold is not None and builder_class:
-                original_threshold = builder_class.reorder_batch_threshold
-                builder_class.reorder_batch_threshold = threshold
+            if threshold is not None and builder_instance:
+                original_threshold = builder_instance.reorder_batch_threshold
+                builder_instance.reorder_batch_threshold = threshold
 
             # Set num_splits for CUTLASS
             original_num_splits = None
@@ -631,7 +699,7 @@ def _run_mla_benchmark_batched(
             finally:
                 # Restore original threshold
                 if original_threshold is not None:
-                    builder_class.reorder_batch_threshold = original_threshold
+                    builder_instance.reorder_batch_threshold = original_threshold
 
                 # Restore original num_splits
                 if original_num_splits is not None:
