@@ -27,7 +27,7 @@ from vllm.scalar_type import ScalarType, scalar_types
 
 
 def default_activation_func(
-    activation: str, output: torch.Tensor, input: torch.Tensor
+    activation: str | None, output: torch.Tensor, input: torch.Tensor
 ) -> None:
     if activation == "silu":
         torch.ops._C.silu_and_mul(output, input)
