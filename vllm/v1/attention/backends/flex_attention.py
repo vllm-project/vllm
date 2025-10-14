@@ -767,7 +767,7 @@ class FlexAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
             # query = self.view_as_4d(query).permute(0, 2, 1, 3)
             # return torch.empty_like(query)
 

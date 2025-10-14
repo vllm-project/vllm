@@ -298,7 +298,7 @@ class TritonAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
 
         assert attn_metadata.use_cascade is False
 
