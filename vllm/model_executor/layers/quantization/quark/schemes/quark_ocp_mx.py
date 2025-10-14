@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from fractions import Fraction
-from functools import partial
+from functools import cache, partial
 from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn.functional as F
 
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4,
@@ -28,6 +28,95 @@ from vllm.platforms import current_platform
 from .quark_scheme import QuarkScheme
 
 logger = init_logger(__name__)
+
+
+# TODO: move registration of custom op to aiter_ops.py
+# `from vllm._aiter_ops import rocm_aiter_ops`
+# use `rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()`
+# for envs checks which does not require @cache anymore.
+# triton kernel is torch compile compatible.
+# does not require direct registeration.
+# use `rocm_aiter_ops.triton_fp4_gemm_dynamic_qaunt`.
+@cache
+def is_rocm_aiter_fp4_asm_gemm_enabled() -> bool:
+    return (
+        current_platform.is_rocm()
+        and envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
+        and envs.VLLM_ROCM_USE_AITER
+    )
+
+
+try:
+    from aiter.ops.shuffle import shuffle_weight
+    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    from vllm.utils import direct_register_custom_op
+
+    if is_rocm_aiter_fp4_asm_gemm_enabled():
+        from aiter import gemm_a4w4, per_1x32_f4_quant_hip
+
+    def gemm_with_dynamic_quant(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        rocm_use_aiter_fp4_asm_gemm: bool = False,
+        out_dtype: Optional[torch.dtype] = torch.bfloat16,
+        x_scales: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        M = x.shape[0]
+        if rocm_use_aiter_fp4_asm_gemm:
+            if x_scales is None:
+                # use hip quant kernel for performance
+                x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+            else:
+                x_q = x
+                x_s = x_scales
+
+            # 32 alignment is enough for dim0 padding of output for
+            # gemm_a4w4 kernel
+            y = torch.empty(
+                (M + 31) // 32 * 32, weight.shape[0], device=x_q.device, dtype=out_dtype
+            )
+
+            gemm_a4w4(
+                x_q, weight, x_s, weight_scale.view(x_s.dtype), y, bpreshuffle=True
+            )
+            return y[:M]
+        else:
+            if x_scales is None:
+                x_q, x_s = dynamic_mxfp4_quant(x)
+            else:
+                x_q = x
+                x_s = x_scales
+            y = torch.empty(
+                x_q.shape[0], weight.shape[0], device=x_q.device, dtype=out_dtype
+            )
+
+            gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, y)
+            return y
+
+    def gemm_with_dynamic_quant_fake(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        x_scales: torch.Tensor = None,
+        rocm_use_aiter_fp4_asm_gemm: bool = False,
+        out_dtype: Optional[torch.dtype] = torch.bfloat16,
+    ) -> torch.Tensor:
+        return torch.empty(
+            (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device
+        )
+
+    direct_register_custom_op(
+        op_name="gemm_with_dynamic_quant",
+        op_func=gemm_with_dynamic_quant,
+        mutates_args=[],
+        fake_impl=gemm_with_dynamic_quant_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+except (ImportError, AttributeError):
+    dynamic_mxfp4_quant = gemm_afp4wfp4 = None
 
 
 class QuarkOCP_MX(QuarkScheme):
@@ -75,27 +164,15 @@ class QuarkOCP_MX(QuarkScheme):
             self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
         )
 
-        # ruff: noqa: E501
-        self.use_aiter_fp4_asm_gemm = (
-            rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
-        )  # enable asm kernel using env var
+        self.rocm_use_aiter_fp4_asm_gemm = is_rocm_aiter_fp4_asm_gemm_enabled()
 
-        # if asm is not enabled, use triton if aiter is available
-        self.use_aiter_fp4_triton_gemm = (
-            rocm_aiter_ops.is_enabled()
-            and not rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
-        )
-        if not self.emulate:
-            assert self.use_aiter_fp4_asm_gemm or self.use_aiter_fp4_triton_gemm, (
-                f"{self.__class__.__name__} requires AITER to be installed"
+        if not self.emulate and (dynamic_mxfp4_quant is None or gemm_afp4wfp4 is None):
+            # Currently need these kernels if not emulating
+            raise NotImplementedError(
+                f"{self.__class__.__name__} requires AITER to be installed "
+                "for non-emulation mode! Please refer to "
+                "https://github.com/ROCm/aiter for installation details."
             )
-            "for non-emulation mode! "
-            "ASM and Triton kernels are available "
-            "from the AITER package in this mode. "
-            "Enable the ASM kernel using VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1; "
-            "otherwise, the Triton kernel will be used. "
-            "Please refer to https://github.com/ROCm/aiter "
-            "for installation details."
 
         if not current_platform.supports_mx():
             logger.warning_once(
@@ -144,7 +221,7 @@ class QuarkOCP_MX(QuarkScheme):
                 layer.weight_scale.data, requires_grad=False
             )
         else:
-            if self.use_aiter_fp4_asm_gemm:
+            if self.rocm_use_aiter_fp4_asm_gemm:
                 # shuffle weight scale
                 weight_scale_shuffle = layer.weight_scale.data
                 sm, sn = weight_scale_shuffle.shape
@@ -161,7 +238,7 @@ class QuarkOCP_MX(QuarkScheme):
 
                 # shuffle weight
                 weight_shuffle = layer.weight.data
-                weight_shuffle = rocm_aiter_ops.shuffle_weight(weight_shuffle)
+                weight_shuffle = shuffle_weight(weight_shuffle, layout=(16, 16))
                 layer.weight = torch.nn.Parameter(weight_shuffle, requires_grad=False)
             else:
                 layer.weight_scale = torch.nn.Parameter(
@@ -214,22 +291,15 @@ class QuarkOCP_MX(QuarkScheme):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # case 1: emulate
         if self.emulate:
             dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
             qdq_x = self.quant_dequant_func(x)
             return F.linear(qdq_x, dq_w, bias)
-
-        # case 2: not emulate (aiter asm/ aiter triton)
         else:
-            # priority 1: aiter asm
-            if self.use_aiter_fp4_asm_gemm:
-                return rocm_aiter_ops.asm_fp4_gemm_dynamic_quant(
-                    x, layer.weight, layer.weight_scale, self.out_dtype
-                )
-
-            # priority 2: aiter triton
-            if self.use_aiter_fp4_triton_gemm:
-                return rocm_aiter_ops.triton_fp4_gemm_dynamic_qaunt(
-                    x, layer.weight, layer.weight_scale, self.out_dtype
-                )
+            return torch.ops.vllm.gemm_with_dynamic_quant(
+                x,
+                layer.weight,
+                layer.weight_scale,
+                self.rocm_use_aiter_fp4_asm_gemm,
+                self.out_dtype,
+            )
