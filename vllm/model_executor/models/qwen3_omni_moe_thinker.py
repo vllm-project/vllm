@@ -733,25 +733,17 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             tok_kwargs=tok_kwargs,
         )
 
-        if (
-            "audio_feature_lengths" in hf_inputs
-            and "feature_attention_mask" in hf_inputs
-            and (audios := mm_data.get("audio", []))
-        ):
-            hop_length = self.info.get_feature_extractor().hop_length
-            audio_num_frames = []
-            for _, audio in enumerate(audios):
-                audio_length = len(audio[0]) if isinstance(audio, tuple) else len(audio)
-                num_frame = (
-                    (audio_length // hop_length)
-                    if audio_length % hop_length == 0
-                    else (audio_length // hop_length - 1)
+        if "audio_feature_lengths" in hf_inputs and audios:
+            audio_feature_lengths = hf_inputs["audio_feature_lengths"]
+            if not isinstance(audio_feature_lengths, torch.Tensor):
+                audio_feature_lengths = torch.as_tensor(
+                    audio_feature_lengths, dtype=torch.long
                 )
-                audio_num_frames.append(num_frame)
+                hf_inputs["audio_feature_lengths"] = audio_feature_lengths
+
             hf_inputs["feature_attention_mask"] = [
-                torch.ones(num_frame) for num_frame in audio_num_frames
+                torch.ones(int(num_frames)) for num_frames in audio_feature_lengths
             ]
-            hf_inputs["audio_feature_lengths"] = torch.tensor(audio_num_frames)
         return hf_inputs
 
     def _maybe_apply_prompt_updates(
@@ -1033,7 +1025,7 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
     def _validate_and_reshape_mm_tensor(
         self, mm_input: object, name: str, dim: int = 0
     ) -> torch.Tensor:
-        if not isinstance(mm_input, (torch.Tensor, list)):
+        if not isinstance(mm_input, torch.Tensor | list):
             raise ValueError(f"Incorrect type of {name}. Got type: {type(mm_input)}")
         if name == "feature_attention_mask":
             dim = -1
