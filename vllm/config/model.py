@@ -179,12 +179,6 @@ class ModelConfig:
     - 1k -> 1000\n
     - 1K -> 1024\n
     - 25.6k -> 25,600"""
-    init_attn_out: bool = False
-    """When true, initialize attention output with zero at the cost of an
-    extra cuda/triton kernel which cannot be removed by cudagraph. By
-    default, initialize attention output with `torch.empty` which can be
-    removed by cudagraph.
-    """
     spec_target_max_model_len: int | None = None
     """Specify the maximum length for spec decoding draft models."""
     quantization: SkipValidation[QuantizationMethods | None] = None
