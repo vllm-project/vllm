@@ -109,6 +109,7 @@ class EagleProposer:
             else []
         )
 
+        self.use_cuda_graph = self.use_cuda_graph and bool(self.cudagraph_batch_sizes)
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=device
@@ -939,7 +940,7 @@ class EagleProposer:
             self.vllm_config, DeepseekV32IndexerCache
         )
         draft_indexer_layer_names = indexer_layers.keys() - target_indexer_layer_names
-        self.attn_layer_names = list(draft_attn_layer_names)
+        self.attn_layer_names = list(draft_attn_layer_names - draft_indexer_layer_names)
         self.indexer_layer_names = list(draft_indexer_layer_names)
 
         if self.indexer_layer_names:
@@ -1051,9 +1052,7 @@ class EagleProposer:
         use_cudagraphs=True,
     ) -> None:
         # Determine if CUDA graphs should be used for this run.
-        cudagraphs_enabled = (
-            use_cudagraphs and self.use_cuda_graph and bool(self.cudagraph_batch_sizes)
-        )
+        cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
         if cudagraphs_enabled and num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
 
