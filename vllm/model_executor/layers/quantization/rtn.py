@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.linear import (
     LinearBase,
