@@ -309,7 +309,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.query_quant = None
         if (
             self.kv_cache_dtype.startswith("fp8")
-            and self.attn_backend.supports_quant_query_input
+            and self.impl.supports_quant_query_input()
         ):
             self.query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
