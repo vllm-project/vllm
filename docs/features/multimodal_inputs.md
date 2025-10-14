@@ -722,6 +722,12 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
 pass a tensor of shape to the corresponding field of the multi-modal dictionary.
 
+You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
+
+!!! warning
+    The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!
+
 #### Image Embedding Inputs
 
 For image embeddings, you can pass the base64-encoded tensor to the `image_embeds` field.

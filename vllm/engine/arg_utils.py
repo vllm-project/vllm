@@ -339,6 +339,7 @@ class EngineArgs:
     task: TaskOption | None = ModelConfig.task
     skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
     enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
+    enable_mm_embeds: bool = ModelConfig.enable_mm_embeds
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
@@ -603,6 +604,9 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--enable-prompt-embeds", **model_kwargs["enable_prompt_embeds"]
+        )
+        model_group.add_argument(
+            "--enable-mm-embeds", **model_kwargs["enable_mm_embeds"]
         )
         model_group.add_argument(
             "--served-model-name", **model_kwargs["served_model_name"]
@@ -1136,6 +1140,7 @@ class EngineArgs:
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
+            enable_mm_embeds=self.enable_mm_embeds,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             interleave_mm_strings=self.interleave_mm_strings,

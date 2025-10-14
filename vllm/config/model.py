@@ -221,8 +221,16 @@ class ModelConfig:
     output will contain token ids."""
     enable_prompt_embeds: bool = False
     """If `True`, enables passing text embeddings as inputs via the
-    `prompt_embeds` key. Note that enabling this will double the time required
-    for graph compilation."""
+    `prompt_embeds` key.
+
+    WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!"""
+    enable_mm_embeds: bool = False
+    """Enable passing multimodal embeddings (content type `image_embeds`).
+    Currently only enforced for the OpenAI-compatible server.
+
+    WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!"""
     served_model_name: str | list[str] | None = None
     """The model name(s) used in the API. If multiple names are provided, the
     server will respond to any of the provided names. The model name in the
