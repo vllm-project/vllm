@@ -603,7 +603,8 @@ steps:
   # since torchao nightly is only compatible with torch nightly currently
   # https://github.com/pytorch/ao/issues/2919, we'll have to skip new torchao tests for now
   # we can only upgrade after this is resolved
-  - pip install --pre torchao==0.13.0.dev20250814 --index-url https://download.pytorch.org/whl/nightly/cu128
+  # TODO(jerryzh168): resolve the above comment
+  - uv pip install --system torchao==0.13.0
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/
 
 - label: LM Eval Small Models # 53min
