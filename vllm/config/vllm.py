@@ -380,6 +380,20 @@ class VllmConfig:
                 # NB: Passing both --enforce-eager and a compilation level
                 # in V0 means the compilation level wins out.
                 self.compilation_config.level = CompilationLevel.NO_COMPILATION
+        else:
+            assert self.compilation_config.level >= CompilationLevel.NO_COMPILATION
+            assert self.compilation_config.level <= CompilationLevel.PIECEWISE
+
+        # If user does not set custom ops via none or all set it here based on
+        # compilation level and backend.
+        if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
+            if (
+                self.compilation_config.backend == "inductor"
+                and self.compilation_config.level > CompilationLevel.NO_COMPILATION
+            ):
+                self.compilation_config.custom_ops.append("none")
+            else:
+                self.compilation_config.custom_ops.append("all")
 
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
@@ -548,6 +562,20 @@ class VllmConfig:
             self.compilation_config.full_cuda_graph = (
                 self.compilation_config.cudagraph_mode.has_full_cudagraphs()
             )
+
+        if self.parallel_config.enable_dbo:
+            a2a_backend = self.parallel_config.all2all_backend
+            assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
+                "Microbatching currently only supports the deepep_low_latency and "
+                f"deepep_high_throughput all2all backend. {a2a_backend} is not "
+                "supported. To fix use --all2all-backend=deepep_low_latency or "
+                "--all2all-backend=deepep_high_throughput and install the DeepEP"
+                " kernels."
+            )
+
+            if not self.model_config.disable_cascade_attn:
+                self.model_config.disable_cascade_attn = True
+                logger.warning_once("Disabling cascade attention when DBO is enabled.")
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
