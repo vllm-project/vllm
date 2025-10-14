@@ -832,7 +832,7 @@ For Online Serving, you can also skip sending media if you expect cache hits wit
         # PIL Image:
         {
             "type": "image_pil",
-            "image_pil": None
+            "image_pil": None,
             "uuid": image_uuid,
         },
 
