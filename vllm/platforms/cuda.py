@@ -46,23 +46,39 @@ torch.backends.cuda.enable_cudnn_sdp(False)
 
 
 @cache
-def _get_backend_priorities():
+def _get_backend_priorities(
+    device_capability: DeviceCapability | None = None,
+) -> dict[_Backend, int]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     from vllm.attention.backends.registry import _Backend
 
-    return {
-        # non-MLA backends
-        _Backend.FLASHINFER: 0,
-        _Backend.FLASH_ATTN: 1,
-        _Backend.TRITON_ATTN: 2,
-        _Backend.FLEX_ATTENTION: 3,
-        # MLA backends
-        _Backend.CUTLASS_MLA: 0,
-        _Backend.FLASHINFER_MLA: 1,
-        _Backend.FLASHMLA: 2,
-        _Backend.FLASH_ATTN_MLA: 3,
-        _Backend.TRITON_MLA: 4,
-    }
+    if device_capability >= DeviceCapability(10, 0):
+        return {
+            # non-MLA backends
+            _Backend.FLASHINFER: 0,
+            _Backend.FLASH_ATTN: 1,
+            _Backend.TRITON_ATTN: 2,
+            _Backend.FLEX_ATTENTION: 3,
+            # MLA backends
+            _Backend.CUTLASS_MLA: 0,
+            _Backend.FLASHINFER_MLA: 1,
+            _Backend.FLASHMLA: 2,
+            _Backend.FLASH_ATTN_MLA: 3,
+            _Backend.TRITON_MLA: 4,
+        }
+    else:
+        return {
+            # non-MLA backends
+            _Backend.FLASH_ATTN: 0,
+            _Backend.FLASHINFER: 1,
+            _Backend.TRITON_ATTN: 2,
+            _Backend.FLEX_ATTENTION: 3,
+            # MLA backends
+            _Backend.FLASHMLA: 0,
+            _Backend.FLASH_ATTN_MLA: 1,
+            _Backend.FLASHINFER_MLA: 2,
+            _Backend.TRITON_MLA: 3,
+        }
 
 
 def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:

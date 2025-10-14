@@ -235,7 +235,7 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def get_min_compute_capability(cls) -> DeviceCapability | None:
-        return DeviceCapability(10, 0)
+        return DeviceCapability(7, 5)
 
     @classmethod
     def get_max_compute_capability(cls) -> DeviceCapability | None:
