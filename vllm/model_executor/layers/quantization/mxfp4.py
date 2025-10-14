@@ -95,12 +95,6 @@ def get_mxfp4_backend():
             and has_flashinfer()
             and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
         ):
-            logger.info_once(
-                "Using FlashInfer MXFP4 MXFP8 TRTLLM backend for SM100, "
-                "for high concurrency throughput workloads consider setting "
-                "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS=1 for better "
-                "performance"
-            )
             return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
         elif current_platform.is_device_capability(100) and has_flashinfer():
             logger.info_once(
