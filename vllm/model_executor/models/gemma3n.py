@@ -51,7 +51,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 
-from .interfaces import SupportsQuant
+from .interfaces import SupportsLoRA, SupportsQuant
 from .utils import (
     AutoWeightsLoader,
     extract_layer_index,
@@ -1080,7 +1080,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         return loaded_params
 
 
-class Gemma3nForCausalLM(nn.Module):
+class Gemma3nForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
