@@ -896,7 +896,7 @@ class Scheduler(SchedulerInterface):
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
                 num_draft_tokens = len(scheduled_spec_token_ids)*num_steps
-                num_accepted = len(generated_token_ids)*num_steps - num_steps
+                num_accepted = len(generated_token_ids) - num_steps
                 num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled

@@ -114,7 +114,7 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
 
-    # actual step num in model_runer
+    # actual step num in model_runner
     step_num: Optional[int] = 1
 
 

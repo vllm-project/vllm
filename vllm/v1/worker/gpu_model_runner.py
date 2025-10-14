@@ -1061,7 +1061,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             spec_decode_metadata = None
         else:
             if self.curr_step > 0:
-                # NOTE(woosuk): `num_tokens` here may include spec tokens
+                # NOTE(woosuk): `num_tokens` here may include spec tokens.
                 self.input_batch.num_tokens[:num_reqs] += num_draft_tokens
             else:
                 # Get the number of draft tokens for each request.
@@ -2206,7 +2206,42 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                uniform_decode=uniform_decode)
             cudagraph_runtime_mode, batch_descriptor = \
                 self.cudagraph_dispatcher.dispatch(batch_descriptor)
-
+        if uniform_decode:
+            self.total_step = scheduler_output.step_num
+            # some cases that ms doesn't support
+            if self.uses_mrope:
+                self.total_step = 1
+            if (self.supports_mm_inputs and not self.model_config.is_encoder_decoer):
+                self.total_step = 1
+            if (self.model_config.is_encoder_decoder
+                    and scheduler_output.scheduled_encoder_inputs):
+                self.total_step = 1
+        else:
+            self.total_step = 1
+        
+        cached_valid_sampled_token_ids = []
+        final_kv_connector_output = KVConnectorOutput()
+        final_kv_connector_output.finished_sending = set()
+        final_kv_connector_output.finished_receving = set()
+        for self.curr_step in range(self.total_step):
+            if self.curr_step > 0:
+                # Prepare the decoder inputs.
+                (attn_metadata, logits_indices, spec_decode_metadata,
+                 num_scheduled_tokens_np, spec_decode_common_attn_metadata,
+                 max_query_len, ubatch_slices, num_tokens_after_padding
+                 ) = self._prepare_inputs(scheduler_output,
+                    cached_valid_sampled_token_ids[-1])
+                (
+                num_scheduled_tokens,
+                num_input_tokens,
+                num_tokens_across_dp,
+                input_ids,
+                inputs_embeds,
+                positions,
+                intermediate_tensors,
+                model_kwargs,
+                ) = self._preprocess(scheduler_output, intermediate_tensors,
+                                     ubatch_slices, num_tokens_after_padding)
             # Run the model.
             # Use persistent buffers for CUDA graphs.
             with (set_forward_context(
@@ -2333,17 +2368,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             with record_function_or_nullcontext("EPLB"):
                 self.eplb_step()
+            
+            cached_valid_sampled_token_ids.append(valid_sampled_token_ids)
+            if kv_connector_output is not None:
+                    final_kv_connector_output.finished_sending.update(
+                        kv_connector_output.finished_sending)
+                    final_kv_connector_output.finished_receving.update(
+                        kv_connector_output.finished_receving)
 
+        final_token_ids = None
+        for each_token_ids in cached_valid_sampled_token_ids:
+            if final_token_ids is None:
+                final_token_ids = each_token_ids
+            else:
+                _ = [x.extend(y) for x, y in zip(final_token_ids, each_token_ids)]
         output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
-            sampled_token_ids=valid_sampled_token_ids,
+            sampled_token_ids=final_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
-            kv_connector_output=kv_connector_output,
+            kv_connector_output=final_kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
+            step_num=self.curr_step + 1,
         )
+        self.curr_step = 0
 
         if not self.use_async_scheduling:
             return output
