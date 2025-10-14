@@ -505,8 +505,8 @@ class CompilationConfig:
                 "If both level and mode are given,"
                 "only mode will be used."
             )
-        if self.mode is not None:
-            self.level = self.mode
+            if self.mode is None:
+                self.mode = self.level
 
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
