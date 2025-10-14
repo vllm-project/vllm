@@ -9,7 +9,7 @@ import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.utils import has_deep_ep, has_pplx
+from vllm.utils import has_deep_ep, has_hybrid_deep_ep, has_pplx
 from vllm.utils.flashinfer import has_flashinfer_all2all
 
 from .base_device_communicator import All2AllManagerBase, Cache
@@ -318,6 +318,41 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         if num_sms > self.num_sms:
             num_sms = self.num_sms
         deep_ep.Buffer.set_num_sms(num_sms)
+
+
+class DeepEPHybridAll2AllManager(DeepEPAll2AllManagerBase):
+    """
+    All2All communication based on DeepEP Hybrid kernels.
+    """
+
+    def __init__(self, cpu_group):
+        assert has_hybrid_deep_ep(), "DeepEP Hybrid kernels not found."
+        super().__init__(cpu_group)
+
+    def _make_all2all_kwargs(self, **kwargs) -> dict[Any, Any]:
+        extra_kwargs = dict(
+            group=self.cpu_group,
+            num_sms_dispatch_api=32,
+            num_sms_combine_api=32,
+            num_sms_preprocessing_api=128,
+            nvlink_domain_size=2,  # hack for now. dp world_size
+        )
+        return {**kwargs, **extra_kwargs}
+
+    def get_handle(self, kwargs):
+        import deep_ep
+
+        buffer_kwargs = self._make_all2all_kwargs(**kwargs)
+        logger.debug("DeepEP Hybrid all2all args %s", buffer_kwargs)
+        handle: deep_ep.Buffer = self.handle_cache.get_or_create(
+            buffer_kwargs, deep_ep.HybridEpBuffer
+        )
+        return handle
+
+    def destroy(self):
+        with self.handle_cache._lock:
+            for _, handle in self.handle_cache._cache.items():
+                handle.destroy()
 
 
 class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):

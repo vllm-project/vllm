@@ -49,7 +49,14 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import cdiv, direct_register_custom_op, has_deep_ep, has_pplx, round_up
+from vllm.utils import (
+    cdiv,
+    direct_register_custom_op,
+    has_deep_ep,
+    has_hybrid_deep_ep,
+    has_pplx,
+    round_up,
+)
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
@@ -68,6 +75,8 @@ if current_platform.is_cuda_alike():
             DEEPEP_QUANT_BLOCK_SHAPE,
             DeepEPLLPrepareAndFinalize,
         )
+    if has_hybrid_deep_ep():
+        from .deepep_hybrid_prepare_finalize import DeepEPHybridPrepareAndFinalize
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = object  # type: ignore
@@ -226,6 +235,26 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 num_dispatchers=all2all_manager.world_size,
                 use_fp8_dispatch=use_fp8_dispatch,
             )
+        elif moe.use_deepep_hybrid_kernels:
+            assert moe.dp_size == all2all_manager.dp_world_size
+
+            use_fp8 = quant_config.use_fp8_w8a8 if quant_config is not None else False
+
+            all_to_all_args = dict(
+                hidden_dim=moe.hidden_dim,
+                max_num_of_tokens_per_rank=moe.max_num_tokens,
+                num_local_experts=(moe.num_experts // all2all_manager.world_size),
+                num_of_experts=moe.num_experts,
+                use_fp8=use_fp8,
+            )
+
+            handle = all2all_manager.get_handle(all_to_all_args)
+            prepare_finalize = DeepEPHybridPrepareAndFinalize(
+                handle,
+                num_dispatchers=all2all_manager.world_size,
+                dp_size=all2all_manager.dp_world_size,
+                rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
+            )
 
         return prepare_finalize
 
@@ -246,6 +275,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         # completely initialized, i.e. all weights loaded and post
         # processed.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        logger.debug("FusedMoE quant_config=%s", self.moe_quant_config)
 
         prepare_finalize = self.maybe_make_prepare_finalize()
 
@@ -1186,6 +1216,9 @@ class FusedMoE(CustomOp):
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
         )
+
+        logger.debug("FusedMoE config=%s", moe)
+
         self.moe_config = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.quant_config = quant_config
@@ -1304,6 +1337,10 @@ class FusedMoE(CustomOp):
     @property
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
+
+    @property
+    def use_deepep_hybrid_kernels(self):
+        return self.moe_parallel_config.use_deepep_hybrid_kernels
 
     @property
     def use_flashinfer_cutlass_kernels(self):
@@ -1843,6 +1880,7 @@ class FusedMoE(CustomOp):
             self.quant_method.moe_quant_config = (
                 self.quant_method.get_fused_moe_quant_config(self)
             )
+            logger.debug("FusedMoE quant_config=%s", self.quant_method.moe_quant_config)
 
     @staticmethod
     def select_experts(

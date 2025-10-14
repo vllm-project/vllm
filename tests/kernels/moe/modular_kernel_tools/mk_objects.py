@@ -35,7 +35,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_fp8_supported,
 )
 from vllm.platforms import current_platform
-from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils import has_deep_ep, has_deep_gemm, has_hybrid_deep_ep, has_pplx
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
@@ -86,6 +86,7 @@ common_float_types: list[torch.dtype | str] = [
 common_float_and_int_types = common_float_types + [torch.int8]
 nvfp4_types = ["nvfp4"]
 fp8_types = [torch.float8_e4m3fn]
+fp8_bf16_types = [torch.float8_e4m3fn, torch.bfloat16]
 
 
 def register_prepare_and_finalize(
@@ -156,13 +157,13 @@ def expert_info(kind) -> ExpertInfo:
     return info
 
 
-register_prepare_and_finalize(
-    MoEPrepareAndFinalizeNoEP,
-    standard_format,
-    common_float_types,
-    blocked_quantization_support=True,
-    backend=None,
-)
+# register_prepare_and_finalize(
+#     MoEPrepareAndFinalizeNoEP,
+#     standard_format,
+#     common_float_types,
+#     blocked_quantization_support=True,
+#     backend=None,
+# )
 
 register_experts(
     BatchedTritonExperts,
@@ -195,30 +196,38 @@ register_experts(
 
 # Disable on blackwell for now
 if has_deep_ep() and not current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
-        DeepEPHTPrepareAndFinalize,
-    )
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
-        DeepEPLLPrepareAndFinalize,
+    pass
+
+    # register_prepare_and_finalize(
+    #     DeepEPHTPrepareAndFinalize,
+    #     standard_format,
+    #     common_float_types,
+    #     blocked_quantization_support=True,
+    #     backend="deepep_high_throughput",
+    # )
+
+    # register_prepare_and_finalize(
+    #     DeepEPLLPrepareAndFinalize,
+    #     batched_format,
+    #     common_float_types,
+    #     blocked_quantization_support=True,
+    #     backend="deepep_low_latency",
+    # )
+
+if has_hybrid_deep_ep():
+    from vllm.model_executor.layers.fused_moe.deepep_hybrid_prepare_finalize import (
+        DeepEPHybridPrepareAndFinalize,
     )
 
     register_prepare_and_finalize(
-        DeepEPHTPrepareAndFinalize,
+        DeepEPHybridPrepareAndFinalize,
         standard_format,
-        common_float_types,
+        fp8_bf16_types,
         blocked_quantization_support=True,
-        backend="deepep_high_throughput",
+        backend="deepep_hybrid",
     )
 
-    register_prepare_and_finalize(
-        DeepEPLLPrepareAndFinalize,
-        batched_format,
-        common_float_types,
-        blocked_quantization_support=True,
-        backend="deepep_low_latency",
-    )
-
-if has_pplx():
+if False and has_pplx():
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize,
     )
@@ -231,7 +240,9 @@ if has_pplx():
         backend="pplx",
     )
 
-if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
+if False and (
+    has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100)
+):
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
@@ -293,18 +304,18 @@ if has_deep_gemm() and is_deep_gemm_supported():
         needs_matching_quant=True,
         needs_deep_gemm=True,
     )
-    register_experts(
-        TritonOrDeepGemmExperts,
-        standard_format,
-        common_float_and_int_types,
-        blocked_quantization_support=True,
-        supports_chunking=True,
-        supports_expert_map=True,
-        needs_matching_quant=True,
-        needs_deep_gemm=True,
-    )
+    # register_experts(
+    #     TritonOrDeepGemmExperts,
+    #     standard_format,
+    #     common_float_and_int_types,
+    #     blocked_quantization_support=True,
+    #     supports_chunking=True,
+    #     supports_expert_map=True,
+    #     needs_matching_quant=True,
+    #     needs_deep_gemm=True,
+    # )
 
-if cutlass_fp8_supported():
+if False and cutlass_fp8_supported():
     from vllm.model_executor.layers.fused_moe import (
         CutlassBatchedExpertsFp8,
         CutlassExpertsFp8,
@@ -327,7 +338,7 @@ if cutlass_fp8_supported():
         supports_expert_map=False,
     )
 
-if cutlass_fp4_supported():
+if False and cutlass_fp4_supported():
     from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp4
 
     register_experts(
