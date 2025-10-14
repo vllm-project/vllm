@@ -833,7 +833,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         num_padded_scheduled_tokens = np.ceil(
             tokens / (2 * self.cp_world_size)
-            ) * (2 * self.cp_world_size)
+            ).astype(np.int32) * (2 * self.cp_world_size)
         # we align scheduled tokens of decode reqs to cp_world_size instead
         # of 2*cp_world_size
         num_padded_scheduled_tokens[:num_decode_reqs] = self.cp_world_size
