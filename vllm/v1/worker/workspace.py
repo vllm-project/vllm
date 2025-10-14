@@ -92,6 +92,8 @@ class WorkspaceManager:
         # List of workspace groups, where each group is a tuple of specs
         # that were reserved together (via reserve or reserve_simultaneous)
         self._reserved_workspaces: list[tuple[WorkspaceSpec, ...]] = []
+        # Number of layers in the model (set during adjust_available_kv_cache_memory)
+        self._num_layers: int | None = None
         self._current_workspaces: list[torch.Tensor | None] = [None, None]
         self._num_kv_cache_tokens: int | None = None
         self._locked: bool = False
@@ -314,15 +316,10 @@ class WorkspaceManager:
             )
 
         if self._num_kv_cache_tokens is None:
-            # KV cache not initialized - use minimal workspace
-            import warnings
-
-            warnings.warn(
+            raise RuntimeError(
                 f"PerKVCacheTokenWorkspace '{spec_name}' requested before "
                 "KV cache initialization. Allocating minimal workspace.",
-                stacklevel=4,
             )
-            return (1, 1)
 
         return (self._num_kv_cache_tokens, self._num_kv_cache_tokens)
 

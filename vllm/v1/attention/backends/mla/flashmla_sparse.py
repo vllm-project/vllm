@@ -142,10 +142,10 @@ def _convert_req_index_to_global_index_kernel(
     ti_stride1,
     out_stride0,
     out_stride1,
-    prefill_mask_ptr,
-    unique_out_ptr,
-    seen_ptr,
-    unique_count_ptr,
+    prefill_mask_ptr,  # int32 [num_tokens]
+    prefill_unique_out_ptr,  # int32 [num_kv_cache_tokens]
+    prefill_seen_ptr,  # int32 [num_kv_cache_tokens] (must be initialized to 0)
+    prefill_unique_count_ptr,  # int32 [1]
     HAS_PREFILL: tl.constexpr,
 ):
     # program_id(0) -> token_id (row)
@@ -174,16 +174,21 @@ def _convert_req_index_to_global_index_kernel(
     valid_block = block_id < max_num_blocks_per_req
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
     base = tl.load(bt_ptr, mask=valid_block, other=0)
+    is_invalid_tok |= ~valid_block
 
     # If token == -1 OR block_id OOB, output -1; else base * BLOCK_SIZE + offset
-    out_val = tl.where(
-        is_invalid_tok | (~valid_block), -1, base * BLOCK_SIZE + inblock_off
-    )
+    out_val = tl.where(is_invalid_tok, -1, base * BLOCK_SIZE + inblock_off)
 
     # Store results
     out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
     tl.store(out_ptr_ij, out_val)
 
+    # if we have prefills, we need to track the unique token indices
+    # across the prefill tokens we do this by atomically setting
+    # prefill_seen to 1 for each unique token index seen, the first
+    # program to set prefill_seen to 1 will atomically increment
+    # prefill_unique_count and store the token index in next available
+    # slot in prefill_unique_out
     if HAS_PREFILL:
         is_prefill = tl.load(prefill_mask_ptr + token_id)
         if is_prefill != 0:
@@ -193,11 +198,11 @@ def _convert_req_index_to_global_index_kernel(
             for i in tl.static_range(0, BLOCK_N):
                 val = tl.load(out_tile_base + i * out_stride1)
                 if val >= 0:
-                    seen_ptr_i = seen_ptr + val
+                    seen_ptr_i = prefill_seen_ptr + val
                     old = tl.atomic_cas(seen_ptr_i, 0, 1)
                     if old == 0:
-                        idx = tl.atomic_add(unique_count_ptr, 1)
-                        tl.store(unique_out_ptr + idx, val)
+                        idx = tl.atomic_add(prefill_unique_count_ptr, 1)
+                        tl.store(prefill_unique_out_ptr + idx, val)
 
 
 def triton_convert_req_index_to_global_index(
@@ -207,10 +212,11 @@ def triton_convert_req_index_to_global_index(
     BLOCK_SIZE: int = 64,
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,  # tile width along columns
-    prefill_token_mask: torch.Tensor | None = None,
-    prefill_seen: torch.Tensor | None = None,
-    prefill_unique_out: torch.Tensor | None = None,
-    prefill_unique_count: torch.Tensor | None = None,
+    prefill_token_mask: torch.Tensor | None = None,  # int32 [num_tokens]
+    prefill_seen: torch.Tensor
+    | None = None,  # int32 [num_kv_cache_tokens] (must be initialized to 0)
+    prefill_unique_out: torch.Tensor | None = None,  # int32 [num_kv_cache_tokens]
+    prefill_unique_count: torch.Tensor | None = None,  # int32 [1]
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Convert per-request indices into global cache slots.
 
@@ -220,6 +226,13 @@ def triton_convert_req_index_to_global_index(
         unique slot ids touched by the masked tokens. The caller is
         responsible for resetting the visited bitmap entries corresponding to
         those slots.
+
+        When prefill_token_mask is provided, prefill_seen,
+        prefill_unique_out, and prefill_unique_count must be provided.
+        prefill_seen must be initialized to 0. The kernel will then fill
+        prefill_unique_out with the unique token indices across the
+        prefill tokens. prefill_unique_count will be the number of unique
+        token indices seen.
     """
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
@@ -570,7 +583,8 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             # they haven't been reserved yet
             # These need to be registered here (not in FlashMLASparseImpl.__init__)
             # so they're accounted for during memory profiling
-            if self.use_fp8_kv_cache and not self.workspace_reservation_done:
+            use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
+            if use_fp8_cache and not self.workspace_reservation_done:
                 self.workspace_reservation_done = True
                 current_workspace_manager().reserve_simultaneous(
                     self.prefill_seen_workspace_spec,
@@ -604,6 +618,10 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
 
         use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
 
+        # These buffers are used to track which tokens are attended to by
+        # the prefill tokens so we can upconvert (from fp8 to bf16) only
+        # these tokens and then use `_forward_bf16_kv` (which uses the
+        # prefill optimized kernel) for the prefill tokens
         prefill_token_mask: torch.Tensor | None = None
         prefill_seen: torch.Tensor | None = None
         prefill_unique_out: torch.Tensor | None = None
@@ -641,7 +659,6 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             assert self.prefill_unique_count is not None
             prefill_unique_count = self.prefill_unique_count
 
-            # TODO(lucas): zero on a seperate stream
             prefill_seen.zero_()
             prefill_unique_count.zero_()
             prefill_unique_out.zero_()
@@ -702,14 +719,13 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                     and unique_prefill_indices.numel() > 0
                 ):
                     assert prefill_bf16_workspace is not None
-                    indices_for_upconvert = unique_prefill_indices.to(
-                        dtype=torch.int32, copy=False
-                    )
+                    # we doing prefill only upcovert the tokens that will be
+                    # attened to by the prefill tokens
                     ops.upconvert_ds_mla_tokens(
                         kv_cache,
                         prefill_bf16_workspace,
-                        indices_for_upconvert.contiguous(),
-                        self.prefill_unique_count,
+                        unique_prefill_indices,
+                        prefill_unique_count,
                     )
                     attn_out[prefill_start:] = self._forward_bf16_kv(
                         q[prefill_start:],
