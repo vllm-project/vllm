@@ -16,17 +16,12 @@ batch_specs:
   - "128q1s1k"    # 128 decode requests, 1k KV cache
   - "128q1s4k"    # 128 decode requests, 4k KV cache
 
-# Sweep num_kv_splits values
-num_splits:
-  - 1
-  - 2
-  - 4
-  - 8
-  - 16
-  - 32
-
-# Compare against auto-selected num_kv_splits
-compare_auto: false
+# Unified parameter sweep configuration
+parameter_sweep:
+  param_name: "num_kv_splits"
+  values: [1, 2, 4, 8, 16, 32]
+  include_auto: false
+  label_format: "{backend}_numsplits_{value}"
 
 # Model configuration (DeepSeek V2/V3 defaults)
 model:

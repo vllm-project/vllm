@@ -20,13 +20,11 @@ batch_specs:
 
 # For CUTLASS, test optimized num_kv_splits
 # Based on Study 1 results, you may want to adjust these values
-num_splits:
-  - 4           # Often optimal for medium batches
-  - 8           # Often optimal for larger batches
-  - 16          # Test for very large batches
-
-# Also compare against auto-selection
-compare_auto: true
+parameter_sweep:
+  param_name: "num_kv_splits"
+  values: [4, 8, 16]  # Often optimal for medium to large batches
+  include_auto: true  # Also compare against auto-selection
+  label_format: "{backend}_numsplits_{value}"
 
 # Model configuration (DeepSeek V2/V3 defaults)
 model:
