@@ -711,11 +711,12 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             return x
 
         # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
+        feature_extractor = self.info.get_feature_extractor()
+        hop_length = feature_extractor.hop_length
         if audios:
             # NOTE: Qwen3-Omni processor accept "audio"
             # To make sure the cache works with padding=True, we pre-padded
             # the audio to multiple of hop_length.
-            hop_length = self.info.get_feature_extractor().hop_length
             mm_data["audio"] = [
                 pad_to_hop_length(audio, hop_length)
                 if isinstance(audio, np.ndarray)
@@ -738,7 +739,6 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             and "feature_attention_mask" in hf_inputs
             and (audios := mm_data.get("audio", []))
         ):
-            hop_length = self.info.get_feature_extractor().hop_length
             audio_num_frames = []
             for _, audio in enumerate(audios):
                 audio_length = len(audio[0]) if isinstance(audio, tuple) else len(audio)
@@ -747,6 +747,10 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                     if audio_length % hop_length == 0
                     else (audio_length // hop_length - 1)
                 )
+                if mm_kwargs.get("truncation", True):
+                    num_frame = min(
+                        num_frame, feature_extractor.n_samples // hop_length
+                    )
                 audio_num_frames.append(num_frame)
             hf_inputs["feature_attention_mask"] = [
                 torch.ones(num_frame) for num_frame in audio_num_frames
