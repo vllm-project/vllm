@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import regex as re
 from fractions import Fraction
 from typing import TYPE_CHECKING, Any
 
+import regex as re
 import torch
 
 from vllm.logger import init_logger
