@@ -1021,8 +1021,8 @@ def create_new_process_for_each_test(
 
     assert method in ["spawn", "fork"], "Method must be either 'spawn' or 'fork'"
 
-    if method == "fork":
-        return fork_new_process_for_each_test
+    # if method == "fork":
+    #     return fork_new_process_for_each_test
 
     return spawn_new_process_for_each_test
 
