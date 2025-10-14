@@ -707,8 +707,6 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         vllm_output_post_proc=model_utils.qwen_vllm_to_hf_output,
         prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
-        # FIXME: https://github.com/huggingface/transformers/issues/38358
-        marks=[pytest.mark.skip("Model initialization fails")],
     ),
     "qwen2_vl": VLMTestInfo(
         models=["Qwen/Qwen2-VL-2B-Instruct"],

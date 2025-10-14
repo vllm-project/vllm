@@ -752,6 +752,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen-VL",
         extras={"chat": "Qwen/Qwen-VL-Chat"},
         trust_remote_code=True,
+        max_transformers_version="4.53.3",
+        transformers_version_reason="Use of deprecated imports which have been removed.",  # noqa: E501
         hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
     ),
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo(
