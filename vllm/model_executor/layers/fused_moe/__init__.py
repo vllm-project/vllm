@@ -51,7 +51,6 @@ __all__ = [
 
 if HAS_TRITON:
     # import to register the custom ops
-    import vllm.model_executor.layers.fused_moe.fused_marlin_moe  # noqa
     from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
         BatchedDeepGemmExperts,
     )
