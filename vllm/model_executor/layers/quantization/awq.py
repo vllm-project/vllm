@@ -4,6 +4,7 @@
 from typing import Any, Union
 
 import torch
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -19,6 +20,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMParameter
+from vllm.transformers_utils.config import get_safetensors_params_metadata
 
 logger = init_logger(__name__)
 
@@ -127,6 +129,20 @@ class AWQConfig(QuantizationConfig):
             )
             return AWQMoEMethod(awq_marlin_config, layer.moe_config)
         return None
+
+    def maybe_update_config(self, model_name: str, revision: str | None = None):
+        if self.modules_to_not_convert:
+            return
+
+        unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+        metadata = get_safetensors_params_metadata(model_name, revision=revision)
+        quant_layers: set[str] = {
+            param_name.rsplit(".", 1)[0]
+            for param_name, info in metadata.items()
+            if (dtype := info.get("dtype", None))
+            and _SAFETENSORS_TO_TORCH_DTYPE[dtype] in unquant_dtypes
+        }
+        self.modules_to_not_convert = list(quant_layers)
 
 
 def is_layer_skipped_awq(prefix: str, modules_to_not_convert: list[str]):
