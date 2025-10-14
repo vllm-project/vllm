@@ -1820,17 +1820,17 @@ class OpenAIServingResponses(OpenAIServing):
                 and ctx.parser.current_recipient
                 and ctx.parser.current_recipient.startswith("functions.")
             ):
-                fc_name = ctx.parser.current_recipient[len("functions.") :]
-                tool_call_item = ResponseFunctionToolCall(
-                    name=fc_name,
-                    type="function_call",
-                    id=current_item_id,
-                    call_id=f"call_{random_uuid()}",
-                    arguments="",
-                    status="in_progress",
-                )
                 if is_first_function_call_delta is False:
                     is_first_function_call_delta = True
+                    fc_name = ctx.parser.current_recipient[len("functions.") :]
+                    tool_call_item = ResponseFunctionToolCall(
+                        name=fc_name,
+                        type="function_call",
+                        id=current_item_id,
+                        call_id=f"call_{random_uuid()}",
+                        arguments="",
+                        status="in_progress",
+                    )
                     current_item_id = f"fc_{random_uuid()}"
                     yield _increment_sequence_number_and_return(
                         ResponseOutputItemAddedEvent(

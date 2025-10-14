@@ -765,16 +765,21 @@ async def test_function_calling_with_stream(client: OpenAI, model_name: str):
     )
     assert stream_response is not None
     final_tool_calls = {}
-
+    final_tool_calls_named = {}
     async for event in stream_response:
         if event.type == "response.output_item.added":
+            if event.item.type != "function_call":
+                continue
             final_tool_calls[event.output_index] = event.item
+            final_tool_calls_named[event.item.name] = event.item
         elif event.type == "response.function_call_arguments.delta":
             index = event.output_index
-
-            if final_tool_calls[index]:
-                final_tool_calls[index].arguments += event.delta
-
+            tool_call = final_tool_calls[index]
+            if tool_call:
+                tool_call.arguments += event.delta
+                final_tool_calls_named[tool_call.name] = tool_call
+        elif event.type == "response.function_call_arguments.done":
+            assert event.arguments == final_tool_calls_named[event.name].arguments
     for tool_call in final_tool_calls.values():
         if (
             tool_call
@@ -797,10 +802,13 @@ async def test_function_calling_with_stream(client: OpenAI, model_name: str):
             }
         ],
         tools=tools,
+        stream=True,
     )
     assert response is not None
-    assert response.status == "completed"
-    assert response.output_text is not None
+    async for event in response:
+        if event.type == "response.completed":
+            assert len(event.response.output) > 0
+            assert event.response.output_text is not None
 
 
 @pytest.mark.asyncio
