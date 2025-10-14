@@ -166,13 +166,13 @@ input_url = generate_presigned_url(
     s3_client,
     "get_object",
     {"Bucket": "MY_BUCKET", "Key": "MY_INPUT_FILE.jsonl"},
-    3600,
+    expires_in=3600,
 )
 output_url = generate_presigned_url(
     s3_client,
     "put_object",
     {"Bucket": "MY_BUCKET", "Key": "MY_OUTPUT_FILE.jsonl"},
-    3600,
+    expires_in=3600,
 )
 print(f"{input_url=}")
 print(f"{output_url=}")
