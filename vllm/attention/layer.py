@@ -346,7 +346,7 @@ class Attention(nn.Module, AttentionLayerBase):
 
         if self.use_output:
             output_shape = output_shape if output_shape is not None else query.shape
-            output = torch.zeros(output_shape, dtype=output_dtype, device=query.device)
+            output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
             hidden_size = output_shape[-1]
             # Reshape the query, key, and value tensors.
             # NOTE(woosuk): We do this outside the custom op to minimize the
@@ -705,7 +705,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.calc_kv_scales(q, kv_c_normed, k_pe)
 
             if self.attn_backend.accept_output_buffer:
-                output = torch.zeros(output_shape, dtype=q.dtype, device=q.device)
+                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 self.impl.forward(
                     self,
                     q,
@@ -722,7 +722,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
         else:
             if self.attn_backend.accept_output_buffer:
-                output = torch.zeros(output_shape, dtype=q.dtype, device=q.device)
+                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 torch.ops.vllm.unified_mla_attention_with_output(
                     q,
                     kv_c_normed,
