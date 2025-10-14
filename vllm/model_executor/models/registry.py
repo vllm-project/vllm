@@ -44,7 +44,6 @@ from .interfaces import (
     supports_multimodal_raw_input_only,
     supports_pp,
     supports_transcription,
-    supports_v0_only,
 )
 from .interfaces_base import (
     get_default_pooling_type,
@@ -479,7 +478,6 @@ class _ModelInfo:
     has_noops: bool
     supports_transcription: bool
     supports_transcription_only: bool
-    supports_v0_only: bool
 
     @staticmethod
     def from_model_cls(model: type[nn.Module]) -> "_ModelInfo":
@@ -504,7 +502,6 @@ class _ModelInfo:
             supports_transcription_only=(
                 supports_transcription(model) and model.supports_transcription_only
             ),
-            supports_v0_only=supports_v0_only(model),
             has_noops=has_noops(model),
         )
 
@@ -1062,14 +1059,6 @@ class _ModelRegistry:
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.supports_transcription_only
-
-    def is_v1_compatible(
-        self,
-        architectures: str | list[str],
-        model_config: ModelConfig,
-    ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return not model_cls.supports_v0_only
 
 
 ModelRegistry = _ModelRegistry(

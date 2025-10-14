@@ -76,9 +76,6 @@ class _HfExamplesInfo:
     trust_remote_code: bool = False
     """The ``trust_remote_code`` level required to load the model."""
 
-    v0_only: bool = False
-    """The model is only available with the vLLM V0 engine."""
-
     hf_overrides: dict[str, Any] = field(default_factory=dict)
     """The ``hf_overrides`` required to load the model."""
 
@@ -694,7 +691,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-VL-01",
         trust_remote_code=True,
-        v0_only=True,
     ),
     "Mistral3ForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Mistral-Small-3.1-24B-Instruct-2503",

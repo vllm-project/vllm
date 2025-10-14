@@ -8,14 +8,12 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
     SupportsTranscription,
-    SupportsV0Only,
     has_inner_state,
     supports_lora,
     supports_mrope,
     supports_multimodal,
     supports_pp,
     supports_transcription,
-    supports_v0_only,
 )
 from .interfaces_base import (
     VllmModelForPooling,
@@ -43,6 +41,4 @@ __all__ = [
     "supports_pp",
     "SupportsTranscription",
     "supports_transcription",
-    "SupportsV0Only",
-    "supports_v0_only",
 ]
