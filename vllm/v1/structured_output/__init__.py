@@ -167,7 +167,7 @@ class StructuredOutputManager:
     def grammar_bitmask(
         self,
         requests: dict[str, Request],
-        structured_output_request_ids: dict[str, int],
+        structured_output_request_ids: list[str],
         scheduled_spec_decode_tokens: dict[str, list[int]],
     ) -> "npt.NDArray[np.int32] | None":
         # Prepare the structured output bitmask for this batch.
@@ -196,17 +196,16 @@ class StructuredOutputManager:
         # masks for each request, one for each possible bonus token position.
         # These are stored inline in the tensor and unpacked by the gpu runner.
         cumulative_index = 0
-        ordered_seq = sorted(structured_output_request_ids.items(), key=lambda x: x[1])
 
         # Optimized parallel filling of bitmasks for
         # non-spec, large-batch-size cases
         if (
-            len(ordered_seq) > self.fill_bitmask_parallel_threshold
+            len(structured_output_request_ids) > self.fill_bitmask_parallel_threshold
             and max_num_spec_tokens == 0
         ):
             promises = []
             batch = []
-            for req_id, _ in ordered_seq:
+            for req_id in structured_output_request_ids:
                 request = requests[req_id]
                 structured_output_request = request.structured_output_request
                 if TYPE_CHECKING:
@@ -230,7 +229,7 @@ class StructuredOutputManager:
                 promise.result()
         else:
             # Fallback to serial filling of bitmasks for small-batch-size cases
-            for req_id, _ in ordered_seq:
+            for req_id in structured_output_request_ids:
                 request = requests[req_id]
                 structured_output_request = request.structured_output_request
 
@@ -295,21 +294,20 @@ class StructuredOutputManager:
             assert request.structured_output_request.grammar is not None
         # by default, we should always advance
         # for cases that don't use thinking mode.
-        if self.reasoner is not None:
-            structured_req = request.structured_output_request
-
-            if structured_req.reasoning_ended:
-                return True
-
-            # Check if reasoning ends in *this* step
-            if self.reasoner.is_reasoning_end(request.all_token_ids):
-                # Reasoning just ended, so we shouldn't advance til
-                # next pass
-                structured_req.reasoning_ended = True
-
-            return False
-        else:
+        if self.reasoner is None:
             return True
+
+        structured_req = request.structured_output_request
+        if structured_req.reasoning_ended:
+            return True
+
+        # Check if reasoning ends in *this* step
+        if self.reasoner.is_reasoning_end(request.all_token_ids):
+            # Reasoning just ended, so we shouldn't advance til
+            # next pass
+            structured_req.reasoning_ended = True
+
+        return False
 
     def clear_backend(self) -> None:
         if self.backend is not None:
