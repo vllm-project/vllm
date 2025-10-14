@@ -1,7 +1,6 @@
 # For vllm script, with -t option (tensor parallel size)
 # bash .buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh -m RedHatAI/Qwen2.5-VL-3B-Instruct-FP8-Dynamic -l 1319 -t 1
 model_name: "RedHatAI/Qwen2.5-VL-3B-Instruct-FP8-Dynamic"
-backend: "vllm"
 tasks:
 - name: "gsm8k"
   metrics:

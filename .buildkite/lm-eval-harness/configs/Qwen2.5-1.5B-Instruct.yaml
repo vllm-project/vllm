@@ -1,6 +1,5 @@
 # bash .buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh -m Qwen/Qwen2.5-1.5B-Instruct -b auto -l 1319 -f 5 -t 1
 model_name: "Qwen/Qwen2.5-1.5B-Instruct"
-backend: "vllm"
 tasks:
 - name: "gsm8k"
   metrics:
