@@ -173,3 +173,6 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
+
+    # Number of steps to schedule
+    step_num: Optional[int] = 1

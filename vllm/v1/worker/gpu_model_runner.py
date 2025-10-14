@@ -119,6 +119,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
     PoolerOutput,
     SamplerOutput,
+    KVConnectorOutput,
 )
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
@@ -510,6 +511,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device="cpu",
             pin_memory=self.pin_memory,
         )
+        # multi step
+        self.total_step = 1
+        self.curr_step = 0
 
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
@@ -1037,7 +1041,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return encoder_seq_lens
 
     def _prepare_inputs(
-        self, scheduler_output: "SchedulerOutput"
+        self, scheduler_output: "SchedulerOutput",
+        last_step_valid_sampled_token_ids = None,
     ) -> tuple[
         PerLayerAttnMetadata,
         torch.Tensor,
@@ -1057,10 +1062,33 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             max_num_scheduled_tokens, use_cascade_attn
         ]
         """
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        if self.curr_step > 0:
+            if self._draft_token_ids is not None:
+                token_each_reqs = [1 + len(x) for x in self._draft_token_ids]
+            else:
+                token_each_reqs = [1]*self.input_batch.num_reqs
+            total_num_scheduled_tokens = sum(token_each_reqs)
+        else:
+            total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
+
+        if self.curr_step > 0 and self._draft_token_ids is not None:
+            # Get the number of draft tokens for each request.
+            # Iterate over the dictionary rather than all requests since not all
+            # requests have draft tokens.
+            num_draft_tokens = np.array([len(x) for x in self._draft_token_ids],
+                    dtype=np.int32)
+            start_index = self.input_batch.num_tokens_no_spec[:num_reqs]
+            end_token_index = start_index + num_draft_tokens
+            if isinstance(self._draft_token_ids, torch.Tensor):
+                draft_token_ids = self._draft_token_ids.tolist()
+            else:
+                draft_token_ids = self._draft_token_ids
+            for x in range(num_reqs):
+                self.input_batch.token_ids_cpu[x, start_index[x]:end_token_index[x]] = \
+                        draft_token_ids[x]
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -1068,7 +1096,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Get the number of scheduled tokens for each request.
         req_ids = self.input_batch.req_ids
-        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+        if self.curr_step > 0:
+            tokens = token_each_reqs
+        else:
+            tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
         max_num_scheduled_tokens = max(tokens)
 
@@ -1080,6 +1111,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
 
+        if self.curr_step > 0:
+            last_step_computed_tokens = np.array(
+                    [len(x) for x in last_step_valid_sampled_token_ids],
+                    dtype=np.int32)
+            self.input_batch.num_computed_tokens_cpu[req_indices] += \
+                    last_step_computed_tokens[req_indices]
         # Get positions.
         positions_np = self.positions.np[:total_num_scheduled_tokens]
         np.add(
@@ -1170,7 +1207,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.query_start_loc.copy_to_gpu()
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
-        num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
+        if self.curr_step > 0:
+            num_tokens_unpadded = total_num_scheduled_tokens
+        else:
+            num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
         num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
         uniform_decode = (
             max_num_scheduled_tokens == self.uniform_decode_query_len
@@ -1228,7 +1268,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Common case (1D positions)
             self.positions.copy_to_gpu(total_num_scheduled_tokens)
 
-        use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+        if self.curr_step > 0:
+            use_spec_decode = self._draft_token_ids is not None
+        else:
+            use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
             # NOTE(woosuk): Due to chunked prefills, the batch may contain
             # partial requests. While we should not sample any token
@@ -1239,27 +1282,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_draft_tokens = None
             spec_decode_metadata = None
         else:
-            # Get the number of draft tokens for each request.
-            # Iterate over the dictionary rather than all requests since not all
-            # requests have draft tokens.
-            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
-            # For chunked prefills, use -1 as mask rather than 0, as guided
-            # decoding may rollback speculative tokens.
-            num_decode_draft_tokens = np.full(num_reqs, -1, dtype=np.int32)
-            for (
-                req_id,
-                draft_token_ids,
-            ) in scheduler_output.scheduled_spec_decode_tokens.items():
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                num_draft_tokens[req_idx] = len(draft_token_ids)
-                num_decode_draft_tokens[req_idx] = (
-                    len(draft_token_ids)
-                    if (
-                        self.input_batch.num_computed_tokens_cpu[req_idx]
-                        >= self.input_batch.num_prompt_tokens[req_idx]
+            if self.curr_step > 0:
+                # NOTE(woosuk): `num_tokens` here may include spec tokens.
+                self.input_batch.num_tokens[:num_reqs] += num_draft_tokens
+            else:
+                # Get the number of draft tokens for each request.
+                # Iterate over the dictionary rather than all requests since not all
+                # requests have draft tokens.
+                num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+                # For chunked prefills, use -1 as mask rather than 0, as guided
+                # decoding may rollback speculative tokens.
+                num_decode_draft_tokens = np.full(num_reqs, -1, dtype=np.int32)
+                for (
+                    req_id,
+                    draft_token_ids,
+                ) in scheduler_output.scheduled_spec_decode_tokens.items():
+                    req_idx = self.input_batch.req_id_to_index[req_id]
+                    num_draft_tokens[req_idx] = len(draft_token_ids)
+                    num_decode_draft_tokens[req_idx] = (
+                        len(draft_token_ids)
+                        if (
+                            self.input_batch.num_computed_tokens_cpu[req_idx]
+                            >= self.input_batch.num_prompt_tokens[req_idx]
+                        )
+                        else -1
                     )
-                    else -1
-                )
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens
             )
@@ -2099,7 +2146,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         IntermediateTensors | None,
         dict[str, Any],
     ]:
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        if self.curr_step > 0:
+            if self._draft_token_ids is not None:
+                token_each_reqs = [1 + len(x) for x in self._draft_token_ids]
+            else:
+                token_each_reqs = [1]*self.input_batch.num_reqs
+            num_scheduled_tokens = sum(token_each_reqs)
+        else:
+            num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         is_first_rank = get_pp_group().is_first_rank
 
         # _prepare_inputs may reorder the batch, so we must gather multi
@@ -2488,7 +2542,43 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     getattr(m, "enable_kv_scales_calculation", False) for m in metadata_list
                 ):
                     cudagraph_runtime_mode = CUDAGraphMode.NONE
+                    
+        if uniform_decode:
+            self.total_step = scheduler_output.step_num
+            # some cases that ms doesn't support
+            if self.uses_mrope:
+                self.total_step = 1
+            if (self.supports_mm_inputs and not self.model_config.is_encoder_decoder):
+                self.total_step = 1
+            if (self.model_config.is_encoder_decoder
+                    and scheduler_output.scheduled_encoder_inputs):
+                self.total_step = 1
+        else:
+            self.total_step = 1
 
+        cached_valid_sampled_token_ids = []
+        final_kv_connector_output = KVConnectorOutput()
+        final_kv_connector_output.finished_sending = set()
+        final_kv_connector_output.finished_receving = set()
+        for self.curr_step in range(self.total_step):
+            if self.curr_step > 0:
+                # Prepare the decoder inputs.
+                (attn_metadata, logits_indices, spec_decode_metadata,
+                 num_scheduled_tokens_np, spec_decode_common_attn_metadata,
+                 max_query_len, ubatch_slices, num_tokens_after_padding
+                 ) = self._prepare_inputs(scheduler_output,
+                    cached_valid_sampled_token_ids[-1])
+                (
+                    num_scheduled_tokens,
+                    num_input_tokens,
+                    num_tokens_across_dp,
+                    input_ids,
+                    inputs_embeds,
+                    positions,
+                    intermediate_tensors,
+                    model_kwargs,
+                ) = self._preprocess(scheduler_output, intermediate_tensors,
+                                     ubatch_slices, num_tokens_after_padding)
             # Run the model.
             # Use persistent buffers for CUDA graphs.
             with (
@@ -2647,16 +2737,60 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             with record_function_or_nullcontext("EPLB"):
                 self.eplb_step()
 
+            use_padded_batch_for_eagle = self.speculative_config and \
+                self.speculative_config.use_eagle() and \
+                not self.speculative_config.disable_padded_drafter_batch
+            if use_padded_batch_for_eagle:
+                # EAGLE speculative decoding can use the GPU sampled tokens
+                # as inputs, and does not need to wait for bookkeeping to finish.
+                propose_draft_token_ids(sampler_output.sampled_token_ids)
+
+            with record_function_or_nullcontext("Bookkeep"):
+                (
+                    num_nans_in_logits,
+                    logprobs_lists,
+                    valid_sampled_token_ids,
+                    prompt_logprobs_dict,
+                    req_ids_output_copy,
+                    req_id_to_index_output_copy,
+                    invalid_req_indices,
+                ) = self._bookkeeping_sync(scheduler_output, sampler_output,
+                                        logits, hidden_states,
+                                        num_scheduled_tokens)
+
+            if self.speculative_config and not use_padded_batch_for_eagle:
+                # ngram and other speculative decoding methods use the sampled
+                # tokens on the CPU, so they are run after bookkeeping.
+                propose_draft_token_ids(valid_sampled_token_ids)
+
+            with record_function_or_nullcontext("EPLB"):
+                self.eplb_step()
+
+            cached_valid_sampled_token_ids.append(valid_sampled_token_ids)
+            if kv_connector_output is not None:
+                final_kv_connector_output.finished_sending.update(
+                        kv_connector_output.finished_sending)
+                final_kv_connector_output.finished_receving.update(
+                        kv_connector_output.finished_receving)
+
+        final_token_ids = None
+        for each_token_ids in cached_valid_sampled_token_ids:
+            if final_token_ids is None:
+                final_token_ids = each_token_ids
+            else:
+                _ = [x.extend(y) for x, y in zip(final_token_ids, each_token_ids)]
         output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
-            sampled_token_ids=valid_sampled_token_ids,
+            sampled_token_ids=final_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
-            kv_connector_output=kv_connector_output,
+            kv_connector_output=final_kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
+            step_num=self.curr_step + 1,
         )
+        self.curr_step = 0
 
         if not self.use_async_scheduling:
             return output
