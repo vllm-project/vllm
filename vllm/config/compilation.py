@@ -38,8 +38,8 @@ class CompilationMode:
     DYNAMO_TRACE_ONCE = 2
     """Single Dynamo trace through the model, avoiding recompilation."""
     VLLM_COMPILE = 3
-    """VLLM_COMPILE (int): Uses piecewise compilation backend for optimized
-    inference workloads."""
+    """Custom vLLM Inductor-based backend with caching, piecewise compilation,
+    shape specialization, and custom passes."""
 
 
 class CUDAGraphMode(enum.Enum):
