@@ -875,10 +875,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Decode tokens are duplicate and their positions always be 0.
         positions[:num_decode_reqs] = 0
 
-        all_positions = [get_current_rank_positions(cu_padded_tokens,
+        all_positions_lst = [get_current_rank_positions(cu_padded_tokens,
                                                     rank_i)
                          for rank_i in range(self.cp_world_size)]
-        all_positions = torch.from_numpy(np.concatenate(all_positions))
+        all_positions = torch.from_numpy(np.concatenate(all_positions_lst))
         cp_allgather_restore_idx = all_positions.float().argsort(
             ).long().to(self.device)
         return (cp_tokens, positions, num_cp_pads,
