@@ -34,14 +34,14 @@ RUN apt-get update && \
 
 WORKDIR /root
 
-ENV VLLM_PATH=/workspace/vllm-project
-ENV VLLM_PLUGIN_PATH=/workspace/vllm-gaudi
+ENV VLLM_PATH=/vllm-workspace
+ENV VLLM_PLUGIN_PATH=/vllm-gaudi
 
 RUN echo "dash dash/sh boolean false" | debconf-set-selections && \
     DEBIAN_FRONTEND=noninteractive dpkg-reconfigure dash
 ENV ENV=~/.profile
 
-# Clone the vllm-project repository and install inside the container
+# Clone the vllm repository and install inside the container
 # Dynamically fetch the compatible vLLM commit from vllm-gaudi repo
 RUN VLLM_STABLE_COMMIT=$(curl -s https://raw.githubusercontent.com/vllm-project/vllm-gaudi/vllm/last-good-commit-for-vllm-gaudi/VLLM_STABLE_COMMIT | tr -d '\n') && \
     echo "Fetched stable commit: $VLLM_STABLE_COMMIT" && \
