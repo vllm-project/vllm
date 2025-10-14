@@ -421,9 +421,7 @@ class Scheduler(SchedulerInterface):
                 # KVTransfer: WAITING reqs have num_computed_tokens > 0
                 # after async KV recvs are completed.
                 else:
-                    new_computed_blocks = (
-                        self.kv_cache_manager.create_empty_block_list()
-                    )
+                    new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
 
@@ -924,6 +922,10 @@ class Scheduler(SchedulerInterface):
         kv_connector_stats = (
             kv_connector_output.kv_connector_stats if kv_connector_output else None
         )
+        if kv_connector_stats and self.connector:
+            stats = self.connector.get_kv_connector_stats()
+            if stats:
+                kv_connector_stats = kv_connector_stats.aggregate(stats)
 
         failed_kv_load_req_ids = None
         if kv_connector_output and kv_connector_output.invalid_block_ids:
@@ -1487,7 +1489,7 @@ class Scheduler(SchedulerInterface):
         total_tokens_to_reschedule += num_tokens_to_reschedule
 
         # Mark requests with async KV load failures; they will be rescheduled
-        # once loading completes
+        # once loading completes.
         self.failed_recving_kv_req_ids |= async_affected_req_ids
 
         # --- Handle sync KV loads (running requests) ---
