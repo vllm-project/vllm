@@ -1305,7 +1305,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Collect the sampling parameters.
     if task_type == TaskType.GENERATION:
-        sampling_params = {
+        extra_body = {
             k: v
             for k, v in {
                 "top_p": args.top_p,
@@ -1320,15 +1320,20 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         }
 
         # Sampling parameters are only supported by openai-compatible backend.
-        if sampling_params and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
+        if extra_body and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
             raise ValueError(
                 "Sampling parameters are only supported by openai-compatible backends."
             )
 
-        if "temperature" not in sampling_params:
-            sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+        if "temperature" not in extra_body:
+            extra_body["temperature"] = 0.0  # Default to greedy decoding.
+
+        # Default disable thinking
+        extra_body["chat_template_kwargs"] = {
+            "enable_thinking": False,
+        }
     else:
-        sampling_params = {}
+        extra_body = {}
 
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
@@ -1355,7 +1360,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         max_concurrency=args.max_concurrency,
         lora_modules=args.lora_modules,
         extra_headers=headers,
-        extra_body=sampling_params,
+        extra_body=extra_body,
         ramp_up_strategy=args.ramp_up_strategy,
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,
