@@ -117,9 +117,11 @@ OpenAI Python client library does not officially support `reasoning_content` att
     # For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
     # For Qwen3 series, if you want to disable thinking in reasoning mode, add:
     # extra_body={"chat_template_kwargs": {"enable_thinking": False}}
-    stream = client.chat.completions.create(model=model,
-                                            messages=messages,
-                                            stream=True)
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        stream=True,
+    )
 
     print("client: Start streaming chat completions...")
     printed_reasoning_content = False
@@ -159,27 +161,29 @@ The reasoning content is also available when both tool calling and the reasoning
 
     client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
 
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get the current weather in a given location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
-                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
-                },
-                "required": ["location", "unit"]
-            }
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                    },
+                    "required": ["location", "unit"],
+                }
+            },
         }
-    }]
+    ]
 
     response = client.chat.completions.create(
         model=client.models.list().data[0].id,
         messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
         tools=tools,
-        tool_choice="auto"
+        tool_choice="auto",
     )
 
     print(response)
@@ -225,7 +229,7 @@ You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_
             previous_token_ids: Sequence[int],
             current_token_ids: Sequence[int],
             delta_token_ids: Sequence[int],
-        ) -> Union[DeltaMessage, None]:
+        ) -> DeltaMessage | None:
             """
             Instance method that should be implemented for extracting reasoning
             from an incomplete response; for use when handling reasoning calls and
@@ -235,8 +239,10 @@ You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_
             """
 
         def extract_reasoning_content(
-                self, model_output: str, request: ChatCompletionRequest
-        ) -> tuple[Optional[str], Optional[str]]:
+            self,
+            model_output: str,
+            request: ChatCompletionRequest | ResponsesRequest,
+        ) -> tuple[str | None, str | None]:
             """
             Extract reasoning content from a complete model-generated string.
 
@@ -274,10 +280,10 @@ Additionally, to enable structured output, you'll need to create a new `Reasoner
 
         @classmethod
         def from_tokenizer(cls, tokenizer: PreTrainedTokenizer) -> Reasoner:
-            return cls(start_token_id=tokenizer.encode(
-                "<think>", add_special_tokens=False)[0],
-                    end_token_id=tokenizer.encode("</think>",
-                                                    add_special_tokens=False)[0])
+            return cls(
+                start_token_id=tokenizer.encode("<think>", add_special_tokens=False)[0],
+                end_token_id=tokenizer.encode("</think>", add_special_tokens=False)[0],
+            )
 
         def is_reasoning_end(self, input_ids: list[int]) -> bool:
             return self.end_token_id in input_ids

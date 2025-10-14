@@ -154,9 +154,7 @@ To substitute multiple images inside the same text prompt, you can pass in a lis
 
     outputs = llm.generate({
         "prompt": prompt,
-        "multi_modal_data": {
-            "image": [image1, image2]
-        },
+        "multi_modal_data": {"image": [image1, image2]},
     })
 
     for o in outputs:
@@ -183,21 +181,24 @@ conversation = [
     {"role": "assistant", "content": "Hello! How can I assist you today?"},
     {
         "role": "user",
-        "content": [{
-            "type": "image_url",
-            "image_url": {
-                "url": image_url
-            }
-        },{
-            "type": "image_pil",
-            "image_pil": image_pil
-        }, {
-            "type": "image_embeds",
-            "image_embeds": image_embeds
-        }, {
-            "type": "text",
-            "text": "What's in these images?"
-        }],
+        "content": [
+            {
+                "type": "image_url",
+                "image_url": {"url": image_url},
+            },
+            {
+                "type": "image_pil",
+                "image_pil": image_pil,
+            },
+            {
+                "type": "image_embeds",
+                "image_embeds": image_embeds,
+            },
+            {
+                "type": "text",
+                "text": "What's in these images?",
+            },
+        ],
     },
 ]
 
@@ -224,7 +225,10 @@ Multi-image input can be extended to perform video captioning. We show this with
     message = {
         "role": "user",
         "content": [
-            {"type": "text", "text": "Describe this set of frames. Consider the frames to be a part of the same video."},
+            {
+                "type": "text",
+                "text": "Describe this set of frames. Consider the frames to be a part of the same video.",
+            },
         ],
     }
     for i in range(len(video_frames)):
@@ -255,13 +259,13 @@ When loading RGBA images (images with transparency), vLLM converts them to RGB f
     # Custom black background for dark theme
     llm = LLM(
         model="llava-hf/llava-1.5-7b-hf",
-        media_io_kwargs={"image": {"rgba_background_color": [0, 0, 0]}}
+        media_io_kwargs={"image": {"rgba_background_color": [0, 0, 0]}},
     )
 
     # Custom brand color background (e.g., blue)
     llm = LLM(
         model="llava-hf/llava-1.5-7b-hf",
-        media_io_kwargs={"image": {"rgba_background_color": [0, 0, 255]}}
+        media_io_kwargs={"image": {"rgba_background_color": [0, 0, 255]}},
     )
     ```
 
@@ -294,20 +298,23 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
         limit_mm_per_prompt={"video": 1},
     )
 
-    sampling_params = SamplingParams(
-        max_tokens=1024,
-    )
+    sampling_params = SamplingParams(max_tokens=1024)
 
     video_messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant.",
+        },
+        {
+            "role": "user",
+            "content": [
                 {"type": "text", "text": "describe this video."},
                 {
                     "type": "video",
                     "video": video_path,
                     "total_pixels": 20480 * 28 * 28,
-                    "min_pixels": 16 * 28 * 28
-                }
+                    "min_pixels": 16 * 28 * 28,
+                },
             ]
         },
     ]
@@ -465,21 +472,24 @@ Then, you can use the OpenAI client as follows:
 
     chat_response = client.chat.completions.create(
         model="microsoft/Phi-3.5-vision-instruct",
-        messages=[{
-            "role": "user",
-            "content": [
-                # NOTE: The prompt formatting with the image token `<image>` is not needed
-                # since the prompt will be processed automatically by the API server.
-                {"type": "text", "text": "What’s in this image?"},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        url": image_url
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    # NOTE: The prompt formatting with the image token `<image>` is not needed
+                    # since the prompt will be processed automatically by the API server.
+                    {
+                        "type": "text",
+                        "text": "What’s in this image?",
                     },
-                    "uuid": image_url # Optional
-                },
-            ],
-        }],
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url},
+                        "uuid": image_url,  # Optional
+                    },
+                ],
+            }
+        ],
     )
     print("Chat completion output:", chat_response.choices[0].message.content)
 
@@ -489,26 +499,27 @@ Then, you can use the OpenAI client as follows:
 
     chat_response = client.chat.completions.create(
         model="microsoft/Phi-3.5-vision-instruct",
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "What are the animals in these images?"},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": image_url_duck
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "What are the animals in these images?",
                     },
-                    "uuid": image_url_duck # Optional
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": image_url_lion
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url_duck},
+                        "uuid": image_url_duck,  # Optional
                     },
-                    "uuid": image_url_lion # Optional
-                },
-            ],
-        }],
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_url_lion},
+                        "uuid": image_url_lion,  # Optional
+                    },
+                ],
+            }
+        ],
     )
     print("Chat completion output:", chat_response.choices[0].message.content)
     ```
@@ -560,23 +571,22 @@ Then, you can use the OpenAI client as follows:
 
     ## Use video url in the payload
     chat_completion_from_url = client.chat.completions.create(
-        messages=[{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "What's in this video?"
-                },
-                {
-                    "type": "video_url",
-                    "video_url": {
-                        "url": video_url
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "What's in this video?",
                     },
-                    "uuid": video_url # Optional
-                },
-            ],
-        }],
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": video_url},
+                        "uuid": video_url,  # Optional
+                    },
+                ],
+            }
+        ],
         model=model,
         max_completion_tokens=64,
     )
@@ -652,23 +662,25 @@ Then, you can use the OpenAI client as follows:
     audio_base64 = encode_base64_content_from_url(audio_url)
 
     chat_completion_from_base64 = client.chat.completions.create(
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "What's in this audio?"
-                },
-                {
-                    "type": "input_audio",
-                    "input_audio": {
-                        "data": audio_base64,
-                        "format": "wav"
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "What's in this audio?",
                     },
-                    "uuid": audio_url # Optional
-                },
-            ],
-        }],
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_base64,
+                            "format": "wav",
+                        },
+                        "uuid": audio_url,  # Optional
+                    },
+                ],
+            },
+        ],
         model=model,
         max_completion_tokens=64,
     )
@@ -683,22 +695,22 @@ Alternatively, you can pass `audio_url`, which is the audio counterpart of `imag
 
     ```python
     chat_completion_from_url = client.chat.completions.create(
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "What's in this audio?"
-                },
-                {
-                    "type": "audio_url",
-                    "audio_url": {
-                        "url": audio_url
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "What's in this audio?",
                     },
-                    "uuid": audio_url # Optional
-                },
-            ],
-        }],
+                    {
+                        "type": "audio_url",
+                        "audio_url": {"url": audio_url},
+                        "uuid": audio_url,  # Optional
+                    },
+                ],
+            }
+        ],
         model=model,
         max_completion_tokens=64,
     )
@@ -747,43 +759,48 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
 
     # Basic usage - this is equivalent to the LLaVA example for offline inference
     model = "llava-hf/llava-1.5-7b-hf"
-    embeds =  {
+    embeds = {
         "type": "image_embeds",
         "image_embeds": f"{base64_image_embedding}",
-        "uuid": image_url # Optional
+        "uuid": image_url,  # Optional
     }
 
     # Pass additional parameters (available to Qwen2-VL and MiniCPM-V)
     model = "Qwen/Qwen2-VL-2B-Instruct"
-    embeds =  {
+    embeds = {
         "type": "image_embeds",
         "image_embeds": {
-            "image_embeds": f"{base64_image_embedding}" , # Required
-            "image_grid_thw": f"{base64_image_grid_thw}"  # Required by Qwen/Qwen2-VL-2B-Instruct
+            "image_embeds": f"{base64_image_embedding}",  # Required
+            "image_grid_thw": f"{base64_image_grid_thw}",  # Required by Qwen/Qwen2-VL-2B-Instruct
         },
-        "uuid": image_url # Optional
+        "uuid": image_url,  # Optional
     }
     model = "openbmb/MiniCPM-V-2_6"
-    embeds =  {
+    embeds = {
         "type": "image_embeds",
         "image_embeds": {
-            "image_embeds": f"{base64_image_embedding}" , # Required
-            "image_sizes": f"{base64_image_sizes}"  # Required by openbmb/MiniCPM-V-2_6
+            "image_embeds": f"{base64_image_embedding}",  # Required
+            "image_sizes": f"{base64_image_sizes}",  # Required by openbmb/MiniCPM-V-2_6
         },
-        "uuid": image_url # Optional
+        "uuid": image_url,  # Optional
     }
     chat_completion = client.chat.completions.create(
         messages=[
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": [
             {
-                "type": "text",
-                "text": "What's in this image?",
+                "role": "system",
+                "content": "You are a helpful assistant.",
             },
-            embeds,
-            ],
-        },
-    ],
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "What's in this image?",
+                    },
+                    embeds,
+                ],
+            },
+        ],
         model=model,
     )
     ```
@@ -802,22 +819,22 @@ For Online Serving, you can also skip sending media if you expect cache hits wit
         {
             "type": "image_embeds",
             "image_embeds": None,
-            "uuid": image_uuid
+            "uuid": image_uuid,
         },
 
         # input_audio:
         {
             "type": "input_audio",
             "input_audio": None,
-            "uuid": audio_uuid
+            "uuid": audio_uuid,
         },
 
         # PIL Image:
         {
             "type": "image_pil",
-            "image_pil": None
-            "uuid": image_uuid
-        }
+            "image_pil": None,
+            "uuid": image_uuid,
+        },
 
     ```
 
