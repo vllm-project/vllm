@@ -64,82 +64,6 @@ class PoolingParamsUpdate:
         params.requires_token_ids = self.requires_token_ids
 
 
-class Pooler(nn.Module, ABC):
-    """The interface required for all poolers used in pooling models in vLLM."""
-
-    @staticmethod
-    def for_token_embed(pooler_config: PoolerConfig):
-        head = TokenEmbeddingPoolerHead()
-
-        if pooler_config.pooling_type == "STEP":
-            return StepPooler(head=head)
-
-        return AllPooler(head=head)
-
-    @staticmethod
-    def for_token_classify(
-        pooler_config: PoolerConfig,
-        classifier: ClassifierFn | None = None,
-        act_fn: "PoolerActivation" | str | None = None,
-    ):
-        head = TokenClassifierPoolerHead(classifier=classifier, act_fn=act_fn)
-
-        if pooler_config.pooling_type == "STEP":
-            return StepPooler(head=head)
-
-        return AllPooler(head=head)
-
-    @staticmethod
-    def for_embed(pooler_config: PoolerConfig):
-        resolved_config = ResolvedPoolingConfig.from_config(
-            task="embed",
-            pooler_config=pooler_config,
-        )
-
-        pooling = PoolingMethod.from_pooling_type(resolved_config.pooling_type)
-        head = EmbeddingPoolerHead()
-
-        return SimplePooler(pooling=pooling, head=head)
-
-    @staticmethod
-    def for_classify(
-        pooler_config: PoolerConfig,
-        classifier: ClassifierFn | None,
-        act_fn: "PoolerActivation" | str | None = None,
-    ):
-        resolved_config = ResolvedPoolingConfig.from_config(
-            task="classify",
-            pooler_config=pooler_config,
-        )
-
-        pooling = PoolingMethod.from_pooling_type(resolved_config.pooling_type)
-
-        return ClassifierPooler(
-            pooling=pooling,
-            classifier=classifier,
-            act_fn=act_fn,
-        )
-
-    @abstractmethod
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        """Determine which pooling tasks are supported."""
-        raise NotImplementedError
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        """
-        Construct the updated pooling parameters to use for a supported task.
-        """
-        return PoolingParamsUpdate()
-
-    @abstractmethod
-    def forward(
-        self,
-        hidden_states: list[torch.Tensor] | torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> PoolerOutput:
-        raise NotImplementedError
-
-
 def get_prompt_lens(
     hidden_states: torch.Tensor | list[torch.Tensor],
     pooling_metadata: PoolingMetadata,
@@ -414,6 +338,82 @@ class LambdaPoolerActivation(PoolerActivation):
         return self.fn(pooled_data)
 
 
+class Pooler(nn.Module, ABC):
+    """The interface required for all poolers used in pooling models in vLLM."""
+
+    @staticmethod
+    def for_token_embed(pooler_config: PoolerConfig):
+        head = TokenEmbeddingPoolerHead()
+
+        if pooler_config.pooling_type == "STEP":
+            return StepPooler(head=head)
+
+        return AllPooler(head=head)
+
+    @staticmethod
+    def for_token_classify(
+        pooler_config: PoolerConfig,
+        classifier: ClassifierFn | None = None,
+        act_fn: PoolerActivation | str | None = None,
+    ):
+        head = TokenClassifierPoolerHead(classifier=classifier, act_fn=act_fn)
+
+        if pooler_config.pooling_type == "STEP":
+            return StepPooler(head=head)
+
+        return AllPooler(head=head)
+
+    @staticmethod
+    def for_embed(pooler_config: PoolerConfig):
+        resolved_config = ResolvedPoolingConfig.from_config(
+            task="embed",
+            pooler_config=pooler_config,
+        )
+
+        pooling = PoolingMethod.from_pooling_type(resolved_config.pooling_type)
+        head = EmbeddingPoolerHead()
+
+        return SimplePooler(pooling=pooling, head=head)
+
+    @staticmethod
+    def for_classify(
+        pooler_config: PoolerConfig,
+        classifier: ClassifierFn | None,
+        act_fn: PoolerActivation | str | None = None,
+    ):
+        resolved_config = ResolvedPoolingConfig.from_config(
+            task="classify",
+            pooler_config=pooler_config,
+        )
+
+        pooling = PoolingMethod.from_pooling_type(resolved_config.pooling_type)
+
+        return ClassifierPooler(
+            pooling=pooling,
+            classifier=classifier,
+            act_fn=act_fn,
+        )
+
+    @abstractmethod
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        """Determine which pooling tasks are supported."""
+        raise NotImplementedError
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        """
+        Construct the updated pooling parameters to use for a supported task.
+        """
+        return PoolingParamsUpdate()
+
+    @abstractmethod
+    def forward(
+        self,
+        hidden_states: list[torch.Tensor] | torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> PoolerOutput:
+        raise NotImplementedError
+
+
 class PoolerHead(nn.Module):
     def __init__(self, activation: PoolerActivation) -> None:
         super().__init__()
@@ -432,7 +432,6 @@ class EmbeddingPoolerHead(PoolerHead):
         super().__init__(activation=PoolerNormalize())
 
         # Load ST projector if available
-
         vllm_config = get_current_vllm_config()
         self.projector: nn.Module | None = (
             _load_st_projector(vllm_config.model_config) if vllm_config else None
@@ -539,7 +538,7 @@ class ClassifierPooler(Pooler):
     def resolve_act_fn(
         model_config: ModelConfig,
         static_num_labels: bool = True,
-        act_fn: "PoolerActivation" | str | None = None,
+        act_fn: PoolerActivation | str | None = None,
     ):
         if isinstance(act_fn, str):
             if act_fn == "classify":
