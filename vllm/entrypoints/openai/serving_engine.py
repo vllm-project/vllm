@@ -1222,7 +1222,7 @@ class OpenAIServing:
                 # NOTE(woosuk): The stop condition is handled by the engine.
                 yield context
 
-            if not context.need_builtin_tool_call():
+            if not context.need_server_side_tool_call():
                 # The model did not ask for a tool call, so we're done.
                 break
 

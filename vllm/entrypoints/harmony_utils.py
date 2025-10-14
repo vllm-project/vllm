@@ -19,6 +19,7 @@ from openai.types.responses.response_function_web_search import (
     ActionSearch,
     ResponseFunctionWebSearch,
 )
+from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
@@ -36,6 +37,7 @@ from openai_harmony import (
     SystemContent,
     TextContent,
     ToolDescription,
+    ToolNamespaceConfig,
     load_harmony_encoding,
 )
 
@@ -44,7 +46,11 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionToolsParam,
     ResponseInputOutputItem,
 )
+from vllm.entrypoints.tool_server import ToolServer
+from vllm.logger import init_logger
 from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
 
 REASONING_EFFORT = {
     "high": ReasoningEffort.HIGH,
@@ -65,8 +71,92 @@ BUILTIN_TOOLS = {
 }
 
 
-def has_custom_tools(tool_types: list[str]) -> bool:
-    return not set(tool_types).issubset(BUILTIN_TOOLS)
+def build_system_and_developer_messages(
+    # Tool for ResponsesAPI, ChatCompletionToolsParam for CompletionsAPI
+    request_tools: list[Tool] | list[ChatCompletionToolsParam],
+    tool_server: ToolServer | None,
+    instructions: str | None = None,
+    reasoning_effort: Literal["high", "medium", "low"] | None = None,
+    start_date: str | None = None,
+    model_identity: str | None = None,
+) -> list[Message]:
+    """Builds system and developer messages for a Harmony request.
+
+    This function standardizes message construction between Responses API
+    and Chat API. It handles tool elevation, message construction, and
+    namespace collection.
+
+    Args:
+        request_tools: List of tools (already normalized to MCP format)
+        tool_server: Tool server for fetching tool descriptions
+        instructions: Custom instructions for the assistant
+        reasoning_effort: Reasoning effort level
+        start_date: Start date for the conversation
+        model_identity: Model identity string
+
+    Returns:
+        List of system message and developer message if nedeed
+    """
+    messages = []
+
+    # Get elevation list from environment
+    elevated_namespaces = envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS or []
+
+    # Classify tools by elevation status
+    elevated_namespace_descriptions = []
+    custom_namespace_descriptions = []
+    function_tools = []
+
+    for tool in request_tools:
+        if tool.type == "mcp":
+            if tool_server and tool_server.has_namespace(tool.server_label):
+                tool_description = tool_server.get_tool_description(tool.server_label)
+            else:
+                available = (
+                    list(tool_server.harmony_tool_descriptions.keys())
+                    if tool_server
+                    else []
+                )
+                raise ValueError(
+                    f"MCP namespace '{tool.server_label}' in the request "
+                    f"is not available in tool server. "
+                    f"Available namespaces: {available}"
+                )
+            if tool.server_label in elevated_namespaces:
+                elevated_namespace_descriptions.append(tool_description)
+            else:
+                custom_namespace_descriptions.append(tool_description)
+        # type is function for responses and completions luckily
+        elif tool.type == "function":
+            function_tools.append(tool)
+        else:
+            raise ValueError(
+                f"Tools should be of type 'mcp' or 'function', got {tool.type}"
+                f" Tool type conversion should happen before this point. "
+            )
+    if function_tools:
+        custom_namespace_descriptions.append(
+            create_function_tools_namespace(function_tools)
+        )
+
+    sys_msg = get_system_message(
+        model_identity=model_identity,
+        reasoning_effort=reasoning_effort,
+        start_date=start_date,
+        elevated_namespace_descriptions=elevated_namespace_descriptions,
+        custom_namespace_descriptions=custom_namespace_descriptions,
+        instructions=instructions,
+    )
+    messages.append(sys_msg)
+
+    dev_msg = get_developer_message(
+        instructions=instructions,
+        tool_namespaces=custom_namespace_descriptions,
+    )
+    if dev_msg is not None:
+        messages.append(dev_msg)
+
+    return messages
 
 
 def get_encoding():
@@ -76,16 +166,73 @@ def get_encoding():
     return _harmony_encoding
 
 
+def create_function_tools_namespace(
+    function_tools: list[Tool | ChatCompletionToolsParam],
+) -> ToolNamespaceConfig:
+    """
+    Create a Harmony ToolNamespaceConfig from function tools.
+
+    Function tools are converted to a namespace called "functions" that can be
+    included in either system or developer messages.
+
+    Args:
+        function_tools: List of function-type tools
+
+    Returns:
+        ToolNamespaceConfig with namespace="functions" and all function tool definitions
+    """
+    tool_descriptions = [create_tool_definition(tool) for tool in function_tools]
+
+    # Create namespace config with "functions" as the namespace name
+    namespace_config = ToolNamespaceConfig(
+        name="functions",
+        # Empty to match harmony implementation of functions namespace
+        description="",
+        tools=tool_descriptions,
+    )
+
+    return namespace_config
+
+
+def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
+    """Convert a tool to a Harmony ToolDescription."""
+    if isinstance(tool, ChatCompletionToolsParam):
+        return ToolDescription.new(
+            name=tool.function.name,
+            description=tool.function.description,
+            parameters=tool.function.parameters,
+        )
+    return ToolDescription.new(
+        name=tool.name,
+        description=tool.description,
+        parameters=tool.parameters,
+    )
+
+
 def get_system_message(
     model_identity: str | None = None,
     reasoning_effort: Literal["high", "medium", "low"] | None = None,
     start_date: str | None = None,
-    browser_description: str | None = None,
-    python_description: str | None = None,
-    container_description: str | None = None,
+    elevated_namespace_descriptions: list | None = None,
+    custom_namespace_descriptions: list | None = None,
     instructions: str | None = None,
-    with_custom_tools: bool = False,
 ) -> Message:
+    """
+    Construct system message for gpt-oss models.
+
+    Args:
+        model_identity: Model identity string
+        reasoning_effort: Reasoning effort level (high/medium/low)
+        start_date: Conversation start date
+        elevated_namespace_descriptions: List of ToolNamespaceConfig
+                                         for elevated namespaces
+        custom_namespace_descriptions: List of ToolNamespaceConfig
+                                         for custom namespaces
+        instructions: User-provided instructions
+
+    Returns:
+        System message for Harmony protocol
+    """
     sys_msg_content = SystemContent.new()
     if model_identity is not None:
         sys_msg_content = sys_msg_content.with_model_identity(model_identity)
@@ -103,13 +250,14 @@ def get_system_message(
         # NOTE(woosuk): This brings non-determinism in vLLM. Be careful.
         start_date = datetime.datetime.now().strftime("%Y-%m-%d")
     sys_msg_content = sys_msg_content.with_conversation_start_date(start_date)
-    if browser_description is not None:
-        sys_msg_content = sys_msg_content.with_tools(browser_description)
-    if python_description is not None:
-        sys_msg_content = sys_msg_content.with_tools(python_description)
-    if container_description is not None:
-        sys_msg_content = sys_msg_content.with_tools(container_description)
-    if not with_custom_tools:
+
+    # Elevated namespaces are registered in the system message
+    if elevated_namespace_descriptions is not None:
+        for tool_namespace in elevated_namespace_descriptions:
+            sys_msg_content = sys_msg_content.with_tools(tool_namespace)
+
+    # If no custom namespaces are provided, remove the "commentary" channel
+    if not custom_namespace_descriptions:
         channel_config = sys_msg_content.channel_config
         invalid_channel = "commentary"
         new_config = ChannelConfig.require_channels(
@@ -120,52 +268,38 @@ def get_system_message(
     return sys_msg
 
 
-def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
-    if isinstance(tool, ChatCompletionToolsParam):
-        return ToolDescription.new(
-            name=tool.function.name,
-            description=tool.function.description,
-            parameters=tool.function.parameters,
-        )
-    return ToolDescription.new(
-        name=tool.name,
-        description=tool.description,
-        parameters=tool.parameters,
-    )
-
-
 def get_developer_message(
     instructions: str | None = None,
-    tools: list[Tool | ChatCompletionToolsParam] | None = None,
-) -> Message:
-    dev_msg_content = DeveloperContent.new()
-    if instructions is not None and not envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
-        dev_msg_content = dev_msg_content.with_instructions(instructions)
-    if tools is not None:
-        function_tools: list[Tool | ChatCompletionToolsParam] = []
-        for tool in tools:
-            if tool.type in (
-                "web_search_preview",
-                "code_interpreter",
-                "container",
-                "mcp",
-            ):
-                # These are built-in tools that are added to the system message.
-                # Adding in MCP for now until we support MCP tools executed
-                # server side
-                pass
+    tool_namespaces: list | None = None,
+) -> Message | None:
+    """
+    Construct developer message for custom (non-elevated) tools.
 
-            elif tool.type == "function":
-                function_tools.append(tool)
-            else:
-                raise ValueError(f"tool type {tool.type} not supported")
-        if function_tools:
-            function_tool_descriptions = [
-                create_tool_definition(tool) for tool in function_tools
-            ]
-            dev_msg_content = dev_msg_content.with_function_tools(
-                function_tool_descriptions
-            )
+    Args:
+        instructions: User-provided instructions
+        tool_namespaces: List of ToolNamespaceConfig for all custom tools
+            (MCP and function)
+
+    Returns:
+        Developer message for Harmony protocol, if needed
+    """
+    developer_instructions = (
+        instructions if not envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS else None
+    )
+    if not developer_instructions and not tool_namespaces:
+        return None
+
+    dev_msg_content = DeveloperContent.new()
+    if developer_instructions:
+        dev_msg_content = dev_msg_content.with_instructions(developer_instructions)
+
+    # Add all tool namespaces
+    if tool_namespaces:
+        for tool_namespace in tool_namespaces:
+            # Use with_tools instead of with_function_tools to simplify
+            # adding non-functions namespaces to developer message
+            dev_msg_content = dev_msg_content.with_tools(tool_namespace)
+
     dev_msg = Message.from_role_and_content(Role.DEVELOPER, dev_msg_content)
     return dev_msg
 
@@ -287,14 +421,50 @@ def render_for_completion(messages: list[Message]) -> list[int]:
     return token_ids
 
 
-def parse_output_message(message: Message) -> list[ResponseOutputItem]:
+def parse_output_message(
+    message: Message,
+    output_items_so_far: list[ResponseOutputItem] | None = None,
+) -> list[ResponseOutputItem]:
     """
     Parse a Harmony message into a list of output response items.
+
+    Args:
+        message: The message to parse
+        output_items_so_far: List of output items parsed so far. When we see
+            a tool response message, we search backward to find the most recent
+            matching McpCall (by tool name) that has no output yet.
     """
+    # Handle tool response messages (look-behind pattern)
+    if message.author.role == "tool":
+        # This is a tool response. Search backward to find matching tool call.
+        if not output_items_so_far:
+            logger.warning(
+                "Tool response with no prior output items: %s", message.author.name
+            )
+            return []
+
+        # Find the most recent McpCall that matches this tool and has no output
+        tool_name = message.author.name  # e.g., "memory.store"
+        matching_call = None
+
+        for item in reversed(output_items_so_far):
+            if isinstance(item, McpCall):
+                call_full_name = f"{item.server_label}.{item.name}"
+                if call_full_name == tool_name and item.output is None:
+                    matching_call = item
+                    break
+
+        if matching_call:
+            matching_call.output = message.content[0].text if message.content else None
+            return []
+        else:
+            # We should error here, but it wouldn't make much sense
+            # before we switch to using McpCall for all tool calls + output
+            logger.error("Tool call output not output for tool: %s", tool_name)
+            return []
+
     if message.author.role != "assistant":
-        # This is a message from a tool to the assistant (e.g., search result).
-        # Don't include it in the final output for now. This aligns with
-        # OpenAI's behavior on models like o4-mini.
+        # This is some other role (not assistant, not tool) - skip it
         return []
 
     output_items: list[ResponseOutputItem] = []
@@ -360,6 +530,9 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
             or recipient.startswith("browser")
             or recipient.startswith("container")
         ):
+            # Built-in tools on commentary channel → reasoning items
+            # For legacy compatibility for now
+            # TODO: Use McpCall here too
             for content in message.content:
                 reasoning_item = ResponseReasoningItem(
                     id=f"rs_{random_uuid()}",
@@ -373,8 +546,22 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                     status=None,
                 )
                 output_items.append(reasoning_item)
-        else:
-            raise ValueError(f"Unknown recipient: {recipient}")
+        elif recipient is not None:
+            # Any other non-function recipient on commentary channel → MCP call
+            namespace = recipient.split(".")[0] if "." in recipient else recipient
+            tool_name = recipient.split(".")[1] if "." in recipient else recipient
+
+            for content in message.content:
+                mcp_call = McpCall(
+                    id=f"mcp_{random_uuid()}",
+                    type="mcp_call",
+                    name=tool_name,
+                    server_label=namespace,
+                    arguments=content.text,
+                    output=None,
+                    error=None,
+                )
+                output_items.append(mcp_call)
     elif message.channel == "final":
         contents = []
         for content in message.content:

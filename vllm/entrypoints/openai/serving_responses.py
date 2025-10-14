@@ -63,17 +63,16 @@ from vllm.entrypoints.context import (
     StreamingHarmonyContext,
 )
 from vllm.entrypoints.harmony_utils import (
-    get_developer_message,
+    build_system_and_developer_messages,
     get_stop_tokens_for_assistant_actions,
-    get_system_message,
     get_user_message,
-    has_custom_tools,
     parse_output_message,
     parse_remaining_state,
     parse_response_input,
     render_for_completion,
 )
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.mcp.mcp_utils import normalize_tool_to_mcp
 from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
     ErrorResponse,
@@ -284,6 +283,12 @@ class OpenAIServingResponses(OpenAIServing):
         else:
             prev_response = None
 
+        # Normalize all tools to MCP format EARLY (before message construction).
+        # This converts legacy CodeInterpreter and WebSearchPreviewTool to Mcp objects.
+        # Must happen before _make_request_with_harmony() so that message construction
+        # sees normalized tools with server_label attributes.
+        request.tools = [normalize_tool_to_mcp(tool) for tool in request.tools]
+
         try:
             lora_request = self._maybe_get_adapters(request)
             model_name = self.models.model_name(lora_request)
@@ -315,20 +320,13 @@ class OpenAIServingResponses(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[ConversationContext, None]] = []
 
-        builtin_tool_list: list[str] = []
-        if self.use_harmony and self.tool_server is not None:
-            if self.tool_server.has_tool("browser"):
-                builtin_tool_list.append("browser")
-            if self.tool_server.has_tool("python"):
-                builtin_tool_list.append("python")
-            if self.tool_server.has_tool("container"):
-                builtin_tool_list.append("container")
+        enabled_tool_namespaces: set[str] = set()
+        if self.use_harmony:
+            # Add all MCP tools from the request (they've been normalized already)
+            for tool in request.tools:
+                if tool.type == "mcp":
+                    enabled_tool_namespaces.add(tool.server_label)
 
-        if self.tool_server is not None:
-            available_tools = builtin_tool_list
-        else:
-            assert len(builtin_tool_list) == 0
-            available_tools = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 maybe_error = self._validate_generator_input(engine_prompt)
@@ -352,9 +350,15 @@ class OpenAIServingResponses(OpenAIServing):
                 context: ConversationContext
                 if self.use_harmony:
                     if request.stream:
-                        context = StreamingHarmonyContext(messages, available_tools)
+                        context = StreamingHarmonyContext(
+                            messages,
+                            list(enabled_tool_namespaces),
+                        )
                     else:
-                        context = HarmonyContext(messages, available_tools)
+                        context = HarmonyContext(
+                            messages,
+                            list(enabled_tool_namespaces),
+                        )
                 else:
                     context = SimpleContext()
                 generator = self._generate_with_builtin_tools(
@@ -507,6 +511,7 @@ class OpenAIServingResponses(OpenAIServing):
         # we should only initialize the tool session if the request needs tools
         if len(request.tools) == 0:
             return
+
         mcp_tools = {
             tool.server_label: tool for tool in request.tools if tool.type == "mcp"
         }
@@ -783,8 +788,15 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> list[ResponseOutputItem]:
         output_items: list[ResponseOutputItem] = []
         num_init_messages = context.num_init_messages
+
         for msg in context.messages[num_init_messages:]:
-            output_items.extend(parse_output_message(msg))
+            output_items.extend(
+                parse_output_message(
+                    msg,
+                    output_items_so_far=output_items,
+                )
+            )
+
         # Handle the generation stopped in the middle (if any).
         last_items = parse_remaining_state(context.parser)
         if last_items:
@@ -838,56 +850,17 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> list[OpenAIHarmonyMessage]:
         messages: list[OpenAIHarmonyMessage] = []
         if prev_response is None:
-            # New conversation.
+            # New conversation - build system and developer messages
             reasoning_effort = request.reasoning.effort if request.reasoning else None
-            tool_types = [tool.type for tool in request.tools]
 
-            # Allow the MCP Tool type to enable built in tools if the
-            # server_label is allowlisted in
-            # envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS
-            if envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS:
-                for tool in request.tools:
-                    if (
-                        tool.type == "mcp"
-                        and tool.server_label in envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS
-                    ):
-                        tool_types.append(tool.server_label)
-            enable_browser = (
-                "web_search_preview" in tool_types
-                and self.tool_server is not None
-                and self.tool_server.has_tool("browser")
-            )
-            enable_code_interpreter = (
-                "code_interpreter" in tool_types
-                and self.tool_server is not None
-                and self.tool_server.has_tool("python")
-            )
-            enable_container = (
-                "container" in tool_types
-                and self.tool_server is not None
-                and self.tool_server.has_tool("container")
-            )
-            with_custom_tools = has_custom_tools(tool_types)
-            sys_msg = get_system_message(
-                reasoning_effort=reasoning_effort,
-                browser_description=self.tool_server.get_tool_description("browser")
-                if enable_browser and self.tool_server is not None
-                else None,
-                python_description=self.tool_server.get_tool_description("python")
-                if enable_code_interpreter and self.tool_server is not None
-                else None,
-                container_description=self.tool_server.get_tool_description("container")
-                if enable_container and self.tool_server is not None
-                else None,
+            # Use unified helper to build messages
+            sys_dev_messages = build_system_and_developer_messages(
+                request_tools=request.tools,
+                tool_server=self.tool_server,
                 instructions=request.instructions,
-                with_custom_tools=with_custom_tools,
+                reasoning_effort=reasoning_effort,
             )
-            messages.append(sys_msg)
-            if with_custom_tools:
-                dev_msg = get_developer_message(
-                    instructions=request.instructions, tools=request.tools
-                )
-                messages.append(dev_msg)
+            messages.extend(sys_dev_messages)
         else:
             # Continue the previous conversation.
             # FIXME(woosuk): Currently, request params like reasoning and
@@ -1672,7 +1645,7 @@ class OpenAIServingResponses(OpenAIServing):
                 previous_item = ctx.parser.messages[-1]
                 if (
                     self.tool_server is not None
-                    and self.tool_server.has_tool("browser")
+                    and self.tool_server.has_namespace("browser")
                     and previous_item.recipient is not None
                     and previous_item.recipient.startswith("browser.")
                 ):
@@ -1757,7 +1730,7 @@ class OpenAIServingResponses(OpenAIServing):
 
                 if (
                     self.tool_server is not None
-                    and self.tool_server.has_tool("python")
+                    and self.tool_server.has_namespace("code_interpreter")
                     and previous_item.recipient is not None
                     and previous_item.recipient.startswith("python")
                 ):

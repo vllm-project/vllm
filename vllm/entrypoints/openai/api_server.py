@@ -1661,7 +1661,7 @@ async def init_app_state(
         await tool_server.init_and_validate()
     elif args.tool_server:
         tool_server = MCPToolServer()
-        await tool_server.add_tool_server(args.tool_server)
+        await tool_server.add_mcp_server(args.tool_server)
     else:
         tool_server = None
 

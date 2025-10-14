@@ -6,7 +6,7 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from contextlib import AsyncExitStack
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING
 
 from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, StreamState, TextContent
@@ -16,6 +16,7 @@ from vllm.entrypoints.harmony_utils import (
     get_streamable_parser_for_assistant,
     render_for_completion,
 )
+from vllm.entrypoints.mcp.mcp_utils import call_mcp_tool
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
@@ -24,25 +25,6 @@ if TYPE_CHECKING:
     from mcp.client import ClientSession
 
 logger = logging.getLogger(__name__)
-
-# This is currently needed as the tool type doesn't 1:1 match the
-# tool namespace, which is what is used to look up the
-# connection to the tool server
-_TOOL_NAME_TO_TYPE_MAP = {
-    "browser": "web_search_preview",
-    "python": "code_interpreter",
-    "container": "container",
-}
-
-
-def _map_tool_name_to_tool_type(tool_name: str) -> str:
-    if tool_name not in _TOOL_NAME_TO_TYPE_MAP:
-        available_tools = ", ".join(_TOOL_NAME_TO_TYPE_MAP.keys())
-        raise ValueError(
-            f"Built-in tool name '{tool_name}' not defined in mapping. "
-            f"Available tools: {available_tools}"
-        )
-    return _TOOL_NAME_TO_TYPE_MAP[tool_name]
 
 
 class TurnTokens:
@@ -72,7 +54,7 @@ class ConversationContext(ABC):
         pass
 
     @abstractmethod
-    def need_builtin_tool_call(self) -> bool:
+    def need_server_side_tool_call(self) -> bool:
         pass
 
     @abstractmethod
@@ -111,7 +93,7 @@ class SimpleContext(ConversationContext):
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
 
-    def need_builtin_tool_call(self) -> bool:
+    def need_server_side_tool_call(self) -> bool:
         return False
 
     async def call_tool(self) -> list[Message]:
@@ -137,13 +119,20 @@ class HarmonyContext(ConversationContext):
     def __init__(
         self,
         messages: list,
-        available_tools: list[str],
+        enabled_tool_namespaces: list[str],
     ):
+        """Initialize HarmonyContext for managing conversation state.
+
+        Args:
+            messages: Initial conversation messages
+            enabled_tool_namespaces: List of all enabled tool namespaces
+                (includes both elevated and custom MCP tools)
+        """
         self._messages = messages
         self.finish_reason: str | None = None
-        self.available_tools = available_tools
+        self.available_tools = enabled_tool_namespaces
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
-        self.called_tools: set[str] = set()
+        self.called_namespaces: set[str] = set()
 
         self.parser = get_streamable_parser_for_assistant()
         self.num_init_messages = len(messages)
@@ -279,14 +268,74 @@ class HarmonyContext(ConversationContext):
     def messages(self) -> list:
         return self._messages
 
-    def need_builtin_tool_call(self) -> bool:
+    def _resolve_namespace(self, recipient: str) -> str:
+        """Map recipient to tool namespace.
+
+        Most tools use recipient prefix as namespace
+        (e.g., "browser.search" → "browser").
+        Exception: "python" → "code_interpreter" for gpt-oss specifically.
+
+        Args:
+            recipient: The recipient string from the message
+
+        Returns:
+            The namespace string
+        """
+        if recipient.startswith("python"):
+            return "code_interpreter"
+        return recipient.split(".")[0] if "." in recipient else recipient
+
+    def _resolve_tool_name(self, recipient: str) -> str:
+        """Map recipient to tool name.
+
+        Most tools use recipient suffix as tool_name
+        (e.g., "browser.search" → "search").
+        Exception: "python" → "python" for gpt-oss specifically.
+
+        Args:
+            recipient: The recipient string from the message
+
+        Returns:
+            The tool_name string
+        """
+        if recipient.startswith("python"):
+            return "python"
+        return recipient.split(".")[-1] if "." in recipient else recipient
+
+    def need_server_side_tool_call(self) -> bool:
+        """Check if the last message requires a server-side tool call.
+
+        Returns:
+            True if recipient is set, not a client-side function,
+                                        and namespace is available
+            False otherwise
+        """
+        if not self.messages:
+            return False
+
         last_msg = self.messages[-1]
         recipient = last_msg.recipient
-        return recipient is not None and (
-            recipient.startswith("browser.")
-            or recipient.startswith("python")
-            or recipient.startswith("container.")
-        )
+
+        if not recipient:
+            return False
+
+        # Client-side function tools are handled by client
+        if recipient.startswith("functions."):
+            return False
+
+        # Validate that the namespace is actually available
+        namespace = self._resolve_namespace(recipient)
+        if namespace not in self.available_tools:
+            logger.warning(
+                "Model requested unknown tool namespace: %s (from recipient: %s). "
+                "Available: %s. Ignoring tool call.",
+                namespace,
+                recipient,
+                self.available_tools,
+            )
+            return False
+
+        return True
 
     async def call_tool(self) -> list[Message]:
         if not self.messages:
@@ -294,67 +343,48 @@ class HarmonyContext(ConversationContext):
         last_msg = self.messages[-1]
         recipient = last_msg.recipient
         if recipient is not None:
-            if recipient.startswith("browser."):
-                return await self.call_search_tool(
-                    self._tool_sessions["browser"], last_msg
+            namespace = self._resolve_namespace(recipient)
+            if namespace not in self._tool_sessions:
+                available = list(self._tool_sessions.keys())
+                raise ValueError(
+                    f"Tool session for namespace '{namespace}' not found. "
+                    f"Model requested recipient '{recipient}' but the "
+                    f"Available namespaces are: {available}"
                 )
-            elif recipient.startswith("python"):
-                return await self.call_python_tool(
-                    self._tool_sessions["python"], last_msg
+            tool_session = self._tool_sessions[namespace]
+            if isinstance(tool_session, Tool):
+                return await tool_session.get_result(self)
+
+            tool_name = self._resolve_tool_name(recipient)
+            # Using str here to do str -> json error handling
+            # in one spot in call_mcp_tool
+            tool_args_str = ""
+            # code_interpreter is special as the model outputs code not json
+            if namespace == "code_interpreter":
+                tool_args_str = json.dumps(
+                    {
+                        "code": last_msg.content[0].text,
+                    }
                 )
-            elif recipient.startswith("container."):
-                return await self.call_container_tool(
-                    self._tool_sessions["container"], last_msg
+            else:
+                tool_args_str = last_msg.content[0].text
+
+            self.called_namespaces.add(namespace)
+            tool_output_str = await call_mcp_tool(
+                tool_session, tool_name, tool_args_str
+            )
+            return [
+                Message(
+                    author=Author(role=Role.TOOL, name=recipient),
+                    content=[TextContent(text=tool_output_str)],
+                    recipient=Role.ASSISTANT,
+                    channel=last_msg.channel,
                 )
+            ]
         raise ValueError("No tool call found")
 
     def render_for_completion(self) -> list[int]:
         return render_for_completion(self.messages)
-
-    async def call_search_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: Message
-    ) -> list[Message]:
-        self.called_tools.add("browser")
-        if isinstance(tool_session, Tool):
-            return await tool_session.get_result(self)
-        tool_name = last_msg.recipient.split(".")[1]
-        args = json.loads(last_msg.content[0].text)
-        result = await tool_session.call_tool(tool_name, args)
-        result_str = result.content[0].text
-        content = TextContent(text=result_str)
-        author = Author(role=Role.TOOL, name=last_msg.recipient)
-        return [
-            Message(
-                author=author,
-                content=[content],
-                recipient=Role.ASSISTANT,
-                channel=last_msg.channel,
-            )
-        ]
-
-    async def call_python_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: Message
-    ) -> list[Message]:
-        self.called_tools.add("python")
-        if isinstance(tool_session, Tool):
-            return await tool_session.get_result(self)
-        param = {
-            "code": last_msg.content[0].text,
-        }
-        result = await tool_session.call_tool("python", param)
-        result_str = result.content[0].text
-
-        content = TextContent(text=result_str)
-        author = Author(role=Role.TOOL, name="python")
-
-        return [
-            Message(
-                author=author,
-                content=[content],
-                channel=last_msg.channel,
-                recipient=Role.ASSISTANT,
-            )
-        ]
 
     async def init_tool_sessions(
         self,
@@ -364,54 +394,16 @@ class HarmonyContext(ConversationContext):
         mcp_tools: dict[str, Mcp],
     ):
         if tool_server:
-            for tool_name in self.available_tools:
-                if tool_name not in self._tool_sessions:
-                    tool_type = _map_tool_name_to_tool_type(tool_name)
+            for namespace in self.available_tools:
+                if namespace not in self._tool_sessions:
                     headers = (
-                        mcp_tools[tool_type].headers if tool_type in mcp_tools else None
+                        mcp_tools[namespace].headers if namespace in mcp_tools else None
                     )
                     tool_session = await exit_stack.enter_async_context(
-                        tool_server.new_session(tool_name, request_id, headers)
+                        tool_server.new_session(namespace, request_id, headers)
                     )
-                    self._tool_sessions[tool_name] = tool_session
+                    self._tool_sessions[namespace] = tool_session
                     exit_stack.push_async_exit(self.cleanup_session)
-
-    async def call_container_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: Message
-    ) -> list[Message]:
-        """
-        Call container tool. Expect this to be run in a stateful docker
-        with command line terminal.
-        The official container tool would at least
-        expect the following format:
-        - for tool name: exec
-            - args:
-                {
-                    "cmd":List[str] "command to execute",
-                    "workdir":optional[str] "current working directory",
-                    "env":optional[object/dict] "environment variables",
-                    "session_name":optional[str] "session name",
-                    "timeout":optional[int] "timeout in seconds",
-                    "user":optional[str] "user name",
-                }
-        """
-        self.called_tools.add("container")
-        if isinstance(tool_session, Tool):
-            return await tool_session.get_result(self)
-        tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
-        args = json.loads(last_msg.content[0].text)
-        result = await tool_session.call_tool(tool_name, args)
-        result_str = result.content[0].text
-        content = TextContent(text=result_str)
-        author = Author(role=Role.TOOL, name=last_msg.recipient)
-        return [
-            Message(
-                author=author,
-                content=[content],
-                recipient=Role.ASSISTANT,
-                channel=last_msg.channel,
-            )
-        ]
 
     async def cleanup_session(self, *args, **kwargs) -> None:
         """Can be used as coro to used in __aexit__"""
@@ -427,7 +419,7 @@ class HarmonyContext(ConversationContext):
         await asyncio.gather(
             *(
                 cleanup_tool_session(self._tool_sessions[tool])
-                for tool in self.called_tools
+                for tool in self.called_namespaces
             )
         )
 
