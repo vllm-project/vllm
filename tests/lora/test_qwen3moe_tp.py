@@ -31,7 +31,7 @@ EXPECTED_LORA_OUTPUT = [
 ]
 
 
-def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
+def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
     prompts = [
         PROMPT_TEMPLATE.format(context="How many candidates are there?"),
         PROMPT_TEMPLATE.format(context="Count the number of candidates."),
@@ -55,7 +55,9 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
         generated_text = output.outputs[0].text.strip()
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-    return generated_texts
+
+    for i in range(len(EXPECTED_LORA_OUTPUT)):
+        assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
 
 
 def test_qwen3moe_lora(qwen3moe_lora_files):
@@ -71,9 +73,8 @@ def test_qwen3moe_lora(qwen3moe_lora_files):
         enable_chunked_prefill=True,
     )
 
-    output1 = do_sample(llm, qwen3moe_lora_files, lora_id=1)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output1[i].startswith(EXPECTED_LORA_OUTPUT[i])
+    generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
+    generate_and_test(llm, qwen3moe_lora_files, lora_id=2)
 
 
 @multi_gpu_test(num_gpus=2)
@@ -89,9 +90,8 @@ def test_qwen3moe_lora_tp2(qwen3moe_lora_files):
         tensor_parallel_size=2,
     )
 
-    output1 = do_sample(llm, qwen3moe_lora_files, lora_id=1)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output1[i].startswith(EXPECTED_LORA_OUTPUT[i])
+    generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
+    generate_and_test(llm, qwen3moe_lora_files, lora_id=2)
 
 
 @multi_gpu_test(num_gpus=4)
@@ -107,6 +107,5 @@ def test_qwen3moe_lora_tp4(qwen3moe_lora_files):
         tensor_parallel_size=4,
     )
 
-    output1 = do_sample(llm, qwen3moe_lora_files, lora_id=1)
-    for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert output1[i].startswith(EXPECTED_LORA_OUTPUT[i])
+    generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
+    generate_and_test(llm, qwen3moe_lora_files, lora_id=2)
