@@ -1314,7 +1314,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Collect the sampling parameters.
     if task_type == TaskType.GENERATION:
-        extra_body = {
+        sampling_params = {
             k: v
             for k, v in {
                 "top_p": args.top_p,
@@ -1329,18 +1329,20 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         }
 
         # Sampling parameters are only supported by openai-compatible backend.
-        if extra_body and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
+        if sampling_params and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
             raise ValueError(
                 "Sampling parameters are only supported by openai-compatible backends."
             )
 
-        if "temperature" not in extra_body:
-            extra_body["temperature"] = 0.0  # Default to greedy decoding.
+        if "temperature" not in sampling_params:
+            sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+    else:
+        sampling_params = {}
 
     if args.extra_body:
         # Merge extra_body from command line argument. The command line
         # argument has higher priority.
-        extra_body = {**extra_body, **args.extra_body}
+        extra_body = {**sampling_params, **args.extra_body}
 
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
