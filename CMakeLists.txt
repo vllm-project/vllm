@@ -334,9 +334,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # compatible with the target GPU(s).
   #
   # Notes:
-  # - 8.0 / 8.7 : Ampere (A100, L40)
-  # - 8.9       : Ada (RTX 4090, L40S)
-  # - 9.0+PTX   : Hopper (H100) and future architectures (for bf16 atomicAdd)
+  # - 8.0 / 8.7 : Ampere (e.g., A100, A30, A40)
+  # - 8.9       : Ada (e.g., RTX 4090, L40, L40S)
+  # - 9.0+PTX   : Hopper and future architectures (for bf16 atomicAdd)
   # ------------------------------------------------------------------------------
 
   cuda_archs_loose_intersection(
