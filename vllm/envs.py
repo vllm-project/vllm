@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
     VLLM_XLA_USE_SPMD: bool = False
-    VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
+    VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "spawn"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_ASSETS_CACHE_MODEL_CLEAN: bool = False
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
@@ -675,7 +675,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD": env_with_choices(
-        "VLLM_WORKER_MULTIPROC_METHOD", "fork", ["spawn", "fork"]
+        "VLLM_WORKER_MULTIPROC_METHOD", "spawn", ["spawn", "fork"]
     ),
     # Path to the cache for storing downloaded assets
     "VLLM_ASSETS_CACHE": lambda: os.path.expanduser(
