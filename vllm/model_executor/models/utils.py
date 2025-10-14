@@ -777,13 +777,6 @@ def fast_topk(
         return torch.topk(values, topk, dim=dim)
 
 
-def get_model_hidden_size(hf_config: PretrainedConfig) -> int:
-    if hasattr(hf_config, "hidden_size"):
-        return hf_config.hidden_size
-    text_config = hf_config.get_text_config()
-    return text_config.hidden_size
-
-
 # Chunk x along the num_tokens axis for sequence parallelism
 # NOTE: This is wrapped in a torch custom op to work around the following issue:
 # The output tensor can have a sequence length 0 at small input sequence lengths

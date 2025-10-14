@@ -325,6 +325,20 @@ class VllmConfig:
                 # NB: Passing both --enforce-eager and a compilation level
                 # in V0 means the compilation level wins out.
                 self.compilation_config.level = CompilationLevel.NO_COMPILATION
+        else:
+            assert self.compilation_config.level >= CompilationLevel.NO_COMPILATION
+            assert self.compilation_config.level <= CompilationLevel.PIECEWISE
+
+        # If user does not set custom ops via none or all set it here based on
+        # compilation level and backend.
+        if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
+            if (
+                self.compilation_config.backend == "inductor"
+                and self.compilation_config.level > CompilationLevel.NO_COMPILATION
+            ):
+                self.compilation_config.custom_ops.append("none")
+            else:
+                self.compilation_config.custom_ops.append("all")
 
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
@@ -512,13 +526,13 @@ class VllmConfig:
             )
 
         if self.parallel_config.enable_dbo:
-            a2a_backend = envs.VLLM_ALL2ALL_BACKEND
+            a2a_backend = self.parallel_config.all2all_backend
             assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
                 "Microbatching currently only supports the deepep_low_latency and "
                 f"deepep_high_throughput all2all backend. {a2a_backend} is not "
-                "supported. To fix set the VLLM_ALL2ALL_BACKEND environment "
-                "variable to deepep_low_latency or deepep_high_throughput and "
-                "install the DeepEP kernels."
+                "supported. To fix use --all2all-backend=deepep_low_latency or "
+                "--all2all-backend=deepep_high_throughput and install the DeepEP"
+                " kernels."
             )
 
             if not self.model_config.disable_cascade_attn:
