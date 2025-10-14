@@ -107,7 +107,7 @@ class VllmConfig:
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
     you are using. Contents must be hashable."""
-    instance_id: str = Field(default="")
+    instance_id: str = ""
     """The ID of the vLLM instance."""
 
     def compute_hash(self) -> str:
