@@ -162,7 +162,7 @@ def create_minimal_vllm_config(
 
 # Backend name to class name prefix mapping
 _BACKEND_NAME_MAP = {
-    "flash_attn_mla": "FlashAttnMLA",
+    "flashattn_mla": "FlashAttnMLA",
     "flashmla": "FlashMLA",
     "flashinfer_mla": "FlashInferMLA",
     "cutlass_mla": "CutlassMLA",
@@ -217,7 +217,7 @@ def _run_mla_benchmark_batched(
     """
     Unified batched MLA benchmark runner for all backends.
 
-    Works for: flash_attn_mla, flashmla, flashinfer_mla, cutlass_mla
+    Works for: flashattn_mla, flashmla, flashinfer_mla, cutlass_mla
 
     This function reuses backend initialization across multiple benchmarks
     to avoid setup/teardown overhead.
@@ -514,12 +514,12 @@ def run_mla_benchmark(
     """
     Unified MLA benchmark runner for all backends.
 
-    Works for: flash_attn_mla, flashmla, flashinfer_mla, cutlass_mla
+    Works for: flashattn_mla, flashmla, flashinfer_mla, cutlass_mla
 
     Always uses batched execution internally for optimal performance.
 
     Args:
-        backend: Backend name (flash_attn_mla, flashmla, flashinfer_mla, cutlass_mla)
+        backend: Backend name (flashattn_mla, flashmla, flashinfer_mla, cutlass_mla)
         config: BenchmarkConfig or list of (BenchmarkConfig, param) tuples
         reorder_batch_threshold: Threshold override for FlashAttn/FlashMLA
                                  (single config mode only)
@@ -533,7 +533,7 @@ def run_mla_benchmark(
         # Already in batched format
         if len(config) > 0 and isinstance(config[0], tuple):
             # Format: [(cfg, param), ...] where param is threshold or num_splits
-            if backend in ("flash_attn_mla", "flashmla"):
+            if backend in ("flashattn_mla", "flashmla"):
                 configs_with_params = [(cfg, param, None) for cfg, param in config]
             else:  # cutlass_mla or flashinfer_mla
                 configs_with_params = [(cfg, None, param) for cfg, param in config]

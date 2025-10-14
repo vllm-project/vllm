@@ -135,7 +135,7 @@ python benchmark.py \
 ```bash
 # Compare all MLA backends
 python benchmark.py \
-    --backends cutlass_mla flashinfer_mla flash_attn_mla flashmla \
+    --backends cutlass_mla flashinfer_mla flashattn_mla flashmla \
     --batch-specs "64q1s1k" "64q1s4k" \
     --output-csv mla_results.csv
 ```
@@ -171,7 +171,7 @@ python benchmark.py \
 
 ```
 --backends BACKEND [BACKEND ...]    # flash, triton, flashinfer, cutlass_mla,
-                                    # flashinfer_mla, flash_attn_mla, flashmla
+                                    # flashinfer_mla, flashattn_mla, flashmla
 --backend BACKEND                   # Single backend (alternative to --backends)
 --batch-specs SPEC [SPEC ...]       # Batch specifications (default: ["q2k", "8q1s1k"])
 

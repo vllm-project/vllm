@@ -6,7 +6,7 @@ description: "FlashAttn MLA vs FlashMLA head count comparison on Hopper"
 
 # Compare these two Hopper backends
 backends:
-  - flash_attn_mla
+  - flashattn_mla
   - flashmla
 
 # Standard decode workloads
