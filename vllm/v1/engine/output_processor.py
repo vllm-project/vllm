@@ -22,7 +22,12 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.metrics.stats import IterationStats, LoRARequestStates, RequestStateStats
+from vllm.v1.metrics.stats import (
+    IterationStats,
+    LoRARequestStates,
+    RequestStateStats,
+    SchedulerStats,
+)
 
 
 class RequestOutputCollector:
@@ -483,12 +488,14 @@ class OutputProcessor:
                 )
                 if self.tracer:
                     self.do_tracing(engine_core_output, req_state, iteration_stats)
-        self.lora_states.update_iteration_stats(iteration_stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
+
+    def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
+        self.lora_states.update_scheduler_stats(scheduler_stats)
 
     def do_tracing(
         self,
