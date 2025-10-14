@@ -651,6 +651,9 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         self,
         image_input: Phi3VImageInputs,
     ) -> torch.Tensor:
+        if image_input["type"] == "image_embeds":
+            return image_input["data"]
+
         assert self.vision_embed_tokens is not None
 
         image_embeds = self.vision_embed_tokens(
