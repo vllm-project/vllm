@@ -35,6 +35,7 @@ def start_async_worker(
     def thread_target() -> None:
         assert device_index is not None
         torch.cuda.set_device(device_index)
+        cuda_stream = torch.cuda.Stream(device=device_index)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -45,7 +46,7 @@ def start_async_worker(
                     ep_group=ep_group,
                     is_profile=is_profile,
                     rank_mapping=rank_mapping,
-                    device_index=device_index,
+                    cuda_stream=cuda_stream,
                 )
             )
         except Exception as exc:  # pragma: no cover - diagnostic path
@@ -64,25 +65,13 @@ async def transfer_run_periodically(
     ep_group: ProcessGroup,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
-    device_index: int | None = None,
+    cuda_stream: torch.cuda.Stream = None,
 ) -> None:
-    experts_stream = (
-        torch.cuda.Stream(device=device_index)
-        if device_index is not None
-        else torch.cuda.Stream()
-    )
-
-    while not state.shutdown_event.is_set():
+    while True:
         await asyncio.to_thread(state.rearrange_event.wait)
 
-        if state.shutdown_event.is_set():
-            break
-
         current_num_layers = model.num_moe_layers
-        while (
-            state.layer_to_transfer < current_num_layers
-            and not state.shutdown_event.is_set()
-        ):
+        while state.layer_to_transfer < current_num_layers:
             if not state.ep_buffer_ready and state.rebalanced:
                 assert state.new_physical_to_logical_map is not None
                 await asyncio.to_thread(state.buffer_lock.acquire)
@@ -102,13 +91,11 @@ async def transfer_run_periodically(
                         ep_group=ep_group,
                         is_profile=is_profile,
                         layer=state.layer_to_transfer,
-                        cuda_stream=experts_stream,
+                        cuda_stream=cuda_stream,
                         rank_mapping=rank_mapping,
                     )
                     state.ep_buffer_ready = 1
                 finally:
                     state.buffer_lock.release()
-            else:
-                await asyncio.sleep(0.001)
 
         state.rearrange_event.clear()

@@ -189,10 +189,6 @@ class EplbState:
     """
     Event to signal when a new rearrangement is needed for the async thread.
     """
-    shutdown_event: threading.Event = field(default_factory=threading.Event)
-    """
-    Event to signal the async thread to shutdown.
-    """
     buffer_lock: threading.Lock = field(default_factory=threading.Lock)
     """
     The lock to protect the expert buffer.
@@ -399,7 +395,7 @@ class EplbState:
             logical_to_physical_map,
             logical_replica_count,
         )
-        device_index: int | None = None
+        device_index: int = None
         if device.type == "cuda":
             device_index = device.index
             if device_index is None and torch.cuda.is_available():
@@ -679,13 +675,13 @@ class EplbState:
 
         return None
 
-    def eplb_async_loop(
+    def start_async_loop(
         self,
         model,
         rank_mapping: dict[int, int] | None = None,
         is_profile: bool = False,
     ):
-        return start_async_worker(
+        start_async_worker(
             self, model, rank_mapping=rank_mapping, is_profile=is_profile
         )
 
@@ -770,7 +766,7 @@ class EplbState:
                 self.buffer_lock.release()
             except Exception as e:
                 logger.error(
-                    "Rank %d: buffer_lock release failed in m_t_w: %s",
+                    "Rank %d: buffer_lock release failed in move_to_workspace: %s",
                     ep_group.rank(),
                     str(e),
                 )

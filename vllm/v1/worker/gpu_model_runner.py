@@ -2931,7 +2931,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 rank_mapping,
             )
             if self.eplb_state.is_async:
-                self.eplb_state.eplb_async_loop(model=self.model)
+                self.eplb_state.start_async_loop(model=self.model)
 
         if (
             self.vllm_config.compilation_config.level == CompilationLevel.DYNAMO_AS_IS
