@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any, Optional
 
 import torch
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.nn import Parameter
 
 import vllm.model_executor.layers.fused_moe  # noqa
@@ -52,6 +53,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMParameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.transformers_utils.config import get_safetensors_params_metadata
 
 logger = init_logger(__name__)
 
@@ -224,6 +226,20 @@ class AWQMarlinConfig(QuantizationConfig):
         return check_marlin_supported(
             quant_type=cls.TYPE_MAP[num_bits], group_size=group_size, has_zp=zero_point
         )
+
+    def maybe_update_config(self, model_name: str, revision: str | None = None):
+        if self.modules_to_not_convert:
+            return
+
+        unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+        metadata = get_safetensors_params_metadata(model_name, revision=revision)
+        quant_layers: set[str] = {
+            param_name.rsplit(".", 1)[0]
+            for param_name, info in metadata.items()
+            if (dtype := info.get("dtype", None))
+            and _SAFETENSORS_TO_TORCH_DTYPE[dtype] in unquant_dtypes
+        }
+        self.modules_to_not_convert = list(quant_layers)
 
 
 class AWQMarlinLinearMethod(LinearMethodBase):
