@@ -353,6 +353,11 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
 
   int hidden_size = input.size(-1);
 
+  // NOTE: With fake tensors, doing this in the Python code
+  // can result in a stride that the rms_norm_kernel is currently unable
+  // to handle, since it expects non-contiguous row-major layout. Initially,
+  // a SEGV was found on ROCm, but has been confirmed on h100 as well with
+  // Qwen-235B-A22B.
   torch::Tensor input_view = input.view({-1, hidden_size});
 
   int num_tokens = input_view.numel() / hidden_size;
