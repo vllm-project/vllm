@@ -38,11 +38,7 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
 
         # 1. default version depending on platform
         fa_version = (
-            4
-            if (device_capability.major == 10 and is_fa_version_supported(4))
-            else 3
-            if (device_capability.major == 9 and is_fa_version_supported(3))
-            else 2
+            3 if (device_capability.major == 9 and is_fa_version_supported(3)) else 2
         )
 
         # 2. override if passed by environment
